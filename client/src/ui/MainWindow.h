@@ -1,0 +1,118 @@
+#pragma once
+
+// 主窗口：QStackedWidget 切换「大厅 / 等待室 / 牌桌」，
+// 负责把 NetClient 的事件分发到 TableModel / TableView / ActionBar。
+
+#include <QJsonObject>
+#include <QMainWindow>
+#include <QString>
+
+#include <functional>
+
+#include "model/AutoPolicy.h"
+#include "model/TableModel.h"
+#include "net/NetClient.h"
+
+class ActionBar;
+class AutoBar;
+class LobbyDialog;
+class QLabel;
+class QLineEdit;
+class QPushButton;
+class QStackedWidget;
+class QTextBrowser;
+class ResultDialog;
+class TableView;
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+public:
+    explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
+
+    // 演示 / 联调用：自动连接 → 建房 → 补机器人 → 准备 → 自动应答。
+    //   mj-bots = 0 时只自动连接并在牌桌上等待人工操作。
+    void autoStart(const QString& host, quint16 port, const QString& name, int bots);
+    // 局间确认：告诉服务端可以直接开下一局
+    void sendConfirmNextRound();
+    // 自动进房但仍由人工操作（演示/截图用）
+    void setAutoAnswer(bool on) { m_autoPlay = on; }
+
+    // ---- 自检钩子 ----
+    // 拦下即将发出的命令：不接网络也能断言「自动应答到底发了什么报文」。
+    void setCommandTapForTest(std::function<void(const QJsonObject&)> tap);
+    AutoBar* autoBarForTest() const { return m_autoBar; }
+    void feedEventForTest(const QJsonObject& ev) { onEvent(ev); }
+
+private slots:
+    void onEvent(const QJsonObject& ev);
+    void onConnected();
+    void onDisconnected();
+    void onNetError(const QString& msg);
+    void onActionReady(const QJsonObject& action);
+    void onTileClicked(const QString& tile, int index);
+    void onRiichiModeChanged(bool on);
+    void onAutoFlagsChanged();
+    void onChatSend();
+    void onLeaveRoom();
+
+private:
+    void buildWaitingPage();
+    void buildTablePage();
+    void showLobby();
+    void updateWaitingRoom(const QJsonObject& room);
+    void updateScorePanel();
+    void appendChat(const QString& who, const QString& text);
+    void sendCommand(const QJsonObject& obj);
+    /** 按三个自动开关替玩家应答本次询问（不满足条件时什么都不做）。 */
+    void applyAuto(const QString& kind, const QJsonObject& ask);
+    /** 每小局结束：三个自动开关立刻全部关掉（用户要求）。 */
+    void resetAutoFlags();
+    void showResultDialog(const QString& title, const QString& html,
+                           const QString& schematic = QString());
+    /** 关闭结算弹窗。confirm=true 视为玩家确认；服务端已推进时传 false（不发 confirm）。 */
+    void closeResultDialog(bool confirm);
+    bool isHost() const;
+
+    NetClient m_net;
+    TableModel m_model;
+    QStackedWidget* m_stack = nullptr;
+    LobbyDialog* m_lobby = nullptr;
+
+    // 等待室
+    QWidget* m_waitPage = nullptr;
+    QLabel* m_roomLabel = nullptr;
+    QLabel* m_seatLabels[4] = { nullptr, nullptr, nullptr, nullptr };
+    QPushButton* m_readyBtn = nullptr;
+    QPushButton* m_addBotBtn = nullptr;
+    QPushButton* m_removeBotBtn = nullptr;
+    QPushButton* m_startBtn = nullptr;
+    QTextBrowser* m_waitChat = nullptr;
+    QLineEdit* m_waitChatEdit = nullptr;
+    bool m_ready = false;
+    QJsonObject m_room;
+
+    // 牌桌
+    QWidget* m_tablePage = nullptr;
+    TableView* m_table = nullptr;
+    ActionBar* m_actions = nullptr;
+    AutoBar* m_autoBar = nullptr;          // 牌桌外的三个自动开关
+    autopolicy::Flags m_autoFlags;         // 它们的当前状态（decide 的输入）
+    QLabel* m_scorePanel = nullptr;
+    QTextBrowser* m_chatView = nullptr;
+    QLineEdit* m_chatEdit = nullptr;
+    QString m_myName;
+    int m_myPid = 0;
+    QJsonObject m_pendingHello;
+    QString m_lastNetError;   // 连接失败提示去重
+
+    // 自动模式
+    bool m_resultOpen = false;    // 结算弹窗是否开着
+    ResultDialog* m_resultDlg = nullptr;   // 局间倒计时/自动关闭要用
+    bool m_autoCreate = false;   // 自动建房（与是否自动应答解耦）
+    bool m_autoPlay = false;
+    bool m_autoRoomSent = false;
+    int m_autoBots = 3;
+    std::function<void(const QJsonObject&)> m_cmdTap;   // 自检用（正常运行为空）
+};
