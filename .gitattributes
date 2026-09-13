@@ -1,0 +1,12 @@
+# 换行符策略：本仓库的文件**本来就是 LF**（含 .sh 与 .ps1）。
+# 显式钉成 LF 存储 + LF 检出，避免 Windows 上 core.autocrlf 把 shell 脚本
+# 检出成 CRLF —— 那样 server/build.sh 到 Ubuntu 上会直接跑不起来。
+* text=auto eol=lf
+
+# 二进制：不要做任何换行/编码转换
+*.otf  binary
+*.png  binary
+*.7z   binary
+*.jar  binary
+*.exe  binary
+*.dll  binary
