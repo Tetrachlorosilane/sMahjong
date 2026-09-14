@@ -734,5 +734,3 @@ Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。
 
 `tools/gen-tile-placeholders.mjs`（生成占位符 SVG，不覆盖已有）· `tools/inline-svg-style.ps1`（把 CSS 内联成表现属性）·
 `tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles`（轮廓化成 SVG）/ `--fontprobe`（实测连字语法，轮次 1=总览 2=组合符放大）。
-
-证据图：`docs/images/font-probe*.png`（总览 / 组合符放大 / 赤宝 / 组合）。
