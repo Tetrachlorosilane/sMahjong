@@ -280,7 +280,7 @@
   "ui.result.winning_tile": " 和了牌 <b>%1</b>",
   "ui.result.yaku_header": "<h3>役种</h3><ul>",
   "ui.result.yaku_row_han": "<li>%1 <b>%2</b> 番</li>",
-    "ui.table.not_connected": "未连接牌局",
+  "ui.table.not_connected": "未连接牌局",
   "ui.table.riichi_suffix": "  立直",
   "ui.table.round_text": "%1%2局 %3本場",
   "ui.table.seat_left": "上家",
@@ -291,5 +291,10 @@
   "ui.table.wind_east": "東",
   "ui.table.wind_north": "北",
   "ui.table.wind_south": "南",
-  "ui.table.wind_west": "西"
+  "ui.table.wind_west": "西",
+  "ui.lobby.preset": "规则预设",
+  "ui.lobby.preset_hint": "先按预设铺一整套规则（役满加倍、累计役满、切上满贯、立直门槛、中途流局…），下面的单项可再覆盖它",
+  "ui.lobby.preset_majsoul": "《雀魂》段位场",
+  "ui.lobby.preset_mleague": "M.League（默认）",
+  "ui.lobby.preset_tenhou": "《天凤》段位战"
 }
