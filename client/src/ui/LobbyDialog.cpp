@@ -44,8 +44,12 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     m_rooms = new QListWidget(roomBox);
     m_rooms->setMinimumHeight(130);
     m_refreshBtn = new QPushButton(lang::t("ui.lobby.refresh"), roomBox);
+    m_replayBtn = new QPushButton(lang::t("ui.replay.open_list"), roomBox);
+    m_replayBtn->setToolTip(lang::t(QStringLiteral("ui.replay.open_list_hint")));
+    connect(m_replayBtn, &QPushButton::clicked, this, &LobbyDialog::replayRequested);
     auto* refreshRow = new QHBoxLayout();
     refreshRow->addWidget(m_refreshBtn);
+    refreshRow->addWidget(m_replayBtn);
     refreshRow->addStretch(1);
     roomLayout->addWidget(m_rooms);
     roomLayout->addLayout(refreshRow);

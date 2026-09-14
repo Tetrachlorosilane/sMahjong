@@ -7,12 +7,16 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import mahjong.game.Table;
+import mahjong.replay.ReplayRecorder;
+import mahjong.replay.ReplayStore;
 import mahjong.util.Json;
 import mahjong.util.Log;
 
@@ -111,6 +115,28 @@ public final class Session {
     /** 无参数的错误（最常用）。 */
     public void sendError(String code) {
         sendError(code, null);
+    }
+
+    /**
+     * 回放接口的频率闸：**与聊天分开计**，而且比聊天宽松得多（翻页要连发几次）。
+     *
+     * <p>为什么回放也要限速：{@code replay_list} / {@code replay_get} 每次都要读磁盘或翻缓存，
+     * 一个循环发请求的客户端就能把磁盘 I/O 打满、把所有人的对局卡住。
+     * 这里每 10 秒最多 60 次（正常翻页 + 列表刷新远远够用）。
+     */
+    private static final int REPLAY_MAX_PER_WINDOW = 60;
+    private static final long REPLAY_WINDOW_MS = 10_000;
+    private long replayWindowStart;
+    private int replayCount;
+
+    private boolean allowReplay() {
+        long now = System.currentTimeMillis();
+        if (now - replayWindowStart > REPLAY_WINDOW_MS) {
+            replayWindowStart = now;
+            replayCount = 0;
+        }
+        replayCount++;
+        return replayCount <= REPLAY_MAX_PER_WINDOW;
     }
 
     /**
@@ -485,6 +511,50 @@ public final class Session {
                     return;
                 }
                 t.broadcast(Json.obj("ev", "chat", "seat", seat, "name", name, "text", text));
+                break;
+            }
+            case "replay_list": {
+                if (!allowReplay()) {
+                    sendError("replay_rate_limited");
+                    return;
+                }
+                ReplayStore store = ReplayStore.current();
+                if (store == null || !store.enabled()) {
+                    send(Json.obj("ev", "replay_list", "total", 0, "items", new ArrayList<>()));
+                    return;
+                }
+                int offset = Json.i(msg, "offset", 0);
+                int limit = Json.i(msg, "limit", 30);
+                send(Json.obj("ev", "replay_list",
+                        "total", store.count(),
+                        "items", store.list(offset, limit)));
+                break;
+            }
+            case "replay_get": {
+                if (!allowReplay()) {
+                    sendError("replay_rate_limited");
+                    return;
+                }
+                ReplayStore store = ReplayStore.current();
+                String rid = Json.str(msg, "id", "");
+                // ⚠ ID 先过形状校验（10 位 base32）再拼路径：否则 "../../x" 就是目录穿越
+                if (store == null || !store.enabled() || !ReplayRecorder.validId(rid)) {
+                    sendError("replay_not_found");
+                    return;
+                }
+                Map<String, Object> head = store.header(rid);
+                List<Object> slice = store.slice(rid, Json.i(msg, "from", 0), Json.i(msg, "count", 600));
+                if (head == null || slice == null) {
+                    sendError("replay_not_found");
+                    return;
+                }
+                int from = Json.i(msg, "from", 0);
+                send(Json.obj("ev", "replay_get",
+                        "id", rid,
+                        "meta", head,
+                        "from", from,
+                        "total", Json.i(head, "entries", 0),
+                        "entries", slice));
                 break;
             }
             case "action": {

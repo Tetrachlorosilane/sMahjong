@@ -10,6 +10,7 @@
 #include "SelfTest.h"
 #include "i18n/Lang.h"
 #include "ui/MainWindow.h"
+#include "ui/ReplayWindow.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -211,6 +212,59 @@ int main(int argc, char* argv[])
         QTimer::singleShot(0, &play, &AutoPlay::start);
         app.exec();
         return play.exitCode();
+    }
+
+    // ---- 回放模式：直接打开回放窗口（可选带 replay id，不带则显示列表）----
+    //   mahjong-client.exe --replay <host> <port> [replay-id] [--shot png] [--after 秒]
+    // 用途：① 用户命令行看回放；② L4 用 `--shot` 出回放界面与牌山窗口的实拍图。
+    const int rp = args.indexOf(QStringLiteral("--replay"));
+    if (rp >= 0) {
+        QString host = QStringLiteral("127.0.0.1");
+        quint16 port = 10086;
+        QString replayId;
+        const QStringList rest = args.mid(rp + 1);
+        int positional = 0;
+        for (const QString& a : rest) {
+            if (a.startsWith(QLatin1Char('-')))
+                break;
+            if (positional == 0)
+                host = a;
+            else if (positional == 1)
+                port = static_cast<quint16>(a.toUShort());
+            else if (positional == 2)
+                replayId = a;
+            ++positional;
+        }
+        auto* win = new ReplayWindow();
+        win->resize(1200, 800);
+        win->show();
+        win->openReplay(host, port, replayId);
+        // `--wall`：连上并载入后自动打开牌山窗口（命令行用途 + L4 截图要抓"活动顶层窗口"）
+        if (args.contains(QStringLiteral("--wall"))) {
+            QTimer::singleShot(3500, win, [win]() { win->showWall(); });
+        }
+
+        const int shotIdx = args.indexOf(QStringLiteral("--shot"));
+        if (shotIdx >= 0 && shotIdx + 1 < args.size()) {
+            const QString path = args.at(shotIdx + 1);
+            int afterMs = 6000;
+            const int ai = args.indexOf(QStringLiteral("--after"));
+            if (ai >= 0 && ai + 1 < args.size()) {
+                afterMs = args.at(ai + 1).toInt() * 1000;
+            }
+            QTimer::singleShot(afterMs, win, [win, path]() {
+                // 与 --demo 同一套做法：抓**活动顶层窗口**（回放窗口/牌山窗口都是顶层）
+                QWidget* target = QApplication::activeWindow();
+                if (target == nullptr) {
+                    target = win;
+                }
+                target->grab().save(path);
+                fprintf(stdout, "REPLAY SHOT: %s\n", qPrintable(path));
+                fflush(stdout);
+                QCoreApplication::quit();
+            });
+        }
+        return qApp->exec();
     }
 
     // ---- UI 回归测试：真的去点大厅里的「建房间」按钮 ----
