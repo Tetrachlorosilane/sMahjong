@@ -803,7 +803,11 @@ public final class Table implements Runnable {
             }
             discardsAll.add(ds);
             riichiAll.add(r.riichi[s]);
-            furitenAll.add(r.isFuriten(s));
+            // ⚠ 振听**只回请求者自己那一项**，其余恒 false（旁观者 seat = -1 → 四项全 false）。
+            //   临时振听（放过一张能和牌的张）等价于「他听牌了」—— 那是别家不该拿到的信息，
+            //   而改造过的客户端只要反复 rejoin 就能把这个快照刷出来。
+            //   客户端本来也只读自己那一项（TableModel::furiten(mySeat)），数组长度仍保持 4。
+            furitenAll.add(s == seat && r.isFuriten(s));
         }
         List<Object> dora = new ArrayList<>();
         for (int k : r.doraIndicators()) {

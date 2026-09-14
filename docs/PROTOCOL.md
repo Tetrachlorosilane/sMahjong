@@ -374,14 +374,40 @@
 ```jsonc
 {"ev":"state","seat":0,"round":{...},"scores":[...],"hand":[...],
  "melds":[[...],[...],[...],[...]],"discards":[[...],[...],[...],[...]],
- "dora_indicators":[...],"tiles_left":40,"dead_wall_left":2,"turn":0,"phase":"wait_discard",
+ "dora_indicators":[...],"tiles_left":40,"dead_wall_left":2,"phase":"playing",
  "riichi":[false,true,false,false],"furiten":[false,false,false,false]}
 ```
+
+- `hand` 是**请求者自己**的手牌（不是四家的）。
+- `tiles_left` / `dead_wall_left` 只是**张数**，不含任何牌面。
+- `furiten` 数组长度仍是 4，但**只有请求者自己那一项可能为 true**，其余恒 false；
+  旁观者（`seat = -1`）四项全 false。理由见 §3.10 —— 临时振听等价于「他听牌了」。
 
 ### 3.9 观战
 
 非入座者收到与其他玩家相同的公开事件（不含 `hand`、不含 `draw.tile`），并收到
 `{"ev":"spectate","room":"AB12"}`。观战者不收到 `ask`。
+
+### 3.10 信息可见性：服务端**绝不**下发的东西
+
+客户端属于不可信输入，因此下面这些隐藏信息**任何事件里都不出现** —— 改过的客户端也拿不到：
+
+| 隐藏信息 | 服务端的处理 |
+| --- | --- |
+| 牌山的**牌面与顺序**、剩余牌都是什么 | 只发 `tiles_left` / `dead_wall_left` 这类**张数**；`Wall.debugAllTiles()` 仅供内部自检，从不上网 |
+| 他家**未出示的手牌**（含刚摸到的那张） | 手牌只发给本人：`round_start` / `state` 按座位**单发**，`draw.tile` 只给摸牌者（其余三家只收到「谁摸了牌 + 剩余张数」） |
+| **未翻开**的宝牌指示牌 | `dora_indicators` 只含已翻开的张数（`Wall.doraCount()`）；开杠才 `dora_reveal` 下一张 |
+| **里宝指示牌** | 仅在和牌、且和牌者立直（或两立直）且 `rules.ura` 时随 `agari` 下发；其余任何时候都不发 |
+| 他家**询问的选项**与 `win_note` | `ask` / `ask_cancel` 只发给被问的那一家，绝不广播 |
+| 他家**振听状态** | `state.furiten` 只填请求者自己那一项（§3.8） |
+| **机器人**座位的手牌 | 机器人没有连接（`Seat.session == null`），服务端直接调 `Bot.decide`，从不经过网络 |
+
+与之相对的**公开信息**（允许下发）：四家牌河与副露、立直状态与供託、**已翻开**的宝牌指示牌、
+各家点数、剩余张数、`tsumogiri`（手切/摸切）、和牌后**和牌者**的手牌与（条件满足时的）里宝指示牌、
+流局时**仅听牌家**的手牌（`ryuukyoku.hands` 里未听牌家是 `null`）、`ryuukyoku.tenpai`。
+
+> 新增协议字段时先回答一句：**这条信息改过的客户端拿到会怎样？**
+> 只要涉及「牌山 / 他家手牌 / 未翻开的指示牌 / 他家振听」，就必须按座位单发或干脆不发。
 
 ## 4. 座位与方向约定
 
