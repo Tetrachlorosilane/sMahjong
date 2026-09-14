@@ -188,7 +188,7 @@ M.League 默认取舍：
    外加 3 次「4 机器人整场半庄」模拟的点数守恒。**当前 507 项全绿。**
 2. **L2 客户端自检**：`client\dist\mahjong-client.exe --selftest client\build\st` —— 牌码双向、NDJSON、`TableModel`
    事件应用、风盘布局不变量（点数等距 / 得点框同理 / 宝牌行只占中间列 / 河区不压手牌 / 牌河超 18 张仍逐行）、
-   自动开关判据与接线、结算面 4 种情形，并出图。**当前 401 项全绿。**
+   自动开关判据与接线、结算面 4 种情形、**语言文件条目数与 `ui.lobby.preset*` 文案**，并出图。**当前 402 项全绿。**
 3. **L3 协议端到端**：起真服务端，跑 `tools/*.mjs`（e2e / timeout / clock / firstturn / riichi-stale /
    claim-priority / utf8 / check-i18n / i18n-scan / i18n-gen）。
 4. **L4 假服务端定点复现**：`tools/mock-server.mjs` 直接把客户端推进到目标状态再截图（比等牌快得多）。
