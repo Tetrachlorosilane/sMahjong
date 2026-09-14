@@ -240,7 +240,7 @@ public final class Round {
             }
             if ("kan".equals(type)) {
                 final int kanBefore = kanCount;
-                Result r = turnKan(turn, act);
+                Result r = turnKan(turn, act, drawn);
                 if (r != null) {
                     return r;
                 }
@@ -606,6 +606,18 @@ public final class Round {
         wall.debugSetRinshanUsed(n);
     }
 
+    /**
+     * 自测钩子：把可摸牌山消耗到只剩 {@code leave} 张。
+     *
+     * <p>用于「残牌门槛（一般规则 ≥4 张）」与「摸到海底牌之后不可立直」这两条立直条件
+     * —— 它们取决于牌山账，不可能靠配牌凑出来。只推进 {@code livePos}，不动任何人的手牌。
+     */
+    public void debugDrainWallTo(int leave) {
+        while (wall.tilesLeft() > leave) {
+            wall.draw();
+        }
+    }
+
     public int[] concealCounts(int seat) {
         int[] c = new int[Tiles.KIND_COUNT];
         for (int id : hand[seat]) {
@@ -676,8 +688,24 @@ public final class Round {
         return false;
     }
 
+    /**
+     * 立直的门槛条件（与「打哪张能听」无关）。
+     *
+     * <p>《雀魂》《天凤》：点数 ≥ 1000 且剩余可摸牌 ≥ 4；**M.League 两条都不要求**，
+     * 但摸到海底牌之后不能再立直（`rules.riichiNoHaitei`）—— 见 docs/日本麻将.md §立直。
+     */
+    private boolean riichiAllowed(int seat) {
+        if (!menzen[seat] || riichi[seat]) {
+            return false;
+        }
+        if (scores[seat] < rules.riichiMinScore || tilesLeft() < rules.riichiMinTilesLeft) {
+            return false;
+        }
+        return !(rules.riichiNoHaitei && wall.atLastLiveTile());
+    }
+
     private boolean canRiichiAny(int seat) {
-        if (!menzen[seat] || riichi[seat] || scores[seat] < 1000 || tilesLeft() < 4) {
+        if (!riichiAllowed(seat)) {
             return false;
         }
         for (int id : hand[seat]) {
@@ -689,7 +717,7 @@ public final class Round {
     }
 
     public boolean canRiichi(int seat, int tileId) {
-        if (!menzen[seat] || riichi[seat] || scores[seat] < 1000 || tilesLeft() < 4) {
+        if (!riichiAllowed(seat)) {
             return false;
         }
         if (!hand[seat].contains(tileId)) {
@@ -782,7 +810,7 @@ public final class Round {
         // 岭上牌只有 4 张，用完就不能再开杠（一局最多 4 次，见 canKan）
         if (canKan()) {
             for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-                if (c[k] == 4 && kanAllowedByRiichi(seat, k)) {
+                if (c[k] == 4 && kanAllowedByRiichi(seat, k, drawn)) {
                     kans.add(Json.obj("kind", "ankan", "tile", Tiles.kindToStr(k)));
                 }
             }
@@ -801,12 +829,85 @@ public final class Round {
         return opts;
     }
 
-    private boolean kanAllowedByRiichi(int seat, int kind) {
+    /**
+     * 立直后可不可以杠。
+     *
+     * <p>两条门槛：①「听牌不变」（{@link RoundOptions#kanAllowedAfterRiichi}）；
+     * ② M.League 追加的「面子构成不变」（{@link #ankanKeepsShape}）。
+     *
+     * <p>⚠ 关键在 `drawn`：自己回合里 `hand[seat]` 是 **14 张**（含刚摸到的那张），
+     * 而「行杠前的听牌」是**13 张**手牌的听牌。早先这里直接拿 {@code waitKinds(seat)}
+     * （对 14 张求听牌）当"杠前听牌" —— 那个集合**恒为空**，于是与杠后听牌永不相等，
+     * **立直后的暗杠一次也下发不出来**（静默失效：选项里没有，玩家也就"本来就不能杠"）。
+     * 所以必须把刚摸到的那张减掉再算；而传给 {@code kanAllowedAfterRiichi} 的
+     * 计数仍是那张 14 张的（它内部要 {@code -= 4} 把这 4 张拿走）。
+     */
+    /**
+     * 该座位能不能对 {@code kind} 这张舍张**大明杠**（手里正好 3 张、名额没满、未立直）。
+     *
+     * <p>三个入口共用同一个判据：鸣牌选项下发、鸣牌仲裁、{@code applyMeld} 的落地校验。
+     * 各写各的就会出现"选项给了但落地崩"或"立直了还能大明杠"。
+     */
+    public boolean canDaiminkan(int seat, int kind) {
+        return kind >= 0 && !riichi[seat] && canKan() && concealCounts(seat)[kind] >= 3;
+    }
+
+    private boolean kanAllowedByRiichi(int seat, int kind, int drawn) {
         if (!riichi[seat]) {
             return true;
         }
-        return RoundOptions.kanAllowedAfterRiichi(
-                waitKinds(seat), concealCounts(seat), melds[seat].size(), kind);
+        final int[] c = concealCounts(seat);
+        final int[] before = c.clone();
+        if (drawn >= 0) {
+            int dk = Tiles.kind(drawn);
+            if (before[dk] > 0) {
+                before[dk]--;
+            }
+        }
+        final List<Integer> waitsBefore = Agari.waits(before, melds[seat].size());
+        if (!RoundOptions.kanAllowedAfterRiichi(waitsBefore, c, melds[seat].size(), kind)) {
+            return false;
+        }
+        // M.League 追加：立直后的暗杠还要求**面子构成不变**（允许役种增减）
+        return !rules.ankanKeepsShape || ankanKeepsShape(seat, kind);
+    }
+
+    /**
+     * M.League 的「面子构成不变」判据（只在立直后、且 `rules.ankanKeepsShape` 时问）。
+     *
+     * <p>规则原文与 4 个例子见 `docs/日本麻将.md` §立直（2026-09-14 版）：
+     * <ul>
+     *   <li>{@code 4m5m5m5m2p2p3p3p4p4p6s7s8s} 暗杠 5m → 听牌变化 → 任何规则都不行；</li>
+     *   <li>{@code 7m7m2p2p2p3p3p3p4p4p4p6s7s} 暗杠 2p/3p/4p → 听牌不变但面子构成变（平和没了）
+     *       → 《雀魂》《天凤》可以，**M.League 不行**；</li>
+     *   <li>{@code 1m1m1m2m2m3m3m3m8p8p8p6z6z} 暗杠 1m/3m 不行、暗杠 **8p 可以**（"不会改变牌型"）；</li>
+     *   <li>{@code 5m5m5m0m6m7m...} 摸 8m 后暗杠 5m = **送杠**，面子构成变 → 任何规则都不行。</li>
+     * </ul>
+     *
+     * <p>把 4 个例子归纳出来的判据是：**这 4 张牌在手里没有任何同花色的"邻居"**
+     * （±1、±2 之内没有同花色的牌）—— 也就是它根本不可能被当成顺子的一部分。
+     * 例：8p 旁边没有 6p/7p/9p → 可以；2p 旁边有 3p/4p → 不行。
+     *
+     * <p>这是**保守**判据：宁可多禁掉个别罕见形状下的暗杠，也绝不放行会改变面子构成的暗杠。
+     */
+    private boolean ankanKeepsShape(int seat, int kind) {
+        if (Tiles.isHonor(kind)) {
+            return true;   // 字牌不可能进顺子
+        }
+        int[] c = concealCounts(seat);
+        for (int d = -2; d <= 2; d++) {
+            if (d == 0) {
+                continue;
+            }
+            int k = kind + d;
+            if (k < 0 || k >= Tiles.KIND_COUNT || Tiles.suit(k) != Tiles.suit(kind)) {
+                continue;
+            }
+            if (c[k] > 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -975,7 +1076,7 @@ public final class Round {
     // ================================================================= 杠
 
     /** 自己回合的暗杠 / 加杠。返回非 null 表示本局结束（抢杠荣和）。 */
-    private Result turnKan(int seat, Map<String, Object> act) {
+    private Result turnKan(int seat, Map<String, Object> act, int drawn) {
         if (act == null) {
             return null;
         }
@@ -993,6 +1094,12 @@ public final class Round {
         }
         if ("ankan".equals(kindStr)) {
             if (picked.size() < 4) {
+                return null;
+            }
+            // ⚠ 选项列表不是安全边界：立直后的暗杠必须在这里**再校验一次**
+            //   （听牌不变 + M.League 的面子构成不变）。没兑现就返回 null →
+            //   调用方退回默认摸切，绝不白拿一张岭上牌。
+            if (!kanAllowedByRiichi(seat, kind, drawn)) {
                 return null;
             }
             int[] tiles = new int[4];
@@ -1037,8 +1144,9 @@ public final class Round {
         kanJustHappened = true;
         clearIppatsu();
         sendMeld(seat, m, -1);
-        revealKanDora();
-        // 抢杠
+        // 抢杠：**先判抢杠，杠成立之后才翻杠宝牌**。
+        // ⚠ 顺序反了会算错分：被抢杠时这次杠并没有成立，对应的宝牌指示牌不能翻开
+        //   （docs/日本麻将.md §宝牌：加杠被抢和时，这次杠的宝牌指示牌不翻开）。
         List<Integer> ron = new ArrayList<>();
         for (int d = 1; d < 4; d++) {
             int s = (seat + d) % 4;
@@ -1053,6 +1161,7 @@ public final class Round {
         if (!ron.isEmpty()) {
             return agariRon(ron, seat, addId, true);
         }
+        revealKanDora();
         return null;
     }
 
@@ -1262,7 +1371,7 @@ public final class Round {
                     continue;
                 }
                 String ty = Json.str(a, "type", "pass");
-                if (t == ClaimType.KAN && "kan".equals(ty) && canKan()) {
+                if (t == ClaimType.KAN && "kan".equals(ty) && canDaiminkan(s, Tiles.kind(tileId))) {
                     Claim c = new Claim();
                     c.type = ClaimType.KAN;
                     c.seat = s;
@@ -1422,7 +1531,9 @@ public final class Round {
         if (c[kind] >= 2) {
             opts.add(Json.obj("type", "pon"));
         }
-        if (c[kind] >= 3 && canKan()) {
+        // 大明杠：**立直后不可**（它一定会改变手牌构成，而暗杠才可能"听牌不变"）。
+        // 立直是门前状态，大明杠还会把 menzen 打掉；任何规则都不允许，所以这里直接挡掉。
+        if (canDaiminkan(seat, kind)) {
             opts.add(Json.obj("type", "kan",
                     "kans", Json.arr(Json.obj("kind", "daiminkan", "tile", Tiles.kindToStr(kind)))));
         }
@@ -1440,6 +1551,22 @@ public final class Round {
     private void applyMeld(Claim cl, int from, int tileId) {
         int seat = cl.seat;
         int kind = Tiles.kind(tileId);
+        // ⚠ 大明杠要**先校验再改状态**：手里不足 3 张就什么都不做。
+        //   旧写法在 case KAN 里直接 `picked.get(0..2)` —— 客户端伪造一条 `type:"kan"`
+        //   （或本可被认领的废包）就会 AIOOBE，异常冒到牌桌线程 → 整场半庄静默死亡，
+        //   与 `pickChiTiles` 那个审计项是同一类问题。
+        List<Integer> kanPicked = null;
+        if (cl.type == ClaimType.KAN) {
+            kanPicked = new ArrayList<>();
+            for (int id : hand[seat]) {
+                if (Tiles.kind(id) == kind && kanPicked.size() < 3) {
+                    kanPicked.add(id);
+                }
+            }
+            if (kanPicked.size() < 3) {
+                return;
+            }
+        }
         menzen[seat] = false;
         anyCall = true;
         clearIppatsu();
@@ -1523,12 +1650,7 @@ public final class Round {
                 break;
             }
             case KAN: {
-                List<Integer> picked = new ArrayList<>();
-                for (int id : hand[seat]) {
-                    if (Tiles.kind(id) == kind && picked.size() < 3) {
-                        picked.add(id);
-                    }
-                }
+                List<Integer> picked = kanPicked;
                 for (int id : picked) {
                     hand[seat].remove((Integer) id);
                 }
@@ -1572,9 +1694,19 @@ public final class Round {
     /** 被鸣走那张牌在原牌河中的下标（-1 表示无）；供 UI/调试参考。 */
     public final int[] discardCalledIndex = {-1, -1, -1, -1};
 
+    /**
+     * 自测钩子：只跑一次包牌判定（不动手牌 / 牌河 / 副露）。
+     *
+     * <p>包牌的三条触发条件（大三元、大四喜、四杠子）都要求"某家副露成立的**那一刻**"，
+     * 靠单局状态机凑出来极难（要精确喂出 4 个杠子、4 个风牌…），所以留一个只跑判据的入口。
+     */
+    public void debugUpdatePao(int seat, int from, Meld m) {
+        updatePao(seat, from, m);
+    }
+
     /** 包牌判定：大三元 / 大四喜 / 四杠子的最后一次副露。 */
     private void updatePao(int seat, int from, Meld m) {
-        if (!rules.pao) {
+        if (!rules.pao || from < 0) {
             return;
         }
         int dragons = 0;
@@ -1591,11 +1723,29 @@ public final class Round {
                 winds++;
             }
         }
+        // 大三元 / 大四喜：造成第 3 个三元牌 / 第 4 个风牌副露的那家包牌。
+        // ⚠ 这里**自然计入暗杠**（暗杠也是 melds 的一项）：M.League 明文「判定大三元、
+        //   大四喜的包牌时，也计入已经公开的暗杠」——已经暗杠的三元牌/风牌算进个数，
+        //   但暗杠本身不是"他家的舍牌"，所以它不会成为包牌者（`from < 0` 直接返回）。
         if (Tiles.isDragon(m.baseKind()) && dragons == 3) {
             paoSeat[seat] = from;
         }
         if (Tiles.isWind(m.baseKind()) && winds == 4) {
             paoSeat[seat] = from;
+        }
+        // 四杠子包牌：**只有 M.League** 有，且必须是"由他家的舍牌大明杠完成第 4 个杠"。
+        // 所以判据是「这一次副露本身是大明杠」+「含它正好 4 个杠子」。
+        if (rules.paoFourKan && m.kind == Meld.Kind.DAIMINKAN) {
+            int kans = 0;
+            for (Meld x : melds[seat]) {
+                if (x.kind == Meld.Kind.ANKAN || x.kind == Meld.Kind.DAIMINKAN
+                        || x.kind == Meld.Kind.KAKAN) {
+                    kans++;
+                }
+            }
+            if (kans >= 4) {
+                paoSeat[seat] = from;
+            }
         }
     }
 
@@ -1669,6 +1819,12 @@ public final class Round {
     private int paoBaseFor(int seat, Evaluator.HandScore sc) {
         if (paoSeat[seat] < 0 || !rules.pao) {
             return 0;
+        }
+        // 《天凤》：包牌涉及**复合后的全部役满得点**；《雀魂》/ M.League 只包被包的那一役
+        // （docs/日本麻将.md §包牌：M.League「只涉及被包的役满部分」，《天凤》「全部」；
+        //   雀魂的例子也是"只包大四喜部分"，所以它与 M.League 同侧）。
+        if (rules.paoCoversAll) {
+            return Math.max(0, sc.base);
         }
         int base = 0;
         for (Evaluator.Yaku y : sc.yaku) {

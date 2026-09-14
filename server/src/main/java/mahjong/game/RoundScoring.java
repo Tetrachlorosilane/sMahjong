@@ -2,6 +2,7 @@ package mahjong.game;
 
 import java.util.Collection;
 
+import mahjong.core.Rules;
 import mahjong.rules.Agari;
 
 /**
@@ -143,5 +144,78 @@ public final class RoundScoring {
     public static boolean tenpai(int[] concealed, int meldCount) {
         callsTenpai++;
         return !Agari.waits(concealed, meldCount).isEmpty();
+    }
+
+    // ================================================================= 精算点数
+
+    /**
+     * 一局的最终精算结果（按**座位**索引）。
+     *
+     * <p>`order[i]` = 第 i 名（0 起）的座位；`rank[seat]` = 该座位名次（0 = 1 位）；
+     * `point` = 精算点数；`uma` / `oka` = 该座位实际拿到的马点与头名赏
+     * （同点平分时会与 `rules.uma` 不同，所以要回传而不是让调用方再算一遍）。
+     */
+    public static final class Settlement {
+        public final int[] order = new int[4];
+        public final int[] rank = new int[4];
+        public final double[] point = new double[4];
+        public final double[] uma = new double[4];
+        public final double[] oka = new double[4];
+    }
+
+    /**
+     * 精算点数 = {@code (点数 − 返点)/1000 + 马点 + 头名赏（仅 1 位）}。
+     *
+     * <p>头名赏 = {@code (返点 − 配给原点) × 4 / 1000}：M.League 为
+     * (30000−25000)×4/1000 = **20**（所以 1 位常合并写成 +50 = +30 马点 +20 头名赏）；
+     * 配给原点与返点相同时（《雀魂》段位场）不存在头名赏。
+     *
+     * <p>同点时：`rules.tieSplitPoint`（M.League）**平分对应名次的马点与头名赏**；
+     * 否则按起家座次先后来定名次（《天凤》）。
+     *
+     * <p>例子见 `docs/日本麻将.md` §精算点数：同样是 53600/28600/20000/−2200，
+     * M.League 得 +73.6 / +8.6 / −20 / −62.2，《雀魂》得 +43.6 / +8.6 / −10 / −42.2。
+     */
+    public static Settlement settle(int[] scores, Rules rules) {
+        Settlement st = new Settlement();
+        Integer[] idx = {0, 1, 2, 3};
+        // 分数降序；同点按座次 —— 本服务端 seat 0 = 起家（東1局の親），
+        // 所以「座次升序」就是《天凤》的「按起家座次先后定名次」。
+        java.util.Arrays.sort(idx, (a, b) -> scores[a] != scores[b] ? scores[b] - scores[a] : a - b);
+        for (int i = 0; i < 4; i++) {
+            st.order[i] = idx[i];
+            st.rank[idx[i]] = i;
+        }
+        double oka = (rules.returnScore - rules.startScore) * 4 / 1000.0;
+        for (int i = 0; i < 4; i++) {
+            st.uma[i] = rules.uma[i];
+            st.oka[i] = (i == 0) ? oka : 0;
+        }
+        if (rules.tieSplitPoint) {
+            for (int i = 0; i < 4; ) {
+                int j = i;
+                while (j + 1 < 4 && scores[idx[j + 1]] == scores[idx[i]]) {
+                    j++;
+                }
+                if (j > i) {
+                    double u = 0;
+                    double o = 0;
+                    for (int k = i; k <= j; k++) {
+                        u += rules.uma[k];
+                        o += (k == 0) ? oka : 0;
+                    }
+                    for (int k = i; k <= j; k++) {
+                        st.uma[k] = u / (j - i + 1);
+                        st.oka[k] = o / (j - i + 1);
+                    }
+                }
+                i = j + 1;
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            int s = idx[i];
+            st.point[s] = (scores[s] - rules.returnScore) / 1000.0 + st.uma[i] + st.oka[i];
+        }
+        return st;
     }
 }
