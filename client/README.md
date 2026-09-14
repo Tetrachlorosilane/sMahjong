@@ -209,15 +209,11 @@ LOBBYTEST PASS: 建房成功，标题 = 立直麻将 · 房间 4Z2F
   | 缺失时 | 逐级回退：目录 → qrc 内嵌 → `TileRenderer` 的程序化绘制（**删掉整个 `tiles/` 也不会白屏**） |
   | 重新生成占位符 | `node tools/gen-tile-placeholders.mjs`（**不覆盖**已存在的文件） |
 
-  占位符就是一张写着牌码的牌形（赤五为红色），见 `docs/images/tiles.png`。
-
-  ![37 种牌](docs/images/tiles.png)
+  占位符就是一张写着牌码的牌形（赤五为红色）。
 
 - **牌桌实拍**（真连 Java 服务端的一局）：
 
   ![对局中](docs/images/table-live.png)
-
-  ![轮到自己摸牌](docs/images/table-turn.png)
 
 > 右侧「分数表 + 聊天」栏是主窗口的附属面板（`MainWindow`），不属于牌桌控件；
 > 得点已经放进风盘，这一栏的分数部分是冗余的，需要的话可以去掉。
