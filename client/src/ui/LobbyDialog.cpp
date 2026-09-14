@@ -55,6 +55,13 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     auto* createBox = new QGroupBox(lang::t("ui.lobby.create_group"), this);
     auto* createForm = new QFormLayout(createBox);
     m_roomName = new QLineEdit(lang::t("ui.lobby.my_room"), createBox);
+    // 规则预设：服务端按 preset 铺一整套取舍，再让下面那些单项覆盖它
+    //（M.League 是服务端默认值；这里显式选一遍，玩家才看得见自己打的是哪套规则）。
+    m_preset = new QComboBox(createBox);
+    m_preset->addItem(lang::t("ui.lobby.preset_mleague"), QStringLiteral("mleague"));
+    m_preset->addItem(lang::t("ui.lobby.preset_tenhou"), QStringLiteral("tenhou"));
+    m_preset->addItem(lang::t("ui.lobby.preset_majsoul"), QStringLiteral("majsoul"));
+    m_preset->setToolTip(lang::t(QStringLiteral("ui.lobby.preset_hint")));
     m_length = new QComboBox(createBox);
     m_length->addItem(lang::t("ui.lobby.rule_hanchan"), QStringLiteral("hanchan"));
     m_length->addItem(lang::t("ui.lobby.rule_tonpuu"), QStringLiteral("tonpuu"));
@@ -87,6 +94,7 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     m_bots->setValue(0);
     m_createBtn = new QPushButton(lang::t("ui.lobby.create_room"), createBox);
     createForm->addRow(lang::t("ui.lobby.room_name"), m_roomName);
+    createForm->addRow(lang::t("ui.lobby.preset"), m_preset);
     createForm->addRow(lang::t("ui.lobby.rules"), m_length);
     createForm->addRow(lang::t("ui.lobby.aka"), m_aka);
     createForm->addRow(lang::t("ui.lobby.clock"), m_think);
@@ -194,6 +202,8 @@ QString LobbyDialog::selectedRoomId() const
 void LobbyDialog::onCreateClicked()
 {
     QJsonObject rules;
+    // preset 必须**先**塞：服务端按它铺一整套取舍，再让后面的单项覆盖
+    rules.insert(QStringLiteral("preset"), m_preset->currentData().toString());
     rules.insert(QStringLiteral("length"), m_length->currentData().toString());
     rules.insert(QStringLiteral("aka"), m_aka->currentData().toInt());
     // 思考时间：规格串「额外+每巡」→ "20+5" = base 5000ms / bank 20000ms

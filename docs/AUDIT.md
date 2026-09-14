@@ -204,7 +204,7 @@
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
 | L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **507 项全绿**（424 → +83：`mleagueRulesTests` 的取舍两侧断言 + 立直门槛 4 组 + 包牌 6 条 + S-28~S-33 的回归断言） |
-| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **401 项全绿**（客户端未改动） |
+| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **402 项全绿**（401 → +1：语言文件条目数 293→298、新增 `ui.lobby.preset*` 文案断言；另跑 `--lobbytest` 验证建房流程） |
 | L3 协议端到端 | `node tools\e2e-test.mjs`（整场东风战 + 逐条 ASCII 审计 + 岭上账） | **E2E PASS**（5 小局 / 3 次和了 / 2 次流局；报文里无中文、岭上账对；顺带实测到新的精算：3 位 22000 → −18、4 位 16000 → −44，与 `settle()` 同式） |
 | L3 其余 | `timeout` / `utf8` / `clock` / `firstturn` / `riichi-stale` | 全部 **PASS** |
 | L3 概率性工具 | `claim-priority-test` | 「**无法判定：样本不足**」（不是通过，也不是失败；本次 272 次出牌询问 / 33 次鸣牌询问都没撞上"有人能碰、同一张上另有人只能吃且拖着不回"的局面）。它负责的另一半（废包不漏到下一巡）本次**通过**：`B 废包之后那一巡：声明 3000ms，实测 3008ms ok` |
@@ -216,6 +216,9 @@
 `test/SelfTest.java`（+83 断言）。**协议新增字段**：`preset` / `kiriage_mangan` / `kazoe_yakuman` /
 `double_wind_pair_fu` / `riichi_min_score` / `riichi_min_tiles_left` / `riichi_no_haitei` /
 `ankan_keeps_shape` / `tie_split_point` / `pao_four_kan` / `pao_covers_all`。
+客户端：`ui/LobbyDialog.{h,cpp}` 建房对话框新增「规则预设」下拉（`rules.preset`）、`main.cpp` 版本号 1.1.0、
+`assets/i18n/zh_CN.json` + `tools/i18n-map.mjs`（+5 条 `ui.lobby.preset*`）、`SelfTest.cpp`（条目数断言同步）。
+**三套预设实测**：`.qt/verify-preset.mjs` 逐字段核对 `room.rules`（mleague / tenhou / majsoul 全 PASS）。
 
 
 > 注：`claim-priority-test.mjs` 需要"有人能碰、同一张舍张上另有人只能吃且拖着不回"这种罕见局面，

@@ -50,6 +50,7 @@ private:
     QPushButton* m_refreshBtn = nullptr;
 
     QLineEdit* m_roomName = nullptr;
+    QComboBox* m_preset = nullptr;   // 规则预设：mleague（默认）/ tenhou / majsoul
     QComboBox* m_length = nullptr;
     QComboBox* m_aka = nullptr;
     QComboBox* m_think = nullptr;   // 思考时间：每巡基本时长 + 总额外时长
