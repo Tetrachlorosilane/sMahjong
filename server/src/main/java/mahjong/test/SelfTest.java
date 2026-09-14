@@ -63,6 +63,7 @@ public final class SelfTest {
         paymentTests();
         notenPenaltyTests();
         fourKanAbortTests();
+        mleagueRulesTests();
         akaRuleTests();
         nagashiLivePathTest();
         simulationTest();
@@ -158,9 +159,23 @@ public final class SelfTest {
 
     private static Evaluator.HandScore evalCtx(String hand, String win, boolean tsumo,
                                                int seat, int dealer, int roundWind, boolean riichi) {
+        return evalCtx(hand, win, tsumo, seat, dealer, roundWind, riichi, Rules.defaults());
+    }
+
+    /**
+     * 指定规则集的和牌评价。
+     *
+     * <p>**凡是"规则取舍"型的判据都必须显式传规则集**：默认预设现在是 M.League
+     * （`Rules.defaults()` → `new Rules()` → `applyPreset("mleague")`），
+     * 直接依赖默认值等于在断言"默认值恰好是某个值"，换个默认预设就误报。
+     * 取舍项（加倍役满 / 累计役满 / 切上满贯 / 连风符 / 立直门槛…）一律两边都钉住。
+     */
+    private static Evaluator.HandScore evalCtx(String hand, String win, boolean tsumo,
+                                               int seat, int dealer, int roundWind, boolean riichi,
+                                               Rules rules) {
         int[] c = counts(hand);
         WinContext ctx = new WinContext();
-        ctx.rules = Rules.defaults();
+        ctx.rules = rules;
         ctx.seat = seat;
         ctx.dealerSeat = dealer;
         ctx.roundWind = 27 + roundWind;
@@ -172,6 +187,13 @@ public final class SelfTest {
         ctx.uraIndicators = new ArrayList<>();
         ctx.allTileIds = parse(hand);
         return Evaluator.evaluate(ctx, c, new ArrayList<>(), ctx.winKind);
+    }
+
+    /** 预设规则集（`mleague` / `tenhou` / `majsoul`），供"取舍"类断言两边钉住。 */
+    private static Rules preset(String name) {
+        Rules r = Rules.defaults();
+        r.applyPreset(name);
+        return r;
     }
 
     private static boolean hasYaku(Evaluator.HandScore s, String name) {
@@ -301,15 +323,37 @@ public final class SelfTest {
         // 结算报文里役满役的番数 = 13 × 倍数（**绝不能是 0**：界面会显示成「0 番」）
         eq("国士无双上报 13 番（役满等价）", reportedHan(s6, "国士无双"), 13);
         eq("国士无双合计番数 = 13 × 1", s6.totalHan(), 13);
-        Evaluator.HandScore s7 = evalClosed("1m9m1p9p1s9s1z2z3z4z5z6z7z1m", "1m", false, 1, 0, 0);
+
+        // ── 「两倍役满」：大四喜 / 国士无双十三面 / 四暗刻单骑 / 纯正九莲宝灯 这 4 种
+        //    在《雀魂》计 2 倍，《天凤》与 **M.League 计 1 倍**（docs/日本麻将.md §两倍役满）。
+        //    两类规则都显式钉住，不依赖默认值。
+        //    ⚠ 约定：加倍与否只改**取值**，不改役种名 —— 十三面/单骑/纯正在任何规则下都是独立役。
+        Rules dbl = preset("majsoul");   // doubleYakuman = true
+        Rules ml = preset("mleague");    // doubleYakuman = false
+        check("《雀魂》预设加倍役满", dbl.doubleYakuman);
+        check("M.League 预设不加倍", !ml.doubleYakuman);
+
+        Evaluator.HandScore s7 = evalCtx("1m9m1p9p1s9s1z2z3z4z5z6z7z1m", "1m", false, 1, 0, 0, false, dbl);
         check("国士十三面双倍: " + yakuNames(s7), s7.yakuman == 2 && hasYaku(s7, "国士无双十三面"));
         eq("国士十三面上报 26 番（13 × 2）", reportedHan(s7, "国士无双十三面"), 26);
         eq("两倍役满合计番数 = 26", s7.totalHan(), 26);
+        eq("两倍役满基本点 = 16000", s7.base, 16000);
+        // M.League：同一个役、只算 1 倍 —— 名字必须还是「国士无双十三面」
+        Evaluator.HandScore s7m = evalCtx("1m9m1p9p1s9s1z2z3z4z5z6z7z1m", "1m", false, 1, 0, 0, false, ml);
+        check("M.League 仍报「国士无双十三面」（只是不加倍）: " + yakuNames(s7m),
+                hasYaku(s7m, "国士无双十三面") && !hasYaku(s7m, "国士无双"));
+        eq("M.League 国士十三面 = 1 倍", s7m.yakuman, 1);
+        eq("M.League 国士十三面合计 13 番", s7m.totalHan(), 13);
+        eq("M.League 国士十三面基本点 = 8000", s7m.base, 8000);
+        eq("M.League 国士十三面打点标签", s7m.limit, "役满");
 
         // 四暗刻单骑
-        Evaluator.HandScore s8 = evalClosed("1m1m1m1p1p1p4p4p4p3s3s3s1z1z", "1z", true, 1, 0, 0);
+        Evaluator.HandScore s8 = evalCtx("1m1m1m1p1p1p4p4p4p3s3s3s1z1z", "1z", true, 1, 0, 0, false, dbl);
         check("四暗刻单骑: " + yakuNames(s8), hasYaku(s8, "四暗刻单骑") && s8.yakuman == 2);
         eq("四暗刻单骑上报 26 番", reportedHan(s8, "四暗刻单骑"), 26);
+        Evaluator.HandScore s8m = evalCtx("1m1m1m1p1p1p4p4p4p3s3s3s1z1z", "1z", true, 1, 0, 0, false, ml);
+        check("M.League 仍是「四暗刻单骑」1 倍: " + yakuNames(s8m),
+                hasYaku(s8m, "四暗刻单骑") && s8m.yakuman == 1 && s8m.base == 8000);
         // 普通役的上报番数就是它自己的番（不能被役满那套折算改到）
         eq("普通役上报番数不变（三色同顺 2 番）", reportedHan(s4, "三色同顺"), 2);
         eq("非役满合计番数不变", s4.totalHan(), s4.han);
@@ -330,15 +374,26 @@ public final class SelfTest {
         Evaluator.HandScore s12 = evalClosed("1m1m1m2m2m3m4m5m6m7m8m9m9m9m", "1m", false, 1, 0, 0);
         check("九莲宝灯: " + yakuNames(s12), hasYaku(s12, "九莲宝灯") && s12.yakuman == 1);
 
-        Evaluator.HandScore s13 = evalClosed("1m1m1m2m2m3m4m5m6m7m8m9m9m9m", "2m", false, 1, 0, 0);
+        Evaluator.HandScore s13 = evalCtx("1m1m1m2m2m3m4m5m6m7m8m9m9m9m", "2m", false, 1, 0, 0, false, dbl);
         check("纯正九莲: " + yakuNames(s13), hasYaku(s13, "纯正九莲宝灯") && s13.yakuman == 2);
+        Evaluator.HandScore s13m = evalCtx("1m1m1m2m2m3m4m5m6m7m8m9m9m9m", "2m", false, 1, 0, 0, false, ml);
+        check("M.League 仍是「纯正九莲宝灯」1 倍: " + yakuNames(s13m),
+                hasYaku(s13m, "纯正九莲宝灯") && s13m.yakuman == 1 && s13m.base == 8000);
 
-        // 清一色 + 二杯口 + 纯全 + 平和 = 累计役满
+        // 清一色 + 二杯口 + 纯全 + 平和 = 累计役满（番数 ≥13 但没有役满役）
         Evaluator.HandScore s14 = evalClosed("1p1p1p1p2p2p3p3p7p7p8p8p9p9p", "1p", false, 1, 0, 0);
         check("累计役满: " + yakuNames(s14) + " han=" + s14.han, s14.han >= 13);
         check("含清一色", hasYaku(s14, "清一色"));
         check("含纯全带幺九", hasYaku(s14, "纯全带幺九"));
         check("含平和", hasYaku(s14, "平和"));
+        // ⚠ 累计役满也是"规则取舍"：**M.League 不采用**，普通役的上限就是三倍满
+        //   （docs/日本麻将.md §役满：「M.League 以三倍满为普通役的上限」/ §M.League 规则）
+        eq("M.League 13 番无役满役 → 三倍满", s14.limit, "三倍满");
+        eq("M.League 13 番 → 基本点 6000（不是 8000）", s14.base, 6000);
+        Evaluator.HandScore s14kz = evalCtx("1p1p1p1p2p2p3p3p7p7p8p8p9p9p", "1p", false, 1, 0, 0, false,
+                preset("tenhou"));
+        eq("《天凤》13 番 → 累计役满", s14kz.limit, "累计役满");
+        eq("《天凤》13 番 → 基本点 8000", s14kz.base, 8000);
 
         // 绿一色
         Evaluator.HandScore s15 = evalClosed("2s2s2s3s3s3s4s4s4s6s6s6s8s8s", "8s", true, 1, 0, 0);
@@ -391,10 +446,17 @@ public final class SelfTest {
         Evaluator.HandScore s2 = evalClosed("1m1m1m2m3m4m5m6m7m2p3p4p9s9s", "9s", true, 1, 0, 0);
         check("自摸符 = 40: " + s2.fu, s2.fu == 40);
 
-        // 连风雀头 4 符（配立直凑役）
-        Evaluator.HandScore s3 = evalCtx("1z1z1m2m3m4m5m6m7m8m9m2p3p4p", "4p", false, 0, 0, 0, true);
-        // 20 + 10(门前) + 4(连风雀头) + 2(单骑) = 36 → 40
-        eq("连风雀头符", s3.fu, 40);
+        // 连风雀头（自风 = 场风）：一般规则 4 符，**M.League 只算 2 符**。
+        // 牌型要挑在**进位线**上，否则 4 与 2 都进位成同一个值、断言测不出差别：
+        //   1m1m1m(幺九暗刻 8) + 234m + 567m + 67p/8p(两面) + 1z1z(东，自家是东、场风也是东)
+        //   4 符：20 + 10(门前荣和) + 8 + 4 = 42 → 50    （docs/日本麻将.md §符：连风雀头 4 符）
+        //   2 符：20 + 10 + 8 + 2     = 40 → 40          （M.League：连风雀头 2 符）
+        Evaluator.HandScore lf4 = evalCtx("1m1m1m2m3m4m5m6m7m6p7p8p1z1z", "8p", false, 0, 0, 0, true,
+                preset("tenhou"));
+        eq("连风雀头 4 符 → 50", lf4.fu, 50);
+        Evaluator.HandScore lf2 = evalCtx("1m1m1m2m3m4m5m6m7m6p7p8p1z1z", "8p", false, 0, 0, 0, true,
+                preset("mleague"));
+        eq("M.League 连风雀头 2 符 → 40", lf2.fu, 40);
 
         // 幺九暗刻 8 符
         Evaluator.HandScore s4 = evalCtx("1m1m1m2m3m4m5m6m7m2p3p4p9s9s", "9s", false, 1, 0, 0, true);
@@ -405,12 +467,20 @@ public final class SelfTest {
         Evaluator.HandScore s5 = evalCtx("1m1m1m2m3m4m5m6m7m2p3p4p9s9s", "3m", false, 1, 0, 0, true);
         // 111m 暗刻(8) + 嵌张(2)：20+10+8+2 = 40
         eq("嵌张符 40", s5.fu, 40);
+
+        // 切上满贯（3 番 60 符 / 4 番 30 符 → 满贯）见 mleagueRulesTests()：
+        // 它与"连风符""累计役满"同属**规则取舍**，放同一处两边钉住更清楚。
     }
 
     // ------------------------------------------------------------- 振听 / 立直
 
     private static mahjong.game.Round newRound() {
-        Table t = new Table("T", "t", Rules.defaults());
+        return newRound(Rules.defaults());
+    }
+
+    /** 指定规则集的一局（座位 0 是庄）。规则取舍类断言一律显式传规则集，别依赖默认预设。 */
+    private static mahjong.game.Round newRound(Rules rules) {
+        Table t = new Table("T", "t", rules);
         return new mahjong.game.Round(t, 0, 1, 0, 0,
                 new int[]{25000, 25000, 25000, 25000}, 0, 7);
     }
@@ -482,7 +552,37 @@ public final class SelfTest {
         r3.furitenPerm[1] = true;
         check("立直振听", r3.isFuriten(1));
 
-        // 立直条件：门前 + 点数 >= 1000 + 剩余 >= 4 + 打后听牌
+        // 立直门槛是**规则取舍**，两侧都要钉住规则集（docs/日本麻将.md §立直 / M.League 规则）：
+        //   一般规则：门前 + 点数 ≥ 1000 + 剩余牌 ≥ 4 + 打后听牌
+        //   M.League：**取消点数与残牌两项要求**，但「摸到海底牌之后不可立直」
+        mahjong.game.Round r5 = newRound(preset("tenhou"));
+        r5.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5.scores[1] = 900;
+        check("点数不足不可立直（一般规则）", !r5.canRiichi(1, Tiles.id(13, 1)));
+        mahjong.game.Round r5m = newRound();
+        r5m.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5m.scores[1] = 900;
+        check("M.League 点数不足也可立直", r5m.canRiichi(1, Tiles.id(13, 1)));
+
+        // 残牌门槛：留 3 张可摸牌 → 一般规则不可立直，M.League 可以
+        mahjong.game.Round r5b = newRound(preset("tenhou"));
+        r5b.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5b.debugDrainWallTo(3);
+        check("残牌不足 4 张不可立直（一般规则）", !r5b.canRiichi(1, Tiles.id(13, 1)));
+        mahjong.game.Round r5c = newRound();
+        r5c.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5c.debugDrainWallTo(3);
+        check("M.League 残牌 3 张也可立直", r5c.canRiichi(1, Tiles.id(13, 1)));
+
+        // 摸到海底牌之后（可摸牌山见底）不可立直 —— M.League 的立直要求"还有下一次摸牌"
+        mahjong.game.Round r5d = newRound();
+        r5d.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5d.debugDrainWallTo(0);
+        check("M.League 摸到海底后不可立直", !r5d.canRiichi(1, Tiles.id(13, 1)));
+        mahjong.game.Round r5e = newRound(preset("tenhou"));
+        r5e.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
+        r5e.debugDrainWallTo(4);
+        check("一般规则下残牌 4 张仍可立直", r5e.canRiichi(1, Tiles.id(13, 1)));
         mahjong.game.Round r4 = newRound();
         r4.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
         check("两面打后听牌可立直", r4.canRiichi(1, Tiles.id(13, 1)));
@@ -497,10 +597,6 @@ public final class SelfTest {
         check("完全不成形时不可立直", !anyRiichi);
         r4.menzen[1] = false;
         check("副露后不可立直", !r4.canRiichi(1, Tiles.id(13, 1)));
-        mahjong.game.Round r5 = newRound();
-        r5.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p5p"));
-        r5.scores[1] = 900;
-        check("点数不足不可立直", !r5.canRiichi(1, Tiles.id(13, 1)));
 
         // 食替禁止
         mahjong.game.Round r6 = newRound();
@@ -870,7 +966,9 @@ public final class SelfTest {
      * 所以判据本身只回答"杠数与人头数"，这里把那张真值表钉住。
      */
     private static void fourKanAbortTests() {
-        mahjong.game.Round r = newRound();
+        // 四杠散了是**规则取舍**：M.League **没有中途流局**（`fourKanAbort=false`），
+        // 所以断言必须显式钉住"开着这条规则"的规则集 —— 用默认预设会随预设变化而误报。
+        mahjong.game.Round r = newRound(preset("tenhou"));
         r.kanCount = 3;
         r.kanByPlayer[0] = 3;
         check("杠 3 次：不流局", !r.fourKanAbortNow());
@@ -880,17 +978,228 @@ public final class SelfTest {
         r.kanByPlayer[1] = 2;
         check("2 家共开 4 次杠 → 四杠散了成立", r.fourKanAbortNow());
 
-        mahjong.game.Round solo = newRound();
+        mahjong.game.Round solo = newRound(preset("tenhou"));
         solo.kanCount = 4;
         solo.kanByPlayer[2] = 4;
         check("同一人开满 4 次杠（四杠子）→ 不流局", !solo.fourKanAbortNow());
 
-        mahjong.game.Round off = newRound();
+        mahjong.game.Round off = newRound(preset("tenhou"));
         off.rules.fourKanAbort = false;
         off.kanCount = 4;
         off.kanByPlayer[0] = 2;
         off.kanByPlayer[3] = 2;
         check("规则关掉四杠散了 → 不流局", !off.fourKanAbortNow());
+
+        // M.League：2 家共开 4 次杠**不流局**（继续打），这是与上面那条同一个判据的另一侧
+        mahjong.game.Round ml = newRound();
+        ml.kanCount = 4;
+        ml.kanByPlayer[0] = 2;
+        ml.kanByPlayer[1] = 2;
+        check("M.League 2 家共开 4 次杠 → 不流局（无中途流局）", !ml.fourKanAbortNow());
+    }
+
+    // ------------------------------------------- M.League 规则取舍（docs/日本麻将.md 2026-09 版）
+
+    /**
+     * M.League 与一般规则（《天凤》/《雀魂》）在**取舍项**上的差异 —— 每一条都两侧钉住。
+     *
+     * <p>依据 `docs/日本麻将.md`（2026-09 版，含 M.League 规则说明）：
+     * 役满不加倍、无累计役满（普通役上限三倍满）、切上满贯、连风雀头 2 符、
+     * 立直无点数/残牌门槛但摸到海底后不可立直、立直后暗杠要求面子构成不变、
+     * 无中途流局、头跳、精算 =（点数 − 返点）/1000 + 马点 + 头名赏（同点平分）。
+     *
+     * <p>为什么**不能**只断言默认预设：默认预设本身会变（现在是 M.League），
+     * 只测默认值等于在测"默认值恰好是什么"，换个预设就整片误报。所以两侧都显式取预设。
+     */
+    private static void mleagueRulesTests() {
+        Rules ml = preset("mleague");
+        Rules th = preset("tenhou");
+        Rules ms = preset("majsoul");
+
+        // ── 预设本身
+        eq("默认预设 = M.League", Rules.defaults().preset, "mleague");
+        check("M.League 无中途流局（四种全关）",
+                !ml.fourKanAbort && !ml.fourRiichiAbort && !ml.fourWindAbort && !ml.kyuushuAbort);
+        check("M.League 三家和了关 + 头跳开", !ml.sanchaAbort && ml.headBump);
+        check("M.League 无击飞 / 无和了止 / 无流局满贯 / 无西入",
+                !ml.tobi && !ml.agariyame && !ml.nagashiMangan && !ml.westExtension);
+        check("M.League 无古役 + 常时一番缚", !ml.koyaku && ml.minHan == 1);
+        check("M.League 食断 + 后付、里宝 + 杠宝", ml.kuitan && ml.ura && ml.kanDora);
+        eq("M.League 赤宝牌 3 张", ml.aka, 3);
+        check("M.League 立直放宽 + 摸海底禁立直 + 暗杠保面子",
+                ml.riichiMinScore == 0 && ml.riichiMinTilesLeft == 0 && ml.riichiNoHaitei && ml.ankanKeepsShape);
+
+        // ── 预设先铺、单字段再覆盖（协议里的 rules 就是这么用的）
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("preset", "mleague");
+        m.put("kazoe_yakuman", true);
+        m.put("aka", 0);
+        Rules over = Rules.fromJson(m);
+        check("预设 + 单字段覆盖：累计役满打开", over.kazoeYakuman);
+        eq("预设 + 单字段覆盖：赤宝牌 0 张", over.aka, 0);
+        check("未覆盖的项仍是 M.League（切上满贯 / 不加倍 / 同点平分）",
+                over.kiriageMangan && !over.doubleYakuman && over.tieSplitPoint);
+
+        // ── 切上满贯：3 番 60 符 与 4 番 30 符（基本点都是 1920，M.League 按满贯）
+        //   3 番 60 符：111m 999m 111p（三个幺九暗刻 8×3）+ 234s + 5s5s，配立直凑役
+        //     役：立直 1 + 三暗刻 2 = 3 番（⚠ 役牌**雀头**只给符、不给役，别拿它凑番）
+        //     符：20 + 10(门前荣和) + 8+8+8 = 54 → 60
+        Evaluator.HandScore k3 = evalCtx("1m1m1m9m9m9m1p1p1p2s3s4s5s5s", "4s", false, 1, 0, 0, true, ml);
+        eq("切上满贯牌型：3 番", k3.han, 3);
+        eq("切上满贯牌型：60 符", k3.fu, 60);
+        eq("M.League 3 番 60 符 → 满贯", k3.limit, "满贯");
+        eq("M.League 3 番 60 符基本点 = 2000", k3.base, 2000);
+        Evaluator.HandScore k3t = evalCtx("1m1m1m9m9m9m1p1p1p2s3s4s5s5s", "4s", false, 1, 0, 0, true, th);
+        eq("《天凤》3 番 60 符基本点 = 1920（不切上）", k3t.base, 1920);
+        check("《天凤》3 番 60 符不带满贯标签", !"满贯".equals(k3t.limit));
+
+        //   4 番 30 符：三色同顺 2 + 断幺九 1 + 平和 1，门前荣和 20+10 = 30 符
+        Evaluator.HandScore k4 = evalCtx("2m3m4m2p3p4p2s3s4s5p6p7p8s8s", "4s", false, 1, 0, 0, false, ml);
+        eq("切上满贯牌型：4 番", k4.han, 4);
+        eq("切上满贯牌型：30 符", k4.fu, 30);
+        eq("M.League 4 番 30 符 → 满贯", k4.limit, "满贯");
+        eq("M.League 4 番 30 符基本点 = 2000", k4.base, 2000);
+        Evaluator.HandScore k4t = evalCtx("2m3m4m2p3p4p2s3s4s5p6p7p8s8s", "4s", false, 1, 0, 0, false, th);
+        eq("《天凤》4 番 30 符基本点 = 1920（不切上）", k4t.base, 1920);
+
+        // 5 番起走档位，两种规则都是满贯（切上满贯只动 3/4 番那两个 1920 的格子）
+        Evaluator.HandScore k5 = evalCtx("2m3m4m2m3m4m2p3p4p2s3s4s5s5s", "4s", false, 1, 0, 0, false, ml);
+        eq("5 番牌型：三色同顺 + 一杯口 + 断幺九 + 平和 = 5 番", k5.han, 5);
+        eq("M.League 5 番 → 满贯 2000", k5.base, 2000);
+        Evaluator.HandScore k5t = evalCtx("2m3m4m2m3m4m2p3p4p2s3s4s5s5s", "4s", false, 1, 0, 0, false, th);
+        eq("《天凤》5 番 → 满贯 2000", k5t.base, 2000);
+
+        // ── 精算点数（docs/日本麻将.md §精算点数 的两个例子逐位比对，点数都不变）
+        int[] sc = {53600, 28600, 20000, -2200};
+        RoundScoring.Settlement mlS = RoundScoring.settle(sc, ml);
+        eq("M.League 精算 1 位", round1(mlS.point[0]), 73.6);
+        eq("M.League 精算 2 位", round1(mlS.point[1]), 8.6);
+        eq("M.League 精算 3 位", round1(mlS.point[2]), -20.0);
+        eq("M.League 精算 4 位", round1(mlS.point[3]), -62.2);
+        eq("M.League 头名赏 = (30000−25000)×4/1000 = 20", round1(mlS.oka[0]), 20.0);
+        eq("M.League 马点原样：1 位 +30", round1(mlS.uma[0]), 30.0);
+        eq("M.League 马点原样：4 位 −30", round1(mlS.uma[3]), -30.0);
+        eq("M.League 名次顺序（按点数降序）", Arrays.toString(mlS.order), "[0, 1, 2, 3]");
+        RoundScoring.Settlement msS = RoundScoring.settle(sc, ms);
+        eq("《雀魂》精算 1 位（精算基准 = 25000，无头名赏）", round1(msS.point[0]), 43.6);
+        eq("《雀魂》精算 2 位", round1(msS.point[1]), 8.6);
+        eq("《雀魂》精算 3 位", round1(msS.point[2]), -10.0);
+        eq("《雀魂》精算 4 位", round1(msS.point[3]), -42.2);
+        eq("《雀魂》无头名赏", round1(msS.oka[0]), 0.0);
+
+        // ── 同点：M.League 平分对应名次的马点与头名赏；《天凤》按起家座次定名次
+        int[] tie = {30000, 30000, 25000, 15000};
+        RoundScoring.Settlement tieMl = RoundScoring.settle(tie, ml);
+        eq("M.League 同点：1 位马点平分 (30+10)/2", round1(tieMl.uma[0]), 20.0);
+        eq("M.League 同点：头名赏平分 20/2", round1(tieMl.oka[0]), 10.0);
+        eq("M.League 同点：两个头名同分", round1(tieMl.point[0]), 30.0);
+        eq("M.League 同点：另一个头名同分", round1(tieMl.point[1]), 30.0);
+        eq("M.League 同点：4 位照自己那套马点", round1(tieMl.point[3]), -45.0);
+        RoundScoring.Settlement tieTh = RoundScoring.settle(tie, th);
+        eq("《天凤》同点：座次靠前者吃掉 1 位加点", round1(tieTh.point[0]), 40.0);
+        eq("《天凤》同点：另一家只是 2 位", round1(tieTh.point[1]), 10.0);
+        eq("《天凤》同点：4 位照自己那套马点", round1(tieTh.point[3]), -35.0);
+
+        // ── 立直后暗杠：M.League 追加「面子构成不变」（用文档那 4 个例子里可判定的 2 个）
+        //   ① 8p 与顺子无关（同花色 ±2 内没有牌）→ 两种规则都可以
+        mahjong.game.Round k8 = newRound(ml);
+        k8.hand[1].addAll(parse("1m1m1m2m2m3m3m3m8p8p8p6z6z8p"));
+        k8.riichi[1] = true;
+        check("M.League 立直后暗杠 8p（面子构成不变）可以",
+                k8.debugTurnOptionTypes(1, Tiles.id(16, 0)).contains("kan"));
+        //   ② 2p：听牌不变、但 222p 刻子变杠 → 面子构成变：《天凤》可以，M.League 不行
+        mahjong.game.Round k2 = newRound(ml);
+        k2.hand[1].addAll(parse("7m7m2p2p2p3p3p3p4p4p4p6s7s2p"));
+        k2.riichi[1] = true;
+        check("M.League 立直后暗杠 2p（面子构成变）不行",
+                !k2.debugTurnOptionTypes(1, Tiles.id(10, 0)).contains("kan"));
+        mahjong.game.Round k2t = newRound(th);
+        k2t.hand[1].addAll(parse("7m7m2p2p2p3p3p3p4p4p4p6s7s2p"));
+        k2t.riichi[1] = true;
+        check("《天凤》同一手牌可以暗杠 2p（只要求听牌不变）",
+                k2t.debugTurnOptionTypes(1, Tiles.id(10, 0)).contains("kan"));
+        //   ③ 非立直不受这条限制
+        mahjong.game.Round k2r = newRound(ml);
+        k2r.hand[1].addAll(parse("7m7m2p2p2p3p3p3p4p4p4p6s7s2p"));
+        check("未立直时暗杠 2p 不受面子构成限制",
+                k2r.debugTurnOptionTypes(1, Tiles.id(10, 0)).contains("kan"));
+
+        // ── 立直后不可大明杠（任何规则；立直是门前状态）
+        mahjong.game.Round dm = newRound(ml);
+        dm.hand[1].addAll(parse("3p3p3p1m2m3m4m5m6m7m8m9m5s5s"));
+        dm.riichi[1] = true;
+        check("立直后不下发大明杠选项", !dm.canDaiminkan(1, 11));   // 11 = 3p
+        mahjong.game.Round dm2 = newRound(ml);
+        dm2.hand[1].addAll(parse("3p3p3p1m2m3m4m5m6m7m8m9m5s5s"));
+        check("未立直可以大明杠（手里 3 张 + 舍张）", dm2.canDaiminkan(1, 11));
+
+        // ── 包牌一：大三元 / 大四喜的判定**计入已经公开的暗杠**（M.League 明文），
+        //    但暗杠本身不会成为包牌者（它不是"他家的舍张"）
+        // ⚠ 顺序要与真实路径一致：真实代码是 `melds[seat].add(m)` **之后**才 updatePao，
+        //   所以计数里必须已经含有这一次副露本身。
+        mahjong.game.Round pd = newRound(ml);
+        pd.melds[1].add(new Meld(Meld.Kind.PON, new int[]{124, 125, 126}, 0, 124));       // 白白白（碰 0 家）
+        pd.melds[1].add(new Meld(Meld.Kind.ANKAN, new int[]{128, 129, 130, 131}, 1, 128)); // 發發發發（自家暗杠）
+        Meld chuun = new Meld(Meld.Kind.PON, new int[]{132, 133, 134}, 2, 132);            // 中中中（碰 2 家）
+        pd.melds[1].add(chuun);
+        pd.debugUpdatePao(1, 2, chuun);
+        eq("大三元含暗杠：第 3 个三元副露那家包牌", pd.paoSeat[1], 2);
+        mahjong.game.Round pdSelf = newRound(ml);
+        pdSelf.melds[1].add(new Meld(Meld.Kind.PON, new int[]{124, 125, 126}, 0, 124));
+        pdSelf.melds[1].add(new Meld(Meld.Kind.PON, new int[]{132, 133, 134}, 2, 132));
+        Meld hatsu = new Meld(Meld.Kind.ANKAN, new int[]{128, 129, 130, 131}, 1, 128);
+        pdSelf.melds[1].add(hatsu);
+        pdSelf.debugUpdatePao(1, -1, hatsu);
+        eq("暗杠凑齐第 3 个三元牌 → 没人包牌（from = -1）", pdSelf.paoSeat[1], -1);
+
+        // ── 包牌二：四杠子包牌**只有 M.League**，且必须是"他家的舍张 → 大明杠完成第 4 个杠"
+        Meld kan1 = new Meld(Meld.Kind.ANKAN, new int[]{0, 1, 2, 3}, 1, 0);
+        Meld kan2 = new Meld(Meld.Kind.ANKAN, new int[]{4, 5, 6, 7}, 1, 4);
+        Meld kan3 = new Meld(Meld.Kind.KAKAN, new int[]{8, 9, 10, 11}, 1, 8);
+        Meld kan4 = new Meld(Meld.Kind.DAIMINKAN, new int[]{12, 13, 14, 15}, 2, 12);
+        mahjong.game.Round pk = newRound(ml);
+        pk.melds[1].add(kan1);
+        pk.melds[1].add(kan2);
+        pk.melds[1].add(kan3);
+        pk.melds[1].add(kan4);
+        pk.debugUpdatePao(1, 2, kan4);
+        eq("M.League 四杠子：大明杠完成第 4 个杠 → 那家包牌", pk.paoSeat[1], 2);
+        mahjong.game.Round pkTh = newRound(th);
+        pkTh.melds[1].add(kan1);
+        pkTh.melds[1].add(kan2);
+        pkTh.melds[1].add(kan3);
+        pkTh.melds[1].add(kan4);
+        pkTh.debugUpdatePao(1, 2, kan4);
+        eq("《天凤》没有四杠子包牌", pkTh.paoSeat[1], -1);
+        // 加杠完成第 4 个杠不算（不是"他家的舍张"）
+        Meld kan4k = new Meld(Meld.Kind.KAKAN, new int[]{12, 13, 14, 15}, 2, 12);
+        mahjong.game.Round pkK = newRound(ml);
+        pkK.melds[1].add(kan1);
+        pkK.melds[1].add(kan2);
+        pkK.melds[1].add(kan3);
+        pkK.melds[1].add(kan4k);
+        pkK.debugUpdatePao(1, 2, kan4k);
+        eq("加杠完成第 4 个杠不触发包牌", pkK.paoSeat[1], -1);
+
+        // ── 包牌三：包"被包的那一役"还是包"全部役满"（大四喜 1 倍 + 字一色 1 倍，庄家 A 荣和 C）
+        //   文档 §包牌 的 M.League 例子：B 包大四喜 → B 付 24000、C 付 72000（合计 96000）
+        //   《天凤》包牌涉及复合后的全部役满 → B、C 各付 48000
+        Evaluator.HandScore fourBig = new Evaluator.HandScore();
+        fourBig.yakuman = 2;
+        fourBig.base = 16000;
+        fourBig.valid = true;
+        Payments.Result ronMl = Payments.compute(fourBig, 0, 2, 0, 0, 0, false, 3, 8000);
+        eq("M.League 包牌只包被包役满：包牌者付一半 24000", -ronMl.delta[3], 24000);
+        eq("M.League 包牌只包被包役满：放铳者付其余 72000", -ronMl.delta[2], 72000);
+        eq("M.League 包牌：和牌者收满 96000", ronMl.delta[0], 96000);
+        Payments.Result ronTh = Payments.compute(fourBig, 0, 2, 0, 0, 0, false, 3, 16000);
+        eq("《天凤》包牌承担全部役满：包牌者付一半 48000", -ronTh.delta[3], 48000);
+        eq("《天凤》包牌承担全部役满：放铳者也付一半 48000", -ronTh.delta[2], 48000);
+    }
+
+    /** 精算点数只到 0.1，比较时先四舍五入到 1 位小数（浮点直接比会因 1e-16 误报）。 */
+    private static double round1(double v) {
+        return Math.round(v * 10) / 10.0;
     }
 
     /**

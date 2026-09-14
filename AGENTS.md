@@ -26,7 +26,13 @@
   跑在 Ubuntu 上，是**唯一权威方**：洗牌、配牌、摸切、鸣牌、和牌判定、役种/符数/点数、振听、流局、连庄、精算。
 - **客户端** `client/` —— Qt 6 Widgets + C++17，MinGW 构建，跑在 Windows 上。
   只负责牌桌绘制、操作收集、事件反馈、网络收发。**不做任何规则判定。**
-- **规则依据** `docs/日本麻将.md`（1453 行原文）。
+- **规则依据** `docs/日本麻将.md`（1494 行，2026-09 版；逐节标注了《雀魂》《天凤》与 **M.League** 的差异）。
+- **规则预设** `rules.preset`：`mleague`（默认）/ `tenhou` / `majsoul` / `custom` —— `Rules.applyPreset()` 先铺一整套，
+  报文里的单项字段再覆盖；新增取舍项要**五处一起改**（字段 / 三套预设 / `fromJson`+`toJson` / `clampToSane` / 断言）。
+  ⚠ **取舍类断言必须两侧都显式传规则集**（`preset(name)` + `evalCtx(..., Rules)` 重载）：只测默认值等于在测
+  "默认值恰好是什么"，默认从《雀魂》换成 M.League 时自检一次红了 8 条就是这么来的（`mleagueRulesTests`）。
+  ⚠ 且**役种名 ≠ 取值**：不加倍役满时国士十三面/四暗刻单骑/纯正九莲仍是各自的役种名（旧代码不加倍就改名成
+  「国士无双」）。取舍清单见 `docs/DESIGN.md`，字段表见 `docs/PROTOCOL.md` §5。
 - **接口契约** `docs/PROTOCOL.md` —— 两端唯一的接口定义。
 
 数据流：`Qt 客户端 ──TCP/NDJSON──> Java 服务端`。一条 TCP 连接一个玩家，一行一个 JSON。
@@ -91,21 +97,16 @@
    教训：**认领答复时必须确认它是个动作**（有 `type`），并且在**写入的那个队列**上消费。
 
 9. **「重复点击」= 同一个询问发出两条动作，客户端必须自己先锁住。**
-   旧客户端点了立直/出牌后**直接 `sendCommand`**，既没走统一入口 `onActionReady()`
-   （那里才 `clearAsk()`），也没在回包里带 `ask_id`。于是：
-   - 询问栏连点两下就发出**两条**动作；第二条没有 `ask_id`，服务端无法判它过期，
-     会一路留到**下一巡**被 `awaitAction` 当成那一巡的答复 → 玩家没动就被代打；
-   - 立直按钮还是个「看不见状态」的开关：连点第二下正好把模式关掉，**标题却仍旧写着
-     「立直：请点击要打出的宣言牌」**（`onTick` 是从当前标题截「（」前面那段来拼倒计时的，
-     没人还原它），玩家以为在立直模式，点手牌发出的却是**普通弃牌**；
-   - 服务端 `Round` 对 `type=="riichi"` 的处理是「宣言不成立就退化成 `discard`」，
-     而 `riichi` 的 `tile` 是**为立直挑的宣言牌** —— 打出去等于替玩家扔掉一张他没选的牌。
-   修法（四条一起才闭环）：
-   - 客户端**所有动作都从 `ActionBar::actionCmd()` 组包**（自动带上 `ask_id`）；
-   - 出牌/立直一律走 `MainWindow::onActionReady()`（先 `clearAsk()` 再发），
-     第二下点击时 `actionCmd()` 已因 `m_valid=false` 返回空对象 → 什么也发不出去；
-   - 标题统一由 `refreshTitle()` 产生（模式与倒计时**同一个来源**），立直按钮做成 `checkable` 让状态可见；
-   - 服务端兜底：立直不成立时退回**默认摸切**，绝不把宣言牌当普通打牌执行。
+   旧客户端点立直/出牌后**直接 `sendCommand`**：没走统一入口 `onActionReady()`（那里才 `clearAsk()`）、
+   回包也不带 `ask_id`。于是连点两下发出**两条**动作，第二条服务端判不了过期，一路留到**下一巡**
+   被 `awaitAction` 当成本巡答复 → 玩家没动就被代打；立直按钮还是"看不见状态"的开关（连点第二下
+   把模式关掉，标题却仍写「立直：请点击要打出的宣言牌」，点手牌发出的其实是普通弃牌）；
+   而服务端对不成立的 `riichi` 会退化成 `discard`，`riichi.tile` 是**为立直挑的宣言牌**
+   —— 打出去等于替玩家扔掉一张他没选的牌。
+   修法（四条一起才闭环）：① 客户端**所有动作都从 `ActionBar::actionCmd()` 组包**（带 `ask_id`）；
+   ② 出牌/立直走 `MainWindow::onActionReady()`（先 `clearAsk()`，第二下时 `actionCmd()` 已因
+   `m_valid=false` 返回空对象）；③ 标题统一由 `refreshTitle()` 产生、立直按钮 `checkable`；
+   ④ 服务端兜底：立直不成立退回**默认摸切**，绝不把宣言牌当普通打牌执行。
    回归：`client --selftest` 的 ActionBar 组 + `node tools\riichi-stale-test.mjs`。
 
 10. **鸣牌仲裁：高优先级成立后**不必再等**低优先级的那几家，而且他们的回包不能留在队列里。**
@@ -260,25 +261,15 @@ node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言
 **不要靠运气等牌**——用假服务端把客户端直接推进到目标状态，再截图看：
 
 ```powershell
-node tools\mock-server.mjs 10999 turn      # 下发含 自摸/立直/杠 的 turn ask
-node tools\mock-server.mjs 10999 claim     # 下发含 荣和/碰/跳过 的 claim ask
-node tools\mock-server.mjs 10999 note      # 下发 win_note（无役提示）
-node tools\mock-server.mjs 10999 river     # 脚本化「宣言牌被鸣走 → 横置顺延」（顺带压测 5 张宝牌栏）
-node tools\mock-server.mjs 10999 agari     # 和牌结算 + round_end + round_wait(5000)：验证弹窗倒计时
-                                           # 与「到点自动关闭 = confirm」（recv 日志带时间戳可核对）
-node tools\mock-server.mjs 10999 yakuman   # 役满结算：役种行须写「2倍役满」、合计只报倍数，不得出现「0 番」
-node tools\mock-server.mjs 10999 kan       # 杠后岭上摸牌：面板「余牌 N · 嶺上 M」的 M 必须跟着减（4→3→2）
-node tools\mock-server.mjs 10999 twoturn   # 跨局首巡计时：两局都声明 15000ms，第 2 局首巡不得只剩 1 秒
-
+node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn
+# turn 自摸/立直/杠 · claim 荣和/碰/跳过 · note 无役提示 · river 横置顺延（顺带压测 5 张宝牌栏）
+# agari 结算 + round_wait(5000) 倒计时 · yakuman 须写「2倍役满」不得出现「0 番」
+# kan 「嶺上 M」跟着减（4→3→2） · twoturn 跨局首巡不得只剩 1 秒
 client\dist\mahjong-client.exe --demo 127.0.0.1 10999 --bots 3 --no-answer `
     --shot client\build\shot.png --after 6
 ```
 
-`--shot` 用 Qt 自己的 `grab()` 出图（不受屏幕裁剪影响）。要看清细节就裁切放大：
-
-```powershell
-Add-Type -AssemblyName System.Drawing   # 见历史用法：CopyFromScreen/DrawImage + NearestNeighbor
-```
+`--shot` 用 Qt 自己的 `grab()` 出图（不受屏幕裁剪影响；要看清细节就裁切放大）。
 
 ### L5 真机联调（最贵，改动涉网络/流程时跑）
 
@@ -608,7 +599,6 @@ mahjong/
 
 ## 7. 常见症状 → 先查哪里
 
-> 表按「启动/连接/构建 → 牌局状态与界面 → 文案与本地化 → 时序·杠·结算 → 交付与安全」大致排序。
 > **最常查的 5 条**：编译/链接失败 · 手牌数量对不上（`tsumogiri`）· 一人牌河两张横置（`discard.sideways`）·
 > 界面显示成裸键/裸码（语言文件）· `dist` 里的 exe 不是最新（要 `-Deploy`）。
 
@@ -627,12 +617,12 @@ mahjong/
 | 结算界面的牌面是文字不是牌图 | 内嵌字体没加载（查 exe 同级 `fonts/I.MahjongJP.otf`），或示意串含非法字元被校验挡下（见 §9） |
 | 素材是彩色、客户端却画成黑白线稿 | Illustrator 的 `<style>`+`class` 上色 Qt 不认 → 跑 `tools\inline-svg-style.ps1` 内联（见 §2.3-5） |
 | 弹窗在截图里看不到 | `--shot` 要抓**活动顶层窗口**而非主窗口（见 §2.3-6）；或弹窗压根没弹出来 |
-| **牌河/副露牌太小、读不出来** | 风盘是不是又「先定尺寸、再把牌河硬塞进去」了？（见 §6）另两条也会白压一轮：河区界限用了 `min(cw,ch)`（应为 `max`）；最坏行按「整行全横置」估（实际一行最多 1 张横置） |
-| **第 19 张起的牌河不显示** | 绘制处行数被封顶了（曾经 `qMin(kMaxRiverRows, …)`）。`riverRowsFor(n)` 不封顶，**布局预留与绘制必须同源**（见 §6） |
+| **牌河/副露牌太小** | 风盘"先定尺寸再塞牌河"了？（见 §6）河区界限要用 `max(cw,ch)`；最坏行按「一行最多 1 张横置」估 |
+| **第 19 张起牌河不显示** | 绘制处行数被封顶。`riverRowsFor(n)` 不封顶，**布局预留与绘制必须同源**（见 §6） |
 | **一路牌「莫名」被盖住**（宝牌/摸牌/副露） | 多半是**画了、只是被后画的盖住**——先按坐标确认。然后查 §6「边界避让」：`over` 是不是负的、③ 的右移有没有封顶 |
 | **宝牌指示牌被压扁、不像牌** | 绘制处是不是只压了宽度？必须 `th = tw × 1.36` **宽高同缩**（见 §6） |
 | **立直棒和点数叠在一起** | 立直棒有没有自己的区带（`m_stickBand`）？曾经和自家点数共用一行（`c.bottom()-pad-sh`） |
-| **牌河压到手上/四家的河互相重叠** | `m_riverArea` 是「河区预留范围」（线框已删、不绘制），受预算约束 `盘半 + riverExtent ≤ 屏半 − 内边距 − 手牌厚`；压到手上 = 有人把这段预算当"画线框用的"删了 |
+| **牌河压到手上/四家河互相重叠** | `m_riverArea`（河区预留范围，线框已删）受预算 `盘半 + riverExtent ≤ 屏半 − 内边距 − 手牌厚` 约束；压到手上 = 有人把这段预算当"画线框用的"删了 |
 | **改了风盘尺寸后第一帧错位** | `paintEvent` 里 `computeLayout()` 是不是在 `paintBackground()` **之前** |
 | **结算弹窗不自己关、下一局已经在它后面开打了** | 没在 `round_wait` 启动倒计时/到点没 `accept()`；且 `round_start`/`game_end` 必须 `closeResultDialog(false)`（见 §6「局间时序」） |
 | **局间的 5 秒等待被吃掉、直接开下一局** | 有没有在服务端已经推进后还发 `confirm`？（残留到下一轮被 `drainConfirm()` 收走）|
@@ -661,21 +651,22 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **424** 项、客户端自检 **401** 项、Node 协议 E2E（含**报文 ASCII 审计**与**岭上账**）、
-超时摸切/回收、思考时间扣减（`clock-test`）、**局间确认/首巡计时**（`firstturn-test`）、
-**作废立直不得替玩家打牌**（`riichi-stale-test`）、**鸣牌优先级 + 队列卫生**（`claim-priority-test`）、
-**报文 UTF-8 编码**（`utf8-test`）、**协议码 ↔ 语言文件静态核对**（`check-i18n`）、
+**实测通过**：服务端自检 **507** 项、客户端自检 **401** 项，以及 §4 的全部 L3 工具
+（e2e 含**报文 ASCII 审计**与**岭上账**；其余见 §4 清单）与 L1 里的
 **杠后岭上摸牌的账**（`rinshanTests`：暗杠 3 / 加杠 1 / 大明杠 9，逐次 4→3→2→1）、
 **一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`：136 局单局最多 3 次杠、闸门断言确定性覆盖，
-10 次废杠尝试对应 13 次有效杠 / 13 次岭上摸牌）、
-Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。
+10 次废杠尝试对应 13 次有效杠 / 13 次岭上摸牌）、**M.League 与一般规则的取舍两侧钉住**
+（`mleagueRulesTests`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。
 
 **未做 / 妥协**：
 
 - **安全 / 逻辑 / 性能审计见 `docs/AUDIT.md`**：已修 6 条严重/高（客户端一条畸形 `chi` 崩掉整桌、
   假顺子改分、读行不设上限、连接数与 `fill_bots` 无界、发牌种子可预测）与二十余条中低，排期项亦已逐条落地。
   **仍未做的**只有低优先项：`Json` 数值强转与落单代理、静态自检钩子、`aka=4` 的编码限制 —— 动之前先看那一份。
-
+- **规则侧**（AUDIT §1.5 有逐条校勘表）：M.League 的**程序性判罚**（扣 20/60 点、诈立判罚、
+  点棒授受订正）属线下裁量，不实现；**形式听牌**的两种口径（《天凤》只看手牌 / M.League 连同副露）
+  未区分，本项目只按"`Agari.waits` 非空即听牌"处理；《雀魂》的「国士可抢暗杠」「天和时国士视作十三面」
+  未实现；杠宝牌的翻开时机统一按 M.League「杠成立即翻」（《天凤》明杠/加杠延后翻的那套不区分）。
 - 服务端只在**本机 Windows + JDK 21** 验证过；**未在真实 Ubuntu 上跑过**（本环境无可用 WSL 发行版）。
   代码是纯标准库字节码、`.sh` 已是 LF 无 BOM，预期直接可用，但请在目标机跑一次 `./build.sh && --selftest`。
 - 赤宝牌支持 **0 / 3 张**（`rules.aka = 4` 即"两张赤五筒"受牌 id 编码限制，仍按 3 张处理）。

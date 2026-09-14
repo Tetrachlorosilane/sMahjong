@@ -320,7 +320,12 @@
   ```jsonc
   "yaku":[{"code":"suuankou_tanki","han":26,"yakuman":2}], "han":26, "yakuman":2, "limit":"yakuman"
   ```
-- 累计役满（番数 ≥13 但**没有**役满役）不是役满：`yakuman = 0`，照常给 `han`（如 26）与 `limit:"kazoe_yakuman"`。
+- 累计役满（番数 ≥13 但**没有**役满役）不是役满：`yakuman = 0`，`han` 照常给（如 13）。
+  打点档位**取决于 `rules.kazoe_yakuman`**：采用它的规则（《天凤》/《雀魂》）→ `limit:"kazoe_yakuman"`、
+  `base_points = 8000`；**M.League 不采用** → 普通役上限三倍满，`limit:"sanbaiman"`、`base_points = 6000`。
+- 役满**不加倍**的规则（M.League /《天凤》，即 `rules.double_yakuman=false`）下，
+  国士无双十三面 / 四暗刻单骑 / 纯正九莲宝灯 / 大四喜仍然是**各自的役种名**
+  （照常发 `kokushi_13` 等码），只是 `yakuman` 计 1 —— 役种命名与取值是两件事。
 
 流局：
 
@@ -364,10 +369,17 @@
 
 ```jsonc
 {"ev":"game_end","scores":[41200,...],"ranking":[0,2,1,3],
- "final":[{"seat":0,"name":"甲","score":41200,"point":53.6,"uma":15,"rank":1}, ...]}
+ "final":[{"seat":0,"name":"甲","score":41200,"point":53.6,"uma":30,"oka":20,"rank":1}, ...]}
 ```
 
-`point` = 精算点数 = `(score - 返点)/1000 + 马点`。
+`point` = **精算点数** = `(score − 返点)/1000 + 马点(uma) + 头名赏(oka)`：
+
+- **头名赏**只给 1 位，`oka = (返点 − 配给原点) × 4 / 1000`（M.League /《天凤》= 20；
+  《雀魂》段位场的精算基准与配给原点同为 25000，所以是 0）。见 `docs/日本麻将.md` §精算点数。
+- `rules.tie_split_point`（M.League）时，**同点的几家平分对应名次的马点与头名赏** —— 此时
+  `uma`/`oka` 与 `rules.uma` 不同（可能是小数），所以报文里回传的是**实际所得**，
+  不是规则表里的原值；否则（《天凤》/《雀魂》）按起家座次先后定名次、原值发放。
+- `ranking` = 名次 → 座位；`final` 按名次顺序排列，`rank` 从 1 起。
 
 ### 3.8 全量同步（重连 / 中途入座）
 
@@ -418,29 +430,49 @@
 
 ## 5. 规则配置 `rules`
 
+**缺省预设是 M.League**（`"preset": "mleague"`，依据 `docs/日本麻将.md` 2026-09 版里逐条标注的
+M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文里出现的单项字段覆盖**：
+
 ```jsonc
 {
+  "preset": "mleague",       // "mleague"(默认) | "tenhou"《天凤》 | "majsoul"《雀魂》 | "custom"(不铺，保留当前值)
   "length": "hanchan",       // "tonpuu"(东风战) | "hanchan"(半庄)
   "aka": 3,                  // 赤宝牌数量 0|3（传 4 按 3 处理）
   "kuitan": true,            // 食断
   "ura": true,               // 里宝牌
   "kan_dora": true,          // 杠宝牌
-  "double_yakuman": true,    // 两倍役满（大四喜/国士13面/四暗刻单骑/纯正九莲）
+  "double_yakuman": false,   // 两倍役满（大四喜/国士13面/四暗刻单骑/纯正九莲）
+                             //   M.League/《天凤》= false（这 4 种仍报各自役种名、只计 1 倍）；
+                             //   《雀魂》= true
   "renhou": "off",           // "off"|"mangan"|"yakuman"
-  "head_bump": false,        // 头跳（false=不采用头跳，但也不采用三家和流局）
+  "head_bump": true,         // 头跳（M.League：不采用三家和了，改判头跳）
   "sancha_abort": false,     // 三家和了流局
-  "four_riichi_abort": true, // 四家立直流局
-  "four_kan_abort": true,    // 四杠散了流局
-  "kyuushu_abort": true,     // 九种九牌流局
-  "nagashi_mangan": true,    // 流局满贯
-  "tobi": true,              // 击飞
-  "agariyame": false,        // 南4局庄家和了即结束
+  "four_riichi_abort": false,// 四家立直流局
+  "four_kan_abort": false,   // 四杠散了流局
+  "four_wind_abort": false,  // 四风连打流局
+  "kyuushu_abort": false,    // 九种九牌流局
+  "nagashi_mangan": false,   // 流局满贯
+  "tobi": false,             // 击飞
+  "agariyame": false,        // 南4局庄家和了即结束（和了止）
+  "west_extension": false,   // 西入
   "kuikae": true,            // 禁止食替
   "pao": true,               // 包牌
+  "pao_four_kan": true,      // 四杠子包牌（只有 M.League 有）
+  "pao_covers_all": false,   // 包牌是否承担"复合后的全部役满得点"（《天凤》= true；
+                             //   M.League/《雀魂》只包被包的那一役）
   "noten_penalty": 3000,     // 不听罚符总额
-  "start_score": 25000,
-  "return_score": 30000,     // 返点
-  "uma": [15, 5, -5, -15],   // 马点（1位..4位）
+  "start_score": 25000,      // 配给原点
+  "return_score": 30000,     // 返点（= 精算基准；《雀魂》段位场与原点同为 25000，故无头名赏）
+  "uma": [30, 10, -10, -30], // 马点（1位..4位）
+  "tie_split_point": true,   // 终局同点：true = 平分对应名次的加点（M.League）；false = 按起家座次定名次
+  "kiriage_mangan": true,    // 切上满贯：3番60符 / 4番30符（基本点 1920）按满贯计（M.League 采用）
+  "kazoe_yakuman": false,    // 累计役满：番数 ≥13 且无役满役时按役满计；
+                             //   M.League 不采用 → 普通役上限三倍满（基本点 6000）
+  "double_wind_pair_fu": 2,  // 连风雀头（自风=场风）的符数：M.League = 2，一般规则 = 4
+  "riichi_min_score": 0,     // 立直所需最低点数（一般规则 1000；M.League 无要求）
+  "riichi_min_tiles_left": 0,// 立直所需剩余可摸牌数（一般规则 4；M.League 无要求）
+  "riichi_no_haitei": true,  // 摸到海底牌之后不允许立直（M.League）
+  "ankan_keeps_shape": true, // 立直后的暗杠除"所听牌不变"外还要求**面子构成不变**（M.League）
   "thinking_base_ms": 5000,  // 每巡基本时长（这段内出牌不消耗额外时长）
   "thinking_bank_ms": 20000, // 总额外时长（超出基本时长的部分从这里扣，整场共用）
   "thinking_ms": 15000,      // 兼容旧字段：等价于「固定时长」= base 15000 + bank 0
@@ -448,7 +480,25 @@
 }
 ```
 
-缺省即上面的值。客户端建房间时可不传 `rules`，服务端用缺省。
+上表的**值是 M.League 预设**（`preset` 的默认值即 M.League）。三套预设的差异速查：
+
+| 项 | M.League | 《天凤》 | 《雀魂》 |
+| --- | --- | --- | --- |
+| 中途流局（四家立直/四杠散了/四风连打/九种九牌） | 全关 | 全开 | 除三家和了外全开 |
+| 三家和了 | 头跳 | 流局 | 无（二家/三家和了都成立） |
+| 击飞 / 和了止 / 流局满贯 / 西入 | 无 | 有 | 有 |
+| 2 倍役满那 4 种 | 1 倍 | 1 倍 | 2 倍 |
+| 累计役满 | 无（上限三倍满） | 有 | 有 |
+| 切上满贯 | 有 | 无 | 无 |
+| 连风雀头符 | 2 符 | 4 符 | 4 符 |
+| 立直门槛 | 无点数/残牌要求，摸海底后禁立直 | ≥1000 点且残牌 ≥4 | 同《天凤》 |
+| 立直后暗杠 | 听牌不变 **且面子构成不变** | 只听牌不变（禁送杠） | 同《天凤》 |
+| 四杠子包牌 | 有 | 无 | 无 |
+| 包牌范围 | 只包被包的那一役 | 复合后的全部役满 | 只包被包的那一役 |
+| 马点 / 头名赏 | 10-30 + 20 | 10-20 + 20 | 5-15 + 0（精算基准 25000） |
+| 同点 | 平分对应名次的加点 | 按起家座次 | 按起家座次 |
+
+客户端建房间时可不传 `rules`（或只传 `preset`），服务端用上面的缺省。
 
 ### 5.1 思考时间（"20+5" 格式）
 

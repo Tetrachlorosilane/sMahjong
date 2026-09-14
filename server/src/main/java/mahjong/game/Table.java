@@ -667,32 +667,23 @@ public final class Table implements Runnable {
     }
 
     private void sendGameEnd(int[] scores) {
-        int[] order = {0, 1, 2, 3};
-        Integer[] idx = {0, 1, 2, 3};
-        java.util.Arrays.sort(idx, (a, b) -> {
-            if (scores[a] != scores[b]) {
-                return scores[b] - scores[a];
-            }
-            return a - b;
-        });
+        // 精算（点数 → 马点/头名赏 → 精算点数）是纯函数，放在 RoundScoring 里可单独单测：
+        // 见 RoundScoring.settle 的注释与 docs/日本麻将.md §精算点数（2026-09-14 版）。
+        RoundScoring.Settlement st = RoundScoring.settle(scores, rules);
         List<Object> finalList = new ArrayList<>();
-        int[] rank = new int[4];
         for (int i = 0; i < 4; i++) {
-            rank[idx[i]] = i;
-        }
-        for (int i = 0; i < 4; i++) {
-            int s = idx[i];
-            double point = (scores[s] - rules.returnScore) / 1000.0 + rules.uma[i];
+            int s = st.order[i];
             finalList.add(Json.obj(
                     "seat", s,
                     "name", seats[s].name,
                     "score", scores[s],
-                    "uma", rules.uma[i],
+                    "uma", Math.round(st.uma[i] * 10) / 10.0,
+                    "oka", Math.round(st.oka[i] * 10) / 10.0,
                     "rank", i + 1,
-                    "point", Math.round(point * 10) / 10.0));
+                    "point", Math.round(st.point[s] * 10) / 10.0));
         }
         List<Object> ranking = new ArrayList<>();
-        for (int s : idx) {
+        for (int s : st.order) {
             ranking.add(s);
         }
         broadcast(Json.obj(

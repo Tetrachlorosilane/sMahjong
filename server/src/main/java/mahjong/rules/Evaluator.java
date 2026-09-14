@@ -164,8 +164,12 @@ public final class Evaluator {
         // ---------------- 役满判定
         List<Yaku> yk = new ArrayList<>();
         if (f.type == Agari.TYPE_KOKUSHI) {
-            if (f.kokushi13 && r.doubleYakuman) {
-                yk.add(Yaku.yakuman("国士无双十三面", 2));
+            // 「13 面」是一个**独立的役**（高目取代国士无双），加不加倍是取值问题：
+            // 《雀魂》计 2 倍，《天凤》与 M.League 计 1 倍（docs/日本麻将.md §两倍役满）。
+            // ⚠ 不能在不加倍时把它改名成「国士无双」—— 那是把"值"的取舍写成了"役种"的取舍，
+            // 玩家和牌界面会看不到自己做出的是十三面。
+            if (f.kokushi13) {
+                yk.add(Yaku.yakuman("国士无双十三面", r.doubleYakuman ? 2 : 1));
             } else {
                 yk.add(Yaku.yakuman("国士无双", 1));
             }
@@ -228,16 +232,17 @@ public final class Evaluator {
                 yk.add(Yaku.yakuman("四杠子", 1));
             }
             if (concealedTriplets == 4 && menzen) {
-                if (f.winSet < 0 && r.doubleYakuman) {
-                    yk.add(Yaku.yakuman("四暗刻单骑", 2));
+                // 同国士十三面：单骑是独立役种（高目取代四暗刻），加倍与否只影响取值
+                if (f.winSet < 0) {
+                    yk.add(Yaku.yakuman("四暗刻单骑", r.doubleYakuman ? 2 : 1));
                 } else {
                     yk.add(Yaku.yakuman("四暗刻", 1));
                 }
             }
             if (menzen && suitsUsed == 1 && !hasHonor) {
                 int ck = checkChuuren(allCounts, ctx.winKind);
-                if (ck == 2 && r.doubleYakuman) {
-                    yk.add(Yaku.yakuman("纯正九莲宝灯", 2));
+                if (ck == 2) {
+                    yk.add(Yaku.yakuman("纯正九莲宝灯", r.doubleYakuman ? 2 : 1));
                 } else if (ck >= 1) {
                     yk.add(Yaku.yakuman("九莲宝灯", 1));
                 }
@@ -574,10 +579,16 @@ public final class Evaluator {
             s.yaku.add(Yaku.normal("赤宝牌", aka));
         }
 
-        // 累计役满
+        // 累计役满：M.League 不采用 —— 番数 ≥13 且没有役满役时只按**三倍满**（6000）计
+        // （docs/日本麻将.md：M.League 以三倍满为普通役的上限）
         if (s.han >= 13) {
-            s.base = 8000;
-            s.limit = "累计役满";
+            if (r.kazoeYakuman) {
+                s.base = 8000;
+                s.limit = "累计役满";
+            } else {
+                s.base = 6000;
+                s.limit = "三倍满";
+            }
             s.fu = 0;
             s.valid = hanYaku >= r.minHan;
             if (!s.valid) {
@@ -587,7 +598,7 @@ public final class Evaluator {
         }
 
         // ---------------- 符
-        s.fu = calcFu(ctx, f, concealed, melds, menzen);
+        s.fu = calcFu(ctx, f, concealed, melds, menzen, r);
 
         // ---------------- 基本点
         if (hanYaku < r.minHan) {
@@ -613,7 +624,9 @@ public final class Evaluator {
             }
         } else {
             int b = s.fu * (1 << (2 + s.han));
-            if (b > 2000) {
+            // 切上满贯：3 番 60 符 / 4 番 30 符（基本点都是 1920）按满贯计 —— M.League 采用，
+            // 《雀魂》《天凤》不采用（此时 1920 就照 1920 收，见 docs/日本麻将.md 打点表前的说明）
+            if (b > 2000 || (r.kiriageMangan && b >= 1920)) {
                 b = 2000;
                 s.limit = "满贯";
             }
@@ -624,7 +637,8 @@ public final class Evaluator {
 
     // ------------------------------------------------------------------ 符
 
-    public static int calcFu(WinContext ctx, Agari.Form f, int[] concealed, List<Meld> melds, boolean menzen) {
+    public static int calcFu(WinContext ctx, Agari.Form f, int[] concealed, List<Meld> melds, boolean menzen,
+                             Rules rules) {
         if (f.type == Agari.TYPE_CHIITOITSU) {
             return 25;
         }
@@ -661,10 +675,12 @@ public final class Evaluator {
             if (Tiles.isDragon(p)) {
                 fu += 2;
             }
-            if (p == ctx.roundWind) {
-                fu += 2;
-            }
-            if (p == ctx.seatWind()) {
+            boolean isRound = (p == ctx.roundWind);
+            boolean isSeat = (p == ctx.seatWind());
+            if (isRound && isSeat) {
+                // 连风牌（场风 = 自风）：M.League 只算 2 符，其余规则自风 2 + 场风 2 = 4 符
+                fu += rules.doubleWindPairFu;
+            } else if (isRound || isSeat) {
                 fu += 2;
             }
         }
