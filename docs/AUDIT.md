@@ -51,6 +51,7 @@
 | **S-15** | `addBot(seat)` 不查 `idx < 4` → `{"add_bot","seat":99}` 越界 | `game/Table.java` | 补 `idx >= 4` 判断 |
 | **S-16** | 重连令牌由 `Math.random()` 派生（48 位状态、非 CSPRNG），而 `pid` 是公开的、房间号只有 4 字符 | `net/Session.java` | 改用 `SecureRandom` |
 | **S-17** | `Server.sessions` 用 `CopyOnWriteArrayList`：每次 accept 整表复制 → n 个连接 O(n²) | `net/Server.java` | 改 `ConcurrentHashMap.newKeySet()` |
+| **S-27** | **重连/旁观快照泄露他家振听**：`state.furiten` 原来把四家的振听原样下发。**临时振听**（放过一张能和牌的张）等价于「他听牌了」—— 而"谁在听牌"正是日麻最核心的隐藏信息。改造过的客户端只要反复 `rejoin` 刷快照就能读出来（客户端自己只读 `furiten(mySeat)` 那一项） | `game/Table.java` `stateFor()` | 只填**请求者自己**那一项，其余恒 `false`（旁观者 `seat=-1` 四项全 false）；数组长度仍保持 4，老客户端零改动。补 10 条断言 `SelfTest.stateVisibilityTests`（含旁观者、以及「`state.hand` 不含他家牌」）。**红证**：把 `stateFor` 改回旧写法，自检立刻报 3 条失败并以 1 退出。契约写进 `PROTOCOL.md` §3.8 / §3.10（新增「信息可见性：服务端绝不下发的东西」一节） |
 
 ### 1.3 排期完成项（原「已知未修」）
 
@@ -180,7 +181,7 @@
 
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
-| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **414 项全绿**（原 387：+12「吃」的合法性、+7 不听罚符零和、+4 四杠散了真值表、+4 赤宝牌张数） |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **424 项全绿**（原 387：+12「吃」的合法性、+7 不听罚符零和、+4 四杠散了真值表、+4 赤宝牌张数、+10 重连快照可见性 S-27） |
 | L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **401 项全绿** |
 | L3 协议端到端 | `node tools\e2e-test.mjs`（整场东风战 + 逐条 ASCII 审计 + 岭上账） | **E2E PASS** |
 | L3 其余 | `timeout` / `utf8` / `clock` / `firstturn` / `riichi-stale` | 全部 PASS |
