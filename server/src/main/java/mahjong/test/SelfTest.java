@@ -24,6 +24,9 @@ import mahjong.rules.Payments;
 import mahjong.rules.Shanten;
 import mahjong.rules.WinContext;
 import mahjong.rules.YakuCodes;
+import mahjong.replay.Replay;
+import mahjong.replay.ReplayRecorder;
+import mahjong.replay.ReplayStore;
 import mahjong.util.Json;
 
 /** 规则引擎回归自测。运行：java -cp <classes> mahjong.test.SelfTest */
@@ -64,6 +67,7 @@ public final class SelfTest {
         notenPenaltyTests();
         fourKanAbortTests();
         mleagueRulesTests();
+        replayTests();
         akaRuleTests();
         nagashiLivePathTest();
         simulationTest();
@@ -1200,6 +1204,261 @@ public final class SelfTest {
     /** 精算点数只到 0.1，比较时先四舍五入到 1 位小数（浮点直接比会因 1e-16 误报）。 */
     private static double round1(double v) {
         return Math.round(v * 10) / 10.0;
+    }
+
+    // ================================================================= 对局记录回放
+
+    /**
+     * 回放：记录器（序号/过滤/截断/ID 形状）→ 整场录制 → 落盘与分块读取 → 容量淘汰 → 重启加载。
+     *
+     * <p>为什么值得这么多断言：回放是**离线**功能，出错不会有人当场发现（用户翻到某一步才发现
+     * "牌对不上"）。所以这里既钉"能存能取"，也钉**语义不变量** ——
+     * 例如"每条 `discard` 的牌必须是该家之前摸到过的"（牌张守恒的弱形式），
+     * 一旦记录漏事件/顺序错乱，这条会立刻红。
+     */
+    private static void replayTests() {
+        Rules rules = Rules.defaults();
+        List<String> names = Arrays.asList("甲", "乙", "丙", "丁");
+
+        // ---------- ① 记录器：序号、过滤、聊天与操作共用一条序号 ----------
+        ReplayRecorder rec = new ReplayRecorder(rules.toJson(), names);
+        rec.add(-1, Json.obj("ev", "game_start", "rules", rules.toJson()));
+        rec.add(0, Json.obj("ev", "draw", "seat", 0, "tile", "1m"));
+        rec.add(-1, Json.obj("ev", "chat", "seat", 1, "name", "乙", "text", "碰！"));
+        rec.add(0, Json.obj("ev", "discard", "seat", 0, "tile", "1m", "tsumogiri", false));
+        // 这些必须被丢掉：派生快照 / 大厅噪音 / 请求错误
+        rec.add(-1, Json.obj("ev", "state", "seat", 0));
+        rec.add(-1, Json.obj("ev", "rooms", "items", Arrays.asList()));
+        rec.add(-1, Json.obj("ev", "room", "id", "ABCD"));
+        rec.add(0, Json.obj("ev", "error", "code", "bad_json"));
+        Replay rp = rec.peek();
+        eq("回放：跳过派生/噪音事件后的条数", rp.entries.size(), 4);
+        boolean seqOk = true;
+        for (int i = 0; i < rp.entries.size(); i++) {
+            seqOk = seqOk && rp.entries.get(i).seq == i;
+        }
+        check("回放：序号 0..n-1 严格递增", seqOk);
+        eq("回放：聊天按到达顺序插在两次操作之间（上一操作）", rp.entries.get(2).ev(), "chat");
+        eq("回放：聊天之后才是出牌（稳定先后顺序）", rp.entries.get(3).ev(), "discard");
+        eq("回放：广播条目的收件座位 = -1", rp.entries.get(2).to, -1);
+        eq("回放：私有条目的收件座位 = 0", rp.entries.get(1).to, 0);
+
+        // ---------- ② ID 形状（不可猜 + 路径安全） ----------
+        String id = ReplayRecorder.newId();
+        check("回放：新 ID 合法（10 位 base32）：" + id, ReplayRecorder.validId(id));
+        check("回放：新 ID 互不相同", !ReplayRecorder.newId().equals(ReplayRecorder.newId()));
+        check("回放：拒绝短 ID", !ReplayRecorder.validId("ABC"));
+        check("回放：拒绝路径穿越", !ReplayRecorder.validId("../../etc/p"));
+        check("回放：拒绝字母表外的字符（I/L/O/U）", !ReplayRecorder.validId("IIIIIIIIII"));
+        check("回放：拒绝小写", !ReplayRecorder.validId(id.toLowerCase()));
+
+        // ---------- ③ 截断：条数上限到了就停记并置标记 ----------
+        ReplayRecorder small = new ReplayRecorder(rules.toJson(), names, 3, 1024 * 1024);
+        for (int i = 0; i < 6; i++) {
+            small.add(-1, Json.obj("ev", "discard", "seat", i % 4, "tile", "1m"));
+        }
+        eq("回放：条数上限生效", small.peek().entries.size(), 3);
+        check("回放：超限后标记 truncated", small.peek().truncated);
+        ReplayRecorder tiny = new ReplayRecorder(rules.toJson(), names, 1000, 200);
+        for (int i = 0; i < 20; i++) {
+            tiny.add(-1, Json.obj("ev", "discard", "seat", 0, "tile", "1m", "pad", "xxxxxxxxxx"));
+        }
+        check("回放：字节上限生效（截断且条数远小于 20）", tiny.peek().truncated && tiny.size() < 20);
+
+        // ---------- ④ 一小局的牌山快照 ----------
+        ReplayRecorder wallRec = new ReplayRecorder(rules.toJson(), names);
+        int[] wall = new int[Tiles.TILE_COUNT];
+        for (int i = 0; i < wall.length; i++) {
+            wall[i] = i;
+        }
+        wallRec.noteRound("E", 1, 0, 0, wall);
+        wallRec.add(-1, Json.obj("ev", "round_end"));
+        eq("回放：小局快照条目名", wallRec.peek().entries.get(0).ev(), Replay.EV_ROUND);
+        eq("回放：小局索引指向快照条目", wallRec.peek().rounds.get(0).intValue(), 0);
+        eq("回放：小局数 = 牌山快照数", wallRec.peek().walls.size(), 1);
+        eq("回放：牌山长度 136", wallRec.peek().walls.get(0).length, Tiles.TILE_COUNT);
+        eq("回放：牌山形状 4 行 × 34 列（index → row/col）", Replay.wallRow(5) * 34 + Replay.wallCol(5) * 1, 1 * 34 + 1);
+
+        // ---------- ⑤ 真实整场录制 + 落盘 + 分块读取 + 重启加载 ----------
+        java.nio.file.Path dir = null;
+        ReplayStore prev = ReplayStore.current();
+        try {
+            dir = java.nio.file.Files.createTempDirectory("mj-replay");
+            ReplayStore store = new ReplayStore(dir, 3, 16 * 1024 * 1024, true);
+            ReplayStore.install(store);
+
+            Table t = new Table("REPLAY", "回放桌", rules);
+            t.botDelayMs = 0;
+            t.roundDelayMs = 0;
+            t.seedBase = 20260914L;
+            for (int i = 0; i < 4; i++) {
+                t.addBot(i);
+            }
+            t.playGame();
+
+            eq("回放：整场结束后库里恰好 1 场", store.count(), 1);
+            List<Object> list = store.list(0, 10);
+            eq("回放：列表返回 1 条元信息", list.size(), 1);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> meta = (Map<String, Object>) list.get(0);
+            String rid = Json.str(meta, "id", "");
+            check("回放：列表里的 ID 合法：" + rid, ReplayRecorder.validId(rid));
+            check("回放：元信息不含操作（列表要小）", !meta.containsKey("entries")
+                    || meta.get("entries") instanceof Number);
+            check("回放：元信息带局数：" + meta.get("rounds"),
+                    Json.i(meta, "rounds", 0) >= 1);
+
+            Map<String, Object> head = store.header(rid);
+            check("回放：能取到头信息", head != null);
+            List<Object> walls = Json.list(head, "walls");
+            eq("回放：牌山快照数 = 小局数", walls.size(), Json.i(head, "rounds", 0));
+            boolean wallOk = true;
+            for (Object o : walls) {
+                List<Object> w = Json.asArr(o);
+                boolean[] seen = new boolean[Tiles.TILE_COUNT];
+                for (Object x : w) {
+                    int v = ((Number) x).intValue();
+                    if (v < 0 || v >= Tiles.TILE_COUNT || seen[v]) {
+                        wallOk = false;
+                    } else {
+                        seen[v] = true;
+                    }
+                }
+                if (w.size() != Tiles.TILE_COUNT) {
+                    wallOk = false;
+                }
+            }
+            check("回放：每小局牌山都是 136 张且 id 不重复", wallOk);
+
+            int total = Json.i(head, "entries", 0);
+            check("回放：整场条数处于合理区间（> 100）：" + total, total > 100);
+            // 分页取全（服务端单次上限 2000 条，客户端就按这个翻页）
+            List<Object> full = new ArrayList<>();
+            for (int from = 0; from < total; from += 2000) {
+                full.addAll(store.slice(rid, from, 2000));
+            }
+            eq("回放：分页取全 == 总条数", full.size(), total);
+            eq("回放：单次分块上限 2000（钳制而不是报错）", store.slice(rid, 0, 99999).size(),
+                    Math.min(2000, total));
+            List<Object> chunkA = store.slice(rid, 0, 7);
+            List<Object> chunkB = store.slice(rid, 7, 7);
+            boolean chunkOk = chunkA.size() == 7;
+            for (int i = 0; i < chunkA.size(); i++) {
+                chunkOk = chunkOk && Json.write(chunkA.get(i)).equals(Json.write(full.get(i)));
+            }
+            for (int i = 0; i < chunkB.size(); i++) {
+                chunkOk = chunkOk && Json.write(chunkB.get(i))
+                        .equals(Json.write(full.get(7 + i)));
+            }
+            check("回放：分块取与整体取逐条一致（翻页不会错位）", chunkOk);
+            eq("回放：越界分块返回空而不是报错", store.slice(rid, total + 100, 50).size(), 0);
+            check("回放：非法 ID 一律查不到（路径安全）",
+                    store.header("../../x") == null && store.slice("short", 0, 10) == null);
+
+            // 语义不变量：每条 discard 的牌必须是该家**之前拿到的**。
+            // ⚠ 起点不能只算 `draw`：配牌那 13 张（庄家 14 张）**没有 draw 事件**，
+            //   它们只出现在该座位自己的 `round_start.hand` 里（见 AGENTS §2.3-4）。
+            int[] perSeat = new int[4 * Tiles.TILE_COUNT];
+            int discards = 0;
+            int badDiscard = -1;
+            int draws = 0;
+            for (Object o : full) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> entry = (Map<String, Object>) o;
+                @SuppressWarnings("unchecked")
+                Map<String, Object> b = (Map<String, Object>) entry.get("b");
+                String ev = Json.str(b, "ev", "");
+                int seat = Json.i(b, "seat", -1);
+                if ("round_start".equals(ev) && seat >= 0) {
+                    for (String ts : Json.strList(b, "hand")) {
+                        int k = Tiles.parseKind(ts);
+                        if (k >= 0) {
+                            perSeat[seat * Tiles.TILE_COUNT + k]++;
+                        }
+                    }
+                    continue;
+                }
+                String tile = Json.str(b, "tile", null);
+                if ("draw".equals(ev) && seat >= 0 && tile != null) {
+                    int k = Tiles.parseKind(tile);
+                    if (k >= 0) {
+                        perSeat[seat * Tiles.TILE_COUNT + k]++;
+                        draws++;
+                    }
+                } else if ("discard".equals(ev) && seat >= 0 && tile != null) {
+                    int k = Tiles.parseKind(tile);
+                    discards++;
+                    if (k < 0 || perSeat[seat * Tiles.TILE_COUNT + k] <= 0) {
+                        badDiscard = seat;
+                    } else {
+                        perSeat[seat * Tiles.TILE_COUNT + k]--;
+                    }
+                }
+            }
+            check("回放：整场记到了摸牌（" + draws + " 次）", draws > 50);
+            check("回放：记到了出牌（" + discards + " 次）", discards > 50);
+            eq("回放：每条出牌的牌都是该家之前拿到的（含配牌）", badDiscard, -1);
+
+            // ---------- ⑥ 重启加载（索引重建：只读每个文件的第一行） ----------
+            // 先塞两场"只有 1 条"的假记录，把库填到上限（3）——整场那场仍在库里。
+            for (int i = 0; i < 2; i++) {
+                Replay extra = new Replay(ReplayRecorder.newId(), System.currentTimeMillis() + i,
+                        rules.toJson(), names);
+                extra.entries.add(new Replay.Entry(0, 0, -1, Json.obj("ev", "round_end")));
+                store.put(extra);
+            }
+            eq("回放：塞到上限后仍是 3 场", store.count(), 3);
+            ReplayStore reloaded = new ReplayStore(dir, 3, 16 * 1024 * 1024, true);
+            eq("回放：重启后仍能列出 3 场", reloaded.count(), 3);
+            // 列表里挑**有牌山的那一场**（两场假记录只有 1 条、没有小局）
+            String fid = "";
+            for (Object o : reloaded.list(0, 10)) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> m = (Map<String, Object>) o;
+                if (Json.i(m, "rounds", 0) >= 1) {
+                    fid = Json.str(m, "id", "");
+                    break;
+                }
+            }
+            check("回放：重启后列表里能找到整场记录", !fid.isEmpty());
+            eq("回放：重启后仍能取到操作（" + fid + "）", reloaded.slice(fid, 0, 5).size(), 5);
+            check("回放：重启后仍能取到牌山",
+                    reloaded.wall(fid, 0) != null && reloaded.wall(fid, 0).size() == Tiles.TILE_COUNT);
+
+            // ---------- ⑦ 容量淘汰（在 reloaded 上做，免得把上面两处要用的记录删掉） ----------
+            Replay third = new Replay(ReplayRecorder.newId(), System.currentTimeMillis() + 99,
+                    rules.toJson(), names);
+            third.entries.add(new Replay.Entry(0, 0, -1, Json.obj("ev", "round_end")));
+            reloaded.put(third);
+            eq("回放：场数上限生效（max 3）", reloaded.count(), 3);
+            check("回放：最旧的一场被淘汰（头信息已查不到）", reloaded.header(rid) == null);
+            check("回放：淘汰会删文件", !java.nio.file.Files.exists(dir.resolve(rid + ".replay")));
+            check("回放：新记录仍在（淘汰的是最旧的）", reloaded.header(third.id) != null);
+
+            // ---------- ⑧ 关闭时零开销 ----------
+            ReplayStore off = new ReplayStore(dir, 3, 1024 * 1024, false);
+            check("回放：关闭态不落盘、不列表、不读取",
+                    off.put(new Replay(ReplayRecorder.newId(), 0, rules.toJson(), names)) == null
+                            && off.list(0, 10).isEmpty() && off.slice(fid, 0, 5) == null);
+        } catch (java.io.IOException e) {
+            failures.add("回放用例 IO 异常: " + e);
+            fail++;
+        } finally {
+            ReplayStore.install(prev);
+            if (dir != null) {
+                try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(dir)) {
+                    walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                        try {
+                            java.nio.file.Files.deleteIfExists(p);
+                        } catch (java.io.IOException ignore) {
+                            // 清理失败不影响自检结论
+                        }
+                    });
+                } catch (java.io.IOException ignore) {
+                    // 同上
+                }
+            }
+        }
     }
 
     /**

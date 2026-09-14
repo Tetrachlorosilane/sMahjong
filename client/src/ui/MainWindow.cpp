@@ -7,6 +7,7 @@
 #include "ui/ActionBar.h"
 #include "ui/AutoBar.h"
 #include "ui/LobbyDialog.h"
+#include "ui/ReplayWindow.h"
 #include "ui/ResultDialog.h"
 #include "ui/TableView.h"
 
@@ -56,6 +57,8 @@ MainWindow::MainWindow(QWidget* parent)
     buildTablePage();
 
     m_lobby = new LobbyDialog(this);
+    // 大厅的「对局回放」：打开回放窗口（它自己连一条，与是否入座无关）
+    connect(m_lobby, &LobbyDialog::replayRequested, this, [this]() { openReplayWindow(); });
     connect(m_lobby, &LobbyDialog::connectRequested, this,
             [this](const QString& host, quint16 port, const QString& name) {
                 if (port == 0) {
@@ -63,6 +66,8 @@ MainWindow::MainWindow(QWidget* parent)
                     return;
                 }
                 m_myName = name;
+                m_host = host;      // 回放窗口要用同一个目标
+                m_port = port;
                 QJsonObject hello;
                 hello.insert(QStringLiteral("cmd"), QStringLiteral("hello"));
                 hello.insert(QStringLiteral("name"), name);
@@ -478,6 +483,10 @@ void MainWindow::showResultDialog(const QString& title, const QString& html, con
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     m_resultOpen = true;
     m_resultDlg = dlg;
+    // 「看本局回放」：拿到本场的 replay_id 才显示按钮（服务端关掉回放时隐藏）。
+    dlg->enableReplay(m_replayId);
+    connect(dlg, &ResultDialog::replayRequested, this,
+            [this](const QString& id) { openReplayWindow(id); });
     // 关闭结算弹窗 = 玩家确认进入下一局（局间最多等 5 秒，见 Table.ROUND_CONFIRM_MS）。
     // 倒计时到点由 ResultDialog 自己 accept()，同样走这里 → 不必等玩家点按钮。
     connect(dlg, &QDialog::finished, this, [this, dlg]() {
@@ -487,6 +496,24 @@ void MainWindow::showResultDialog(const QString& title, const QString& html, con
         sendConfirmNextRound();
     });
     dlg->show();
+}
+
+void MainWindow::openReplayWindow(const QString& replayId)
+{
+    if (m_host.isEmpty() || m_port == 0) {
+        // 还没连过任何服务端：回放入口没有目标，直接提示（不静默失败）
+        statusBar()->showMessage(lang::t(QStringLiteral("ui.replay.need_connect")), 5000);
+        return;
+    }
+    if (m_replay == nullptr) {
+        m_replay = new ReplayWindow(this);
+        m_replay->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_replay, &QObject::destroyed, this, [this]() { m_replay = nullptr; });
+    }
+    m_replay->show();
+    m_replay->raise();
+    m_replay->activateWindow();
+    m_replay->openReplay(m_host, m_port, replayId);
 }
 
 void MainWindow::onRiichiModeChanged(bool on)
@@ -656,6 +683,8 @@ void MainWindow::onEvent(const QJsonObject& ev)
     } else if (name == QLatin1String("game_start")) {
         m_room = QJsonObject();
         resetAutoFlags();   // 新的一场：自动开关一律从关闭开始
+        // 记下这一场的回放 ID：结算界面的「看本局回放」要用它
+        m_replayId = ev.value(QStringLiteral("replay_id")).toString();
         if (m_lobby && m_lobby->isVisible())
             m_lobby->hide();
         m_stack->setCurrentWidget(m_tablePage);
@@ -818,6 +847,11 @@ void MainWindow::onEvent(const QJsonObject& ev)
         }
     } else if (name == QLatin1String("game_end")) {
         closeResultDialog(false);
+        // 终局报文里也带 replay_id（game_start 没收到时兜底）
+        const QString endId = ev.value(QStringLiteral("replay_id")).toString();
+        if (!endId.isEmpty()) {
+            m_replayId = endId;
+        }
         showResultDialog(lang::t("ui.result.title_game_end"),
                          ResultDialog::gameEndHtml(ev, &m_model));
         m_stack->setCurrentWidget(m_waitPage);

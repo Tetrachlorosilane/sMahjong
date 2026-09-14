@@ -11,6 +11,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import mahjong.core.Rules;
+import mahjong.replay.ReplayRecorder;
+import mahjong.replay.ReplayStore;
 import mahjong.rules.YakuCodes;
 import mahjong.net.Session;
 import mahjong.util.Json;
@@ -101,10 +103,17 @@ public final class Table implements Runnable {
         return x ^ (x >>> 31);
     }
 
-    /** 机器人思考延时（自测时置 0 加速）。 */
-    public volatile long botDelayMs = 800;
-    /** 每局之间的停顿。 */
-    public volatile long roundDelayMs = 1200;
+    /**
+     * 机器人思考延时 / 每局之间的停顿（毫秒）。
+     *
+     * <p>默认刻意放慢（机器人像人在想、局间给人看结算的时间）；自测置 0 加速，
+     * 服务端的 `--fast` 也是同一套开关（自动化测试用，别在生产局里开）。
+     */
+    public static volatile long DEFAULT_BOT_DELAY_MS = 800;
+    public static volatile long DEFAULT_ROUND_DELAY_MS = 1200;
+
+    public volatile long botDelayMs = DEFAULT_BOT_DELAY_MS;
+    public volatile long roundDelayMs = DEFAULT_ROUND_DELAY_MS;
     /** 房间内已无真人时由 Server 回收。 */
     public volatile Runnable onEmpty;
     private int lastScores[] = new int[4];
@@ -198,6 +207,10 @@ public final class Table implements Runnable {
         if (debugEventTap != null) {
             debugEventTap.accept(seat, ev);
         }
+        if (replay != null) {
+            // 先记后发：记录的先后顺序就是下行的先后顺序（聊天与操作共用一条序号）
+            replay.add(seat, ev);
+        }
         Session s = seats[seat].session;
         if (s != null) {
             s.send(ev);
@@ -208,6 +221,17 @@ public final class Table implements Runnable {
         if (debugEventTap != null) {
             debugEventTap.accept(-1, ev);
         }
+        if (replay != null) {
+            replay.add(-1, ev);
+        }
+        broadcastRaw(ev);
+    }
+
+    /**
+     * 只发不记。给「已经手工记过」的报文用（目前只有终局的 `game_end`：它必须
+     * **先落盘再下发**，否则客户端一收到结算就点"看回放"会查不到 —— 见 {@link #sendGameEnd}）。
+     */
+    private void broadcastRaw(Map<String, Object> ev) {
         for (Seat s : seats) {
             if (s.session != null) {
                 s.session.send(ev);
@@ -215,6 +239,33 @@ public final class Table implements Runnable {
         }
         for (Session sp : spectators) {
             sp.send(ev);
+        }
+    }
+
+    /**
+     * 记一条**只给回放看**的条目（不发给任何客户端）。
+     *
+     * <p>用途：小局边界上的牌山快照。要塞进正常报文就等于每小局给所有客户端多发 136 个牌 id，
+     * 而这份信息只有回放需要。
+     */
+    void replayNote(int to, Map<String, Object> body) {
+        if (replay != null) {
+            replay.note(to, body);
+        }
+    }
+
+    /** 当前这一小局的录制器（没有录制时为 null）。 */
+    public ReplayRecorder replay() {
+        return replay;
+    }
+
+    /** 录制器：整场一个（{@code playGame} 开头建、结束时落盘）。未启用回放时为 null。 */
+    private ReplayRecorder replay;
+
+    /** 供 {@link Round} 在小局开头记下这一小局的牌山快照（见 {@code Replay.EV_ROUND}）。 */
+    void noteRoundWall(String bakaze, int kyoku, int honba, int dealer, int[] wallOrder) {
+        if (replay != null) {
+            replay.noteRound(bakaze, kyoku, honba, dealer, wallOrder);
         }
     }
 
@@ -533,11 +584,23 @@ public final class Table implements Runnable {
         long roundSeed = seedBase;
         int roundIndex = 0;
 
+        // 回放录制：整场一个录制器（未启用回放时是 null，零开销）。
+        // 记的是**客户端实际收到的报文**，所以回放与实时对局走同一条渲染路径。
+        ReplayStore store = ReplayStore.current();
+        if (store != null && store.enabled()) {
+            List<String> names = new ArrayList<>(4);
+            for (Seat s : seats) {
+                names.add(s.name);
+            }
+            replay = new ReplayRecorder(rules.toJson(), names);
+        }
+
         for (Seat s : seats) {
             send(s.index, Json.obj(
                     "ev", "game_start",
                     "rules", rules.toJson(),
                     "seats", seatInfo(),
+                    "replay_id", replay == null ? "" : replay.id(),
                     "round", Json.obj("bakaze", "E", "kyoku", 1, "honba", 0)));
         }
         broadcastRoom();
@@ -560,6 +623,7 @@ public final class Table implements Runnable {
                 // 这里把整场按异常终止收尾，客户端至少能拿到结算、体面退出。
                 Log.error("一局异常，按终局收尾", e);
                 sendGameEnd(scores);
+                saveReplay();
                 return;
             }
             currentRound = null;
@@ -656,6 +720,28 @@ public final class Table implements Runnable {
             lastScores = scores.clone();
         }
         sendGameEnd(scores);
+        saveReplay();
+    }
+
+    /**
+     * 整场结束：把录制好的记录交给回放库落盘（原子写 + 容量淘汰，见 {@link ReplayStore}）。
+     *
+     * <p>落盘放在**牌局结束之后**、不在热路径上：牌桌线程只在最后做一次文件写，
+     * 不阻塞任何一次摸切。异常一律吞掉并记日志 —— 回放失败绝不能影响对局收尾。
+     */
+    private void saveReplay() {
+        if (replay == null) {
+            return;
+        }
+        ReplayStore store = ReplayStore.current();
+        if (store != null) {
+            try {
+                store.put(replay.finish());
+            } catch (RuntimeException e) {
+                Log.warn("回放保存失败：" + e.getMessage());
+            }
+        }
+        replay = null;
     }
 
     private List<Object> seatInfo() {
@@ -686,11 +772,20 @@ public final class Table implements Runnable {
         for (int s : st.order) {
             ranking.add(s);
         }
-        broadcast(Json.obj(
+        Map<String, Object> end = Json.obj(
                 "ev", "game_end",
                 "scores", intList(scores),
                 "ranking", ranking,
-                "final", finalList));
+                "replay_id", replay == null ? "" : replay.id(),
+                "final", finalList);
+        // ⚠ 顺序：**先记并落盘，再下发**。客户端收到 `game_end` 就会在结算界面上给
+        //   「看本局回放」按钮 —— 那一刻回放必须已经能取，否则用户点了就是"找不到该记录"。
+        //   （这条顺序在真机 L3 上踩过：先广播后落盘时，`replay_list` 少了刚打完的这一场。）
+        if (replay != null) {
+            replay.add(-1, end);
+            saveReplay();
+        }
+        broadcastRaw(end);
         Log.info("牌桌 " + id + " 终局：" + java.util.Arrays.toString(scores));
     }
 

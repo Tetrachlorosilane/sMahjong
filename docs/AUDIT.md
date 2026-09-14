@@ -57,7 +57,9 @@
 | **S-30** | **加杠被抢杠时仍翻杠宝牌**：`turnKan` 的加杠分支先 `revealKanDora()` 再判抢杠 —— 而规则是「加杠被抢和时，这次杠的宝牌指示牌**不翻开**」 | `game/Round.java` `turnKan` | 抢杠判定提到 `revealKanDora()` **之前**（抢杠成立即 `return`，那张宝牌不再翻） |
 | **S-31** | **役满不加倍时把"值"的取舍写成了"役种"的取舍**：`if (f.kokushi13 && r.doubleYakuman)` 之类，于是 M.League /《天凤》下国士无双十三面被改名成「国士无双」、四暗刻单骑→「四暗刻」、纯正九莲宝灯→「九莲宝灯」。这三者（连同大四喜）是**独立役种**，不加倍只是**取值**为 1 倍 | `rules/Evaluator.java` | 役种名与取值分开：名字照报，倍数取 `r.doubleYakuman ? 2 : 1`。补断言（M.League 仍报「国士无双十三面」/「四暗刻单骑」/「纯正九莲宝灯」且 `base = 8000`） |
 | **S-32** | **包牌两处缺口**：① 四杠子包牌（**M.League 独有**：由他家的舍张大明杠完成第 4 个杠）从未实现（`paoBaseFor` 里已经算了四杠子，但 `paoSeat` 永远设不上）；② 《天凤》的包牌要承担**复合后的全部役满得点**，而实现只包"被包的那一役"，没有规则开关 | `core/Rules.java`、`game/Round.java` | 新增 `pao_four_kan`（仅 mleague）/ `pao_covers_all`（仅 tenhou）两个字段；`updatePao` 里加四杠子分支（**只认大明杠**）；`paoBaseFor` 在 `paoCoversAll` 时返回 `sc.base`。补断言：大三元含暗杠的判定、四杠子包牌（M.League 有 / 天凤无 / 加杠不算）、以及**用文档 §包牌 的 M.League 例子逐位比对**（庄家荣和：包牌者 24000、放铳者 72000；天凤各 48000） |
-| **S-33** | **《雀魂》精算基准取错**：`returnScore` 被当成"返还点 30000"，而《雀魂》段位场的**精算基准与配给原点相同（25000）→ 不存在头名赏**（30000 是它的"一位必要点数"，是另一个数） | `core/Rules.java` majsoul 预设 | 预设改 `returnScore = 25000`（精算基准；本项目不做"一位必要点数"的拆分，唯一另一个使用者是西入，三套预设都是关）。补断言：文档 §精算点数 的《雀魂》例子 +43.6 / +8.6 / −10 / −42.2 与 M.League 例子 +73.6 / +8.6 / −20 / −62.2 |
+| **S-34** | **终局顺序：先广播 `game_end` 后落盘回放** → 客户端一收到结算就给出「看本局回放」按钮，而那一刻记录还没进库，点下去只会得到"找不到该记录"。真机 L3 上实测到：`replay_list` 少了刚打完的那一场（同一次运行里 `replay_get` 却能读到，因为文件已经写下去了） | `game/Table.java` `sendGameEnd()` | 改成 **先记 + 落盘、再下发**（新增 `broadcastRaw()`：只发不记，避免重复记录）。现在「收到 `game_end` 的那一刻记录一定能取」是硬保证，写在 PROTOCOL §3.11 |
+| **S-35** | **回放记录里的摸牌存了三份无用副本**：`broadcastDraw` 给四家各发一份报文，只有摸牌者那份带 `tile`，其余三份只是"谁摸了 + 剩余张数"。全记下来不仅体积翻三成以上，客户端"下一步"还要按四次才过一个操作 | `replay/ReplayRecorder.java` | 录制时丢掉不带 `tile` 的 `draw`（其余字段在摸牌者那份里都有）。实测一场东风战：1613 条 → **806 条 / 384 KB** |
+| **S-36** | **牌山视图把"整局会不会被拿走"当成了"现在有没有被拿走"**：配牌 52 张没设 `takenAt`（永远画成牌背），其余按整局着色（一开始就画成已拿走）。真机截图上是"前半背面、后半全部翻开"，与当前步完全不符 | `client/model/ReplayModel.cpp` + `ui/WallView.cpp` | 配牌的 `takenAt` 取小局边界；着色一律与**当前步**比较；"已拿走 N/122"也按当前步统计。另外"小局跳转"落在**最后一条 `round_start`**（配牌完成）而不是边界条目，否则开局画面是四个空手牌 |
 
 ### 1.3 排期完成项（原「已知未修」）
 
@@ -199,26 +201,30 @@
 
 ## 4. 本次验证记录
 
-> 本节记录 **2026-09-14「按新的规则原文做 M.League 化」这一轮**的验证（上一轮 S-27 的记录见 git 历史）。
+> 本节记录 **2026-09-15「对局记录回放」这一轮**的验证（上一轮 M.League 化的记录见 §1.2 / §1.5）。
 
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
-| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **507 项全绿**（424 → +83：`mleagueRulesTests` 的取舍两侧断言 + 立直门槛 4 组 + 包牌 6 条 + S-28~S-33 的回归断言） |
-| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **402 项全绿**（401 → +1：语言文件条目数 293→298、新增 `ui.lobby.preset*` 文案断言；另跑 `--lobbytest` 验证建房流程） |
-| L3 协议端到端 | `node tools\e2e-test.mjs`（整场东风战 + 逐条 ASCII 审计 + 岭上账） | **E2E PASS**（5 小局 / 3 次和了 / 2 次流局；报文里无中文、岭上账对；顺带实测到新的精算：3 位 22000 → −18、4 位 16000 → −44，与 `settle()` 同式） |
-| L3 其余 | `timeout` / `utf8` / `clock` / `firstturn` / `riichi-stale` | 全部 **PASS** |
-| L3 概率性工具 | `claim-priority-test` | 「**无法判定：样本不足**」（不是通过，也不是失败；本次 272 次出牌询问 / 33 次鸣牌询问都没撞上"有人能碰、同一张上另有人只能吃且拖着不回"的局面）。它负责的另一半（废包不漏到下一巡）本次**通过**：`B 废包之后那一巡：声明 3000ms，实测 3008ms ok` |
-| L3 静态三件套 | `check-i18n` / `i18n-scan --check` / `i18n-gen --check` | 全绿（293 条文案 / `ui.*` 173 条 / 源码 0 处残留中文） |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **554 项全绿**（507 → +47：记录器序号/过滤/截断/ID 形状、整场录制的牌山与出牌守恒、落盘/分页/重启加载/容量淘汰/关闭态零开销） |
+| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **439 项全绿**（402 → +37：`ReplayModel` 的小局/巡/步索引、牌山 136 张的归属映射、上帝视角手牌、两个回放入口按钮） |
+| L3 对局记录端到端 | `node tools\replay-test.mjs <host> <port>` | **REPLAY PASS（26 项）**：真跑一场东风战后**立即**能查（S-34 的回归）、分页一致、牌山 136 张不重复、每小局边界与 `replay_round` 对齐、**每条出牌的牌都是该家之前拿到的**、越界 / 非法 ID / 路径穿越、限速 |
+| L3 其余协议用例 | `e2e` / `timeout` / `clock` / `firstturn` / `riichi-stale` / `utf8` | 全部 **PASS**（`claim-priority` 仍是概率性工具，样本不足时会报"无法判定"） |
+| L4 GUI 实拍 | `client --replay <host> <port> <id> [--wall] --shot …` | 回放窗口（导航 / 操作列表 / 聊天 / 记录列表）与**牌山视图**（每行一家按抓牌顺序 + 王牌 14 张 + 当前进度高亮）各出一图；据此发现并修掉 S-36 |
 
-**本轮改动面**：`core/Rules.java`（预设 + 11 个取舍字段）、`rules/Evaluator.java`（连风符 / 切上满贯 /
-累计役满上限 / 役种名与取值分离）、`game/Round.java`（立直门槛、暗杠面子构成、加杠宝牌时机、
-大明杠三处校验、包牌）、`game/RoundScoring.java`（`settle()` 精算纯函数）、`game/Table.java`（`game_end`）、
-`test/SelfTest.java`（+83 断言）。**协议新增字段**：`preset` / `kiriage_mangan` / `kazoe_yakuman` /
-`double_wind_pair_fu` / `riichi_min_score` / `riichi_min_tiles_left` / `riichi_no_haitei` /
-`ankan_keeps_shape` / `tie_split_point` / `pao_four_kan` / `pao_covers_all`。
-客户端：`ui/LobbyDialog.{h,cpp}` 建房对话框新增「规则预设」下拉（`rules.preset`）、`main.cpp` 版本号 1.1.0、
-`assets/i18n/zh_CN.json` + `tools/i18n-map.mjs`（+5 条 `ui.lobby.preset*`）、`SelfTest.cpp`（条目数断言同步）。
-**三套预设实测**：`.qt/verify-preset.mjs` 逐字段核对 `room.rules`（mleague / tenhou / majsoul 全 PASS）。
+**本轮改动面**：服务端新增 `replay/{Replay,ReplayRecorder,ReplayStore}.java`，
+`Table`（录制挂点、`replay_id`、**先落盘再广播终局**、`broadcastRaw`）、`Round`（配牌顺序改为「每人一次抓 4 张」、
+牌山快照）、`Session`（`replay_list` / `replay_get` + 限速）、`Main`（`--replay-dir` / `--replay-max` /
+`--replay-max-mb` / `--no-replay` / `--fast`）、`SelfTest`（+47）；
+客户端新增 `model/ReplayModel.{h,cpp}`、`ui/{ReplayWindow,WallView}.{h,cpp}`，
+`main.cpp`（`--replay`）、`MainWindow`（两个入口 + `replay_id`）、`LobbyDialog`/`ResultDialog`（入口按钮）、
+`SelfTest.cpp`（+37）、i18n（+62 条 `ui.replay.*` / `error.replay_*`）、`tools/replay-test.mjs`。
+
+> ⚠ 本轮在**测试脚本**上踩了一个坑，值得记下来：`tools/replay-test.mjs` 的假客户端把"已经被 `wait()`
+> 命中过"的消息留在 inbox 里，于是"先问列表（0 场）→ 打完再问列表"的第二问命中了第一条旧回复，
+> 把服务端**正确**的行为报成了失败 —— S-34 的真相因此多花了两轮长跑才看清。
+> 现在被等待者取走的消息会从 inbox 摘掉，谓词也带 `from`/`id` 精确匹配。
+> **测试工具本身也是代码，也会骗人。**
+
 
 
 > 注：`claim-priority-test.mjs` 需要"有人能碰、同一张舍张上另有人只能吃且拖着不回"这种罕见局面，

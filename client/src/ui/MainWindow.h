@@ -22,6 +22,7 @@ class QPushButton;
 class QStackedWidget;
 class QTextBrowser;
 class ResultDialog;
+class ReplayWindow;
 class TableView;
 
 class MainWindow : public QMainWindow
@@ -75,6 +76,14 @@ private:
     void closeResultDialog(bool confirm);
     bool isHost() const;
 
+    /**
+     * 打开回放窗口（懒建）：replayId 为空 = 只打开列表让用户挑。
+     *
+     * <p>回放窗口**自己开一条连接**（服务端的 `replay_*` 与是否入座无关），
+     * 所以玩家在一局里也能开回放，不会干扰当前对局。
+     */
+    void openReplayWindow(const QString& replayId = QString());
+
     NetClient m_net;
     TableModel m_model;
     QStackedWidget* m_stack = nullptr;
@@ -115,4 +124,10 @@ private:
     bool m_autoRoomSent = false;
     int m_autoBots = 3;
     std::function<void(const QJsonObject&)> m_cmdTap;   // 自检用（正常运行为空）
+
+    // 回放
+    ReplayWindow* m_replay = nullptr;   // 懒建；自己一条连接
+    QString m_replayId;                 // 本场的回放 ID（`game_start` / `game_end` 里带）
+    QString m_host;                     // 当前连接目标（回放窗口要用）
+    quint16 m_port = 0;
 };

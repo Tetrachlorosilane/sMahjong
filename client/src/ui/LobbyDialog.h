@@ -33,6 +33,8 @@ signals:
     void refreshRequested();
     void createRoomRequested(const QString& name, const QJsonObject& rules, int fillBots);
     void joinRoomRequested(const QString& roomId);
+    /** 「对局回放」：打开回放窗口（未连接时入口无效）。 */
+    void replayRequested();
 
 private:
     void onConnectClicked();
@@ -48,6 +50,7 @@ private:
 
     QListWidget* m_rooms = nullptr;
     QPushButton* m_refreshBtn = nullptr;
+    QPushButton* m_replayBtn = nullptr;
 
     QLineEdit* m_roomName = nullptr;
     QComboBox* m_preset = nullptr;   // 规则预设：mleague（默认）/ tenhou / majsoul

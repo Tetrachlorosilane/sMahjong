@@ -212,8 +212,12 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
     m_browser->setHtml(html);
     root->addWidget(m_browser);
 
-    // 底部一行：确认按钮 + 局间倒计时文字
+    // 底部一行：看回放按钮（拿到 replay_id 才显示）+ 局间倒计时文字 + 确认
     auto* bottom = new QHBoxLayout();
+    m_replayBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.watch_this")), this);
+    m_replayBtn->setVisible(false);   // `enableReplay()` 里才显示（老服务端没有 replay_id）
+    connect(m_replayBtn, &QPushButton::clicked, this, [this]() { emit replayRequested(m_replayId); });
+    bottom->addWidget(m_replayBtn);
     m_countdown = new QLabel(this);
     m_countdown->setStyleSheet(QStringLiteral("color:#666;"));
     bottom->addWidget(m_countdown);
@@ -235,6 +239,14 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
         m_countdown->setText(lang::t("ui.result.auto_next")
                                  .arg((m_leftMs + 999) / 1000));
     });
+}
+
+void ResultDialog::enableReplay(const QString& replayId)
+{
+    m_replayId = replayId.trimmed();
+    if (m_replayBtn != nullptr) {
+        m_replayBtn->setVisible(!m_replayId.isEmpty());
+    }
 }
 
 void ResultDialog::startCountdown(int ms)

@@ -33,6 +33,9 @@
   "默认值恰好是什么"，默认从《雀魂》换成 M.League 时自检一次红了 8 条就是这么来的（`mleagueRulesTests`）。
   ⚠ 且**役种名 ≠ 取值**：不加倍役满时国士十三面/四暗刻单骑/纯正九莲仍是各自的役种名（旧代码不加倍就改名成
   「国士无双」）。取舍清单见 `docs/DESIGN.md`，字段表见 `docs/PROTOCOL.md` §5。
+- **对局记录/回放** `server/.../replay/` + 客户端 `ReplayWindow`/`WallView`：整场下行报文按 `seq` 记下、
+  终局**先落盘再广播 `game_end`**（否则结算界面上点「看本局回放」查不到）；接口 `replay_list`/`replay_get`，
+  回放 ID **先校验形状再拼路径**。细节见 PROTOCOL §3.11 与 DESIGN「对局记录与回放」。
 - **接口契约** `docs/PROTOCOL.md` —— 两端唯一的接口定义。
 
 数据流：`Qt 客户端 ──TCP/NDJSON──> Java 服务端`。一条 TCP 连接一个玩家，一行一个 JSON。
@@ -124,8 +127,8 @@
       （`Table.awaitAction(..., allowedTypes)` 与 claimPhase 的 `askedTypes`）。
       废包的 `chi`/`pon` 不可能出现在出牌询问的选项里，所以它被丢弃、玩家照样拿到完整 deadline。
 
-    不处理这两条的症状：**玩家没动就被代打**（废包被 `awaitAction` 当成本巡答复，
-    出牌循环再把它默认成 `discard`）；或下一次鸣牌询问被废包"先答了"，真答复被顶掉。
+    不处理这两条的症状：**玩家没动就被代打**（废包被 `awaitAction` 当成本巡答复）；
+    或下一次鸣牌询问被废包"先答了"，真答复被顶掉。
     回归：`SelfTest.roundClaimsTests/dropRepliesTests` + `node tools\claim-priority-test.mjs`。
 
 ### 2.4 别做危险操作
@@ -141,10 +144,9 @@
 ### 3.1 工具链：脚本自己找，不写死路径
 
 构建脚本按「显式参数 → 环境变量 → PATH → 常见安装位置 → 仓库内缓存 → **自动下载**」解析依赖，
-所以**不必预装 Qt**（见 §3.3）。本机实测可用的位置（**仅供参考，不是硬编码**）：
-JDK 21 `C:\Program Files\Microsoft\jdk-21.0.10.7-hotspot` ·
-Qt 6.11.2 `D:\Dependencies\Qt\6.11.2\mingw_64` ·
-MinGW 13.1 `D:\Dependencies\Qt\Tools\mingw1310_64\bin` · CMake `C:\Program Files\CMake\bin` · Ninja `D:\Dependencies\Qt\Tools\Ninja`。
+所以**不必预装 Qt**（见 §3.3）。本机实测可用位置（**仅供参考，不是硬编码**）：
+JDK 21 `C:\Program Files\Microsoft\jdk-21.0.10.7-hotspot`、Qt 6.11.2 `D:\Dependencies\Qt\6.11.2\mingw_64`、
+MinGW 13.1 `D:\Dependencies\Qt\Tools\mingw1310_64\bin`、CMake `C:\Program Files\CMake\bin`、Ninja `D:\Dependencies\Qt\Tools\Ninja`。
 
 > **系统 PATH 里没有 g++**，构建脚本自己拼 PATH（`client/build.ps1` / `server/build.ps1` 已处理）。
 
@@ -244,6 +246,8 @@ node tools\firstturn-test.mjs 127.0.0.1 10086 3000       # 「每局第一巡」
 node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000     # 作废的立直不得替玩家打牌 + 重复包被丢弃
 node tools\claim-priority-test.mjs 127.0.0.1 10086 3000   # 鸣牌优先级：高优先级成立后不必等低优先级 + 废包不漏到下一巡
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
+node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
+                                                          #（加 --no-game 只验读取路径，几秒跑完）
 node tools\check-i18n.mjs                                 # **静态**核对：服务端每个码都有客户端译文（不用起服务端）
 node tools\i18n-scan.mjs --check                          # 界面文案必须都在语言文件里（源码里不留中文；见 §6）
 node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言文件一致（新增文案不漏 key）
@@ -289,6 +293,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | `--lobbytest <host> <port>` | 大厅 UI 回归：连上后「建房间」按钮是否可用，并真的点它建房 |
 | `--autoplay <host> <port> [--name 名] [--timeout 秒]` | 真连服务端自走一整场，写 `autoplay.log` |
 | `--demo <host> <port> [--bots N] [--no-answer] [--shot png] [--after 秒]` | 起 GUI 自动进房；`--no-answer` = 建房但不自动应答（截图用）；`--shot` 定时出图后退出（**优先抓活动顶层窗口**，否则拍不到弹窗） |
+| `--replay <host> <port> [回放ID] [--wall] [--shot png]` | 打开回放窗口（`--wall` 顺带开牌山视图）：命令行复盘与 L4 截图都用它 |
 | `--gentiles <outdir> [字体路径]` | 用字体把 Unicode 麻将牌字形**轮廓化**成 SVG 素材（见 §9） |
 | `--fontprobe <out.png> [字体路径] [轮次]` | 渲染候选输入串，**实测字体的连字语法**；轮次 1=总览 / 2=组合符放大 |
 
@@ -314,6 +319,7 @@ mahjong/
 │     ├─ rules/        Shanten Agari Evaluator(役种+符+高点法) Payments
 │     ├─ game/         Round(一局状态机) Table(房间/半庄/线程)
 │     │                 WinCheck/RoundOptions/RoundClaims/RoundScoring(纯判据，可单独单测)
+│     ├─ replay/       Replay Store Recorder（对局记录：录制 / 落盘 / 容量淘汰）
 │     ├─ net/          Server Session
 │     ├─ bot/          Bot(牌效 AI，补位用)
 │     └─ test/         SelfTest ★ 改规则必须在这里加断言
@@ -333,6 +339,7 @@ mahjong/
 │     ├─ net/              NetClient(含 IPv4/IPv6 自动回退) Protocol
 │     ├─ model/            Tile TableModel(纯数据状态机) AutoPolicy(自动应答判据，纯逻辑)
 │     └─ ui/               TileRenderer TableView ActionBar AutoBar(自动开关) LobbyDialog ResultDialog MainWindow
+│                           ReplayWindow(回放) WallView(牌山 136 张)
 └─ tools/              联调与静态检查：e2e-test / timeout-test / clock-test / firstturn-test /
                        riichi-stale-test / claim-priority-test / utf8-test / check-i18n /
                        i18n-scan / i18n-map + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 /
@@ -448,9 +455,8 @@ mahjong/
   ⚠ **删线框时不要连预算一起删**：牌河真的占那块地方，预算没了风盘就会长到让四家的河压上手牌。
 - **牌河不得压到邻家的河**：相邻河从「盘半 + 间距」起步，两者相交要**两个方向同时**重叠，
   所以界限用 `max(cw,ch)/2 + kGap`（**不是 min** —— 盘做成宽扁形后用 min 会平白再压小一轮）；
-  且**一行最多 1 张横置牌**（只有立直宣言牌横置，每家至多 1 张），故最坏一行 =
-  横置牌 + 5×普通牌 + 5×间距。按「整行全横置」估会多要一倍宽度、把牌河压掉一半。
-  这条钳制现在只是**兜底**：正常尺寸下按上面的反推，牌河能拿到标称大小。
+  最坏一行的算法同前（横置牌 + 5×普通牌 + 5×间距）。这条钳制现在只是**兜底**：
+  正常尺寸下按上面的反推，牌河能拿到标称大小。
 - **`paintEvent` 必须先 `computeLayout()` 再 `paintBackground()`**：之后每一层绘制都直接用布局结果，
   写反了第一帧用的是上一轮尺寸（改风盘尺寸时会闪一帧错位）。
 - **「手牌 + 摸牌」块的边界避让：一次算完 + 右移封顶**（同一个坑踩了三次，别简化）：
@@ -517,7 +523,7 @@ mahjong/
     加载顺序与 `tiles/`、`fonts/` 同约定（**exe 同级 `i18n/` → qrc → 返回码**）→ **改文案不用重编译**。
     ⚠ 认不出的码**原样显示码本身**（不是 `yaku.xxx` 裸键、也不是空串），这样"服务端加了码、语言文件没跟上"一眼可见；
     码为空串时回退老字段（`yaku[].name` / 原样 `limit` / `error.msg`），新旧两端混跑不显示空白。
-  - **界面固定文案也全在 `ui.*`（178 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
+  - **界面固定文案也全在 `ui.*`（243 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
     代码里只留 `lang::t("ui.…")`，**源码里不该再有中文字面量**。例外用 `// i18n-keep` 就地豁免
     （牌面字形「萬」「東」、立直标记「立」、默认玩家名、隐藏的测量按钮）；日志与自检输出不进语言文件。
     搬运三件套（同一份映射，**不会漂移**）：`i18n-map.mjs`（字面量 → key 的**唯一数据源**）→
@@ -651,12 +657,9 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **507** 项、客户端自检 **402** 项，以及 §4 的全部 L3 工具
-（e2e 含**报文 ASCII 审计**与**岭上账**；其余见 §4 清单）与 L1 里的
-**杠后岭上摸牌的账**（`rinshanTests`：暗杠 3 / 加杠 1 / 大明杠 9，逐次 4→3→2→1）、
-**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`：136 局单局最多 3 次杠、闸门断言确定性覆盖，
-10 次废杠尝试对应 13 次有效杠 / 13 次岭上摸牌）、**M.League 与一般规则的取舍两侧钉住**
-（`mleagueRulesTests`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。
+**实测通过**：服务端自检 **554** 项、客户端自检 **439** 项、§4 的全部 L3 工具（含 `replay-test`），
+外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有两组"跑整场"的账：
+**杠后岭上摸牌**（`rinshanTests`）与**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）。
 
 **未做 / 妥协**：
 
