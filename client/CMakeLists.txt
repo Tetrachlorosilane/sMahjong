@@ -66,6 +66,8 @@ set(MJ_SOURCES
     src/model/TableModel.h
     src/model/AutoPolicy.cpp
     src/model/AutoPolicy.h
+    src/model/ReplayModel.cpp
+    src/model/ReplayModel.h
     src/ui/AutoBar.cpp
     src/ui/AutoBar.h
     src/ui/TileFont.cpp
@@ -86,6 +88,10 @@ set(MJ_SOURCES
     src/ui/ResultDialog.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/ReplayWindow.cpp
+    src/ui/ReplayWindow.h
+    src/ui/WallView.cpp
+    src/ui/WallView.h
 )
 
 # 含 Q_OBJECT 的头文件（预生成模式下逐个跑 moc）
@@ -99,6 +105,8 @@ set(MJ_MOC_HEADERS
     src/ui/LobbyDialog.h
     src/ui/ResultDialog.h
     src/ui/MainWindow.h
+    src/ui/ReplayWindow.h
+    src/ui/WallView.h
 )
 
 if(NOT MJ_USE_AUTOMOC)

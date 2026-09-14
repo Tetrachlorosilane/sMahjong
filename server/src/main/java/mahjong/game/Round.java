@@ -131,10 +131,20 @@ public final class Round {
     private int openingTile = -1;
 
     private void setup() {
-        for (int r = 0; r < 13; r++) {
+        // 配牌按**现实麻将的抓牌顺序**：从庄家起每人一次抓 4 张、共 3 轮（每人 12 张），
+        // 然后每人再各抓 1 张补齐 13 张。
+        // ⚠ 这段顺序决定「牌山第 k 张给了谁」——回放的牌山视图（PROTOCOL §3.11）直接按它标归属，
+        //   所以改这里必须同步改那一段与客户端 `ReplayModel` 的映射。
+        for (int r = 0; r < 3; r++) {
             for (int s = 0; s < 4; s++) {
-                hand[(dealer + s) % 4].add(wall.deal());
+                List<Integer> h = hand[(dealer + s) % 4];
+                for (int t = 0; t < 4; t++) {
+                    h.add(wall.deal());
+                }
             }
+        }
+        for (int s = 0; s < 4; s++) {
+            hand[(dealer + s) % 4].add(wall.deal());
         }
         // 庄家的第 14 张随配牌一起发出（第一巡不再摸），它同时充当本次摸到的牌
         openingTile = wall.deal();
@@ -444,6 +454,9 @@ public final class Round {
 
     private void sendRoundStart() {
         sortHands();
+        // 回放：把这一小局的**牌山快照**（136 张，按抓牌顺序）记在事件流最前面。
+        // 只给回放看，不发给客户端 —— 正常报文里凭空多 136 个牌 id 是白花的下行。
+        table.noteRoundWall(roundWindName(), kyoku, honba, dealer, wallOrder());
         for (int s = 0; s < 4; s++) {
             table.send(s, Json.obj(
                     "ev", "round_start",
@@ -461,10 +474,24 @@ public final class Round {
 
     private Map<String, Object> roundJson() {
         return Json.obj(
-                "bakaze", new String[]{"E", "S", "W", "N"}[roundWind],
+                "bakaze", roundWindName(),
                 "kyoku", kyoku,
                 "honba", honba,
                 "riichi_sticks", sticks);
+    }
+
+    private String roundWindName() {
+        return new String[]{"E", "S", "W", "N"}[Math.max(0, Math.min(3, roundWind))];
+    }
+
+    /**
+     * 整副牌山（136 张）的**抓牌顺序**：{@code [0,52)} 是配牌（含庄家第 14 张）、
+     * {@code [52,122)} 是可摸牌山、末尾 14 张是王牌（4 岭上 + 5 表宝牌 + 5 里宝）。
+     *
+     * <p>回放的牌山视图与"这一张是什么时候被谁抓走的"都靠它。
+     */
+    public int[] wallOrder() {
+        return wall.debugAllTiles();
     }
 
     private void broadcastDraw(int seat, int tile, boolean rinshan) {

@@ -77,6 +77,27 @@ java -jar build/mahjong-server.jar --selftest
 # 期望输出：通过 N 项，失败 0 项 / SELFTEST PASS
 ```
 
+### 3.1 对局记录（回放）的磁盘占用
+
+服务端默认把每一场半庄记下来并落盘到 **`./replays/`**（相对启动目录），
+每场约 0.3~1 MB（东风战实测 384 KB）。容量是**双上限**，超出会**淘汰最旧的并删文件**，
+所以磁盘占用有硬上限、不会无限增长：
+
+```bash
+--replay-dir /var/lib/mahjong/replays   # 换目录（systemd 里建议给绝对路径，见 §5）
+--replay-max 200                        # 最多留多少场（默认 50）
+--replay-max-mb 512                     # 记录总字节上限（默认 96）
+--no-replay                             # 完全不记录（既省磁盘也省内存）
+```
+
+⚠ 要点：
+
+- 目录要**可写**（systemd 里若开了 `ProtectSystem=strict` / `ReadWritePaths`，把它加进可写路径）。
+- 回放是**上帝视角**（四家手牌 + 整副牌山），所以记录只在**牌局结束后**可读；
+  读取接口是只读的，且 ID 是随机生成的 10 位字符串。**别把 replays 目录暴露成静态站点** ——
+  要分享某一场，把 ID 给对方，让他用客户端的大厅「对局回放」拉。
+- 想保留更久就把 `--replay-max` / `--replay-max-mb` 调大；两者谁先到就按谁淘汰。
+
 ## 4. 开放端口
 
 ```bash

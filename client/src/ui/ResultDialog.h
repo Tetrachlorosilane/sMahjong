@@ -7,6 +7,7 @@
 #include <QString>
 
 class QLabel;
+class QPushButton;
 class QTextBrowser;
 class QTimer;
 class TableModel;
@@ -25,6 +26,16 @@ public:
      */
     void startCountdown(int ms);
 
+    /**
+     * 允许"看本局回放"：把这一场的回放 ID 传进来，底部按钮才会出现。
+     * 服务端没给 `replay_id`（关掉了回放 / 老服务端）时保持隐藏。
+     */
+    void enableReplay(const QString& replayId);
+
+signals:
+    void replayRequested(const QString& replayId);
+
+public:
     // 组装文本
     static QString agariHtml(const QJsonObject& ev, const TableModel* model);
     static QString ryuukyokuHtml(const QJsonObject& ev, const TableModel* model);
@@ -36,6 +47,8 @@ public:
 private:
     QTextBrowser* m_browser = nullptr;
     QLabel* m_countdown = nullptr;
+    QPushButton* m_replayBtn = nullptr;
+    QString m_replayId;
     QTimer* m_timer = nullptr;
     int m_leftMs = 0;
 };
