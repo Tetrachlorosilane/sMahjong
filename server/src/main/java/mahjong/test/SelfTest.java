@@ -47,6 +47,7 @@ public final class SelfTest {
         yakuTests();
         fuTests();
         furitenTests();
+        stateVisibilityTests();
         optionTests();
         sidewaysTests();
         timeControlTests();
@@ -412,6 +413,52 @@ public final class SelfTest {
         Table t = new Table("T", "t", Rules.defaults());
         return new mahjong.game.Round(t, 0, 1, 0, 0,
                 new int[]{25000, 25000, 25000, 25000}, 0, 7);
+    }
+
+    // ------------------------------------------------- 重连快照的信息可见性
+
+    /**
+     * {@code state}（重连 / 旁观快照）**不能**泄露别家的隐藏信息。
+     *
+     * <p>回归的是一个真实存在过的漏洞：`state.furiten` 原来把四家的振听原样下发，
+     * 而**临时振听**（放过一张能和牌的张）等价于「他听牌了」—— 改造过的客户端只要
+     * 反复 rejoin 刷新快照，就能读出「谁在听牌」。客户端其实只读自己那一项，
+     * 所以修法是只填请求者自己那一项（数组长度保持 4，老客户端不受影响）。
+     */
+    private static void stateVisibilityTests() {
+        Table t = new Table("T", "t", Rules.defaults());
+        mahjong.game.Round r = new mahjong.game.Round(t, 0, 1, 0, 0,
+                new int[]{25000, 25000, 25000, 25000}, 0, 7);
+        t.currentRound = r;
+        r.hand[0].addAll(parse("1m2m3m4m5m6m7m8m9m1p2p3p4p"));
+        r.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p"));
+        r.furitenPerm[1] = true;   // 座位 1：舍张/立直振听
+        r.furitenTemp[2] = true;   // 座位 2：同巡振听（这一条最能暴露「他在听牌」）
+        check("自检前提：座位 1 振听", r.isFuriten(1));
+        check("自检前提：座位 2 振听", r.isFuriten(2));
+
+        java.util.Map<String, Object> st0 = t.stateFor(0);
+        java.util.Map<String, Object> st1 = t.stateFor(1);
+        java.util.Map<String, Object> stSp = t.stateFor(-1);   // 旁观者
+
+        check("state 不把座位 1 的振听给座位 0", !stateFlag(st0, "furiten", 1));
+        check("state 不把座位 2 的振听给座位 0", !stateFlag(st0, "furiten", 2));
+        check("state 仍把振听给本人（座位 1 自己那项）", stateFlag(st1, "furiten", 1));
+        check("state 旁观者四项全 false", !stateFlag(stSp, "furiten", 1) && !stateFlag(stSp, "furiten", 2));
+        eq("state.furiten 长度仍为 4（老客户端兼容）", stateList(st0, "furiten").size(), 4);
+        check("state.hand 只有自己那 13 张", stateList(st0, "hand").size() == 13);
+        check("state.hand 不含别家的牌", !stateList(st0, "hand").contains("5p"));
+        check("state 旁观者没有手牌", stateList(stSp, "hand").isEmpty());
+    }
+
+    private static java.util.List<?> stateList(java.util.Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        return (v instanceof java.util.List) ? (java.util.List<?>) v : java.util.Collections.emptyList();
+    }
+
+    private static boolean stateFlag(java.util.Map<String, Object> m, String key, int i) {
+        java.util.List<?> l = stateList(m, key);
+        return i < l.size() && Boolean.TRUE.equals(l.get(i));
     }
 
     private static void furitenTests() {
