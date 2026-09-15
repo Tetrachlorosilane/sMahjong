@@ -1,7 +1,9 @@
 # 立直麻将 Qt6 客户端（C++17 / Qt6 Widgets + Network / MinGW 构建）
 cmake_minimum_required(VERSION 3.19)
 
-project(mahjong-client VERSION 1.0.0 LANGUAGES CXX)
+# ⚠ 版本号有**两处**，改动要一起改：这里 + `src/main.cpp` 的 `setApplicationVersion()`
+#   （前者是工程元数据，后者是运行时 `QApplication::applicationVersion()`，发布说明引用的是后者）。
+project(mahjong-client VERSION 1.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
