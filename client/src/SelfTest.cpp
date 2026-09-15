@@ -4,6 +4,7 @@
 #include "model/AutoPolicy.h"
 #include "model/ReplayModel.h"
 #include "model/Settings.h"
+#include "model/TenhouLog.h"
 #include "model/Theme.h"
 #include "model/TableModel.h"
 #include "model/Tile.h"
@@ -1457,6 +1458,187 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 回归：天鳳牌譜导出（tenhou.net/6 的 #json= 形式）----------
+    // 格式参考 github.com/wuye999/tenhou（`生成2.py`）。断言钉的是**结构**与**编码**：
+    // 小局元素个数、每家的配牌 13 张、摸切 = 60、立直 = "r…"、牌号落在天鳳的编码集合里。
+    {
+        auto entry = [](int seq, int to, const QJsonObject& body) {
+            QJsonObject o;
+            o.insert(QStringLiteral("seq"), seq);
+            o.insert(QStringLiteral("t"), seq * 10);
+            o.insert(QStringLiteral("to"), to);
+            o.insert(QStringLiteral("b"), body);
+            return o;
+        };
+        auto obj = [](std::initializer_list<QPair<QString, QJsonValue>> kv) {
+            QJsonObject o;
+            for (const auto& p : kv) {
+                o.insert(p.first, p.second);
+            }
+            return o;
+        };
+        // 牌号编码：11..19 / 21..29 / 31..39 / 41..47，赤五 51/52/53
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("1m"))), QStringLiteral("11"),
+                QStringLiteral("牌谱：1m → 11"));
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("9s"))), QStringLiteral("39"),
+                QStringLiteral("牌谱：9s → 39"));
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("7z"))), QStringLiteral("47"),
+                QStringLiteral("牌谱：7z（中）→ 47"));
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("0p"))), QStringLiteral("52"),
+                QStringLiteral("牌谱：赤五筒 → 52"));
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("5p"))), QStringLiteral("25"),
+                QStringLiteral("牌谱：普通五筒 → 25（赤与不赤是两套码）"));
+        checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("nope"))), QStringLiteral("-1"),
+                QStringLiteral("牌谱：认不出的牌码 → -1"));
+
+        // 用手写的一小局记录跑一遍：配牌 13×4、一次摸牌、一次手切、一次摸切、一次立直手切
+        ReplayModel tp;
+        QJsonArray wall3;
+        for (int i = 0; i < 136; ++i) {
+            wall3.append(i);
+        }
+        QJsonObject meta3;
+        meta3.insert(QStringLiteral("id"), QStringLiteral("TENHOU1"));
+        meta3.insert(QStringLiteral("entries"), 8);
+        meta3.insert(QStringLiteral("names"), QJsonArray{QStringLiteral("甲"), QStringLiteral("乙"),
+                                                         QStringLiteral("丙"), QStringLiteral("丁")});
+        meta3.insert(QStringLiteral("walls"), QJsonArray{wall3});
+        meta3.insert(QStringLiteral("round_at"), QJsonArray{0});
+        tp.setMeta(meta3);
+        QJsonArray arr3;
+        arr3.append(entry(0, -1, obj({{QStringLiteral("ev"), QStringLiteral("replay_round")},
+                                      {QStringLiteral("index"), 0},
+                                      {QStringLiteral("bakaze"), QStringLiteral("E")},
+                                      {QStringLiteral("kyoku"), 1},
+                                      {QStringLiteral("honba"), 0},
+                                      {QStringLiteral("dealer"), 0},
+                                      {QStringLiteral("wall"), wall3}})));
+        const QStringList deal { QStringLiteral("1m"), QStringLiteral("2m"), QStringLiteral("3m"),
+                                 QStringLiteral("4m"), QStringLiteral("5m"), QStringLiteral("6m"),
+                                 QStringLiteral("7m"), QStringLiteral("8m"), QStringLiteral("9m"),
+                                 QStringLiteral("1p"), QStringLiteral("2p"), QStringLiteral("3p"),
+                                 QStringLiteral("4p") };
+        for (int s = 0; s < 4; ++s) {
+            QJsonArray hand;
+            for (const QString& t : deal) {
+                hand.append(t);
+            }
+            if (s == 0) {
+                hand.append(QStringLiteral("9s"));   // 庄家第 14 张 → 算他的第一次摸牌
+            }
+            arr3.append(entry(1 + s, s, obj({{QStringLiteral("ev"), QStringLiteral("round_start")},
+                                             {QStringLiteral("seat"), s},
+                                             {QStringLiteral("hand"), hand},
+                                             {QStringLiteral("round"),
+                                              obj({{QStringLiteral("bakaze"), QStringLiteral("E")},
+                                                   {QStringLiteral("kyoku"), 1},
+                                                   {QStringLiteral("riichi_sticks"), 1}})},
+                                             {QStringLiteral("scores"),
+                                              QJsonArray{25000, 25000, 25000, 25000}},
+                                             {QStringLiteral("dora_indicators"),
+                                              QJsonArray{QStringLiteral("1p")}}})));
+        }
+        // 座位 1：摸 5s → 手切 3p → 摸 2s → 摸切 → 摸 4s → 立直手切 4s
+        arr3.append(entry(5, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                     {QStringLiteral("seat"), 1},
+                                     {QStringLiteral("tile"), QStringLiteral("5s")}})));
+        arr3.append(entry(6, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                                      {QStringLiteral("seat"), 1},
+                                      {QStringLiteral("tile"), QStringLiteral("3p")},
+                                      {QStringLiteral("tsumogiri"), false},
+                                      {QStringLiteral("riichi"), false}})));
+        arr3.append(entry(7, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                     {QStringLiteral("seat"), 1},
+                                     {QStringLiteral("tile"), QStringLiteral("2s")}})));
+        arr3.append(entry(8, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                                      {QStringLiteral("seat"), 1},
+                                      {QStringLiteral("tile"), QStringLiteral("2s")},
+                                      {QStringLiteral("tsumogiri"), true},
+                                      {QStringLiteral("riichi"), false}})));
+        arr3.append(entry(9, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                     {QStringLiteral("seat"), 1},
+                                     {QStringLiteral("tile"), QStringLiteral("4s")}})));
+        arr3.append(entry(10, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                                       {QStringLiteral("seat"), 1},
+                                       {QStringLiteral("tile"), QStringLiteral("4s")},
+                                       {QStringLiteral("tsumogiri"), false},
+                                       {QStringLiteral("riichi"), true}})));
+        arr3.append(entry(11, -1, obj({{QStringLiteral("ev"), QStringLiteral("agari")},
+                                       {QStringLiteral("winner"), 1},
+                                       {QStringLiteral("from"), 0},
+                                       {QStringLiteral("ura_indicators"),
+                                        QJsonArray{QStringLiteral("9m")}}})));
+        tp.addEntries(arr3);
+        tp.build();
+
+        const TenhouLog::Result tr = TenhouLog::build(tp);
+        check(tr.ok, QStringLiteral("牌谱：导出成功"));
+        checkEq(QString::number(tr.rounds), QStringLiteral("1"), QStringLiteral("牌谱：导出 1 个小局"));
+        check(tr.url.startsWith(QStringLiteral("https://tenhou.net/6/#json=")),
+              QStringLiteral("牌谱：链接前缀正确"));
+        const QJsonObject root = QJsonDocument::fromJson(tr.json.toUtf8()).object();
+        check(!root.isEmpty(), QStringLiteral("牌谱：JSON 可解析"));
+        checkEq(QString::number(root.value(QStringLiteral("name")).toArray().size()),
+                QStringLiteral("4"), QStringLiteral("牌谱：四家名字"));
+        const QJsonArray logs = root.value(QStringLiteral("log")).toArray();
+        checkEq(QString::number(logs.size()), QStringLiteral("1"), QStringLiteral("牌谱：log 有 1 局"));
+        const QJsonArray g = logs.at(0).toArray();
+        checkEq(QString::number(g.size()), QStringLiteral("17"),
+                QStringLiteral("牌谱：小局元素个数（4 头部 + 4×3 家 + 1 结果）"));
+        // 头部：[场局次, 本场, 供託] = 東1局0本場1供託
+        const QJsonArray head = g.at(0).toArray();
+        checkEq(QString::number(head.at(0).toInt()), QStringLiteral("0"),
+                QStringLiteral("牌谱：東1局 → 场局次 0"));
+        checkEq(QString::number(head.at(1).toInt()), QStringLiteral("0"), QStringLiteral("牌谱：本场"));
+        checkEq(QString::number(head.at(2).toInt()), QStringLiteral("1"), QStringLiteral("牌谱：供託"));
+        checkEq(QString::number(g.at(1).toArray().size()), QStringLiteral("4"),
+                QStringLiteral("牌谱：四家点数"));
+        checkEq(QString::number(g.at(2).toArray().at(0).toInt()), QStringLiteral("21"),
+                QStringLiteral("牌谱：表宝牌指示牌 1p → 21"));
+        checkEq(QString::number(g.at(3).toArray().at(0).toInt()), QStringLiteral("19"),
+                QStringLiteral("牌谱：里宝牌指示牌 9m → 19"));
+        for (int s = 0; s < 4; ++s) {
+            checkEq(QString::number(g.at(4 + s).toArray().size()), QStringLiteral("13"),
+                    QStringLiteral("牌谱：座位 %1 配牌 13 张").arg(s));
+        }
+        // 取牌：庄家的第 14 张算第一次摸牌；座位 1 摸了 3 张
+        checkEq(QString::number(g.at(8).toArray().size()), QStringLiteral("1"),
+                QStringLiteral("牌谱：庄家第一次摸牌 = 配牌那张第 14 张"));
+        checkEq(QString::number(g.at(8).toArray().at(0).toInt()), QStringLiteral("39"),
+                QStringLiteral("牌谱：庄家摸到 9s → 39"));
+        checkEq(QString::number(g.at(9).toArray().size()), QStringLiteral("3"),
+                QStringLiteral("牌谱：座位 1 摸了 3 张"));
+        // 出牌：手切 = 牌号；摸切 = 60；立直手切 = "r<牌号>"
+        const QJsonArray d1 = g.at(13).toArray();
+        checkEq(QString::number(d1.size()), QStringLiteral("3"),
+                QStringLiteral("牌谱：座位 1 打出 3 张"));
+        checkEq(QString::number(d1.at(0).toInt()), QStringLiteral("23"),
+                QStringLiteral("牌谱：手切 3p → 23"));
+        checkEq(d1.at(1).toString(), QStringLiteral("60"), QStringLiteral("牌谱：摸切 → 60"));
+        checkEq(d1.at(2).toString(), QStringLiteral("r34"),
+                QStringLiteral("牌谱：立直手切 4s → r34"));
+        const QJsonArray res = g.at(16).toArray();
+        checkEq(res.at(0).toString(), QStringLiteral("和了"), QStringLiteral("牌谱：结果 = 和了"));
+        checkEq(QString::number(res.at(1).toInt()), QStringLiteral("1"), QStringLiteral("牌谱：和了家"));
+        checkEq(QString::number(res.at(2).toInt()), QStringLiteral("0"), QStringLiteral("牌谱：放銃家"));
+
+        // 写文件：内容第一行就是那条链接
+        const QString outPath = outDir + QStringLiteral("/tenhou_export.txt");
+        QString werr;
+        check(TenhouLog::writeFile(tr, outPath, &werr), QStringLiteral("牌谱：能写出文件"));
+        {
+            QFile f(outPath);
+            check(f.open(QIODevice::ReadOnly), QStringLiteral("牌谱：文件可读"));
+            const QString first = QString::fromUtf8(f.readLine()).trimmed();
+            check(first.startsWith(QStringLiteral("https://tenhou.net/6/#json=")),
+                  QStringLiteral("牌谱：文件第一行是链接"));
+            f.close();
+        }
+        // 空记录不能崩，也不能谎报成功
+        ReplayModel empty;
+        check(!TenhouLog::build(empty).ok, QStringLiteral("牌谱：空记录导出失败（不谎报成功）"));
+    }
+
     // ---------- 回归：语言文件（协议里只有 ASCII 码，中文全在这里）----------
     // 报文里**不再有中文**：役种/打点/流局原因/错误都只发 ASCII 码，客户端查这张表。
     // 所以这里必须钉住两件事：① 语言文件真的被载入（不是"返回 key"）；② 每个码都有对应文案。
@@ -1476,7 +1658,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("403"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("409"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -1503,7 +1685,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("11"),
                 QStringLiteral("error.* 条目数（含回放的两个码）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("281"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("287"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()

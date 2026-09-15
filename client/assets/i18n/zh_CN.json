@@ -401,5 +401,11 @@
   "ui.settings.pick_pack": "选择材质包（zip）",
   "ui.settings.pick_pack_dir": "或选择一个材质包文件夹",
   "ui.settings.reload": "重新载入",
-  "ui.settings.title": "个人设置"
+  "ui.settings.title": "个人设置",
+  "ui.replay.export": "导出牌谱",
+  "ui.replay.export_done": "已导出 %1（%2 个小局）。把文件里那一行链接粘到浏览器即可在 tenhou.net/6 打开",
+  "ui.replay.export_failed": "导出失败：%1",
+  "ui.replay.export_filter": "牌谱文本 (*.txt)",
+  "ui.replay.export_hint": "导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）",
+  "ui.replay.export_title": "导出天鳳牌谱"
 }

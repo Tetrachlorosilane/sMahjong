@@ -86,7 +86,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("mahjong-client"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.3.1"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.4.0"));
 
     const QStringList args = QCoreApplication::arguments();
 
@@ -284,14 +284,32 @@ int main(int argc, char* argv[])
         const bool wantWall = args.contains(QStringLiteral("--wall"));
         const bool wantGod = args.contains(QStringLiteral("--god"));
         const bool wantResult = args.contains(QStringLiteral("--result"));
+        // `--export-tenhou <out.txt>`：载入完就把天鳳牌譜导出到文件，然后退出
+        //（L4/L3 都能用它做"真路径"验证，不必手点界面）
+        const int exIdx = args.indexOf(QStringLiteral("--export-tenhou"));
+        const QString exportPath = (exIdx >= 0 && exIdx + 1 < args.size())
+                                           ? args.at(exIdx + 1)
+                                           : QString();
         const int stepIdx = args.indexOf(QStringLiteral("--step"));
         const int wantStep = (stepIdx >= 0 && stepIdx + 1 < args.size())
                                      ? args.at(stepIdx + 1).toInt()
                                      : -1;
         auto* fallback = new QTimer(win);
         fallback->setSingleShot(true);
-        auto apply = [win, fallback, wantWall, wantGod, wantResult, wantStep]() {
+        auto apply = [win, fallback, wantWall, wantGod, wantResult, wantStep, exportPath]() {
             fallback->stop();   // 只应用一次（载入成功与兜底定时器谁先到算谁）
+            if (!exportPath.isEmpty()) {
+                QString err;
+                const QString wrote = win->exportTenhou(exportPath, &err);
+                if (wrote.isEmpty()) {
+                    fprintf(stderr, "TENHOU EXPORT FAILED: %s\n", qUtf8Printable(err));
+                } else {
+                    fprintf(stdout, "TENHOU EXPORT: %s\n", qUtf8Printable(wrote));
+                    fflush(stdout);
+                }
+                QCoreApplication::quit();
+                return;
+            }
             if (wantStep >= 0) {
                 win->seekStep(wantStep);
             }
