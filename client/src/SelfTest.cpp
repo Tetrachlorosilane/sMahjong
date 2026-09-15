@@ -1254,6 +1254,27 @@ int run(const QString& outDir)
         const QString path = dir + QStringLiteral("/settings.json");
         QFile::remove(path);
 
+        // 测试夹具的读写：**必须确认成功**。写不进去的话后面的断言就是"静默地什么都没测"
+        // —— 那是这个项目最讨厌的一类假绿（Qt 6.11 起 `QFile::open` 是 `[[nodiscard]]`，
+        //    忽略返回值会直接报警告，这次正好借它把夹具补严）。
+        auto writeFixture = [&](const QString& p, const QByteArray& data) {
+            QFile f(p);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                check(false, QStringLiteral("测试夹具：写不进 %1").arg(p));
+                return;
+            }
+            f.write(data);
+            f.close();
+        };
+        auto readFixture = [&](const QString& p) -> QByteArray {
+            QFile f(p);
+            if (!f.open(QIODevice::ReadOnly)) {
+                check(false, QStringLiteral("测试夹具：读不出 %1").arg(p));
+                return QByteArray();
+            }
+            return f.readAll();
+        };
+
         // ① 文件不存在 → 生成缺省文件，并回报一句说明
         QString note;
         QStringList repaired;
@@ -1277,23 +1298,14 @@ int run(const QString& outDir)
         check(repaired.isEmpty() && note.isEmpty(), QStringLiteral("设置：好文件不报任何问题"));
 
         // ③ 坏 JSON → 缺省值重新生成（原文件备份成 .bak，不直接扔）
-        {
-            QFile f(path);
-            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            f.write("{ this is not json ");
-            f.close();
-        }
+        writeFixture(path, QByteArrayLiteral("{ this is not json "));
         QStringList rep3;
         Settings s3 = Settings::load(path, &rep3, &note);
         checkEq(s3.host, QStringLiteral("127.0.0.1"), QStringLiteral("设置：坏 JSON → 回缺省"));
         checkEq(note, QStringLiteral("settings_broken"), QStringLiteral("设置：回报「文件坏了」"));
         check(QFile::exists(path + QStringLiteral(".bak")), QStringLiteral("设置：坏文件先备份成 .bak"));
-        {
-            QFile f(path);
-            check(f.open(QIODevice::ReadOnly), QStringLiteral("设置：坏文件已被重新生成"));
-            const QJsonDocument d = QJsonDocument::fromJson(f.readAll());
-            check(d.isObject(), QStringLiteral("设置：重新生成的是合法 JSON"));
-        }
+        check(QJsonDocument::fromJson(readFixture(path)).isObject(),
+              QStringLiteral("设置：重新生成的是合法 JSON"));
 
         // ④ 某个键不可用 → **只重置那一个键**，其余保留；认不出的键不丢
         {
@@ -1303,10 +1315,7 @@ int run(const QString& outDir)
             o.insert(QStringLiteral("name"), QStringLiteral("这个昵称实在是太长了超过二十四个字所以不合法不合法"));
             o.insert(QStringLiteral("pack"), QStringLiteral("ok.zip"));
             o.insert(QStringLiteral("future_key"), 42);        // 别的版本写的
-            QFile f(path);
-            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            f.write(QJsonDocument(o).toJson());
-            f.close();
+            writeFixture(path, QJsonDocument(o).toJson());
         }
         QStringList rep4;
         Settings s4 = Settings::load(path, &rep4, &note);
@@ -1319,9 +1328,7 @@ int run(const QString& outDir)
         check(!rep4.contains(QStringLiteral("host")), QStringLiteral("设置：合法键不进重置清单"));
         checkEq(note, QStringLiteral("settings_repaired"), QStringLiteral("设置：回报「有键被重置」"));
         {
-            QFile f(path);
-            f.open(QIODevice::ReadOnly);
-            const QJsonObject o2 = QJsonDocument::fromJson(f.readAll()).object();
+            const QJsonObject o2 = QJsonDocument::fromJson(readFixture(path)).object();
             checkEq(QString::number(o2.value(QStringLiteral("future_key")).toInt()), QStringLiteral("42"),
                     QStringLiteral("设置：认不出的键原样保留（向前兼容）"));
         }
@@ -1349,26 +1356,20 @@ int run(const QString& outDir)
             check(backImg.save(pack + QStringLiteral("/assets/tiles/back.png")),
                   QStringLiteral("材质包：测试牌背位图写出成功"));
             // 一张**坏**位图：内容是垃圾字节，扩展名却是 png
-            QFile bad(pack + QStringLiteral("/assets/tiles/2m.png"));
-            bad.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            bad.write("not an image at all");
-            bad.close();
+            writeFixture(pack + QStringLiteral("/assets/tiles/2m.png"),
+                         QByteArrayLiteral("not an image at all"));
             // 牌背用 svg（验证"矢量与位图混用"）
-            QFile back(pack + QStringLiteral("/assets/tiles/back.svg"));
-            back.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            back.write("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">"
-                       "<rect width=\"10\" height=\"10\" fill=\"#123456\"/></svg>");
-            back.close();
+            writeFixture(pack + QStringLiteral("/assets/tiles/back.svg"),
+                         QByteArrayLiteral("<svg xmlns=\"http://www.w3.org/2000/svg\" "
+                                           "viewBox=\"0 0 10 10\">"
+                                           "<rect width=\"10\" height=\"10\" fill=\"#123456\"/></svg>"));
             QJsonObject m;
             m.insert(QStringLiteral("name"), QStringLiteral("自检材质包"));
             m.insert(QStringLiteral("tiles"), QStringLiteral("assets/tiles"));
             m.insert(QStringLiteral("cloth"), QStringLiteral("/assets/cloth"));   // 带前导斜杠也要认
             m.insert(QStringLiteral("stick"), QStringLiteral("assets/stick"));
             m.insert(QStringLiteral("font"), QStringLiteral("assets/font"));
-            QFile mf(pack + QStringLiteral("/theme.json"));
-            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            mf.write(QJsonDocument(m).toJson());
-            mf.close();
+            writeFixture(pack + QStringLiteral("/theme.json"), QJsonDocument(m).toJson());
         }
         {
             const Theme::Status st = Theme::instance().load(pack);
@@ -1415,10 +1416,7 @@ int run(const QString& outDir)
             QJsonObject m;
             m.insert(QStringLiteral("tiles"), QStringLiteral("../../outside"));
             m.insert(QStringLiteral("cloth"), QStringLiteral("C:/Windows"));
-            QFile mf(pack + QStringLiteral("/theme.json"));
-            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            mf.write(QJsonDocument(m).toJson());
-            mf.close();
+            writeFixture(pack + QStringLiteral("/theme.json"), QJsonDocument(m).toJson());
             const Theme::Status st = Theme::instance().load(pack);
             TileRenderer::clearAssetCache();
             check(st.loaded, QStringLiteral("材质包：清单还是合法的（只是路径不能用）"));
@@ -1441,10 +1439,8 @@ int run(const QString& outDir)
                     QStringLiteral("材质包：作废后全用默认素材"));
         }
         {
-            QFile mf(pack + QStringLiteral("/theme.json"));
-            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
-            mf.write("[1,2,3]");   // 是合法 JSON，但不是对象
-            mf.close();
+            // 是合法 JSON，但不是对象
+            writeFixture(pack + QStringLiteral("/theme.json"), QByteArrayLiteral("[1,2,3]"));
             const Theme::Status st = Theme::instance().load(pack);
             check(!st.loaded && st.problems.contains(QStringLiteral("manifest_broken")),
                   QStringLiteral("材质包：清单不是 JSON 对象 → 作废"));
