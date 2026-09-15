@@ -120,7 +120,11 @@ void TableModel::reset()
     m_hand.clear();
     m_drawn.clear();
     m_drawnSeat = -1;
-    clearGodHands();
+    // ⚠ **不在这里清上帝手牌**：它是"事件流之外"的数据（回放窗口自己推），而回放每次跳转都是
+    //    `reset()` + 从头重放一遍。若在这里清掉，重放到"出牌"那一步时模型里已经没有四家暗牌了
+    //    → 出牌动画只能退回"随机挑一格"（真机上就是这么表现的）。保留上一帧那份，
+    //    正好就是**出牌前**的手牌 → 动画起点才对得上。
+    //   换一场记录时由 `ReplayWindow` 显式 `clearGodHands()`。
 
     m_discards = QVector<QStringList>(4);
     m_discardSide = QVector<QVector<bool>>(4);
@@ -176,12 +180,14 @@ int TableModel::concealedCount(int seat) const
 {
     if (seat < 0 || seat > 3)
         return 0;
-    // 上帝视角（回放「显示他家手牌」）：以真实暗牌为准 —— **布局与绘制必须同源**，
+    // 自家优先：手里的牌就是**画出来的那份**（`m_hand`），布局必须跟着它走，
+    // 不能让上帝数据插进来 —— 那两份数据一旦有分歧，行宽就与画出来的牌对不上。
+    if (seat == m_mySeat && m_hasSeat)
+        return m_hand.size() + (m_drawn.isEmpty() ? 0 : 1);
+    // 回放「显示他家手牌」：别家以真实暗牌为准 —— **布局与绘制必须同源**，
     // 否则行宽按"张数"算、牌按另一份数据画，就会出现张数不对/牌飞出位置不对。
     if (m_godHas[seat])
         return m_godHand[seat].size() + (m_godDrawn[seat].isEmpty() ? 0 : 1);
-    if (seat == m_mySeat && m_hasSeat)
-        return m_hand.size() + (m_drawn.isEmpty() ? 0 : 1);
     int n = 13 - 3 * int(m_melds.at(seat).size());
     if (m_drawnSeat == seat)
         n += 1;
