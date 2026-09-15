@@ -48,7 +48,7 @@ public:
     void setHighlightTiles(const QStringList& tiles);
 
     /**
-     * **上帝视角**（回放「显示他家手牌」）：把四家暗牌交给 `TableModel`，本控件只负责画。
+     * **上帝视角**（回放）：把四家暗牌交给 `TableModel`（本控件只负责画）。
      *
      * @param hands 四家的暗牌（**不含**刚摸到的那张；空串表示该家未知）
      * @param drawn 四家刚摸到的那张（空 = 没有），单独占一格、与自家规则一致
@@ -61,6 +61,16 @@ public:
     void setGodHands(const QVector<QStringList>& hands, const QStringList& drawn);
     /** 关闭上帝视角（恢复实时对局画法）。 */
     void clearGodHands();
+
+    /**
+     * 别家手牌**画牌面还是画牌背**（`setGodHands()` 给的是"知不知道"，这里给的是"显不显示"）。
+     *
+     * <p>回放里四家的暗牌**始终**交给模型：出牌动画的起点要按真实手牌算，
+     * 这件事与"给不给玩家看牌面"是两回事（实时对局把别家的牌随机化起飞，
+     * 是为了不泄露手牌信息；回放没有这个顾虑，且要求动画与手牌位置一致）。
+     * 默认 false = 别家画牌背。
+     */
+    void setGodVisible(bool on);
 
 signals:
     void tileClicked(const QString& tile, int index);
@@ -193,6 +203,9 @@ public:
      */
     int lastFlightFromIndexForTest() const { return m_lastFlightFromIndex; }
 
+    /** 自检用：上一次出牌动画是不是**按真实手牌**定位的（false = 走了"未知手牌"的随机兜底）。 */
+    bool lastFlightWasExactForTest() const { return m_lastFlightExact; }
+
 private:
     /** 手牌区布局（局部坐标）：直接转发到 `m_layout`。 */
     HandLayout layoutHand(int pos) const;
@@ -221,7 +234,9 @@ private:
     QVector<Flight> m_flights;
     QTimer m_animTimer;
     bool m_seatDataValid = false;
+    bool m_godVisible = false;          // 别家手牌画牌面（回放「显示他家手牌」）
     int m_lastFlightFromIndex = -1;     // 自检用：上次出牌动画的起点格（-1 = 摸牌槽）
+    bool m_lastFlightExact = false;     // 自检用：上次动画是否按真实手牌定位
 
     QRectF m_plateRects[4];             // 四家名牌的屏幕矩形（点击切视角用）
 };

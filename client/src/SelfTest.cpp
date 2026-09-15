@@ -1597,6 +1597,8 @@ int run(const QString& outDir)
             const int idx = tv.lastFlightFromIndexForTest();
             check(idx >= 0 && idx < ten.size(),
                   QStringLiteral("他家手牌：手切动画从手牌行里的一格起飞（第 %1 格）").arg(idx));
+            check(tv.lastFlightWasExactForTest(),
+                  QStringLiteral("他家手牌：手切动画按**真实手牌**定位（不是随机兜底）"));
             // 摸切则固定从摸牌槽起飞
             gm.applyEvent(obj({{QStringLiteral("ev"), QStringLiteral("discard")},
                                {QStringLiteral("seat"), 2},
@@ -1605,10 +1607,100 @@ int run(const QString& outDir)
             checkEq(QString::number(tv.lastFlightFromIndexForTest()), QStringLiteral("-1"),
                     QStringLiteral("他家手牌：摸切动画从摸牌槽起飞"));
 
+            // ④ **复刻 `ReplayWindow::replayTo` 的真实顺序**（这条是上一版的漏网之鱼）：
+            //    回放窗口每次跳转都是 `reset()` + 从头重放一遍。若 `reset()` 把上帝手牌清掉，
+            //    重放到"出牌"那一步时模型里就没有四家暗牌了 → 动画只能退回随机兜底
+            //    （真机上的表现正是"仍然从随机位置打出"，而当时的自检**绕过**了 reset，
+            //      所以照样全绿 —— 教训：自检必须走与 App 同一条路径）。
+            gm.clearGodHands();
+            gm.setGodHand(2, ten, QString());          // 上一帧：出牌前的真实手牌
+            gm.reset();                                // replayTo 的第一步
+            check(gm.hasGodHand(2),
+                  QStringLiteral("上帝手牌：`reset()` 不会清掉它（回放重放要靠上一帧那份算动画）"));
+            checkEq(QString::number(gm.concealedCount(2)), QStringLiteral("10"),
+                    QStringLiteral("上帝手牌：reset 之后布局仍按真实张数"));
+            gm.applyEvent(obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                               {QStringLiteral("seat"), 2},
+                               {QStringLiteral("tile"), QStringLiteral("1m")},
+                               {QStringLiteral("tsumogiri"), false}}));
+            check(tv.lastFlightWasExactForTest() && tv.lastFlightFromIndexForTest() >= 0,
+                  QStringLiteral("上帝手牌：reset + 重放之后，出牌动画仍然按真实手牌定位"
+                                 "（第 %1 格）").arg(tv.lastFlightFromIndexForTest()));
+            // 换一场记录时才显式清掉
+            gm.clearGodHands();
+            gm.reset();
+            check(!gm.hasGodHand(2), QStringLiteral("上帝手牌：换记录时显式清掉"));
+
             gm.clearGodHands();
             check(!gm.hasGodHand(2), QStringLiteral("他家手牌：可以关掉"));
             checkEq(QString::number(gm.concealedCount(2)), QStringLiteral("13"),
                     QStringLiteral("关掉后回到「13 − 3×副露」的实时对局口径"));
+        }
+
+        // ---------- 回归：回放的「下一步」必须走**真实的**动画路径 ----------
+        // 上一个版本的教训：自检自己 setGodHand + applyEvent（**绕过** `replayTo`），
+        // 于是"reset 把上帝手牌清掉 → 动画退回随机"这个真机 bug 完全测不到。
+        // 这里改成：塞一份手写记录 → `loadForTest()` → `nextOpForTest()`（与点按钮同一个槽），
+        // 再读牌桌的"这次动画是不是按真实手牌定位的"。
+        {
+            ReplayWindow rw;
+            rw.resize(1200, 800);
+            ReplayModel* rm = rw.replayForTest();
+
+            QJsonArray wall2;
+            for (int i = 0; i < 136; ++i) {
+                wall2.append(i);
+            }
+            QJsonObject meta2;
+            meta2.insert(QStringLiteral("id"), QStringLiteral("GODPATH"));
+            meta2.insert(QStringLiteral("entries"), 7);
+            meta2.insert(QStringLiteral("names"), QJsonArray{QStringLiteral("甲"), QStringLiteral("乙"),
+                                                             QStringLiteral("丙"), QStringLiteral("丁")});
+            meta2.insert(QStringLiteral("walls"), QJsonArray{wall2});
+            meta2.insert(QStringLiteral("round_at"), QJsonArray{0});
+            rm->setMeta(meta2);
+
+            QJsonArray arr2;
+            arr2.append(entry(0, -1, obj({{QStringLiteral("ev"), QStringLiteral("replay_round")},
+                                          {QStringLiteral("index"), 0},
+                                          {QStringLiteral("bakaze"), QStringLiteral("E")},
+                                          {QStringLiteral("kyoku"), 1},
+                                          {QStringLiteral("dealer"), 0},
+                                          {QStringLiteral("wall"), wall2}})));
+            const QStringList h1 { QStringLiteral("1m"), QStringLiteral("2m"), QStringLiteral("3m"),
+                                   QStringLiteral("4m"), QStringLiteral("5m"), QStringLiteral("6m"),
+                                   QStringLiteral("7m"), QStringLiteral("8m"), QStringLiteral("9m"),
+                                   QStringLiteral("1p"), QStringLiteral("2p"), QStringLiteral("3p"),
+                                   QStringLiteral("4p") };
+            for (int s = 0; s < 4; ++s) {
+                QJsonArray hand;
+                for (const QString& t : h1) {
+                    hand.append(t);
+                }
+                arr2.append(entry(1 + s, s, obj({{QStringLiteral("ev"), QStringLiteral("round_start")},
+                                                 {QStringLiteral("seat"), s},
+                                                 {QStringLiteral("hand"), hand}})));
+            }
+            // 座位 1 摸一张、再手切一张 **7m**（它是手牌第 7 格，理牌后位置明确）
+            arr2.append(entry(5, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                         {QStringLiteral("seat"), 1},
+                                         {QStringLiteral("tile"), QStringLiteral("9s")}})));
+            arr2.append(entry(6, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                                          {QStringLiteral("seat"), 1},
+                                          {QStringLiteral("tile"), QStringLiteral("7m")},
+                                          {QStringLiteral("tsumogiri"), false}})));
+            rm->addEntries(arr2);
+            rw.loadForTest();                 // 光标落在"配牌完成"那一步
+            rw.tableForTest()->grab();        // 画一帧（记录"上一帧的手牌"）
+
+            rw.nextOpForTest();               // → 摸牌（不播动画）
+            rw.tableForTest()->grab();
+            rw.nextOpForTest();               // → 打出 7m（**这一步要播动画**）
+            const int fi = rw.tableForTest()->lastFlightFromIndexForTest();
+            check(rw.tableForTest()->lastFlightWasExactForTest(),
+                  QStringLiteral("回放「下一步」：出牌动画按**真实手牌**定位（不是随机兜底）"));
+            checkEq(QString::number(fi), QStringLiteral("6"),
+                    QStringLiteral("回放「下一步」：7m 起飞的格子 = 它在理牌后手牌里的下标"));
         }
 
         // 回放入口：大厅一个按钮；结算弹窗要拿到 replay_id 才显示「看本局回放」

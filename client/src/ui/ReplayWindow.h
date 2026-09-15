@@ -67,6 +67,20 @@ public:
     /** 跳到第 `step` 步（0 起；越界会被钳制）。 */
     void seekStep(int step);
 
+    // ---- 自检用（**不连网**也能走真实的载入 / 跳转 / 动画路径）----
+    // ⚠ 这几个口子是被一个真实 bug 逼出来的：上帝手牌曾经在 `TableModel::reset()` 里被清掉，
+    //   而回放每次跳转都是 reset + 从头重放 → 动画拿不到真实手牌，退回"随机挑一格"。
+    //   当时的自检**绕过**了 `replayTo`（自己 setGodHand 再 applyEvent），所以照样全绿。
+    //   教训：能走真路径就别走旁路。
+    /** 内部记录模型（塞一份手写的记录进去）。 */
+    ReplayModel* replayForTest() { return m_replay; }
+    /** 不连网，按"载入完成"的流程把已塞好的记录建索引 + 定位（等价于 `finishLoad()`）。 */
+    void loadForTest();
+    /** 等价于点一次「下一步」（**完全相同的带动画路径**）。 */
+    void nextOpForTest();
+    /** 牌桌控件（读 `lastFlight…ForTest()` 用）。 */
+    TableView* tableForTest() { return m_view; }
+
 signals:
     /** 记录载入并建好索引（命令行据此在"真的能看了"之后再执行 `--wall` / `--god` / `--step`）。 */
     void replayLoaded();
