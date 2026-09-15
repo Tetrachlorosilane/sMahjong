@@ -95,6 +95,15 @@ public:
     int roundStart(int round) const;               // 小局第一条 entry
     int nextRoundStart(int index) const;
     int prevRoundStart(int index) const;
+    /**
+     * 该小局的**结算事件**下标（`agari` / `ryuukyoku`，取该小局最后一条）。
+     *
+     * <p>回放里「每小局结束都给一次结算界面」要看这条：结算界面的 HTML 由那条事件 + 当时
+     * 的模型状态渲染，所以必须能定位到"是哪一条"，而不是靠 `round_end` 里的布尔字段。
+     *
+     * @return entry 下标；`-1` = 该小局还没打完（记录里没有结算事件）。
+     */
+    int roundResultEntry(int round) const;
 
     // ---- 「步」= 一个逻辑操作 ----
     // 记录里一条事件可能有多份（`round_start` 按座位各发一份），所以**步**才是
@@ -119,7 +128,8 @@ public:
     /** 上帝视角的四家手牌（**按牌码**，已扣掉打出与副露的牌）。 */
     struct GodState
     {
-        QStringList hands[4];
+        QStringList hands[4];                            // **含**刚摸到的那张（与 `round_start` + `draw` 的叠加一致）
+        QString drawn[4];                                // 刚摸到、还没打出的那张（`TableView::setGodHands` 要单列一格）
         QStringList rivers[4];
         QVector<QPair<QString, QStringList>> melds[4];   // kind, tiles
         QVector<int> scores;

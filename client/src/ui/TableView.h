@@ -47,8 +47,21 @@ public:
     void showToast(const QString& text, const QColor& color = QColor(0xFF, 0xD2, 0x4A));
     void setHighlightTiles(const QStringList& tiles);
 
+    /**
+     * **上帝视角**（回放专用）：给出四家手牌，非自家也画成牌面而不是牌背。
+     *
+     * @param hands 四家的暗牌（**不含**刚摸到的那张；空串表示该家未知）
+     * @param drawn 四家刚摸到的那张（空 = 没有），单独占一格、与自家规则一致
+     *
+     * 传空（不调用）即恢复实时对局的行为：只画自家手牌，别家画牌背。
+     * 回放的「显示其他家手牌」开关就是切这个。
+     */
+    void setGodHands(const QVector<QStringList>& hands, const QStringList& drawn);
+
 signals:
     void tileClicked(const QString& tile, int index);
+    /** 点了某家的名牌 → 请求切到那家的视角（回放用）。 */
+    void seatClicked(int seat);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -196,6 +209,11 @@ private:
     QVector<Flight> m_flights;
     QTimer m_animTimer;
     bool m_seatDataValid = false;
+
+    // 回放：上帝视角的四家手牌 / 摸牌（空 = 按实时对局画牌背）
+    QVector<QStringList> m_godHands;
+    QStringList m_godDrawn;
+    QRectF m_plateRects[4];             // 四家名牌的屏幕矩形（点击切视角用）
 };
 
 using TableWidget = TableView;

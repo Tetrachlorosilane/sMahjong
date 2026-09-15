@@ -217,6 +217,23 @@ int ReplayModel::roundOpenEnd(int round) const
     return last;
 }
 
+int ReplayModel::roundResultEntry(int round) const
+{
+    const int start = roundStart(round);
+    if (start < 0) {
+        return -1;
+    }
+    const int stop = (round + 1 < m_rounds.size()) ? m_rounds.at(round + 1).start : m_entries.size();
+    int found = -1;
+    for (int i = start; i < stop && i < m_entries.size(); ++i) {
+        const QString ev = m_entries.at(i).ev();
+        if (ev == QLatin1String("agari") || ev == QLatin1String("ryuukyoku")) {
+            found = i;   // 取该小局**最后**一条（多家和了时服务端会逐条下发）
+        }
+    }
+    return found;
+}
+
 int ReplayModel::roundOf(int index) const
 {
     if (index < 0 || index >= m_roundOf.size()) {
@@ -462,6 +479,7 @@ void ReplayModel::buildGod(int index) const
                 st.hands[s].clear();
                 st.rivers[s].clear();
                 st.melds[s].clear();
+                st.drawn[s].clear();
             }
             continue;
         }
@@ -469,6 +487,7 @@ void ReplayModel::buildGod(int index) const
             const int seat = e.seat();
             if (seat >= 0 && e.to == seat) {
                 st.hands[seat].clear();
+                st.drawn[seat].clear();
                 for (const QJsonValue& v : e.body.value(QStringLiteral("hand")).toArray()) {
                     st.hands[seat] << v.toString();
                 }
@@ -478,6 +497,7 @@ void ReplayModel::buildGod(int index) const
             const QString tile = e.body.value(QStringLiteral("tile")).toString();
             if (seat >= 0 && !tile.isEmpty()) {
                 st.hands[seat] << tile;
+                st.drawn[seat] = tile;   // 摸到还没打出 → 单独占一格（与自家实时对局一致）
             }
         } else if (ev == QLatin1String("discard")) {
             const int seat = e.seat();
@@ -485,9 +505,13 @@ void ReplayModel::buildGod(int index) const
             if (seat >= 0 && !tile.isEmpty()) {
                 st.hands[seat].removeOne(tile);
                 st.rivers[seat] << tile;
+                st.drawn[seat].clear();   // 打出去了，摸牌格空出来
             }
         } else if (ev == QLatin1String("meld")) {
             const int seat = e.seat();
+            if (seat >= 0) {
+                st.drawn[seat].clear();
+            }
             const QString kind = e.body.value(QStringLiteral("kind")).toString();
             QStringList tiles;
             for (const QJsonValue& v : e.body.value(QStringLiteral("tiles")).toArray()) {
@@ -514,6 +538,9 @@ void ReplayModel::buildGod(int index) const
         } else if (ev == QLatin1String("round_end") || ev == QLatin1String("ryuukyoku")
                    || ev == QLatin1String("agari")) {
             // 结算事件里带最新点数，用来显示四家分数
+            for (int s = 0; s < 4; ++s) {
+                st.drawn[s].clear();   // 一局结束，没有"刚摸到"这回事了
+            }
             if (e.body.contains(QStringLiteral("scores"))) {
                 st.scores.clear();
                 for (const QJsonValue& v : e.body.value(QStringLiteral("scores")).toArray()) {

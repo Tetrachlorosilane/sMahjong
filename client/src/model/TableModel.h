@@ -117,6 +117,16 @@ public:
     QString askTile() const;
     void clearAsk();
 
+    /**
+     * **静默模式**：不再发 `discarded` / `calledFromRiver`（即不放动画）。
+     *
+     * <p>回放**跳转**时要把"从本小局开头到目标步"的事件一次性重放，这些历史出牌不该再做动画
+     * —— 否则每按一次「下一步」，四家都会把前几巡的牌重打一遍（真机上就是这个症状）。
+     * 只有"前进到的那一步"本身需要动画：调用方重放时把除最后一条以外都设成静默即可。
+     */
+    void setSilent(bool on) { m_silent = on; }
+    bool silent() const { return m_silent; }
+
     // ---- 结算 ----
     QJsonObject lastAgari() const { return m_agari; }
     QJsonObject lastRyuukyoku() const { return m_ryuukyoku; }
@@ -140,6 +150,7 @@ private:
     static bool isWinningForm(const QVector<int>& counts, int meldCount);
 
     bool m_hasSeat = false;
+    bool m_silent = false;
     int m_mySeat = 0;
     int m_dealer = 0;
     QString m_bakaze = QStringLiteral("E");

@@ -17,6 +17,7 @@
 #include "../model/ReplayModel.h"
 #include "../model/TableModel.h"
 #include "../net/NetClient.h"
+#include "ResultDialog.h"
 #include "TableView.h"
 #include "WallView.h"
 
@@ -66,6 +67,7 @@ void ReplayWindow::buildUi()
             if (m_net != nullptr && m_net->isConnected()) {
                 m_replay->reset();
                 m_ops->clear();
+                m_opsRound = -1;
                 requestChunk(0);
             }
         }
@@ -73,8 +75,9 @@ void ReplayWindow::buildUi()
     top->addWidget(openBtn);
     root->addLayout(top);
 
-    // ---- 导航条 ----
+    // ---- 导航条（**两行**：控件太多，挤一行会把「视角」下拉压成一个字）----
     auto* nav = new QHBoxLayout();
+    auto* nav2 = new QHBoxLayout();
     auto mkBtn = [&](const char* key, const char* slotKey) {
         auto* b = new QPushButton(lang::t(QString::fromLatin1(key)), this);
         b->setToolTip(lang::t(QString::fromLatin1(slotKey)));
@@ -105,33 +108,57 @@ void ReplayWindow::buildUi()
     m_jump = new QPushButton(lang::t(QStringLiteral("ui.replay.jump")), this);
     connect(m_jump, &QPushButton::clicked, this, &ReplayWindow::onJumpTurn);
     nav->addWidget(m_jump);
+    nav->addStretch(1);
 
-    nav->addWidget(new QLabel(lang::t(QStringLiteral("ui.replay.round")), this));
+    // 第二行：小局 / 视角 / 三个开关
+    nav2->addWidget(new QLabel(lang::t(QStringLiteral("ui.replay.round")), this));
     m_roundBox = new QComboBox(this);
+    m_roundBox->setMinimumWidth(130);
     connect(m_roundBox, QOverload<int>::of(&QComboBox::activated), this, &ReplayWindow::onPickRound);
-    nav->addWidget(m_roundBox);
+    nav2->addWidget(m_roundBox);
 
-    nav->addWidget(new QLabel(lang::t(QStringLiteral("ui.replay.view_seat")), this));
+    nav2->addWidget(new QLabel(lang::t(QStringLiteral("ui.replay.view_seat")), this));
     m_seatBox = new QComboBox(this);
+    m_seatBox->setMinimumWidth(120);
     for (int s = 0; s < 4; ++s) {
         m_seatBox->addItem(QStringLiteral("%1").arg(s + 1), s);
     }
     connect(m_seatBox, QOverload<int>::of(&QComboBox::activated), this, &ReplayWindow::onSeatChanged);
-    nav->addWidget(m_seatBox);
+    nav2->addWidget(m_seatBox);
+
+    // 需求：一个切换键，切换是否显示非自家手牌（上帝视角）。
+    m_godBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.god_hands")), this);
+    m_godBtn->setCheckable(true);
+    m_godBtn->setToolTip(lang::t(QStringLiteral("ui.replay.god_hands_hint")));
+    connect(m_godBtn, &QPushButton::toggled, this, &ReplayWindow::onGodToggled);
+    nav2->addWidget(m_godBtn);
+
+    m_resultBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.round_result")), this);
+    m_resultBtn->setToolTip(lang::t(QStringLiteral("ui.replay.round_result_hint")));
+    connect(m_resultBtn, &QPushButton::clicked, this, &ReplayWindow::onRoundResult);
+    nav2->addWidget(m_resultBtn);
 
     m_wallBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.wall")), this);
     connect(m_wallBtn, &QPushButton::clicked, this, &ReplayWindow::showWall);
-    nav->addWidget(m_wallBtn);
-    nav->addStretch(1);
+    nav2->addWidget(m_wallBtn);
+    nav2->addStretch(1);
+
     root->addLayout(nav);
+    root->addLayout(nav2);
 
     // ---- 主体：左（牌桌）/ 右（操作列表 + 聊天 + 记录列表）----
     auto* split = new QSplitter(Qt::Horizontal, this);
     m_view = new TableView(split);
     m_view->setModel(m_model);
+    // 点名牌 = 切到那家的视角（与下拉框同一条路径）
+    connect(m_view, &TableView::seatClicked, this, &ReplayWindow::onSeatClicked);
     split->addWidget(m_view);
 
     auto* right = new QSplitter(Qt::Vertical, split);
+    // 操作列表标题：写明"这里只装当前小局的记录"（需求：按小局切割）
+    m_opsTitle = new QLabel(right);
+    m_opsTitle->setStyleSheet(QStringLiteral("color:#9AA3B2;padding:2px 4px;"));
+    right->addWidget(m_opsTitle);
     m_ops = new QListWidget(right);
     connect(m_ops, &QListWidget::itemClicked, this, &ReplayWindow::onListClicked);
     right->addWidget(m_ops);
@@ -141,6 +168,9 @@ void ReplayWindow::buildUi()
     m_list = new QListWidget(right);
     connect(m_list, &QListWidget::itemDoubleClicked, this, &ReplayWindow::onListDoubleClicked);
     right->addWidget(m_list);
+    // 操作列表是主角：多给点高度（聊天默认空着，用不了那么多）。
+    // ⚠ 这里有 **4 个**子控件（标题标签 + 操作列表 + 聊天 + 记录列表），setSizes 必须给 4 个数。
+    right->setSizes({26, 440, 190, 170});
     split->addWidget(right);
     split->setStretchFactor(0, 3);
     split->setStretchFactor(1, 2);
@@ -155,7 +185,7 @@ void ReplayWindow::buildUi()
 void ReplayWindow::setEnabledAll(bool on)
 {
     for (QPushButton* b : {m_prevOp, m_nextOp, m_prevTurn, m_nextTurn, m_prevRound, m_nextRound,
-                           m_play, m_jump, m_wallBtn}) {
+                           m_play, m_jump, m_wallBtn, m_godBtn, m_resultBtn}) {
         if (b != nullptr) {
             b->setEnabled(on);
         }
@@ -212,6 +242,7 @@ void ReplayWindow::onEvent(const QJsonObject& ev)
         if (!m_pendingId.isEmpty()) {
             m_replay->reset();
             m_ops->clear();
+            m_opsRound = -1;
             requestChunk(0);
         }
         return;
@@ -254,6 +285,7 @@ void ReplayWindow::onEvent(const QJsonObject& ev)
             }
             m_currentId = id;
             m_ops->clear();
+            m_opsRound = -1;
             setStatus(lang::t(QStringLiteral("ui.replay.loading")).arg(m_replay->total()));
         }
         const QJsonArray entries = ev.value(QStringLiteral("entries")).toArray();
@@ -293,11 +325,12 @@ void ReplayWindow::finishLoad()
     for (int i = 0; i < m_replay->roundCount(); ++i) {
         m_roundBox->addItem(m_replay->roundText(i));
     }
-    // 操作列表按**步**（不是按 entry）：一次配牌/一次摸牌各占一行，
-    // 否则"下一步"要按四次才过一个操作（真机第一版就是那样）。
-    for (int step = 0; step < m_replay->stepCount(); ++step) {
-        const int at = m_replay->stepEntry(step);
-        m_ops->addItem(QStringLiteral("%1. %2").arg(step + 1).arg(m_replay->describe(at)));
+    m_opsRound = -1;          // 强制按小局重建操作列表
+    m_ops->clear();
+    // 视角下拉改用**玩家名**（1/2/3/4 看不出谁是谁；点名牌切视角也靠这个同步）
+    m_seatBox->clear();
+    for (int s = 0; s < 4; ++s) {
+        m_seatBox->addItem(QStringLiteral("%1 (%2)").arg(m_replay->playerName(s)).arg(s + 1), s);
     }
     setEnabledAll(true);
     setStatus(lang::t(QStringLiteral("ui.replay.loaded"))
@@ -306,18 +339,64 @@ void ReplayWindow::finishLoad()
                       .arg(m_replay->stepCount()));
     const int open0 = m_replay->roundOpenEnd(0);
     seek(open0 >= 0 ? open0 : 0);
+    emit replayLoaded();
+}
+
+void ReplayWindow::setGodMode(bool on)
+{
+    if (m_godBtn != nullptr) {
+        m_godBtn->setChecked(on);   // toggled → onGodToggled → updateGodView
+    } else {
+        m_godOn = on;
+        updateGodView();
+    }
+}
+
+void ReplayWindow::openRoundResult()
+{
+    showRoundResult(false);
+}
+
+void ReplayWindow::seekStep(int step)
+{
+    if (m_replay == nullptr || m_replay->total() == 0) {
+        return;
+    }
+    // 钳到 [0, 最后一步]：`--step 99999` 就是"跳到末尾"（截图脚本按这个用）
+    const int s = qBound(0, step, qMax(0, m_replay->stepCount() - 1));
+    const int at = m_replay->stepEntry(s);
+    seek(at >= 0 ? at : m_cursor);
 }
 
 void ReplayWindow::seek(int index)
+{
+    replayTo(index, false);
+}
+
+void ReplayWindow::seekAnimated(int index)
+{
+    replayTo(index, true);
+}
+
+void ReplayWindow::replayTo(int index, bool animate)
 {
     if (m_replay->total() == 0) {
         return;
     }
     const int n = m_replay->entries().size();
-    m_cursor = qBound(0, index, qMax(0, n - 1));
+    const int target = qBound(0, index, qMax(0, n - 1));
+    // 「前进一个操作」的**唯一**判据：目标恰好是当前步的下一步。
+    // ⚠ 少了这个判据，走到末尾时 `nextStepEntry()` 会返回当前 entry，
+    //    于是"整个小局都算最后一步" → 一次点击把整局的弃牌动画全播一遍（就是那个渲染 bug）。
+    const bool forward = animate && target > m_cursor
+                         && target == m_replay->nextStepEntry(m_cursor);
+    m_cursor = target;
     const int round = m_replay->roundOf(m_cursor);
     const int start = m_replay->roundStart(round);
-    // 从**本小局的第一条**重放：一个小局最多几百条，够快，且不必给每种事件写反向操作
+    // 从**本小局的第一条**重放：一个小局最多几百条，够快，且不必给每种事件写反向操作。
+    // 重放本身**一律静默**，只有"落在最后一步里"的事件才允许播动画 —— 否则每跳一次
+    // 就把前几巡的弃牌动画重打一遍（需求点名的渲染 bug）。
+    const int finalStep = m_replay->stepOfEntry(m_cursor);
     m_model->reset();
     m_model->setMySeat(m_viewSeat);
     for (int i = qMax(0, start); i <= m_cursor; ++i) {
@@ -327,9 +406,61 @@ void ReplayWindow::seek(int index)
         if (e.to >= 0 && e.to != m_viewSeat) {
             continue;
         }
+        m_model->setSilent(!(forward && m_replay->stepOfEntry(i) == finalStep));
         m_model->applyEvent(e.body);
     }
+    m_model->setSilent(true);   // 复原：之后的任何重建都不播动画
     refreshUi();
+}
+
+void ReplayWindow::rebuildOps(int round)
+{
+    m_ops->clear();
+    m_opsRound = round;
+    const int start = m_replay->roundStart(round);
+    if (start < 0) {
+        m_opsTitle->setText(QString());
+        return;
+    }
+    const int stop = (round + 1 < m_replay->roundCount()) ? m_replay->roundStart(round + 1)
+                                                          : m_replay->entries().size();
+    for (int i = start; i < stop; ++i) {
+        // 一步一个代表 entry（配牌/摸牌各算一步），与服务端的下发粒度对齐
+        if (m_replay->stepEntry(m_replay->stepOfEntry(i)) != i) {
+            continue;
+        }
+        auto* item = new QListWidgetItem(
+                QStringLiteral("%1. %2")
+                        .arg(m_replay->stepOfEntry(i) + 1)
+                        .arg(m_replay->describe(i)));
+        item->setData(Qt::UserRole, m_replay->stepOfEntry(i));
+        m_ops->addItem(item);
+    }
+    m_opsTitle->setText(lang::t(QStringLiteral("ui.replay.ops_title"))
+                                .arg(m_replay->roundText(round))
+                                .arg(m_ops->count()));
+}
+
+void ReplayWindow::updateGodView()
+{
+    if (!m_godOn) {
+        // 不传 = 恢复实时对局的画法（别家画牌背）
+        m_view->setGodHands(QVector<QStringList>(), QStringList());
+        return;
+    }
+    const ReplayModel::GodState& god = m_replay->godState(m_cursor);
+    QVector<QStringList> hands;
+    QStringList drawn;
+    for (int s = 0; s < 4; ++s) {
+        QStringList h = god.hands[s];
+        // `god.hands` 含刚摸到的那张；牌桌要求它单独占一格，所以这里要摘出来
+        if (!god.drawn[s].isEmpty()) {
+            h.removeOne(god.drawn[s]);
+        }
+        hands << h;
+        drawn << god.drawn[s];
+    }
+    m_view->setGodHands(hands, drawn);
 }
 
 void ReplayWindow::refreshUi()
@@ -349,13 +480,27 @@ void ReplayWindow::refreshUi()
     const int maxTurn = m_replay->maxTurn(round);
     m_turnSpin->setRange(1, qMax(1, maxTurn));
     m_turnSpin->setValue(m_replay->turnOf(m_cursor));
-    if (m_ops->currentRow() != step) {
-        const QSignalBlocker block(m_ops);
-        m_ops->setCurrentRow(step);
-        if (m_ops->currentItem() != nullptr) {
-            m_ops->scrollToItem(m_ops->currentItem(), QListWidget::PositionAtCenter);
+    // 操作列表按小局切割：换小局才重建（需求：每小局只展示对应的记录）
+    if (m_opsRound != round) {
+        rebuildOps(round);
+    }
+    // 当前行 = 本小局内的第几条（列表下标与本小局步骤序号一一对应）
+    int row = -1;
+    for (int i = 0; i < m_ops->count(); ++i) {
+        if (m_ops->item(i)->data(Qt::UserRole).toInt() == step) {
+            row = i;
+            break;
         }
     }
+    if (row >= 0 && m_ops->currentRow() != row) {
+        const QSignalBlocker block(m_ops);
+        m_ops->setCurrentRow(row);
+        m_ops->scrollToItem(m_ops->item(row), QListWidget::PositionAtCenter);
+    }
+    // 「本局结算」只有该小局真的打完了才可点
+    const bool done = m_replay->roundResultEntry(round) >= 0
+                      && m_cursor >= m_replay->roundResultEntry(round);
+    m_resultBtn->setEnabled(done);
     // 聊天：只显示当前步之前的发言（需求：以操作分割、顺序稳定）
     QStringList chat;
     const QVector<ReplayEntry>& entries = m_replay->entries();
@@ -367,6 +512,7 @@ void ReplayWindow::refreshUi()
         }
     }
     m_chat->setPlainText(chat.join(QStringLiteral("\n")));
+    updateGodView();
     if (m_wall != nullptr) {
         m_wall->setState(m_replay, round, m_cursor);
     }
@@ -379,7 +525,8 @@ void ReplayWindow::onPrevOp()
 
 void ReplayWindow::onNextOp()
 {
-    seek(m_replay->nextStepEntry(m_cursor));
+    // 唯一播动画的入口之一：前进**一个**操作
+    seekAnimated(m_replay->nextStepEntry(m_cursor));
 }
 
 void ReplayWindow::onPrevTurn()
@@ -447,8 +594,90 @@ void ReplayWindow::onSeatChanged(int index)
     seek(m_cursor);
 }
 
+void ReplayWindow::onSeatClicked(int seat)
+{
+    // 需求：点牌桌上的 ID 框（名牌）切到那家的视角。与下拉框走同一条路径，
+    // 所以顺带把下拉框也同步过去（否则两处显示会不一致）。
+    if (seat < 0 || seat >= 4 || seat == m_viewSeat) {
+        return;
+    }
+    m_viewSeat = seat;
+    const QSignalBlocker block(m_seatBox);
+    m_seatBox->setCurrentIndex(m_seatBox->findData(seat));
+    seek(m_cursor);
+}
+
+void ReplayWindow::onGodToggled(bool on)
+{
+    m_godOn = on;
+    updateGodView();
+    m_view->update();
+}
+
+void ReplayWindow::onRoundResult()
+{
+    showRoundResult(false);
+}
+
+void ReplayWindow::showRoundResult(bool resumeAfter)
+{
+    if (m_replay == nullptr || m_replay->total() == 0) {
+        return;
+    }
+    const int round = m_replay->roundOf(m_cursor);
+    const int at = m_replay->roundResultEntry(round);
+    if (at < 0) {
+        setStatus(lang::t(QStringLiteral("ui.replay.no_round_result"))
+                          .arg(m_replay->roundText(round)));
+        return;
+    }
+    // 结算画面要按"结算那一刻"的状态渲染（可能比当前光标更靠后）
+    if (m_cursor < at) {
+        seek(at);
+    }
+    m_resumeAfterResult = resumeAfter;
+    m_roundResultOpen = true;
+    if (m_playing) {
+        m_timer->stop();   // 结算期间**暂停播放**，直到玩家确认
+    }
+    const ReplayEntry& e = m_replay->entries().at(at);
+    const bool agari = (e.ev() == QLatin1String("agari"));
+    auto* dlg = new ResultDialog(agari ? lang::t(QStringLiteral("ui.result.title_agari"))
+                                       : lang::t(QStringLiteral("ui.result.title_ryuukyoku")),
+                                 agari ? ResultDialog::agariHtml(e.body, m_model)
+                                       : ResultDialog::ryuukyokuHtml(e.body, m_model),
+                                 agari ? ResultDialog::schematicOf(e.body, m_model, true)
+                                       : QString(),
+                                 this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    // ⚠ 故意**不调** `startCountdown()`：回放里没有"5 秒后自动开下一局"这回事，
+    //    必须等玩家点确认（需求）。
+    connect(dlg, &QDialog::finished, this, [this, round](int) {
+        m_roundResultOpen = false;
+        const bool resume = m_resumeAfterResult;
+        m_resumeAfterResult = false;
+        if (!resume || m_replay->total() == 0) {
+            return;
+        }
+        // 玩家确认后才进下一小局；接着播（他本来就是开着播放的）。
+        // ⚠ 用**弹窗打开时**那一局 +1，不要现算 `roundOf(m_cursor)` ——
+        //    弹窗是无模态的，玩家可能已经翻到别的小局去了。
+        const int next = m_replay->roundOpenEnd(round + 1);
+        if (next >= 0) {
+            seek(next);
+        }
+        if (m_playing) {
+            m_timer->start(kPlayIntervalMs);
+        }
+    });
+    dlg->show();
+}
+
 void ReplayWindow::onTogglePlay()
 {
+    if (m_roundResultOpen) {
+        return;   // 本局结算还开着：先确认，再谈播放
+    }
     m_playing = !m_playing;
     m_play->setText(lang::t(m_playing ? QStringLiteral("ui.replay.pause")
                                       : QStringLiteral("ui.replay.play")));
@@ -461,17 +690,33 @@ void ReplayWindow::onTogglePlay()
 
 void ReplayWindow::onTick()
 {
-    if (m_replay->stepOfEntry(m_cursor) + 1 >= m_replay->stepCount()) {
-        onTogglePlay();
+    if (m_roundResultOpen) {
+        m_timer->stop();
         return;
     }
-    seek(m_replay->nextStepEntry(m_cursor));
+    const int next = m_replay->nextStepEntry(m_cursor);
+    if (m_replay->stepOfEntry(m_cursor) + 1 >= m_replay->stepCount() || next <= m_cursor) {
+        // 整场放完：停播，并把**最后一小局**的结算也显示出来（每一小局都该有一次结算）
+        onTogglePlay();
+        showRoundResult(false);
+        return;
+    }
+    if (m_replay->roundOf(next) != m_replay->roundOf(m_cursor)) {
+        // 跨小局：停在本局末尾，先把本局结算显示出来；玩家确认后才进下一局（无倒计时）
+        showRoundResult(true);
+        return;
+    }
+    seekAnimated(next);   // 播放的每一拍 = 前进一个操作，这一拍要播动画
 }
 
 void ReplayWindow::onListClicked()
 {
-    const int row = m_ops->currentRow();
-    const int at = m_replay->stepEntry(row);
+    QListWidgetItem* item = m_ops->currentItem();
+    if (item == nullptr) {
+        return;
+    }
+    const int step = item->data(Qt::UserRole).toInt();
+    const int at = m_replay->stepEntry(step);
     if (at >= 0) {
         seek(at);
     }
@@ -487,6 +732,7 @@ void ReplayWindow::onListDoubleClicked()
     m_openEdit->setText(m_pendingId);
     m_replay->reset();
     m_ops->clear();
+    m_opsRound = -1;
     requestChunk(0);
 }
 

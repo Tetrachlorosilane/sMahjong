@@ -215,8 +215,9 @@ int main(int argc, char* argv[])
     }
 
     // ---- 回放模式：直接打开回放窗口（可选带 replay id，不带则显示列表）----
-    //   mahjong-client.exe --replay <host> <port> [replay-id] [--shot png] [--after 秒]
-    // 用途：① 用户命令行看回放；② L4 用 `--shot` 出回放界面与牌山窗口的实拍图。
+    //   mahjong-client.exe --replay <host> <port> [replay-id] [--wall] [--god] [--step N]
+    //                       [--result] [--shot png] [--after 秒]
+    // 用途：① 用户命令行看回放；② L4 用 `--shot` 出回放界面 / 牌山 / 上帝视角 / 本局结算的实拍图。
     const int rp = args.indexOf(QStringLiteral("--replay"));
     if (rp >= 0) {
         QString host = QStringLiteral("127.0.0.1");
@@ -239,10 +240,37 @@ int main(int argc, char* argv[])
         win->resize(1200, 800);
         win->show();
         win->openReplay(host, port, replayId);
-        // `--wall`：连上并载入后自动打开牌山窗口（命令行用途 + L4 截图要抓"活动顶层窗口"）
-        if (args.contains(QStringLiteral("--wall"))) {
-            QTimer::singleShot(3500, win, [win]() { win->showWall(); });
-        }
+
+        // 这些开关都要等"记录真的载入完了"才有意义（`replayLoaded` 在 `finishLoad()` 末尾发）。
+        // 另配一个兜底定时器：载入失败（服务端没有这条记录）时也要把已请求的开关落下去，
+        // 否则截图脚本会一直等到 `--after` 才退，白等一场。
+        const bool wantWall = args.contains(QStringLiteral("--wall"));
+        const bool wantGod = args.contains(QStringLiteral("--god"));
+        const bool wantResult = args.contains(QStringLiteral("--result"));
+        const int stepIdx = args.indexOf(QStringLiteral("--step"));
+        const int wantStep = (stepIdx >= 0 && stepIdx + 1 < args.size())
+                                     ? args.at(stepIdx + 1).toInt()
+                                     : -1;
+        auto* fallback = new QTimer(win);
+        fallback->setSingleShot(true);
+        auto apply = [win, fallback, wantWall, wantGod, wantResult, wantStep]() {
+            fallback->stop();   // 只应用一次（载入成功与兜底定时器谁先到算谁）
+            if (wantStep >= 0) {
+                win->seekStep(wantStep);
+            }
+            if (wantGod) {
+                win->setGodMode(true);
+            }
+            if (wantResult) {
+                win->openRoundResult();
+            }
+            if (wantWall) {
+                win->showWall();
+            }
+        };
+        QObject::connect(win, &ReplayWindow::replayLoaded, win, apply);
+        QObject::connect(fallback, &QTimer::timeout, win, apply);
+        fallback->start(4000);
 
         const int shotIdx = args.indexOf(QStringLiteral("--shot"));
         if (shotIdx >= 0 && shotIdx + 1 < args.size()) {
