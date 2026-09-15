@@ -67,6 +67,14 @@ public:
     /** 跳到第 `step` 步（0 起；越界会被钳制）。 */
     void seekStep(int step);
 
+    /**
+     * **导出天鳳牌譜**（tenhou.net/6 的 `#json=` 形式，见 `model/TenhouLog`）。
+     *
+     * @param path 目标文件；空 = 弹保存对话框（界面按钮走这条）
+     * @return 写出的文件路径；失败返回空串并把原因写进 `err`
+     */
+    QString exportTenhou(const QString& path = QString(), QString* err = nullptr);
+
     // ---- 自检用（**不连网**也能走真实的载入 / 跳转 / 动画路径）----
     // ⚠ 这几个口子是被一个真实 bug 逼出来的：上帝手牌曾经在 `TableModel::reset()` 里被清掉，
     //   而回放每次跳转都是 reset + 从头重放 → 动画拿不到真实手牌，退回"随机挑一格"。
@@ -109,6 +117,8 @@ private slots:
     void onGodToggled(bool on);
     /** 「本局结算」按钮。 */
     void onRoundResult();
+    /** 「导出牌谱」按钮。 */
+    void onExportTenhou();
 
 private:
     void buildUi();
@@ -163,6 +173,7 @@ private:
     QPushButton* m_play = nullptr;
     QPushButton* m_jump = nullptr;
     QPushButton* m_wallBtn = nullptr;
+    QPushButton* m_exportBtn = nullptr;
     QPushButton* m_godBtn = nullptr;
     QPushButton* m_resultBtn = nullptr;
     QTimer* m_timer = nullptr;

@@ -294,7 +294,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | `--lobbytest <host> <port>` | 大厅 UI 回归：连上后「建房间」按钮是否可用，并真的点它建房 |
 | `--autoplay <host> <port> [--name 名] [--timeout 秒]` | 真连服务端自走一整场，写 `autoplay.log` |
 | `--demo <host> <port> [--bots N] [--no-answer] [--shot png] [--after 秒]` | 起 GUI 自动进房；`--no-answer` = 建房但不自动应答（截图用）；`--shot` 定时出图后退出（**优先抓活动顶层窗口**，否则拍不到弹窗） |
-| `--replay <host> <port> [回放ID] [--wall] [--god] [--step N] [--result] [--shot png]` | 打开回放窗口（`--wall` 牌山 / `--god` 显示他家手牌 / `--step N` 跳到第 N 步（99999 = 末尾）/ `--result` 弹本局结算）：命令行复盘与 L4 截图都用它 |
+| `--replay <host> <port> [回放ID] [--wall] [--god] [--step N] [--result] [--export-tenhou out.txt] [--shot png]` | 打开回放窗口（`--wall` 牌山 / `--god` 他家手牌 / `--step N` 第 N 步 / `--result` 本局结算 / `--export-tenhou` 导出天鳳牌谱后退出）：复盘与 L4 截图都用它 |
 | `--gentiles <outdir> [字体路径]` | 用字体把 Unicode 麻将牌字形**轮廓化**成 SVG 素材（见 §9） |
 | `--fontprobe <out.png> [字体路径] [轮次]` | 渲染候选输入串，**实测字体的连字语法**；轮次 1=总览 / 2=组合符放大 |
 
@@ -341,10 +341,10 @@ mahjong/
 │     ├─ model/            Tile TableModel(纯数据状态机) AutoPolicy(自动应答判据) Settings Theme(材质包)
 │     └─ ui/               TileRenderer TableView ActionBar AutoBar LobbyDialog ResultDialog SettingsDialog MainWindow
 │                           ReplayWindow(回放) WallView(牌山 136 张)
-└─ tools/              联调与静态检查：e2e-test / timeout-test / clock-test / firstturn-test /
-                       riichi-stale-test / claim-priority-test / utf8-test / check-i18n /
-                       i18n-scan / i18n-map + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 /
-                       mock-server / gen-tile-placeholders / inline-svg-style / dump-otf-features
+└─ tools/              联调与静态检查：e2e-test / timeout / clock / firstturn / riichi-stale /
+                       claim-priority / utf8 / check-i18n / i18n-scan / i18n-map + i18n-apply
+                       + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server / gen-tile-placeholders
+                       / inline-svg-style / dump-otf-features
 ```
 
 ---
@@ -521,7 +521,7 @@ mahjong/
     加载顺序与 `tiles/`、`fonts/` 同约定（**exe 同级 `i18n/` → qrc → 返回码**）→ **改文案不用重编译**。
     ⚠ 认不出的码**原样显示码本身**（不是 `yaku.xxx` 裸键、也不是空串），这样"服务端加了码、语言文件没跟上"一眼可见；
     码为空串时回退老字段（`yaku[].name` / 原样 `limit` / `error.msg`），新旧两端混跑不显示空白。
-  - **界面固定文案也全在 `ui.*`（281 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
+  - **界面固定文案也全在 `ui.*`（287 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
     代码里只留 `lang::t("ui.…")`，**源码里不该再有中文字面量**。例外用 `// i18n-keep` 就地豁免
     （牌面字形「萬」「東」、立直标记「立」、默认玩家名、隐藏的测量按钮）；日志与自检输出不进语言文件。
     搬运三件套（同一份映射，**不会漂移**）：`i18n-map.mjs`（字面量 → key 的**唯一数据源**）→
@@ -655,7 +655,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **554** 项、客户端自检 **521** 项、§4 的全部 L3 工具（含 `replay-test`），
+**实测通过**：服务端自检 **554** 项、客户端自检 **558** 项、§4 的全部 L3 工具（含 `replay-test`），
 外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有两组"跑整场"的账：
 **杠后岭上摸牌**（`rinshanTests`）与**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）。
 

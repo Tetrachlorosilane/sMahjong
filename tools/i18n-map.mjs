@@ -310,6 +310,13 @@ export const EXTRA = {
   'ui.replay.round_result_hint': '看这一小局的结算（和牌/流局）。播放跨小局时会自动弹出，且不会自动关闭',
   'ui.replay.ops_title': '本小局操作记录 · %1（共 %2 步）',
   'ui.replay.no_round_result': '%1 还没打完，暂时没有结算可看',
+  // 导出天鳳牌譜
+  'ui.replay.export': '导出牌谱',
+  'ui.replay.export_hint': '导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）',
+  'ui.replay.export_title': '导出天鳳牌谱',
+  'ui.replay.export_filter': '牌谱文本 (*.txt)',
+  'ui.replay.export_done': '已导出 %1（%2 个小局）。把文件里那一行链接粘到浏览器即可在 tenhou.net/6 打开',
+  'ui.replay.export_failed': '导出失败：%1',
   // ---- 个人设置 / 材质包 ----
   // 源码里直接写 `lang::t("ui.settings.*")`（与 ui.replay.* 同一做法），所以放 EXTRA。
   'ui.settings.title': '个人设置',
