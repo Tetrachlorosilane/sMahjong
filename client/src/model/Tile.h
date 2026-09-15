@@ -11,6 +11,7 @@
 
 #include <QChar>
 #include <QString>
+#include <QStringList>
 
 namespace mj {
 
@@ -37,5 +38,13 @@ int numberOfKind(int kind);
 
 // 中文短名（用于自检图标注与提示），如 "五万"、"东"、"白"
 QString tileLabel(const QString& tile);
+
+/**
+ * 手牌排序（**理牌**）：按牌种 0..33 升序，同点数时普通牌在赤宝牌前。
+ *
+ * <p>`TableModel` 里的自家手牌与回放「显示他家手牌」的别家手牌**必须用同一把尺子**
+ * （`QStringList::sort()` 是字典序 —— 赤五 `0m` 会被排到 `1m` 前面，看着像没理牌）。
+ */
+void sortTiles(QStringList& tiles);
 
 } // namespace mj

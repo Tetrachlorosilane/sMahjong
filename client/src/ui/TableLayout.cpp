@@ -35,6 +35,10 @@ bool seatHasDrawnTile(const TableModel& m, int seat)
 {
     if (seat == m.mySeat())
         return !m.drawnTile().isEmpty();
+    // 回放开了「显示他家手牌」时，别家的摸牌格也来自真实数据
+    // （实时对局下 `drawnSeat()` 才是唯一依据 —— 客户端看不到别家的牌，只看得到谁摸了牌）
+    if (m.hasGodHand(seat))
+        return !m.godDrawn(seat).isEmpty();
     return m.drawnSeat() == seat;
 }
 

@@ -82,6 +82,24 @@ public:
     int concealedCount(int seat) const;                // 该家暗牌张数（含摸牌）
     int drawnSeat() const { return m_drawnSeat; }      // 刚摸牌的是哪家（-1 = 无）
 
+    // ---- 回放「显示他家手牌」（上帝视角）----
+    // 实时对局里客户端**看不到**别家的暗牌（服务端只发张数）；回放里 `round_start` / `draw`
+    // 的按座位副本都记下来了，所以能重建。
+    //
+    // ⚠ 这份数据**必须存在模型里**，不能只放在 `TableView` 里：牌桌的**布局**
+    //   （手牌行几格、摸牌槽在哪）是按 `concealedCount()` 算的，
+    //   如果布局用"张数"、绘制用另一份"上帝手牌"，两者就会各说各话 ——
+    //   现象正是"开了他家手牌之后张数不对、牌飞出位置也不对"。
+    void clearGodHands();
+    /** 设置某家的暗牌（**不含**摸牌）+ 刚摸到的那张；内部会按理牌顺序排序。 */
+    void setGodHand(int seat, const QStringList& concealed, const QString& drawn);
+    bool hasGodHand(int seat) const;
+    /** 上帝视角下该家的暗牌（不含摸牌，已理牌）；没有数据时返回空表。 */
+    QStringList godHand(int seat) const;
+    QString godDrawn(int seat) const;
+    /** 上帝视角下该家的**最后一格**（摸牌槽）该画什么：有摸牌就是那张，否则空串。 */
+    QString godDrawnTile(int seat) const { return godDrawn(seat); }
+
     // ---- 桌面 ----
     QStringList discards(int seat) const;
     bool discardSideways(int seat, int index) const;   // 立直宣言牌横置
@@ -161,6 +179,11 @@ private:
     QStringList m_hand;
     QString m_drawn;      // 摸到的牌（单独放最右）
     int m_drawnSeat = -1; // 刚摸牌的座位
+
+    // 上帝视角（仅回放）：四家暗牌 + 刚摸到的那张。`m_godHas` 为假 = 该家仍按实时对局处理。
+    QStringList m_godHand[4];
+    QString m_godDrawn[4];
+    bool m_godHas[4] = {false, false, false, false};
 
     QVector<QStringList> m_discards;                  // 4 家牌河
     QVector<QVector<bool>> m_discardSide;             // 牌河横置标记
