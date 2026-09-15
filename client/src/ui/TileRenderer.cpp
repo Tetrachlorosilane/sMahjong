@@ -131,6 +131,99 @@ QImage* rasterFor(const QString& code)
     return it.value().isNull() ? nullptr : &it.value();
 }
 
+/**
+ * 牌面/牌背的**位图缓存**（这一轮性能优化的核心）。
+ *
+ * <p>为什么需要：`QSvgRenderer::render()` **每次调用都重新栅格化一遍矢量**。
+ * 出牌动画 16ms 一帧、每帧重画整张桌子（四家手牌 + 四家牌河 + 副露 + 宝牌行 +
+ * 牌山窗口 136 张），于是每秒要栅格化上万次 —— 实测就是"动画轻微卡顿"的来源。
+ * 牌在同一界面里只有几档尺寸（手牌 / 牌河 / 副露 / 宝牌 / 牌山），
+ * 按「牌码 + 目标**设备像素**尺寸」缓存一张位图后，每帧就只剩 blit。
+ *
+ * <p>几个必须做对的地方：
+ *   · 键用**设备像素**（由 painter 的 `deviceTransform()` 取缩放）—— 高 DPI（本机 1.5×）
+ *     否则会拿到低分辨率的缓存图；**旋转不进键**：位图一律正着栅格化，
+ *     再由调用方画笔的旋转变换整体转过去（90° 整数倍无损耗）。
+ *   · 换材质包必须清缓存，见 `clearAssetCache()`。
+ *   · 缓存有上限，满了整体换代（简单且内存有界；重填一次的代价远小于无界增长）。
+ */
+QHash<QString, QPixmap>& pixCache()
+{
+    static QHash<QString, QPixmap> c;
+    return c;
+}
+
+constexpr int kMaxPixCache = 512;
+TileRenderer::AssetCacheStats g_cacheStats;   // 自检用：命中 / 未命中
+/**
+ * 位图缓存开关。默认开；`MAHJONG_NO_TILE_CACHE=1` 可关掉（= 优化前的每帧重栅格化），
+ * 既是自检的基准对照，也方便在真机上 A/B 复现"卡顿"。
+ */
+bool g_cacheEnabled = !qEnvironmentVariableIsSet("MAHJONG_NO_TILE_CACHE");
+
+/**
+ * 画笔当前的**设备缩放**（设备像素 / 逻辑单位）。
+ *
+ * <p>用 `hypot(m11,m12)` 取长度：旋转不改变长度，所以 0/90/180/270° 得到同一个缩放；
+ * 两个轴的实际缩放总是相等（widget 绘制），取平均让位图长宽比与目标矩形严格一致。
+ */
+qreal deviceScale(QPainter& p)
+{
+    const QTransform dt = p.deviceTransform();
+    const qreal sx = std::hypot(dt.m11(), dt.m12());
+    const qreal sy = std::hypot(dt.m21(), dt.m22());
+    return (sx > 0.0 && sy > 0.0) ? (sx + sy) / 2.0 : 1.0;
+}
+
+/** 目标矩形的设备像素尺寸（只取缩放、不含旋转：旋转不改变长度）。 */
+QSize devicePixelSize(QPainter& p, const QRectF& r)
+{
+    const qreal s = deviceScale(p);
+    if (s <= 0.0)
+        return QSize();
+    return QSize(qMax(1, qRound(r.width() * s)), qMax(1, qRound(r.height() * s)));
+}
+
+/**
+ * 把缓存位图贴回目标矩形。
+ *
+ * ⚠ **不能用 `drawPixmap(rect, pm, srcRect)`**：那会按"逻辑矩形 × 设备缩放"再缩放一次，
+ * 而位图的实际像素数只有 `qRound()` 的精度 → 差那么零点几个像素就会触发重采样，
+ * 牌面边缘出现 1px 抖动（实测与矢量直画相差 12.8% 的像素、最大通道差 184 —— 看起来"糊了一圈"）。
+ * 正确做法是把**设备像素比**告诉 `QPixmap`，再按逻辑坐标 1:1 贴上去：
+ * 设备像素与位图一一对应，不重采样。
+ */
+void blitPixmap(QPainter& p, const QRectF& r, QPixmap& pm, qreal scale)
+{
+    pm.setDevicePixelRatio(scale > 0.0 ? scale : 1.0);
+    p.drawPixmap(r.topLeft(), pm);
+}
+
+/**
+ * 把一张牌栅格化成位图（正着画，尺寸 = 目标设备像素）。
+ * @return false = 这张牌没有可用素材（调用方回落到程序化绘制）
+ */
+bool renderTilePixmap(QPixmap& pm, const QString& code, int pw, int ph, bool back)
+{
+    const QRectF target(0, 0, pw, ph);
+    const QString c = back ? QStringLiteral("back") : code;
+    if (QSvgRenderer* svg = svgFor(c)) {
+        pm = QPixmap(pw, ph);
+        pm.fill(Qt::transparent);
+        QPainter pp(&pm);
+        pp.setRenderHint(QPainter::Antialiasing, true);
+        pp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        svg->render(&pp, target);
+        return true;
+    }
+    if (const QImage* img = rasterFor(c)) {
+        pm = QPixmap::fromImage(
+                img->scaled(pw, ph, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        return true;
+    }
+    return false;
+}
+
 
 /** 赤五：调用方可能给的是 "5m" 而非 "0m"，统一成素材用的牌码。 */
 QString tileCodeOf(const QString& tile, bool red)
@@ -622,8 +715,38 @@ QString TileRenderer::label(const QString& tile)
 
 void TileRenderer::drawFaceF(QPainter& p, const QRectF& r, const QString& tile, bool red, bool small)
 {
-    // 优先用矢量素材；没有就用**材质包里的位图**（拉伸铺满目标矩形）；再没有才程序化绘制
+    if (r.width() <= 0.0 || r.height() <= 0.0)
+        return;
     const QString code = tileCodeOf(tile, red);
+    const QSize px = g_cacheEnabled ? devicePixelSize(p, r) : QSize();
+    if (!px.isEmpty()) {
+        const QString key = code + QLatin1Char('@') + QString::number(px.width())
+                + QLatin1Char('x') + QString::number(px.height())
+                + (small ? QLatin1String("s") : QLatin1String(""));
+        auto it = pixCache().find(key);
+        if (it == pixCache().end()) {
+            QPixmap pm;
+            if (renderTilePixmap(pm, code, px.width(), px.height(), false)) {
+                ++g_cacheStats.misses;
+                if (pixCache().size() >= kMaxPixCache)
+                    pixCache().clear();   // 换代：内存有界，重填一次很快
+                it = pixCache().insert(key, pm);
+            } else {
+                // 没有素材（走程序化绘制）：不进缓存也不计数
+                p.save();
+                p.setRenderHint(QPainter::Antialiasing, true);
+                p.setRenderHint(QPainter::TextAntialiasing, true);
+                drawFaceBody(p, r, tile, red, small);
+                p.restore();
+                return;
+            }
+        } else {
+            ++g_cacheStats.hits;
+        }
+        blitPixmap(p, r, it.value(), deviceScale(p));
+        return;
+    }
+    // 缓存关闭（自检的基准对照）或拿不到设备变换：按优化前的老路走
     if (QSvgRenderer* svg = svgFor(code)) {
         p.save();
         p.setRenderHint(QPainter::Antialiasing, true);
@@ -648,6 +771,33 @@ void TileRenderer::drawFaceF(QPainter& p, const QRectF& r, const QString& tile, 
 
 void TileRenderer::drawBackF(QPainter& p, const QRectF& r)
 {
+    if (r.width() <= 0.0 || r.height() <= 0.0)
+        return;
+    const QSize px = g_cacheEnabled ? devicePixelSize(p, r) : QSize();
+    if (!px.isEmpty()) {
+        const QString key = QStringLiteral("back@") + QString::number(px.width())
+                + QLatin1Char('x') + QString::number(px.height());
+        auto it = pixCache().find(key);
+        if (it == pixCache().end()) {
+            QPixmap pm;
+            if (renderTilePixmap(pm, QString(), px.width(), px.height(), true)) {
+                ++g_cacheStats.misses;
+                if (pixCache().size() >= kMaxPixCache)
+                    pixCache().clear();
+                it = pixCache().insert(key, pm);
+            } else {
+                p.save();
+                p.setRenderHint(QPainter::Antialiasing, true);
+                drawBackBody(p, r);
+                p.restore();
+                return;
+            }
+        } else {
+            ++g_cacheStats.hits;
+        }
+        blitPixmap(p, r, it.value(), deviceScale(p));
+        return;
+    }
     if (QSvgRenderer* svg = svgFor(QStringLiteral("back"))) {
         p.save();
         p.setRenderHint(QPainter::Antialiasing, true);
@@ -746,8 +896,26 @@ QString TileRenderer::assetSourceForTest(const QString& code)
 
 void TileRenderer::clearAssetCache()
 {
-    // 换材质包后必须清：否则还是上一次那批图（缓存里存的是解析好的素材）
+    // 换材质包后必须清：否则还是上一次那批图（两份缓存里存的是解析/栅格化好的素材）
     svgCache().clear();
     rasterCache().clear();
+    pixCache().clear();
     Theme::instance().clearCaches();
+}
+
+TileRenderer::AssetCacheStats TileRenderer::assetCacheStatsForTest()
+{
+    TileRenderer::AssetCacheStats s = g_cacheStats;
+    s.entries = pixCache().size();
+    return s;
+}
+
+void TileRenderer::resetAssetCacheStatsForTest()
+{
+    g_cacheStats = TileRenderer::AssetCacheStats();
+}
+
+void TileRenderer::setAssetCacheEnabledForTest(bool on)
+{
+    g_cacheEnabled = on;
 }

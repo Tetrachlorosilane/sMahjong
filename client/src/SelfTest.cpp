@@ -1981,6 +1981,81 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 性能：牌面位图缓存（动画卡顿的根因）----------
+    // `QSvgRenderer::render()` 每次调用都重新栅格化矢量，而动画 16ms 一帧要重画一百多张牌。
+    // 这里做**同机同轮**的 A/B：关缓存（= 优化前的行为）与开缓存各画 N 帧，量每帧耗时。
+    // 断言只钉**确定性**的东西（缓存命中数、第二帧零未命中），耗时只打印出来给人看
+    //（机器负载会抖，拿绝对毫秒当判据会变成 flaky 测试）。
+    {
+        TableModel pm;
+        pm.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"round_start","round":{"bakaze":"E","kyoku":2,"honba":1,"riichi_sticks":1},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","1m","1m","2m","3m","4m","5m","6m","7m","9m","9m","9m","9m"],"dora_indicators":["5m","2p","8s","3z","6m"],"tiles_left":42,"dead_wall_left":4})"),
+            nullptr));
+        // 把四家牌河填满（每行 6 列 → 18 张是 3 行的满配），这是动画期间一帧要画的量级
+        for (int seat = 0; seat < 4; ++seat) {
+            for (int i = 0; i < 18; ++i) {
+                QJsonObject d;
+                d.insert(QStringLiteral("ev"), QStringLiteral("discard"));
+                d.insert(QStringLiteral("seat"), seat);
+                d.insert(QStringLiteral("tile"), QStringLiteral("3p"));
+                d.insert(QStringLiteral("tsumogiri"), false);
+                (void)seat;
+                pm.applyEvent(d);
+            }
+        }
+        TableView tv;
+        tv.setModel(&pm);
+        tv.resize(1354, 930);
+
+        constexpr int kFrames = 40;
+        auto bench = [&](bool cacheOn) {
+            TileRenderer::setAssetCacheEnabledForTest(cacheOn);
+            TileRenderer::clearAssetCache();
+            TileRenderer::resetAssetCacheStatsForTest();
+            tv.grab();                       // 预热一帧（布局 + 素材解析）
+            QElapsedTimer t;
+            t.start();
+            for (int i = 0; i < kFrames; ++i) {
+                tv.grab();
+            }
+            const qint64 ms = t.elapsed();
+            TileRenderer::AssetCacheStats st = TileRenderer::assetCacheStatsForTest();
+            return QPair<qint64, TileRenderer::AssetCacheStats>(ms, st);
+        };
+
+        const auto slow = bench(false);
+        const auto fast = bench(true);
+        const double slowPer = double(slow.first) / kFrames;
+        const double fastPer = double(fast.first) / kFrames;
+        // 打印出来（自检输出就是给人看的证据）
+        QTextStream(stdout) << QStringLiteral("[perf] 牌桌 %1 帧：优化前(每帧重栅格化矢量) %2 ms/帧"
+                                             " ｜ 优化后(位图缓存) %3 ms/帧"
+                                             "（命中 %4 / 未命中 %5 / 缓存 %6 张）\n")
+                                     .arg(kFrames)
+                                     .arg(slowPer, 0, 'f', 2)
+                                     .arg(fastPer, 0, 'f', 2)
+                                     .arg(fast.second.hits)
+                                     .arg(fast.second.misses)
+                                     .arg(fast.second.entries);
+        fflush(stdout);
+
+        check(fast.second.hits > 0, QStringLiteral("性能：位图缓存有命中"));
+        check(fast.second.entries > 0, QStringLiteral("性能：位图缓存里确实存下了图"));
+        check(fast.second.misses <= 64,
+              QStringLiteral("性能：整个基准里的未命中次数只等于「牌的种类 × 尺寸档位」（实际 %1）")
+                  .arg(fast.second.misses));
+        check(fastPer < slowPer,
+              QStringLiteral("性能：开缓存后每帧更快（%1 ms → %2 ms）").arg(slowPer, 0, 'f', 2)
+                  .arg(fastPer, 0, 'f', 2));
+        // 第二帧（缓存已热）必须**零未命中** —— 这条是确定性的，钉住"缓存真的在复用"
+        TileRenderer::resetAssetCacheStatsForTest();
+        tv.grab();
+        checkEq(QString::number(TileRenderer::assetCacheStatsForTest().misses),
+                QStringLiteral("0"), QStringLiteral("性能：缓存热了以后一帧内零未命中"));
+        TileRenderer::setAssetCacheEnabledForTest(true);
+        TileRenderer::clearAssetCache();
+    }
+
     // ---------- 回归：结算界面的役满必须写「n倍役满」，不能写「0 番」----------
     // 规则：成立 n 种役满役则基本点 = 8000n，**符数与番数全部失效**（见 docs/日本麻将.md）。
     // 旧版界面直接印 yaku[].han，而服务端当时对役满役发的 han 是 0 →
