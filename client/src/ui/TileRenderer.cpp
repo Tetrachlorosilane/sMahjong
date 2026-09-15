@@ -1,5 +1,6 @@
 #include "ui/TileRenderer.h"
 
+#include "model/Theme.h"
 #include "model/Tile.h"
 
 #include <QCoreApplication>
@@ -7,6 +8,7 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QHash>
+#include <QImage>
 #include <QLineF>
 #include <QLinearGradient>
 #include <QPainter>
@@ -34,7 +36,29 @@ bool isKnownTileCode(const QString& code)
 }
 
 /**
- * 牌面矢量素材：`client/assets/tiles/<牌码>.svg`（构建时拷到 exe 同级 `tiles/`）。
+ * 素材缓存（**文件作用域**：`clearAssetCache()` 换材质包时要能一起清掉）。
+ * 合法牌码只有 38 种，正常永远打不满；上限是为了让"异常输入撑爆缓存"这条路走不通
+ * （超出上限就不再插新项，宁可回退程序化绘制）。
+ */
+QHash<QString, QSvgRenderer*>& svgCache()
+{
+    static QHash<QString, QSvgRenderer*> c;
+    return c;
+}
+
+QHash<QString, QImage>& rasterCache()
+{
+    static QHash<QString, QImage> c;
+    return c;
+}
+
+constexpr int kMaxAssetCache = 64;
+
+/**
+ * 牌面矢量素材。查找顺序：
+ *   1) **材质包**里的 `<牌码>.svg`（用户在设置里指定；见 `model/Theme`）
+ *   2) exe 同级 `tiles/<牌码>.svg` —— **美术改完 SVG 重启客户端即可生效，无需重新编译**
+ *   3) qrc 内嵌 `:/tiles/<牌码>.svg` —— 兜底（若将来改用资源内嵌）
  *
  * 找不到或解析失败时返回 nullptr，调用方回退到下面的程序化绘制
  * —— 这样删掉素材也不会白屏，只是回到旧画法。
@@ -43,44 +67,70 @@ bool isKnownTileCode(const QString& code)
  */
 QSvgRenderer* svgFor(const QString& code)
 {
-    // 合法牌码只有 38 种，缓存正常永远打不满；设上限是为了让「异常输入撑爆缓存」
-    // 这条路彻底走不通（超出上限就不再插新项，宁可回退程序化绘制）。
-    constexpr int kMaxSvgCache = 64;
-    static QHash<QString, QSvgRenderer*> cache;
-
     if (!isKnownTileCode(code))
         return nullptr;   // 非法码：绝不碰文件系统
 
-    const auto it = cache.constFind(code);
-    if (it != cache.constEnd()) {
+    const auto it = svgCache().constFind(code);
+    if (it != svgCache().constEnd()) {
         return it.value();
     }
-    // 查找顺序：
-    //   1) exe 同级 tiles/  —— **美术改完 SVG 重启客户端即可生效，无需重新编译**
-    //   2) qrc 内嵌 :/tiles/ —— 兜底（若将来改用资源内嵌）
-    QStringList candidates;
-    candidates << QCoreApplication::applicationDirPath() + QStringLiteral("/tiles/%1.svg").arg(code);
-    candidates << QStringLiteral(":/tiles/%1.svg").arg(code);
-
     QSvgRenderer* r = nullptr;
-    for (const QString& path : candidates) {
-        if (!QFile::exists(path)) {
-            continue;
+    // 1) 材质包（内容直接来自内存，不进文件系统）
+    const QByteArray packed = Theme::instance().packSvg(code);
+    if (!packed.isEmpty()) {
+        r = new QSvgRenderer(packed);
+        if (!r->isValid()) {
+            delete r;
+            r = nullptr;   // 包里的 SVG 坏了 → 当作"这张没有"，继续往下找默认素材
         }
-        r = new QSvgRenderer(path);
-        if (r->isValid()) {
-            break;
-        }
-        delete r;
-        r = nullptr;
     }
-    if (cache.size() >= kMaxSvgCache) {
+    // 2/3) 默认素材目录 → qrc
+    if (r == nullptr) {
+        QStringList candidates;
+        candidates << QCoreApplication::applicationDirPath() + QStringLiteral("/tiles/%1.svg").arg(code);
+        candidates << QStringLiteral(":/tiles/%1.svg").arg(code);
+        for (const QString& path : candidates) {
+            if (!QFile::exists(path)) {
+                continue;
+            }
+            r = new QSvgRenderer(path);
+            if (r->isValid()) {
+                break;
+            }
+            delete r;
+            r = nullptr;
+        }
+    }
+    if (svgCache().size() >= kMaxAssetCache) {
         delete r;   // 不进缓存 → 也不能泄漏
         return nullptr;
     }
-    cache.insert(code, r);
+    svgCache().insert(code, r);
     return r;
 }
+
+/**
+ * 牌面位图素材（材质包里的 `png/jpg/…`）。
+ *
+ * <p>位图与矢量**共存**：同一张牌优先用矢量（缩放不糊），没有再退回位图 ——
+ * 绘制时按目标矩形**拉伸铺满**（作者理应给对比例，见 `docs/THEME.md`）。
+ * 缓存里存空图表示"查过了、确实没有"（避免每帧都摸一遍磁盘）。
+ */
+QImage* rasterFor(const QString& code)
+{
+    if (!isKnownTileCode(code))
+        return nullptr;
+
+    auto it = rasterCache().find(code);
+    if (it == rasterCache().end()) {
+        if (rasterCache().size() >= kMaxAssetCache) {
+            return nullptr;
+        }
+        it = rasterCache().insert(code, Theme::instance().packImage(code));
+    }
+    return it.value().isNull() ? nullptr : &it.value();
+}
+
 
 /** 赤五：调用方可能给的是 "5m" 而非 "0m"，统一成素材用的牌码。 */
 QString tileCodeOf(const QString& tile, bool red)
@@ -572,12 +622,20 @@ QString TileRenderer::label(const QString& tile)
 
 void TileRenderer::drawFaceF(QPainter& p, const QRectF& r, const QString& tile, bool red, bool small)
 {
-    // 优先用矢量素材；没有就回退到程序化绘制
-    if (QSvgRenderer* svg = svgFor(tileCodeOf(tile, red))) {
+    // 优先用矢量素材；没有就用**材质包里的位图**（拉伸铺满目标矩形）；再没有才程序化绘制
+    const QString code = tileCodeOf(tile, red);
+    if (QSvgRenderer* svg = svgFor(code)) {
         p.save();
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
         svg->render(&p, r);
+        p.restore();
+        return;
+    }
+    if (const QImage* img = rasterFor(code)) {
+        p.save();
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(r, *img);
         p.restore();
         return;
     }
@@ -595,6 +653,13 @@ void TileRenderer::drawBackF(QPainter& p, const QRectF& r)
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
         svg->render(&p, r);
+        p.restore();
+        return;
+    }
+    if (const QImage* img = rasterFor(QStringLiteral("back"))) {
+        p.save();
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(r, *img);
         p.restore();
         return;
     }
@@ -660,4 +725,29 @@ void TileRenderer::drawBack(QPainter& p, const QRect& r)
 void TileRenderer::drawSmall(QPainter& p, const QRect& r, const QString& tile)
 {
     drawFaceF(p, QRectF(r), tile, false, true);
+}
+
+QString TileRenderer::assetSourceForTest(const QString& code)
+{
+    if (!isKnownTileCode(code)) {
+        return QStringLiteral("procedural");
+    }
+    const Theme::Source ts = Theme::instance().sourceOf(code);
+    if (ts != Theme::Source::None) {
+        return Theme::sourceName(ts);
+    }
+    if (svgFor(code) != nullptr) {
+        const QString file =
+                QCoreApplication::applicationDirPath() + QStringLiteral("/tiles/%1.svg").arg(code);
+        return QFile::exists(file) ? QStringLiteral("file-svg") : QStringLiteral("qrc");
+    }
+    return QStringLiteral("procedural");
+}
+
+void TileRenderer::clearAssetCache()
+{
+    // 换材质包后必须清：否则还是上一次那批图（缓存里存的是解析好的素材）
+    svgCache().clear();
+    rasterCache().clear();
+    Theme::instance().clearCaches();
 }

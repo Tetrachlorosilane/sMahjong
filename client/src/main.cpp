@@ -9,6 +9,8 @@
 #include "GenTiles.h"
 #include "SelfTest.h"
 #include "i18n/Lang.h"
+#include "model/Settings.h"
+#include "model/Theme.h"
 #include "ui/MainWindow.h"
 #include "ui/ReplayWindow.h"
 
@@ -16,6 +18,8 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QFile>
+#include <QFont>
+#include <QFontDatabase>
 #include <QString>
 #include <QPushButton>
 #include <QStringList>
@@ -82,7 +86,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("mahjong-client"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.2.1"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.3.0"));
 
     const QStringList args = QCoreApplication::arguments();
 
@@ -99,6 +103,39 @@ int main(int argc, char* argv[])
             fprintf(stderr, "warning: 语言文件载入失败（locale=%s），文案将显示为 key\n",
                     qUtf8Printable(langCode.isEmpty() ? QStringLiteral("zh_CN") : langCode));
             fflush(stderr);
+        }
+    }
+
+    // ---- 个人设置 + 材质包（**尽早**：字体要在任何界面创建之前设好）----
+    //   · 设置文件坏/缺 → `Settings::load()` 自己用缺省值**重新生成**，这里不会失败；
+    //   · 材质包坏/缺 → 只回退默认素材，设置里那条路径原样保留（用户修好再点「重新载入」）。
+    const QString settingsPath = Settings::defaultPath();
+    QStringList repairedKeys;
+    QString settingsNote;
+    const Settings settings = Settings::load(settingsPath, &repairedKeys, &settingsNote);
+    if (!settingsNote.isEmpty() || !repairedKeys.isEmpty()) {
+        fprintf(stderr, "settings: %s%s%s\n", qUtf8Printable(settingsNote),
+                repairedKeys.isEmpty() ? "" : " repaired=",
+                qUtf8Printable(repairedKeys.join(QStringLiteral(","))));
+        fflush(stderr);
+    }
+    {
+        const Theme::Status ts = Theme::instance().load(settings.pack);
+        if (!settings.pack.isEmpty() && !ts.problems.isEmpty()) {
+            fprintf(stderr, "theme: %s\n", qUtf8Printable(ts.problems.join(QStringLiteral(", "))));
+            fflush(stderr);
+        }
+        // UI 字体（结算用的麻将字体不在此列，它由 TileFont 单独加载）
+        if (!ts.loaded || Theme::instance().fontData().isEmpty()) {
+            // 没有材质包字体：什么都不做（用系统默认），保持既有外观
+        } else {
+            const int id = QFontDatabase::addApplicationFontFromData(Theme::instance().fontData());
+            const QStringList fams = id >= 0 ? QFontDatabase::applicationFontFamilies(id) : QStringList();
+            if (!fams.isEmpty()) {
+                QFont f = QApplication::font();
+                f.setFamily(fams.first());
+                QApplication::setFont(f);
+            }
         }
     }
 
@@ -314,6 +351,7 @@ int main(int argc, char* argv[])
             ++positional;
         }
         MainWindow window;
+        window.applySettings(settings, settingsPath);
         window.resize(1600, 1000);
         window.show();
 
@@ -382,6 +420,7 @@ int main(int argc, char* argv[])
     // 演示 / 联调：--demo <host> <port> [--name 名] [--bots N]
     const int dm = args.indexOf(QStringLiteral("--demo"));
     MainWindow window;
+    window.applySettings(settings, settingsPath);
     window.show();
     if (dm >= 0) {
         QString host = QStringLiteral("127.0.0.1");
