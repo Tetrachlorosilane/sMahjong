@@ -296,15 +296,20 @@ export const EXTRA = {
   'ui.replay.wall_title': '牌山',
   'ui.replay.wall_title_round': '牌山 · %1',
   'ui.replay.wall_empty': '没有可显示的牌山',
-  'ui.replay.wall_dead': '王牌',
-  'ui.replay.wall_rinshan': '岭上 4',
-  'ui.replay.wall_dora': '表宝牌 5',
-  'ui.replay.wall_ura': '里宝 5',
-  'ui.replay.wall_row': '%1·%2',
+  // 牌山布局：**同一序列里四家混排**（副露会改变摸牌顺序，按玩家分行是错的），
+  // 每列 4 张只是阅读分组。旧版"每行一家 / 岭上 4 / 表宝牌 5 / 里宝 5"那几个 key 已随之废弃。
   'ui.replay.wall_legend':
-    '%1 ｜ 136 张按抓牌顺序：每行一家（从庄家起），'
-    + '前 12 张＝三轮各 4 张（每 4 列一组），再各补 1 张，'
-    + '庄家第 14 张，之后逐张摸牌 ｜ 已拿走 %2 / 122（另 14 张为王牌）',
+    '%1 ｜ 136 张按抓牌顺序铺开：每列 4 张（自上而下读，每 4 列一个空隙，纯为便于阅读，与哪一家无关）'
+    + ' ｜ 已拿走 %2 / 122（另 14 张为王牌，在序列末尾、底色不同）',
+  'ui.replay.wall_seat_legend': '每张牌底部那条细线 = 谁拿走的：%1',
+  'ui.replay.wall_dead_note': '从第 122 张起是王牌：岭上 4 + 表宝牌指示牌 5 + 里宝指示牌 5',
+  // 回放：切换显示其他家手牌 / 本局结算 / 操作列表标题
+  'ui.replay.god_hands': '显示他家手牌',
+  'ui.replay.god_hands_hint': '开关：把其他三家的手牌也画成牌面（默认只画自家，别家画牌背）',
+  'ui.replay.round_result': '本局结算',
+  'ui.replay.round_result_hint': '看这一小局的结算（和牌/流局）。播放跨小局时会自动弹出，且不会自动关闭',
+  'ui.replay.ops_title': '本小局操作记录 · %1（共 %2 步）',
+  'ui.replay.no_round_result': '%1 还没打完，暂时没有结算可看',
   // 大厅：地址输入框的 tooltip（三行）
   'ui.lobby.conn_hint':
     '本机服务端填 127.0.0.1 或 localhost。\n'

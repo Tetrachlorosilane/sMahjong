@@ -60,6 +60,11 @@
 | **S-34** | **终局顺序：先广播 `game_end` 后落盘回放** → 客户端一收到结算就给出「看本局回放」按钮，而那一刻记录还没进库，点下去只会得到"找不到该记录"。真机 L3 上实测到：`replay_list` 少了刚打完的那一场（同一次运行里 `replay_get` 却能读到，因为文件已经写下去了） | `game/Table.java` `sendGameEnd()` | 改成 **先记 + 落盘、再下发**（新增 `broadcastRaw()`：只发不记，避免重复记录）。现在「收到 `game_end` 的那一刻记录一定能取」是硬保证，写在 PROTOCOL §3.11 |
 | **S-35** | **回放记录里的摸牌存了三份无用副本**：`broadcastDraw` 给四家各发一份报文，只有摸牌者那份带 `tile`，其余三份只是"谁摸了 + 剩余张数"。全记下来不仅体积翻三成以上，客户端"下一步"还要按四次才过一个操作 | `replay/ReplayRecorder.java` | 录制时丢掉不带 `tile` 的 `draw`（其余字段在摸牌者那份里都有）。实测一场东风战：1613 条 → **806 条 / 384 KB** |
 | **S-36** | **牌山视图把"整局会不会被拿走"当成了"现在有没有被拿走"**：配牌 52 张没设 `takenAt`（永远画成牌背），其余按整局着色（一开始就画成已拿走）。真机截图上是"前半背面、后半全部翻开"，与当前步完全不符 | `client/model/ReplayModel.cpp` + `ui/WallView.cpp` | 配牌的 `takenAt` 取小局边界；着色一律与**当前步**比较；"已拿走 N/122"也按当前步统计。另外"小局跳转"落在**最后一条 `round_start`**（配牌完成）而不是边界条目，否则开局画面是四个空手牌 |
+| **S-37** | **回放每走一步就把前几巡的弃牌动画重播一遍**（四家同时"重新打出"） | `client/ui/ReplayWindow.cpp` | 跳转一律"从小局开头重放"，而 `TableModel` 每次都会 `emit discarded` → 飞牌动画。修法：`TableModel::setSilent()` 静音开关 + `ReplayWindow::replayTo(index, animate)` —— **只有"前进一个操作"**（目标恰好是当前步的下一步）才开动画，且只对落在**最后一步里**的事件放开；其余跳转（上一步/换巡/换小局/跳巡目/点列表/换视角/载入）全程静默。⚠ 判据必须带 `target > m_cursor`：少了它，走到末尾时 `nextStepEntry()` 返回当前条，"整个小局都算最后一步" → 点一下把整局动画播完 |
+| **S-38** | **牌山视图按玩家分行**：把 136 张排成"一行一家（从庄家起）"，但**副露会改变下一个摸牌的人**，所以四家的牌在序列里根本不连续 —— 该排法是错的（用户直接点出） | `client/ui/WallView.{h,cpp}` | 改成**一条抓牌顺序序列**：每列 4 张、自上而下读，每 4 列留一个阅读空隙（与玩家无关）；末尾 14 张王牌仍在序列里，只换底色。归属改用**每张牌底部的四色细线**表达（四家混排也认得出）。旧版"岭上/表宝牌/里宝/每行一家"那几个 i18n key 一并废弃 |
+| **S-39** | **「看本局回放」在每一小局结算都出现**：牌局未结束时记录**还没落盘**（服务端终局才写），按钮点下去只会查不到；用户也明确要求"未结束时不该提供回放按钮" | `client/ui/MainWindow.{h,cpp}` | `showResultDialog(..., bool offerReplay)` 显式开关，**只有 `game_end` 那条传 true**；其余（`agari` / `ryuukyoku`）即使手上已有 `m_replay_id` 也不下发按钮 |
+| **S-40** | **回放里没有小局结算、操作记录也不分小局**：一场半庄上千步挤在一条列表里；每小局结束后无从查看该局结算（只有终局顺位） | `client/model/ReplayModel.{h,cpp}` + `ui/ReplayWindow.cpp` | 新增 `roundResultEntry(round)`（定位该小局的 `agari`/`ryuukyoku`）；右侧操作列表**按小局切割**（只装当前小局，标题写明是小局几）；新增「本局结算」按钮，且**播放跨小局时自动弹出并暂停播放**——结算弹窗在回放里**不调 `startCountdown()`**，必须等玩家点确认才进下一局 |
+| **S-41** | **回放看不清别家手牌、切视角要点下拉框**：回放天然是上帝视角（`walls` + 四家 `round_start`/`draw` 都在），但界面只画自家 | `client/ui/TableView.cpp` + `ui/ReplayWindow.cpp` | 新增 `TableView::setGodHands(hands, drawn)`（别家也画牌面，摸牌仍单列一格，数据来自 `ReplayModel::godState()` 新增的 `drawn[4]`）+ 工具栏「显示他家手牌」切换键；`TableView::seatClicked(seat)` 让**点名牌就能切视角**（与下拉框同一条路径，两边同步） |
 
 ### 1.3 排期完成项（原「已知未修」）
 
@@ -201,7 +206,18 @@
 
 ## 4. 本次验证记录
 
-> 本节记录 **2026-09-15「对局记录回放」这一轮**的验证（上一轮 M.League 化的记录见 §1.2 / §1.5）。
+> 本节记录 **2026-09-15「回放渲染与视角」这一轮**的验证（上一轮「对局记录回放」见 §4.1）。
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **554 项全绿**（本轮**未动服务端**，故与上一轮同数） |
+| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **449 项全绿**（439 → +10：`roundResultEntry` 定位、上帝视角 `drawn[4]` 的"刚摸到/打出后清空"、回放窗口的「显示他家手牌」（可切换）与「本局结算」按钮、i18n 计数 368 / `ui.*` 246） |
+| L3 对局记录端到端 | `node tools\replay-test.mjs <host> <port>` | **REPLAY PASS（26 项）**（本轮未改协议/服务端，回归确认） |
+| L3 其余协议用例 | `e2e` / `timeout` / `clock` / `firstturn` / `riichi-stale` / `utf8` | 全部 **PASS** |
+| L3 静态检查 | `check-i18n` / `i18n-scan --check` / `i18n-gen --check` | 全部 **PASS**（新增 8 条回放文案，废弃 5 条牌山旧 key 后语言文件 368 条） |
+| L4 GUI 实拍 | `client --replay <host> <port> <id> --step N [--god] [--result] [--wall] --shot …` | 四张实拍：`replay-window.png`（导航含两个新按钮 + **按小局切割的操作列表**）、`replay-god.png`（四家手牌全明）、`replay-wall.png`（**一条抓牌顺序序列**、每列 4 张、四色归属线、王牌在序列末尾）、`replay-result.png`（本局结算，只有「确定」、无倒计时） |
+
+### 4.1 上一轮（对局记录回放）
 
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
@@ -209,9 +225,20 @@
 | L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **439 项全绿**（402 → +37：`ReplayModel` 的小局/巡/步索引、牌山 136 张的归属映射、上帝视角手牌、两个回放入口按钮） |
 | L3 对局记录端到端 | `node tools\replay-test.mjs <host> <port>` | **REPLAY PASS（26 项）**：真跑一场东风战后**立即**能查（S-34 的回归）、分页一致、牌山 136 张不重复、每小局边界与 `replay_round` 对齐、**每条出牌的牌都是该家之前拿到的**、越界 / 非法 ID / 路径穿越、限速 |
 | L3 其余协议用例 | `e2e` / `timeout` / `clock` / `firstturn` / `riichi-stale` / `utf8` | 全部 **PASS**（`claim-priority` 仍是概率性工具，样本不足时会报"无法判定"） |
-| L4 GUI 实拍 | `client --replay <host> <port> <id> [--wall] --shot …` | 回放窗口（导航 / 操作列表 / 聊天 / 记录列表）与**牌山视图**（每行一家按抓牌顺序 + 王牌 14 张 + 当前进度高亮）各出一图；据此发现并修掉 S-36 |
+| L4 GUI 实拍 | `client --replay <host> <port> <id> [--wall] --shot …` | 回放窗口（导航 / 操作列表 / 聊天 / 记录列表）与**牌山视图**各出一图；据此发现并修掉 S-36 |
 
-**本轮改动面**：服务端新增 `replay/{Replay,ReplayRecorder,ReplayStore}.java`，
+### 4.2 本轮改动面
+
+纯客户端（服务端一行未改）：`model/ReplayModel`（`GodState.drawn[4]`、`roundResultEntry`）、
+`model/TableModel`（`setSilent()` 静音开关）、`ui/TableView`（`setGodHands()`、`seatClicked()`）、
+`ui/WallView`（重写为**一条抓牌顺序序列**）、`ui/ReplayWindow`（动画策略 / 上帝视角开关 /
+点名牌切视角 / 按小局切割的操作列表 / 本局结算）、`ui/MainWindow`（`offerReplay` 只在 `game_end`）、
+`main.cpp`（`--god` / `--step N` / `--result` + `replayLoaded` 信号），
+`SelfTest.cpp`（+10）、i18n（+8 条、废弃 5 条）、`docs/{DESIGN,PROTOCOL,AUDIT}.md`、`README.md`。
+
+### 4.3 上一轮改动面（对局记录回放）
+
+服务端新增 `replay/{Replay,ReplayRecorder,ReplayStore}.java`，
 `Table`（录制挂点、`replay_id`、**先落盘再广播终局**、`broadcastRaw`）、`Round`（配牌顺序改为「每人一次抓 4 张」、
 牌山快照）、`Session`（`replay_list` / `replay_get` + 限速）、`Main`（`--replay-dir` / `--replay-max` /
 `--replay-max-mb` / `--no-replay` / `--fast`）、`SelfTest`（+47）；

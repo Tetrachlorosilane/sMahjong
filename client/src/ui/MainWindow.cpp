@@ -473,7 +473,8 @@ void MainWindow::closeResultDialog(bool confirm)
     dlg->close();
 }
 
-void MainWindow::showResultDialog(const QString& title, const QString& html, const QString& schematic)
+void MainWindow::showResultDialog(const QString& title, const QString& html, const QString& schematic,
+                                  bool offerReplay)
 {
     // 上一张结算弹窗必须先关掉：否则它留在屏幕上，而且它的 finished 处理器
     // 还会再发一条 confirm（服务端已经推进了 → 那条会残留到下一次局间，把 5 秒等待吃掉）。
@@ -483,8 +484,11 @@ void MainWindow::showResultDialog(const QString& title, const QString& html, con
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     m_resultOpen = true;
     m_resultDlg = dlg;
-    // 「看本局回放」：拿到本场的 replay_id 才显示按钮（服务端关掉回放时隐藏）。
-    dlg->enableReplay(m_replayId);
+    // 「看本局回放」**只在整场总结算出现**（用户要求：牌局未结束时不给这个按钮）。
+    // 不是终局时 m_replayId 即使有值也不下发，按钮保持隐藏。
+    if (offerReplay) {
+        dlg->enableReplay(m_replayId);
+    }
     connect(dlg, &ResultDialog::replayRequested, this,
             [this](const QString& id) { openReplayWindow(id); });
     // 关闭结算弹窗 = 玩家确认进入下一局（局间最多等 5 秒，见 Table.ROUND_CONFIRM_MS）。
@@ -853,7 +857,8 @@ void MainWindow::onEvent(const QJsonObject& ev)
             m_replayId = endId;
         }
         showResultDialog(lang::t("ui.result.title_game_end"),
-                         ResultDialog::gameEndHtml(ev, &m_model));
+                         ResultDialog::gameEndHtml(ev, &m_model), QString(),
+                         true);   // 整场总结算：这里是「看本局回放」唯一的出口
         m_stack->setCurrentWidget(m_waitPage);
         QJsonObject cmd;
         cmd.insert(QStringLiteral("cmd"), QStringLiteral("list_rooms"));

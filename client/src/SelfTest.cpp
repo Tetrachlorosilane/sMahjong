@@ -10,9 +10,11 @@
 #include "ui/AutoBar.h"
 #include "ui/LobbyDialog.h"
 #include "ui/MainWindow.h"
+#include "ui/ReplayWindow.h"
 #include "ui/ResultDialog.h"
 #include "ui/TableView.h"
 #include "ui/TileRenderer.h"
+#include "ui/WallView.h"
 
 #include <QApplication>
 #include <QDir>
@@ -1260,7 +1262,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("365"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("368"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -1287,11 +1289,15 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("11"),
                 QStringLiteral("error.* 条目数（含回放的两个码）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("243"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("246"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()
                   && !lang::t(QStringLiteral("ui.replay.wall_legend")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.replay.wall_seat_legend")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.replay.god_hands")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.replay.round_result")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.replay.ops_title")).isEmpty()
                   && !lang::t(QStringLiteral("ui.replay.op.draw")).isEmpty()
                   && !lang::t(QStringLiteral("error.replay_not_found")).isEmpty(),
               QStringLiteral("回放相关文案都在语言文件里"));
@@ -1362,13 +1368,13 @@ int run(const QString& outDir)
         }
         QJsonObject meta;
         meta.insert(QStringLiteral("id"), QStringLiteral("TESTREPLAY"));
-        meta.insert(QStringLiteral("entries"), 12);
+        meta.insert(QStringLiteral("entries"), 13);
         meta.insert(QStringLiteral("names"), QJsonArray{QStringLiteral("甲"), QStringLiteral("乙"),
                                                          QStringLiteral("丙"), QStringLiteral("丁")});
         meta.insert(QStringLiteral("walls"), QJsonArray{wall});
         meta.insert(QStringLiteral("round_at"), QJsonArray{0});
         check(rp.setMeta(meta), QStringLiteral("回放：头信息解析成功"));
-        checkEq(QString::number(rp.total()), QStringLiteral("12"), QStringLiteral("回放：总步数"));
+        checkEq(QString::number(rp.total()), QStringLiteral("13"), QStringLiteral("回放：总步数"));
 
         auto entry = [](int seq, int to, const QJsonObject& body) {
             QJsonObject o;
@@ -1423,6 +1429,11 @@ int run(const QString& outDir)
         arr.append(entry(11, 3, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
                                      {QStringLiteral("seat"), 3},
                                      {QStringLiteral("tile"), QStringLiteral("9s")}})));
+        // 12: 本小局的结算事件（和牌）—— 用来验「每小局结算」的定位
+        arr.append(entry(12, -1, obj({{QStringLiteral("ev"), QStringLiteral("agari")},
+                                      {QStringLiteral("winner"), 0},
+                                      {QStringLiteral("tsumo"), true},
+                                      {QStringLiteral("scores"), QJsonArray{30000, 25000, 25000, 20000}}})));
         rp.addEntries(arr);
         rp.build();
 
@@ -1473,12 +1484,31 @@ int run(const QString& outDir)
               QStringLiteral("回放：聊天那步带正文：%1").arg(rp.describe(10)));
         checkEq(rp.playerName(0), QStringLiteral("甲"), QStringLiteral("回放：玩家名"));
         checkEq(rp.roundText(0), QStringLiteral("E 1局 0本场"), QStringLiteral("回放：小局标题"));
-        checkEq(QString::number(rp.stepCount()), QStringLiteral("9"),
+        checkEq(QString::number(rp.stepCount()), QStringLiteral("10"),
                 QStringLiteral("回放：步数（四家配牌合成一步）"));
         checkEq(QString::number(rp.stepOfEntry(4)), QStringLiteral("1"),
                 QStringLiteral("回放：4 条配牌属于同一步"));
         checkEq(QString::number(rp.roundOpenEnd(0)), QStringLiteral("4"),
                 QStringLiteral("回放：小局开头落在配牌完成处（第 4 条）"));
+
+        // 「每小局结算」定位：结算事件（agari / ryuukyoku）是渲染结算界面的**唯一**依据，
+        // 靠 round_end 里的布尔字段是拿不到番符/牌面的。
+        checkEq(QString::number(rp.roundResultEntry(0)), QStringLiteral("12"),
+                QStringLiteral("回放：本小局结算事件可定位（agari）"));
+        checkEq(QString::number(rp.roundResultEntry(7)), QStringLiteral("-1"),
+                QStringLiteral("回放：越界小局没有结算事件"));
+
+        // 上帝视角的「刚摸到的那张」要与手牌分开（牌桌要把它单独画一格）
+        checkEq(rp.godState(5).drawn[0], QStringLiteral("5p"),
+                QStringLiteral("上帝视角：座位 0 刚摸到 5p"));
+        checkEq(QString::number(rp.godState(5).hands[0].size()), QStringLiteral("14"),
+                QStringLiteral("上帝视角：摸牌后手牌 14 张（含刚摸的那张）"));
+        checkEq(rp.godState(9).drawn[0], QString(),
+                QStringLiteral("上帝视角：打出后摸牌格空出来"));
+        checkEq(rp.godState(8).drawn[3], QStringLiteral("5p"),
+                QStringLiteral("上帝视角：座位 3 第 1 张摸到的是 5p"));
+        checkEq(rp.godState(11).drawn[3], QStringLiteral("9s"),
+                QStringLiteral("上帝视角：座位 3 第 2 张摸到 9s（覆盖前一格）"));
 
         // 回放入口：大厅一个按钮；结算弹窗要拿到 replay_id 才显示「看本局回放」
         {
@@ -1518,6 +1548,29 @@ int run(const QString& outDir)
             }
             checkEq(QString::number(shownBtn), QStringLiteral("1"),
                     QStringLiteral("拿到 replay_id 后「看本局回放」出现"));
+        }
+
+        // 回放窗口的入口按钮：显示他家手牌（可切换）/ 本局结算 —— 都必须存在且文案来自语言文件
+        {
+            ReplayWindow rw;
+            int godBtn = 0;
+            int godCheckable = 0;
+            int resultBtn = 0;
+            for (QPushButton* b : rw.findChildren<QPushButton*>()) {
+                if (b->text() == lang::t(QStringLiteral("ui.replay.god_hands"))) {
+                    godBtn++;
+                    godCheckable += b->isCheckable() ? 1 : 0;
+                }
+                if (b->text() == lang::t(QStringLiteral("ui.replay.round_result"))) {
+                    resultBtn++;
+                }
+            }
+            checkEq(QString::number(godBtn), QStringLiteral("1"),
+                    QStringLiteral("回放窗口有「显示他家手牌」切换键"));
+            checkEq(QString::number(godCheckable), QStringLiteral("1"),
+                    QStringLiteral("「显示他家手牌」是**可切换**的（checkable）"));
+            checkEq(QString::number(resultBtn), QStringLiteral("1"),
+                    QStringLiteral("回放窗口有「本局结算」按钮"));
         }
     }
 

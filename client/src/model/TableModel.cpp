@@ -575,7 +575,7 @@ void TableModel::applyEvent(const QJsonObject& ev)
             m_turn = (seat + 1) % 4;
             m_phase = QStringLiteral("wait_discard");
             clearAsk();
-            if (riverRecorded)
+            if (riverRecorded && !m_silent)
                 emit discarded(seat, tile, tsumogiri, m_discards[seat].size() - 1);
         }
     } else if (name == QLatin1String("meld")) {
@@ -624,7 +624,8 @@ void TableModel::applyEvent(const QJsonObject& ev)
                 && calledIdx < m_discards[meld.from].size()) {
                 m_discards[meld.from].removeAt(calledIdx);
                 m_discardSide[meld.from].removeAt(calledIdx);
-                emit calledFromRiver(meld.from, calledIdx, seat);
+                if (!m_silent)
+                    emit calledFromRiver(meld.from, calledIdx, seat);
             }
 
             if (seat == m_mySeat && m_hasSeat) {
