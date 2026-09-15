@@ -1,0 +1,40 @@
+立直麻将客户端（mahjong-client）· 第三方组件与许可声明
+============================================================
+
+本目录随 mahjong-client.exe 一起分发，包含本程序使用的第三方组件的许可文本。
+本文件不涉及本项目自身代码的许可。
+
+────────────────────────────────────────────────────────────
+1) Qt 6.11.2 —— GNU LGPL version 3（动态链接）
+────────────────────────────────────────────────────────────
+本程序以**动态链接**方式使用 Qt，随 exe 同目录分发其共享库：
+
+    Qt6Core.dll  Qt6Gui.dll  Qt6Widgets.dll  Qt6Network.dll  Qt6Svg.dll
+    platforms\qwindows.dll  styles\qmodernwindowsstyle.dll  tls\*.dll
+
+* 这些都是**独立的 .dll 文件**，因此**可被替换**：你可以自行编译同版本（或 ABI 兼容版本）
+  的 Qt 共享库覆盖它们，从而改变本程序所使用的 Qt。本程序不做任何阻止替换的校验。
+* 本程序属于 LGPLv3 所称的「使用库的作品」，其自身源码无须按 LGPLv3 开放。
+* Qt 的完整源码可从 https://download.qt.io/ 获取（本项目使用 Qt 6.11.2，
+  对应源码包 qt-everywhere-src-6.11.2.tar.xz）。
+* 本项目**未使用**任何「仅 GPLv3」的 Qt 模块（如 Qt Quick 3D、Qt Virtual Keyboard、
+  Qt MQTT、Qt HTTP Server、Qt Graphs、Qt Wayland Compositor 等）。
+* 许可全文见同目录 **Qt-LICENSE.txt**（含 GNU LGPLv3 与 GNU GPLv3 全文；
+  LGPLv3 是 GPLv3 的补充条款，两者需一并提供）。
+* 第三方组件版权声明见同目录 **Qt-Copyright.txt**。
+* Qt 是 The Qt Company Ltd. 的商标。
+
+────────────────────────────────────────────────────────────
+2) MinGW 运行时（libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll）
+────────────────────────────────────────────────────────────
+采用 GNU GPLv3 **附带 GCC Runtime Library Exception**：
+允许随非 GPL 的程序一起分发，不要求该程序开放源码。
+
+────────────────────────────────────────────────────────────
+3) 结算界面牌面字体（fonts/I.MahjongJP.otf）
+────────────────────────────────────────────────────────────
+采用 **M+ 字型授权条款**：可自由使用、复制、分发、修改，商业与非商业均可。
+
+────────────────────────────────────────────────────────────
+更详细的说明（各组件清单、义务对照表与判定依据）见项目仓库的
+docs/THIRD-PARTY.md。
