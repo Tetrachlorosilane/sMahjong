@@ -2,6 +2,8 @@
 
 #include "i18n/Lang.h"
 
+#include <algorithm>
+
 namespace mj {
 
 int kindOfTile(const QString& tile, bool* red)
@@ -118,6 +120,18 @@ QString tileLabel(const QString& tile)
     // 所以换语言只需换 i18n/<locale>.json，不必动 C++。
     // 非法牌码（上面已经挡掉）与语言文件里没登记的码由 tileName 原样返回牌码。
     return lang::tileName(tileString(kind, red));
+}
+
+void sortTiles(QStringList& tiles)
+{
+    // 与 `TableModel::sortHand()` 同一把尺子（那里改成直接调用本函数）。
+    std::sort(tiles.begin(), tiles.end(), [](const QString& a, const QString& b) {
+        const int ka = kindOfTile(a);
+        const int kb = kindOfTile(b);
+        if (ka != kb)
+            return ka < kb;
+        return !isRedTile(a) && isRedTile(b);   // 同点数时普通牌在赤牌前
+    });
 }
 
 } // namespace mj

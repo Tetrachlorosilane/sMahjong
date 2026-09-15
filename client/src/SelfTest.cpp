@@ -1368,13 +1368,13 @@ int run(const QString& outDir)
         }
         QJsonObject meta;
         meta.insert(QStringLiteral("id"), QStringLiteral("TESTREPLAY"));
-        meta.insert(QStringLiteral("entries"), 13);
+        meta.insert(QStringLiteral("entries"), 15);
         meta.insert(QStringLiteral("names"), QJsonArray{QStringLiteral("甲"), QStringLiteral("乙"),
                                                          QStringLiteral("丙"), QStringLiteral("丁")});
         meta.insert(QStringLiteral("walls"), QJsonArray{wall});
         meta.insert(QStringLiteral("round_at"), QJsonArray{0});
         check(rp.setMeta(meta), QStringLiteral("回放：头信息解析成功"));
-        checkEq(QString::number(rp.total()), QStringLiteral("13"), QStringLiteral("回放：总步数"));
+        checkEq(QString::number(rp.total()), QStringLiteral("15"), QStringLiteral("回放：总步数"));
 
         auto entry = [](int seq, int to, const QJsonObject& body) {
             QJsonObject o;
@@ -1399,10 +1399,16 @@ int run(const QString& outDir)
                                      {QStringLiteral("kyoku"), 1},
                                      {QStringLiteral("dealer"), 0},
                                      {QStringLiteral("wall"), wall}})));
-        // 1..4: 四家配牌（各 13 张，这里只用张数占位）
+        // 1..4: 四家配牌（各 13 张，这里只用张数占位）。
+        // ⚠ 座位 1 特意给**两张 5p**：副露的牌码会重复（碰是三张同码），
+        //   而"被鸣的那张来自别人、只该从手里扣掉一张同码"这件事必须能被测出来。
         for (int s = 0; s < 4; ++s) {
             QJsonArray hand;
-            for (int i = 0; i < 13; ++i) {
+            if (s == 1) {
+                hand.append(QStringLiteral("5p"));
+                hand.append(QStringLiteral("5p"));
+            }
+            for (int i = 0; i < (s == 1 ? 11 : 13); ++i) {
                 hand.append(QStringLiteral("1m"));
             }
             arr.append(entry(1 + s, s, obj({{QStringLiteral("ev"), QStringLiteral("round_start")},
@@ -1429,8 +1435,28 @@ int run(const QString& outDir)
         arr.append(entry(11, 3, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
                                      {QStringLiteral("seat"), 3},
                                      {QStringLiteral("tile"), QStringLiteral("9s")}})));
-        // 12: 本小局的结算事件（和牌）—— 用来验「每小局结算」的定位
-        arr.append(entry(12, -1, obj({{QStringLiteral("ev"), QStringLiteral("agari")},
+        // 12: 座位 1 碰（三张同码）—— 只该从手里扣 **2 张**（被鸣的那张来自别人）。
+        //     曾经的写法"凡等于 called_tile 就跳过"会把三张全跳过 → 一张都不扣，
+        //     副露的牌同时留在手里（用户报障：他家手牌张数不对、副露牌去向不对）。
+        arr.append(entry(12, -1, obj({{QStringLiteral("ev"), QStringLiteral("meld")},
+                                      {QStringLiteral("seat"), 1},
+                                      {QStringLiteral("kind"), QStringLiteral("pon")},
+                                      {QStringLiteral("from"), 0},
+                                      {QStringLiteral("called_tile"), QStringLiteral("5p")},
+                                      {QStringLiteral("tiles"),
+                                       QJsonArray{QStringLiteral("5p"), QStringLiteral("5p"),
+                                                  QStringLiteral("5p")}}})));
+        // 13: 座位 1 加杠 —— 只有第 4 张来自手里（前三张碰的时候已经扣过）
+        arr.append(entry(13, -1, obj({{QStringLiteral("ev"), QStringLiteral("meld")},
+                                      {QStringLiteral("seat"), 1},
+                                      {QStringLiteral("kind"), QStringLiteral("kakan")},
+                                      {QStringLiteral("from"), 0},
+                                      {QStringLiteral("called_tile"), QStringLiteral("5p")},
+                                      {QStringLiteral("tiles"),
+                                       QJsonArray{QStringLiteral("5p"), QStringLiteral("5p"),
+                                                  QStringLiteral("5p"), QStringLiteral("5p")}}})));
+        // 14: 本小局的结算事件（和牌）—— 用来验「每小局结算」的定位
+        arr.append(entry(14, -1, obj({{QStringLiteral("ev"), QStringLiteral("agari")},
                                       {QStringLiteral("winner"), 0},
                                       {QStringLiteral("tsumo"), true},
                                       {QStringLiteral("scores"), QJsonArray{30000, 25000, 25000, 20000}}})));
@@ -1484,7 +1510,7 @@ int run(const QString& outDir)
               QStringLiteral("回放：聊天那步带正文：%1").arg(rp.describe(10)));
         checkEq(rp.playerName(0), QStringLiteral("甲"), QStringLiteral("回放：玩家名"));
         checkEq(rp.roundText(0), QStringLiteral("E 1局 0本场"), QStringLiteral("回放：小局标题"));
-        checkEq(QString::number(rp.stepCount()), QStringLiteral("10"),
+        checkEq(QString::number(rp.stepCount()), QStringLiteral("12"),
                 QStringLiteral("回放：步数（四家配牌合成一步）"));
         checkEq(QString::number(rp.stepOfEntry(4)), QStringLiteral("1"),
                 QStringLiteral("回放：4 条配牌属于同一步"));
@@ -1493,10 +1519,20 @@ int run(const QString& outDir)
 
         // 「每小局结算」定位：结算事件（agari / ryuukyoku）是渲染结算界面的**唯一**依据，
         // 靠 round_end 里的布尔字段是拿不到番符/牌面的。
-        checkEq(QString::number(rp.roundResultEntry(0)), QStringLiteral("12"),
+        checkEq(QString::number(rp.roundResultEntry(0)), QStringLiteral("14"),
                 QStringLiteral("回放：本小局结算事件可定位（agari）"));
         checkEq(QString::number(rp.roundResultEntry(7)), QStringLiteral("-1"),
                 QStringLiteral("回放：越界小局没有结算事件"));
+
+        // 副露扣牌：吃/碰/大明杠的 `tiles` **包含**被鸣的那张（来自别人），只能扣一张同码；
+        // 加杠只有第 4 张来自手里。两个都踩过（碰三张同码时"全跳过"→ 一张都不扣）。
+        checkEq(QString::number(rp.godState(12).hands[1].size()), QStringLiteral("12"),
+                QStringLiteral("上帝视角：碰之后暗牌 14 → 12（只扣手里那两张）"));
+        checkEq(QString::number(rp.godState(12).hands[1].count(QStringLiteral("5p"))),
+                QStringLiteral("1"),
+                QStringLiteral("上帝视角：碰之后手里还剩一张 5p（被鸣的那张不该算在手里）"));
+        checkEq(QString::number(rp.godState(13).hands[1].size()), QStringLiteral("11"),
+                QStringLiteral("上帝视角：加杠只再扣 1 张（不是 4 张）"));
 
         // 上帝视角的「刚摸到的那张」要与手牌分开（牌桌要把它单独画一格）
         checkEq(rp.godState(5).drawn[0], QStringLiteral("5p"),
@@ -1509,6 +1545,71 @@ int run(const QString& outDir)
                 QStringLiteral("上帝视角：座位 3 第 1 张摸到的是 5p"));
         checkEq(rp.godState(11).drawn[3], QStringLiteral("9s"),
                 QStringLiteral("上帝视角：座位 3 第 2 张摸到 9s（覆盖前一格）"));
+
+        // ---------- 回归：回放「显示他家手牌」——布局、理牌、出牌动画起点 ----------
+        // 这三条是同一个需求的三面：**别家暗牌必须存在模型里**（布局按它算、牌按它画）、
+        // 必须**自动理牌**（赤五排在普通五旁边，而不是字典序把它甩到 1m 前面）、
+        // 出牌动画必须**从这张牌待着的那一格**起飞。
+        {
+            TableModel gm;
+            gm.setMySeat(0);
+
+            // ① 理牌：字典序会把 `0m` 排到 `1m` 前面；正确顺序是 1m,5m,0m,5p,9s
+            QStringList h { QStringLiteral("9s"), QStringLiteral("0m"), QStringLiteral("1m"),
+                            QStringLiteral("5m"), QStringLiteral("5p") };
+            gm.setGodHand(1, h, QStringLiteral("3z"));
+            check(gm.hasGodHand(1), QStringLiteral("他家手牌：设置后标记为已知"));
+            checkEq(gm.godHand(1).join(QLatin1Char(',')), QStringLiteral("1m,5m,0m,5p,9s"),
+                    QStringLiteral("他家手牌：自动理牌（赤五紧随普通五，不是字典序）"));
+            checkEq(QString::number(gm.concealedCount(1)), QStringLiteral("6"),
+                    QStringLiteral("他家手牌：暗牌总数 = 手牌 5 + 摸牌 1（布局与绘制同源）"));
+
+            // ② 布局：开了他家手牌后，手牌行按**真实张数**排；摸牌单独占一格
+            //    ⚠ 量宽度必须取**对家**（pos 2）：左右两家整体旋转 90°，
+            //      屏幕矩形的 width 是局部高度（恒等于牌高），量不出手牌行长度。
+            TableView tv;
+            tv.setModel(&gm);
+            tv.resize(1354, 930);
+            tv.grab();                       // 触发一次 paintEvent → computeLayout()
+            const qreal wDerived = tv.handBlockScreenForTest(2).width();
+            gm.setGodHand(2, QStringList(10, QStringLiteral("1m")), QString());
+            tv.grab();
+            const qreal wTen = tv.handBlockScreenForTest(2).width();
+            gm.setGodHand(2, QStringList(10, QStringLiteral("1m")), QStringLiteral("3z"));
+            tv.grab();
+            const qreal wTenDrawn = tv.handBlockScreenForTest(2).width();
+            check(wTen < wDerived - 1.0,
+                  QStringLiteral("他家手牌：布局按真实张数排（10 张 %1 < 实时口径的 13 张 %2）")
+                      .arg(wTen).arg(wDerived));
+            check(qAbs(wTenDrawn - wTen) < 0.5,
+                  QStringLiteral("他家手牌：摸牌单独占一格，不挤手牌行（%1 vs %2）")
+                      .arg(wTenDrawn).arg(wTen));
+
+            // ③ 出牌动画起点 = 这张牌在手牌行里**理牌后**的那一格
+            const QStringList ten = gm.godHand(2);          // 已理牌（10 张全 1m）
+            gm.clearGodHands();
+            gm.setGodHand(2, ten, QString());
+            tv.grab();
+            gm.applyEvent(obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                               {QStringLiteral("seat"), 2},
+                               {QStringLiteral("tile"), QStringLiteral("1m")},
+                               {QStringLiteral("tsumogiri"), false}}));
+            const int idx = tv.lastFlightFromIndexForTest();
+            check(idx >= 0 && idx < ten.size(),
+                  QStringLiteral("他家手牌：手切动画从手牌行里的一格起飞（第 %1 格）").arg(idx));
+            // 摸切则固定从摸牌槽起飞
+            gm.applyEvent(obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                               {QStringLiteral("seat"), 2},
+                               {QStringLiteral("tile"), QStringLiteral("1m")},
+                               {QStringLiteral("tsumogiri"), true}}));
+            checkEq(QString::number(tv.lastFlightFromIndexForTest()), QStringLiteral("-1"),
+                    QStringLiteral("他家手牌：摸切动画从摸牌槽起飞"));
+
+            gm.clearGodHands();
+            check(!gm.hasGodHand(2), QStringLiteral("他家手牌：可以关掉"));
+            checkEq(QString::number(gm.concealedCount(2)), QStringLiteral("13"),
+                    QStringLiteral("关掉后回到「13 − 3×副露」的实时对局口径"));
+        }
 
         // 回放入口：大厅一个按钮；结算弹窗要拿到 replay_id 才显示「看本局回放」
         {

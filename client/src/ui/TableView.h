@@ -48,15 +48,19 @@ public:
     void setHighlightTiles(const QStringList& tiles);
 
     /**
-     * **上帝视角**（回放专用）：给出四家手牌，非自家也画成牌面而不是牌背。
+     * **上帝视角**（回放「显示他家手牌」）：把四家暗牌交给 `TableModel`，本控件只负责画。
      *
      * @param hands 四家的暗牌（**不含**刚摸到的那张；空串表示该家未知）
      * @param drawn 四家刚摸到的那张（空 = 没有），单独占一格、与自家规则一致
      *
-     * 传空（不调用）即恢复实时对局的行为：只画自家手牌，别家画牌背。
-     * 回放的「显示其他家手牌」开关就是切这个。
+     * ⚠ 为什么要经过模型：手牌区的**布局**是按 `TableModel::concealedCount()` 算的
+     * （行宽、摸牌槽位置），出牌动画的起点也按布局算。数据只放在控件里的话，
+     * 布局用"张数"、绘制用另一份手牌 → 张数不对、牌飞出的格子也不对。
+     * 传空即恢复实时对局的行为（别家画牌背）。
      */
     void setGodHands(const QVector<QStringList>& hands, const QStringList& drawn);
+    /** 关闭上帝视角（恢复实时对局画法）。 */
+    void clearGodHands();
 
 signals:
     void tileClicked(const QString& tile, int index);
@@ -181,6 +185,14 @@ public:
      */
     QRectF handBlockScreenForTest(int pos) const;
 
+    /**
+     * 自检用：上一次出牌动画的起点是**手牌行的第几格**。
+     *
+     * <p>`-1` = 摸牌槽（摸切）或没有动画。上帝视角下别家的牌面已知，
+     * 起点必须落在"这张牌真正待着的那一格"上 —— 这条断言就是钉它。
+     */
+    int lastFlightFromIndexForTest() const { return m_lastFlightFromIndex; }
+
 private:
     /** 手牌区布局（局部坐标）：直接转发到 `m_layout`。 */
     HandLayout layoutHand(int pos) const;
@@ -209,10 +221,8 @@ private:
     QVector<Flight> m_flights;
     QTimer m_animTimer;
     bool m_seatDataValid = false;
+    int m_lastFlightFromIndex = -1;     // 自检用：上次出牌动画的起点格（-1 = 摸牌槽）
 
-    // 回放：上帝视角的四家手牌 / 摸牌（空 = 按实时对局画牌背）
-    QVector<QStringList> m_godHands;
-    QStringList m_godDrawn;
     QRectF m_plateRects[4];             // 四家名牌的屏幕矩形（点击切视角用）
 };
 

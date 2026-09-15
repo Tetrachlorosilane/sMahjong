@@ -444,8 +444,7 @@ void ReplayWindow::rebuildOps(int round)
 void ReplayWindow::updateGodView()
 {
     if (!m_godOn) {
-        // 不传 = 恢复实时对局的画法（别家画牌背）
-        m_view->setGodHands(QVector<QStringList>(), QStringList());
+        m_view->clearGodHands();   // 恢复实时对局的画法（别家画牌背）
         return;
     }
     const ReplayModel::GodState& god = m_replay->godState(m_cursor);
@@ -453,13 +452,17 @@ void ReplayWindow::updateGodView()
     QStringList drawn;
     for (int s = 0; s < 4; ++s) {
         QStringList h = god.hands[s];
-        // `god.hands` 含刚摸到的那张；牌桌要求它单独占一格，所以这里要摘出来
+        // `god.hands` 含刚摸到的那张；牌桌要求它单独占一格，所以这里要摘出来。
+        // ⚠ 只摘**一张**：同一牌码可能有两张（比如摸到 5m 而手里本来也有 5m），
+        //   `removeOne` 正好只去一张。
         if (!god.drawn[s].isEmpty()) {
             h.removeOne(god.drawn[s]);
         }
         hands << h;
         drawn << god.drawn[s];
     }
+    // 交给模型（**不是**只放在控件里）：牌桌的行宽、摸牌槽、出牌动画起点
+    // 全都按模型里的同一份数据算，张数与位置才不会各说各话。
     m_view->setGodHands(hands, drawn);
 }
 

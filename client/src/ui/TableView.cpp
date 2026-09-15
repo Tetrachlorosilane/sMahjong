@@ -459,40 +459,60 @@ void TableView::onDiscarded(int seat, const QString& tile, bool tsumogiri, int r
     const QRectF toLocal = f.toScreen.inverted().mapRect(toScreen);
 
     QRectF fromLocal;
-    if (pos == 0 && !m_handTiles.isEmpty()) {
-        if (tsumogiri) {
-            // 摸切：起点固定为「摸牌槽」。绝不能用上一帧缓存的 last()：
-            // draw 与 discard 常在同一批 TCP 里到达、中间没有重绘，
-            // 那时的缓存还是「没摸牌」的一帧，会把摸切演成手切。
-            fromLocal = m_layout.handSlotLocal(pos, 0, true, *m_model);
-        } else {
-            QVector<int> cand;                          // 手切：从手牌（非摸牌）随机一张飞出
-            for (int i = 0; i < m_handTiles.size() - 1; ++i) {
+    int fromIndex = -1;   // 起点格（-1 = 摸牌槽）；自检断言用它
+    // 手切：从"这张牌真正所在的那一格"起飞。自家用上一帧缓存的手牌串，
+    // **上帝视角下的别家**用模型里的真实暗牌 —— 两者都只是用来**挑哪一格**，
+    // 坐标一律按当前布局现算（`handSlotLocal`），所以与手牌行的实际排布必然一致。
+    const bool godSeat = (pos != 0) && m_model->hasGodHand(seat);
+    if (tsumogiri && (pos == 0 || godSeat)) {
+        // 摸切：起点固定为「摸牌槽」。绝不能用上一帧缓存的 last()：
+        // draw 与 discard 常在同一批 TCP 里到达、中间没有重绘，
+        // 那时的缓存还是「没摸牌」的一帧，会把摸切演成手切。
+        fromLocal = m_layout.handSlotLocal(pos, 0, true, *m_model);
+    } else if (pos == 0 && !m_handTiles.isEmpty()) {
+        QVector<int> cand;                          // 手切：从手牌（非摸牌）随机一张飞出
+        for (int i = 0; i < m_handTiles.size() - 1; ++i) {
+            if (m_handTiles.at(i) == tile)
+                cand.append(i);
+        }
+        if (cand.isEmpty()) {
+            for (int i = 0; i < m_handTiles.size(); ++i) {
                 if (m_handTiles.at(i) == tile)
                     cand.append(i);
             }
-            if (cand.isEmpty()) {
-                for (int i = 0; i < m_handTiles.size(); ++i) {
-                    if (m_handTiles.at(i) == tile)
-                        cand.append(i);
-                }
-            }
-            // ⚠ 起点**按当前布局现算**，不要用上一帧缓存的手牌矩形：`draw` 与 `discard`
-            // 可能同一批到达（中间没有重绘），那时缓存的手牌矩形还是"没摸牌 / 没打牌"那一版，
-            // 动画会从一个已经不存在的槽位起飞（AUDIT C-S3）。用 `m_handTiles`（上一帧的
-            // 牌面串）只为了**挑哪一格**，坐标一律来自当前布局。
-            const int pick = cand.isEmpty()
-                    ? 0
-                    : cand.at(int(QRandomGenerator::global()->bounded(cand.size())));
-            fromLocal = m_layout.handSlotLocal(pos, pick, false, *m_model);
         }
+        // ⚠ 起点**按当前布局现算**，不要用上一帧缓存的手牌矩形：`draw` 与 `discard`
+        // 可能同一批到达（中间没有重绘），那时缓存的手牌矩形还是"没摸牌 / 没打牌"那一版，
+        // 动画会从一个已经不存在的槽位起飞（AUDIT C-S3）。用 `m_handTiles`（上一帧的
+        // 牌面串）只为了**挑哪一格**，坐标一律来自当前布局。
+        const int pick = cand.isEmpty()
+                ? 0
+                : cand.at(int(QRandomGenerator::global()->bounded(cand.size())));
+        fromLocal = m_layout.handSlotLocal(pos, pick, false, *m_model);
+        fromIndex = pick;
+    } else if (godSeat) {
+        // 上帝视角的别家：牌面已知，直接找它在**理牌后**的那一格，
+        // 于是飞牌动画的起点就是这张牌在屏幕上真正待着的位置。
+        const QStringList h = m_model->godHand(seat);
+        QVector<int> cand;
+        for (int i = 0; i < h.size(); ++i) {
+            if (h.at(i) == tile)
+                cand.append(i);
+        }
+        const int pick = cand.isEmpty()
+                ? 0
+                : cand.at(int(QRandomGenerator::global()->bounded(cand.size())));
+        fromLocal = m_layout.handSlotLocal(pos, pick, false, *m_model);
+        fromIndex = pick;
     }
     if (!fromLocal.isValid()) {
         const int concealed = qMax(1, m_model->concealedCount(seat));
         const int idx = tsumogiri ? concealed - 1
                                   : int(QRandomGenerator::global()->bounded(qMax(1, concealed)));
         fromLocal = m_layout.handSlotLocal(pos, idx, tsumogiri, *m_model);
+        fromIndex = tsumogiri ? -1 : idx;
     }
+    m_lastFlightFromIndex = fromIndex;
 
     Flight fl;
     fl.tile = tile;
@@ -635,16 +655,15 @@ void TableView::paintSeat(QPainter& p, int pos)
 
     QStringList handTiles;
     bool hasDrawn = false;
-    // 回放：开了「显示其他家手牌」时，别家也按真牌画（数据由 `setGodHands()` 给）
-    const bool god = (pos != 0) && m_godHands.size() == 4 && m_godHands.at(seat).size() >= 0
-                     && !m_godHands.at(seat).isEmpty();
+    // 回放：开了「显示他家手牌」时，别家也按真牌画（数据存在 `TableModel` 里，
+    // 与布局用的是**同一份** —— 见 `TableModel::concealedCount()` 的注释）
+    const bool god = (pos != 0) && m_model->hasGodHand(seat);
     if (isSelf) {
         handTiles = m_model->hand();
         hasDrawn = !m_model->drawnTile().isEmpty();
     } else if (god) {
-        handTiles = m_godHands.at(seat);
-        handTiles.sort();
-        hasDrawn = m_godDrawn.size() == 4 && !m_godDrawn.at(seat).isEmpty();
+        handTiles = m_model->godHand(seat);      // 已由模型理牌
+        hasDrawn = !m_model->godDrawn(seat).isEmpty();
     } else {
         // 别家同样遵循「手牌 + 单独一格摸牌」的摆放规则：
         // concealedCount 含那张刚摸到的牌，这里把它拆出来单独画一个牌背。
@@ -700,7 +719,7 @@ void TableView::paintSeat(QPainter& p, int pos)
             m_handRects.append(f.toScreen.mapRect(tr));
             m_handTiles.append(t);
         } else if (god) {
-            const QString t = m_godDrawn.at(seat);
+            const QString t = m_model->godDrawn(seat);
             TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
         } else {
             // 别家的摸牌只画牌背，但同样占独立的一格（与自家规则一致）
@@ -766,8 +785,22 @@ void TableView::paintSeat(QPainter& p, int pos)
 
 void TableView::setGodHands(const QVector<QStringList>& hands, const QStringList& drawn)
 {
-    m_godHands = hands;
-    m_godDrawn = drawn;
+    if (!m_model)
+        return;
+    if (hands.size() != 4) {
+        clearGodHands();
+        return;
+    }
+    for (int s = 0; s < 4; ++s) {
+        m_model->setGodHand(s, hands.at(s), s < drawn.size() ? drawn.at(s) : QString());
+    }
+    update();
+}
+
+void TableView::clearGodHands()
+{
+    if (m_model)
+        m_model->clearGodHands();
     update();
 }
 
