@@ -65,6 +65,7 @@
 | **S-39** | **「看本局回放」在每一小局结算都出现**：牌局未结束时记录**还没落盘**（服务端终局才写），按钮点下去只会查不到；用户也明确要求"未结束时不该提供回放按钮" | `client/ui/MainWindow.{h,cpp}` | `showResultDialog(..., bool offerReplay)` 显式开关，**只有 `game_end` 那条传 true**；其余（`agari` / `ryuukyoku`）即使手上已有 `m_replay_id` 也不下发按钮 |
 | **S-40** | **回放里没有小局结算、操作记录也不分小局**：一场半庄上千步挤在一条列表里；每小局结束后无从查看该局结算（只有终局顺位） | `client/model/ReplayModel.{h,cpp}` + `ui/ReplayWindow.cpp` | 新增 `roundResultEntry(round)`（定位该小局的 `agari`/`ryuukyoku`）；右侧操作列表**按小局切割**（只装当前小局，标题写明是小局几）；新增「本局结算」按钮，且**播放跨小局时自动弹出并暂停播放**——结算弹窗在回放里**不调 `startCountdown()`**，必须等玩家点确认才进下一局 |
 | **S-41** | **回放看不清别家手牌、切视角要点下拉框**：回放天然是上帝视角（`walls` + 四家 `round_start`/`draw` 都在），但界面只画自家 | `client/ui/TableView.cpp` + `ui/ReplayWindow.cpp` | 新增 `TableView::setGodHands(hands, drawn)`（别家也画牌面，摸牌仍单列一格，数据来自 `ReplayModel::godState()` 新增的 `drawn[4]`）+ 工具栏「显示他家手牌」切换键；`TableView::seatClicked(seat)` 让**点名牌就能切视角**（与下拉框同一条路径，两边同步） |
+| **S-42** | **「显示他家手牌」一开，别家的张数、理牌、副露去向、出牌动画起点全不对**：① `ReplayModel::buildGod` 的副露扣牌写成"凡等于 `called_tile` 就跳过"，而碰的三张牌码**完全相同** → 一张都不扣（副露的牌同时留在手里）；加杠同理会把四张全扣掉。② 别家手牌用 `QStringList::sort()`（字典序）→ 赤五 `0m` 被甩到 `1m` 前面，看着像没理牌。③ 上帝手牌只存在 `TableView` 里，而**布局**按 `TableModel::concealedCount()`（13−3×副露）算 → 张数与画出来的牌各说各话。④ 别家出牌动画走"随机挑一格"的兜底，不是这张牌待着的位置 | `client/model/ReplayModel.cpp` + `model/TableModel.{h,cpp}` + `model/Tile.{h,cpp}` + `ui/TableLayout.cpp` + `ui/TableView.{h,cpp}` | ① 扣牌改成与自家手牌**同一套算法**（`TableModel` 是权威实现）：吃/碰/大明杠先摘掉**一张** `called_tile`，暗杠不摘，加杠只扣第 4 张。② 抽出 `mj::sortTiles()`（`TableModel::sortHand()` 也改调它），上帝手牌在 `setGodHand()` 里就理好牌。③ 上帝手牌**存进 `TableModel`**（`setGodHand/clearGodHands`），`concealedCount()`、`seatHasDrawnTile()`、`godHand()` 全部同源 → 布局与绘制不可能不一致。④ 手切动画起点改用**理牌后**的格子下标（`handSlotLocal`），摸切仍是摸牌槽。回归：`SelfTest` 的「碰只扣 2 张 / 加杠只扣 1 张 / 自动理牌 / 布局按真实张数 / 动画起点就是那一格」，以及一次真实回放的重放核对（422 次出牌 0 异常） |
 
 ### 1.3 排期完成项（原「已知未修」）
 
@@ -211,11 +212,12 @@
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
 | L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **554 项全绿**（本轮**未动服务端**，故与上一轮同数） |
-| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **449 项全绿**（439 → +10：`roundResultEntry` 定位、上帝视角 `drawn[4]` 的"刚摸到/打出后清空"、回放窗口的「显示他家手牌」（可切换）与「本局结算」按钮、i18n 计数 368 / `ui.*` 246） |
+| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **461 项全绿**（449 → +12：`roundResultEntry`、上帝视角 `drawn[4]`、**碰只扣 2 张 / 加杠只扣 1 张**、**自动理牌**、**布局按真实张数**、**出牌动画起点**、回放窗口两个新按钮、i18n 计数 368 / `ui.*` 246） |
 | L3 对局记录端到端 | `node tools\replay-test.mjs <host> <port>` | **REPLAY PASS（26 项）**（本轮未改协议/服务端，回归确认） |
 | L3 其余协议用例 | `e2e` / `timeout` / `clock` / `firstturn` / `riichi-stale` / `utf8` | 全部 **PASS** |
 | L3 静态检查 | `check-i18n` / `i18n-scan --check` / `i18n-gen --check` | 全部 **PASS**（新增 8 条回放文案，废弃 5 条牌山旧 key 后语言文件 368 条） |
-| L4 GUI 实拍 | `client --replay <host> <port> <id> --step N [--god] [--result] [--wall] --shot …` | 四张实拍：`replay-window.png`（导航含两个新按钮 + **按小局切割的操作列表**）、`replay-god.png`（四家手牌全明）、`replay-wall.png`（**一条抓牌顺序序列**、每列 4 张、四色归属线、王牌在序列末尾）、`replay-result.png`（本局结算，只有「确定」、无倒计时） |
+| L4 GUI 实拍 | `client --replay <host> <port> <id> --step N [--god] [--result] [--wall] --shot …` | 四张实拍：`replay-window.png`（导航含两个新按钮 + **按小局切割的操作列表**）、`replay-god.png`（四家手牌全明、**按真实张数排布且已理牌**）、`replay-wall.png`（**一条抓牌顺序序列**、每列 4 张、四色归属线、王牌在序列末尾）、`replay-result.png`（本局结算，只有「确定」、无倒计时） |
+| L4 上帝视角逐张核对 | 临时给 `paintSeat` 加一行 `MAHJONG_DEBUG_HAND` 开关的打印，跑 `--god` 抓"实际画出来的四家手牌" | 与按同一套规则离线重放真实回放的结果**逐张一致**（13/13/13/10；座位 2 碰 9p 后 10 张且只剩 1 张 9p）—— 排除了"截图上认错牌"的误判 |
 
 ### 4.1 上一轮（对局记录回放）
 
@@ -229,12 +231,16 @@
 
 ### 4.2 本轮改动面
 
-纯客户端（服务端一行未改）：`model/ReplayModel`（`GodState.drawn[4]`、`roundResultEntry`）、
-`model/TableModel`（`setSilent()` 静音开关）、`ui/TableView`（`setGodHands()`、`seatClicked()`）、
-`ui/WallView`（重写为**一条抓牌顺序序列**）、`ui/ReplayWindow`（动画策略 / 上帝视角开关 /
-点名牌切视角 / 按小局切割的操作列表 / 本局结算）、`ui/MainWindow`（`offerReplay` 只在 `game_end`）、
+纯客户端（服务端一行未改）：`model/ReplayModel`（`GodState.drawn[4]`、`roundResultEntry`、
+**副露扣牌算法对齐自家手牌**）、`model/TableModel`（`setSilent()` 静音开关、**上帝手牌存进模型**
+（`setGodHand/clearGodHands/hasGodHand/godHand/godDrawn` + `concealedCount` 同源））、
+`model/Tile`（`mj::sortTiles()` 统一理牌）、`ui/TableLayout`（`seatHasDrawnTile` 认上帝摸牌）、
+`ui/TableView`（`setGodHands/clearGodHands`、`seatClicked()`、**出牌动画起点按理牌后的格子**、
+`lastFlightFromIndexForTest()`）、`ui/WallView`（重写为**一条抓牌顺序序列**）、
+`ui/ReplayWindow`（动画策略 / 上帝视角开关 / 点名牌切视角 / 按小局切割的操作列表 / 本局结算）、
+`ui/MainWindow`（`offerReplay` 只在 `game_end`）、
 `main.cpp`（`--god` / `--step N` / `--result` + `replayLoaded` 信号），
-`SelfTest.cpp`（+10）、i18n（+8 条、废弃 5 条）、`docs/{DESIGN,PROTOCOL,AUDIT}.md`、`README.md`。
+`SelfTest.cpp`（+22）、i18n（+8 条、废弃 5 条）、`docs/{DESIGN,PROTOCOL,AUDIT}.md`、`README.md`、`.gitignore`。
 
 ### 4.3 上一轮改动面（对局记录回放）
 

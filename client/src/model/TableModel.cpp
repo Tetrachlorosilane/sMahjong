@@ -120,6 +120,7 @@ void TableModel::reset()
     m_hand.clear();
     m_drawn.clear();
     m_drawnSeat = -1;
+    clearGodHands();
 
     m_discards = QVector<QStringList>(4);
     m_discardSide = QVector<QVector<bool>>(4);
@@ -175,12 +176,50 @@ int TableModel::concealedCount(int seat) const
 {
     if (seat < 0 || seat > 3)
         return 0;
+    // 上帝视角（回放「显示他家手牌」）：以真实暗牌为准 —— **布局与绘制必须同源**，
+    // 否则行宽按"张数"算、牌按另一份数据画，就会出现张数不对/牌飞出位置不对。
+    if (m_godHas[seat])
+        return m_godHand[seat].size() + (m_godDrawn[seat].isEmpty() ? 0 : 1);
     if (seat == m_mySeat && m_hasSeat)
         return m_hand.size() + (m_drawn.isEmpty() ? 0 : 1);
     int n = 13 - 3 * int(m_melds.at(seat).size());
     if (m_drawnSeat == seat)
         n += 1;
     return qMax(0, n);
+}
+
+void TableModel::clearGodHands()
+{
+    for (int s = 0; s < 4; ++s) {
+        m_godHand[s].clear();
+        m_godDrawn[s].clear();
+        m_godHas[s] = false;
+    }
+}
+
+void TableModel::setGodHand(int seat, const QStringList& concealed, const QString& drawn)
+{
+    if (seat < 0 || seat > 3)
+        return;
+    m_godHand[seat] = concealed;
+    mj::sortTiles(m_godHand[seat]);   // 自动理牌（与自家手牌同一把尺子）
+    m_godDrawn[seat] = drawn;
+    m_godHas[seat] = true;
+}
+
+bool TableModel::hasGodHand(int seat) const
+{
+    return seat >= 0 && seat <= 3 && m_godHas[seat];
+}
+
+QStringList TableModel::godHand(int seat) const
+{
+    return (seat >= 0 && seat <= 3) ? m_godHand[seat] : QStringList();
+}
+
+QString TableModel::godDrawn(int seat) const
+{
+    return (seat >= 0 && seat <= 3) ? m_godDrawn[seat] : QString();
 }
 
 QStringList TableModel::discards(int seat) const
@@ -250,13 +289,7 @@ bool TableModel::furiten(int seat) const
 
 void TableModel::sortHand()
 {
-    std::sort(m_hand.begin(), m_hand.end(), [](const QString& a, const QString& b) {
-        const int ka = mj::kindOfTile(a);
-        const int kb = mj::kindOfTile(b);
-        if (ka != kb)
-            return ka < kb;
-        return !mj::isRedTile(a) && mj::isRedTile(b); // 同点数时普通牌在前
-    });
+    mj::sortTiles(m_hand);   // 与回放「他家手牌」共用同一把尺子（见 mj::sortTiles）
 }
 
 bool TableModel::takeFromHand(const QString& tile)

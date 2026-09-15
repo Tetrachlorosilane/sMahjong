@@ -519,18 +519,29 @@ void ReplayModel::buildGod(int index) const
             }
             if (seat >= 0) {
                 const QString called = e.body.value(QStringLiteral("called_tile")).toString();
-                for (const QString& t : tiles) {
-                    if ((kind == QLatin1String("chi") || kind == QLatin1String("pon")
-                         || kind == QLatin1String("daiminkan"))
-                        && t == called) {
-                        continue;   // 被鸣的那张不是从手里出的
+                // 从手里**实际拿出去**的那几张 —— 与 `TableModel` 的自家手牌**同一套算法**
+                // （那边是权威实现，别自己发挥）：
+                //   · 吃/碰/大明杠：`tiles` 里**包含**被鸣的那张（来自别人），
+                //     所以只摘掉**一张**同牌码的份，其余才是从手里出的；
+                //   · 暗杠：四张全部来自手里（`from == seat`，不摘）；
+                //   · 加杠：只有第 4 张（`called_tile`）来自手里，前三张早在碰的时候就扣过了。
+                // ⚠ 曾经的写法是"凡等于 `called_tile` 就跳过"，而碰的三张牌码**完全相同**
+                //   → 一张都不扣，副露的牌同时留在手里（现象：他家手牌多出 2~3 张、
+                //   副露牌"去向"不对）。加杠同理会把四张全扣掉。
+                QStringList toRemove = tiles;
+                if (e.body.value(QStringLiteral("from")).toInt(seat) != seat && !called.isEmpty()) {
+                    const int idx = toRemove.indexOf(called);
+                    if (idx >= 0) {
+                        toRemove.removeAt(idx);
                     }
-                    if (kind == QLatin1String("kakan")) {
-                        if (t == called) {
-                            st.hands[seat].removeOne(t);
-                        }
-                        continue;
+                    if (toRemove.isEmpty() && !tiles.isEmpty()) {
+                        toRemove = tiles;   // 兜底：牌码对不上时按原样扣（宁可多扣也别漏牌）
                     }
+                }
+                if (kind == QLatin1String("kakan")) {
+                    toRemove = QStringList { tiles.isEmpty() ? called : tiles.first() };
+                }
+                for (const QString& t : toRemove) {
                     st.hands[seat].removeOne(t);
                 }
                 st.melds[seat].append(qMakePair(kind, tiles));
