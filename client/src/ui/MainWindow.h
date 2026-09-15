@@ -70,8 +70,15 @@ private:
     void applyAuto(const QString& kind, const QJsonObject& ask);
     /** 每小局结束：三个自动开关立刻全部关掉（用户要求）。 */
     void resetAutoFlags();
+    /**
+     * 弹出结算界面。
+     *
+     * @param offerReplay 是否给「看本局回放」按钮。**只有整场总结算（`game_end`）才传 true** ——
+     *        牌局还没打完时，回放记录尚未落盘（服务端是终局才写盘），那个按钮点不出任何东西；
+     *        用户也明确要求"未结束时不该提供回放按钮"。
+     */
     void showResultDialog(const QString& title, const QString& html,
-                           const QString& schematic = QString());
+                           const QString& schematic = QString(), bool offerReplay = false);
     /** 关闭结算弹窗。confirm=true 视为玩家确认；服务端已推进时传 false（不发 confirm）。 */
     void closeResultDialog(bool confirm);
     bool isHost() const;

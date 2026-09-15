@@ -635,9 +635,16 @@ void TableView::paintSeat(QPainter& p, int pos)
 
     QStringList handTiles;
     bool hasDrawn = false;
+    // 回放：开了「显示其他家手牌」时，别家也按真牌画（数据由 `setGodHands()` 给）
+    const bool god = (pos != 0) && m_godHands.size() == 4 && m_godHands.at(seat).size() >= 0
+                     && !m_godHands.at(seat).isEmpty();
     if (isSelf) {
         handTiles = m_model->hand();
         hasDrawn = !m_model->drawnTile().isEmpty();
+    } else if (god) {
+        handTiles = m_godHands.at(seat);
+        handTiles.sort();
+        hasDrawn = m_godDrawn.size() == 4 && !m_godDrawn.at(seat).isEmpty();
     } else {
         // 别家同样遵循「手牌 + 单独一格摸牌」的摆放规则：
         // concealedCount 含那张刚摸到的牌，这里把它拆出来单独画一个牌背。
@@ -667,15 +674,17 @@ void TableView::paintSeat(QPainter& p, int pos)
 
     for (int i = 0; i < handTiles.size(); ++i) {
         const QRectF tr(x, y, m_layout.m_tileW, m_layout.m_tileH);
-        if (isSelf) {
+        if (isSelf || god) {
             const QString& t = handTiles.at(i);
-            if (m_highlight.contains(t)) {
+            if (isSelf && m_highlight.contains(t)) {
                 flatBox(p, tr.adjusted(-1.5, -1.5, 1.5, 1.5), QColor(0xF2, 0xC1, 0x4B, 70), kAccent,
                         5, 2.0);
             }
             TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
-            m_handRects.append(f.toScreen.mapRect(tr));
-            m_handTiles.append(t);
+            if (isSelf) {
+                m_handRects.append(f.toScreen.mapRect(tr));
+                m_handTiles.append(t);
+            }
         } else {
             TileRenderer::drawBackF(p, tr);
         }
@@ -690,6 +699,9 @@ void TableView::paintSeat(QPainter& p, int pos)
             TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
             m_handRects.append(f.toScreen.mapRect(tr));
             m_handTiles.append(t);
+        } else if (god) {
+            const QString t = m_godDrawn.at(seat);
+            TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
         } else {
             // 别家的摸牌只画牌背，但同样占独立的一格（与自家规则一致）
             TileRenderer::drawBackF(p, tr);
@@ -749,6 +761,14 @@ void TableView::paintSeat(QPainter& p, int pos)
 
     p.restore();
     paintNamePlate(p, f.plate, seat, active);
+    m_plateRects[pos] = f.toScreen.mapRect(f.plate);
+}
+
+void TableView::setGodHands(const QVector<QStringList>& hands, const QStringList& drawn)
+{
+    m_godHands = hands;
+    m_godDrawn = drawn;
+    update();
 }
 
 /**
@@ -781,6 +801,13 @@ void TableView::mousePressEvent(QMouseEvent* event)
     for (int i = 0; i < m_handRects.size() && i < m_handTiles.size(); ++i) {
         if (m_handRects.at(i).contains(pos)) {
             emit tileClicked(m_handTiles.at(i), i);
+            return;
+        }
+    }
+    // 点名牌 = 切到那家的视角（回放用；实时对局里没人接这个信号，等同无效点击）
+    for (int s = 0; s < 4; ++s) {
+        if (!m_plateRects[s].isEmpty() && m_plateRects[s].contains(pos)) {
+            emit seatClicked(s);
             return;
         }
     }

@@ -1,24 +1,26 @@
 #pragma once
 
-// 牌山整体视图：**136 张按抓牌顺序**铺开，并标出牌局进展。
+// 牌山整体视图：**136 张按抓牌顺序铺开**，并标出牌局进展。
 //
-// 布局（PROTOCOL §3.11 的坐标）：
-//   行 = 四家（从庄家起逆时针，第 0 行就是庄家）
-//   列 = 该家第几次拿牌（0 起）：前 3 轮各 4 张（每 4 列一组、组间留空隙）、
-//        第 13 张、庄家的第 14 张、之后是牌局中一张一张的摸牌
-//   底部单独一条：王牌 14 张（4 岭上 / 5 表宝牌指示牌 / 5 里宝指示牌）
+// 布局（PROTOCOL §3.11 的抓牌顺序）：
+//   · 一行 4 张（**每列 4 张**）—— 这 4 张是抓牌序列里连续的 4 张，**与"哪一家"无关**：
+//     副露（吃/碰/杠）会改变下一个摸牌的人，所以任何"按玩家分行"的排法都是错的。
+//   · 阅读顺序：**每列自上而下**（第 1~4 张）、再从左到右下一列。每 4 列留一个稍大的空隙，
+//     纯粹是防止看花眼的视觉分组。
+//   · 末尾 14 张（k ≥ 122）是王牌：4 张岭上 + 5 张表宝牌指示牌 + 5 张里宝指示牌，
+//     仍在同一序列里，只是底色不同。
+//   · 每张牌按**当前步**着色：未摸到（牌背）/ 手牌 / 已打出（灰）/ 已副露（绿框）/
+//     王牌（黄底）/ 开杠移入王牌（红底）；**底部一条细线是"谁拿走的"的颜色**（图例在标题行）。
 //
-// 每张牌按**当前时刻**的去向着色：未摸到（牌背）/ 在手里 / 已打出（灰）/ 已副露（蓝框）/
-// 王牌（黄底）/ 开杠移入王牌（红底）。当前这一步摸到的那张加红框。
-//
-// 为什么要单独一个窗口：牌桌视图（`TableView`）只能表现"当前局面"，
-// 而"牌山走到哪了、还剩什么"是**跨整局**的信息，塞进牌桌会把风盘挤坏（见 AGENTS §6.2）。
+// 为什么要单独一个窗口：牌桌视图只能表现"当前局面"，而"牌山走到哪了、还剩什么"是跨整局的信息，
+// 塞进牌桌会把风盘挤坏（见 AGENTS §6.2）。
+
+#include "../model/ReplayModel.h"   // 牌山归属结构（Round / WallSlot）就是模型里的那两个
 
 #include <QVector>
 #include <QWidget>
 
 class QLabel;
-class ReplayModel;
 
 class WallView : public QWidget
 {
@@ -32,7 +34,7 @@ public:
     void setRound(int round);
 
 signals:
-    /** 点某一张牌 → 请求跳到"它被拿走"的那一步（-1 = 王牌/未摸到）。 */
+    /** 点某一张牌 → 请求跳到"它被拿走"的那一步（-1 = 王牌/还没摸到）。 */
     void seekRequested(int entryIndex);
 
 protected:
@@ -44,24 +46,31 @@ private:
 
     struct Cell
     {
-        int wallIndex = -1;     // 牌山下标（-1 = 空位）
+        int wallIndex = -1;
         Fate fate = Untaken;
+        int seat = -1;          // 谁拿走的（-1 = 还没被拿走 / 王牌）
         int entryIndex = -1;    // 何时被拿走
         QRect rect;
     };
 
     void rebuild();
-    Fate fateOf(int wallIndex, int seat, const QVector<int>& assigned) const;
+    /**
+     * 一张**已被拿走**的牌现在在哪（手牌 / 已打出 / 已副露）。
+     *
+     * <p>牌山里同一牌码有多份（最多 4 张），所以只能按"这一张是该家同类份里的第几张"
+     * 依次去占牌河与副露的名额，剩下的算在手里 —— 这是**视觉近似**，够用且不需要新协议字段。
+     */
+    Fate fateOfTakenTile(const ReplayModel::Round& r,
+                         const QVector<ReplayModel::WallSlot>& wallSlots,
+                         const ReplayModel::WallSlot& s, int k) const;
 
     ReplayModel* m_model = nullptr;
     int m_round = 0;
     int m_step = 0;
-    QVector<QVector<Cell>> m_rows;      // 行 = 座位（0..3，按抓牌顺序从庄家起）
-    QVector<Cell> m_deadCells;          // 王牌 14 张
-    QVector<int> m_seatOfRow;           // 每行对应的座位
+    QVector<Cell> m_cells;      // 136 张，下标 = 抓牌顺序
     QLabel* m_title = nullptr;
     int m_cellW = 26;
     int m_cellH = 35;
     int m_gap = 3;
-    int m_groupGap = 9;
+    int m_groupGap = 14;        // 每 4 列的视觉分隔（纯阅读辅助）
 };
