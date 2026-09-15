@@ -279,6 +279,9 @@ void ReplayWindow::onEvent(const QJsonObject& ev)
         }
         if (m_replay->replayId() != id) {
             m_replay->reset();
+            // 换一场记录：上一场的上帝手牌必须清掉（`TableModel::reset()` **故意不清**它，
+            // 因为回放每次跳转都要靠"上一帧那份"算出牌动画的起点）。见 TableModel 的注释。
+            m_model->clearGodHands();
             if (!m_replay->setMeta(ev.value(QStringLiteral("meta")).toObject())) {
                 setStatus(lang::t(QStringLiteral("ui.replay.bad")));
                 return;
@@ -340,6 +343,31 @@ void ReplayWindow::finishLoad()
     const int open0 = m_replay->roundOpenEnd(0);
     seek(open0 >= 0 ? open0 : 0);
     emit replayLoaded();
+}
+
+void ReplayWindow::loadForTest()
+{
+    // 与 `finishLoad()` 的收尾完全一致（除了它还要处理分页/状态栏）
+    m_loading = false;
+    m_replay->build();
+    m_roundBox->clear();
+    for (int i = 0; i < m_replay->roundCount(); ++i) {
+        m_roundBox->addItem(m_replay->roundText(i));
+    }
+    m_opsRound = -1;
+    m_ops->clear();
+    m_seatBox->clear();
+    for (int s = 0; s < 4; ++s) {
+        m_seatBox->addItem(QStringLiteral("%1 (%2)").arg(m_replay->playerName(s)).arg(s + 1), s);
+    }
+    setEnabledAll(true);
+    const int open0 = m_replay->roundOpenEnd(0);
+    seek(open0 >= 0 ? open0 : 0);
+}
+
+void ReplayWindow::nextOpForTest()
+{
+    onNextOp();   // 与点「下一步」按钮**同一个槽**，带动画
 }
 
 void ReplayWindow::setGodMode(bool on)
@@ -443,10 +471,12 @@ void ReplayWindow::rebuildOps(int round)
 
 void ReplayWindow::updateGodView()
 {
-    if (!m_godOn) {
-        m_view->clearGodHands();   // 恢复实时对局的画法（别家画牌背）
-        return;
-    }
+    // 「显示他家手牌」只决定**画不画牌面**；真实暗牌**始终**交给模型 ——
+    //   ① 手牌行的布局（几格、摸牌槽在哪）要按真实张数算；
+    //   ② 出牌动画的起点要落在"这张牌真正待着的那一格"上。
+    // 实时对局把别家手切动画随机化是对的（不泄露手牌顺序），回放没有这个顾虑、且要求动画正确。
+    m_view->setGodVisible(m_godOn);
+
     const ReplayModel::GodState& god = m_replay->godState(m_cursor);
     QVector<QStringList> hands;
     QStringList drawn;
@@ -461,8 +491,6 @@ void ReplayWindow::updateGodView()
         hands << h;
         drawn << god.drawn[s];
     }
-    // 交给模型（**不是**只放在控件里）：牌桌的行宽、摸牌槽、出牌动画起点
-    // 全都按模型里的同一份数据算，张数与位置才不会各说各话。
     m_view->setGodHands(hands, drawn);
 }
 
