@@ -1,6 +1,8 @@
 #include "ReplayWindow.h"
 
 #include <QComboBox>
+#include <QDir>
+#include <QFileDialog>
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,6 +20,7 @@
 #include "../model/TableModel.h"
 #include "../net/NetClient.h"
 #include "ResultDialog.h"
+#include "model/TenhouLog.h"
 #include "TableView.h"
 #include "WallView.h"
 
@@ -141,6 +144,13 @@ void ReplayWindow::buildUi()
     m_wallBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.wall")), this);
     connect(m_wallBtn, &QPushButton::clicked, this, &ReplayWindow::showWall);
     nav2->addWidget(m_wallBtn);
+
+    // 导出天鳳牌譜（tenhou.net/6 的 #json= 链接，见 model/TenhouLog）
+    m_exportBtn = new QPushButton(lang::t(QStringLiteral("ui.replay.export")), this);
+    m_exportBtn->setToolTip(lang::t(QStringLiteral("ui.replay.export_hint")));
+    connect(m_exportBtn, &QPushButton::clicked, this, &ReplayWindow::onExportTenhou);
+    nav2->addWidget(m_exportBtn);
+
     nav2->addStretch(1);
 
     root->addLayout(nav);
@@ -648,6 +658,58 @@ void ReplayWindow::onGodToggled(bool on)
 void ReplayWindow::onRoundResult()
 {
     showRoundResult(false);
+}
+
+QString ReplayWindow::exportTenhou(const QString& pathIn, QString* err)
+{
+    if (m_replay == nullptr || m_replay->total() == 0) {
+        if (err != nullptr) {
+            *err = QStringLiteral("no_replay");
+        }
+        return QString();
+    }
+    const TenhouLog::Result r = TenhouLog::build(*m_replay);
+    if (!r.ok) {
+        if (err != nullptr) {
+            *err = r.problems.join(QLatin1Char(','));
+        }
+        return QString();
+    }
+    QString path = pathIn;
+    if (path.isEmpty()) {
+        const QString suggest = (m_replay->replayId().isEmpty() ? QStringLiteral("replay")
+                                                                : m_replay->replayId())
+                + QStringLiteral("-tenhou.txt");
+        path = QFileDialog::getSaveFileName(this,
+                                            lang::t(QStringLiteral("ui.replay.export_title")),
+                                            QDir::homePath() + QLatin1Char('/') + suggest,
+                                            lang::t(QStringLiteral("ui.replay.export_filter")));
+        if (path.isEmpty()) {
+            return QString();   // 用户取消
+        }
+    }
+    QString werr;
+    if (!TenhouLog::writeFile(r, path, &werr)) {
+        if (err != nullptr) {
+            *err = werr;
+        }
+        return QString();
+    }
+    // 把链接也留在状态栏（可以直接粘到浏览器打开 tenhou.net/6）
+    setStatus(lang::t(QStringLiteral("ui.replay.export_done")).arg(path, QString::number(r.rounds)));
+    if (!r.problems.isEmpty()) {
+        setStatus(m_status->text() + QStringLiteral(" ⚠ ")
+                  + r.problems.join(QLatin1Char(',')));
+    }
+    return path;
+}
+
+void ReplayWindow::onExportTenhou()
+{
+    QString err;
+    if (exportTenhou(QString(), &err).isEmpty() && !err.isEmpty()) {
+        setStatus(lang::t(QStringLiteral("ui.replay.export_failed")).arg(err));
+    }
 }
 
 void ReplayWindow::showRoundResult(bool resumeAfter)

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.19)
 
 # ⚠ 版本号有**两处**，改动要一起改：这里 + `src/main.cpp` 的 `setApplicationVersion()`
 #   （前者是工程元数据，后者是运行时 `QApplication::applicationVersion()`，发布说明引用的是后者）。
-project(mahjong-client VERSION 1.3.1 LANGUAGES CXX)
+project(mahjong-client VERSION 1.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,6 +70,8 @@ set(MJ_SOURCES
     src/model/AutoPolicy.h
     src/model/ReplayModel.cpp
     src/model/ReplayModel.h
+    src/model/TenhouLog.cpp
+    src/model/TenhouLog.h
     src/model/Settings.cpp
     src/model/Settings.h
     src/model/Theme.cpp
