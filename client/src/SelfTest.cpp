@@ -3,6 +3,8 @@
 #include "i18n/Lang.h"
 #include "model/AutoPolicy.h"
 #include "model/ReplayModel.h"
+#include "model/Settings.h"
+#include "model/Theme.h"
 #include "model/TableModel.h"
 #include "model/Tile.h"
 #include "net/Protocol.h"
@@ -1243,6 +1245,222 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 回归：个人设置（settings.json）与材质包 ----------
+    // 两条硬要求：① 设置文件缺/坏/某个键不可用 → **不报错**，用缺省值重新生成；
+    //             ② 材质包缺/坏/内容格式不对 → **只回退默认素材**，设置里的路径原样保留。
+    {
+        const QString dir = outDir + QStringLiteral("/settings_test");
+        QDir().mkpath(dir);
+        const QString path = dir + QStringLiteral("/settings.json");
+        QFile::remove(path);
+
+        // ① 文件不存在 → 生成缺省文件，并回报一句说明
+        QString note;
+        QStringList repaired;
+        Settings s1 = Settings::load(path, &repaired, &note);
+        check(QFile::exists(path), QStringLiteral("设置：文件不存在时会生成一份"));
+        checkEq(s1.host, QStringLiteral("127.0.0.1"), QStringLiteral("设置：缺省地址"));
+        checkEq(QString::number(s1.port), QStringLiteral("10086"), QStringLiteral("设置：缺省端口"));
+        checkEq(note, QStringLiteral("settings_missing"), QStringLiteral("设置：回报「文件不存在」"));
+
+        // ② 好文件往返
+        s1.host = QStringLiteral("10.0.0.7");
+        s1.port = 12345;
+        s1.name = QStringLiteral("小明");
+        s1.pack = QStringLiteral("D:/packs/demo.zip");
+        check(s1.save(path), QStringLiteral("设置：能写回文件"));
+        Settings s2 = Settings::load(path, &repaired, &note);
+        checkEq(s2.host, QStringLiteral("10.0.0.7"), QStringLiteral("设置：地址往返"));
+        checkEq(QString::number(s2.port), QStringLiteral("12345"), QStringLiteral("设置：端口往返"));
+        checkEq(s2.name, QStringLiteral("小明"), QStringLiteral("设置：昵称往返"));
+        checkEq(s2.pack, QStringLiteral("D:/packs/demo.zip"), QStringLiteral("设置：材质包路径往返"));
+        check(repaired.isEmpty() && note.isEmpty(), QStringLiteral("设置：好文件不报任何问题"));
+
+        // ③ 坏 JSON → 缺省值重新生成（原文件备份成 .bak，不直接扔）
+        {
+            QFile f(path);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            f.write("{ this is not json ");
+            f.close();
+        }
+        QStringList rep3;
+        Settings s3 = Settings::load(path, &rep3, &note);
+        checkEq(s3.host, QStringLiteral("127.0.0.1"), QStringLiteral("设置：坏 JSON → 回缺省"));
+        checkEq(note, QStringLiteral("settings_broken"), QStringLiteral("设置：回报「文件坏了」"));
+        check(QFile::exists(path + QStringLiteral(".bak")), QStringLiteral("设置：坏文件先备份成 .bak"));
+        {
+            QFile f(path);
+            check(f.open(QIODevice::ReadOnly), QStringLiteral("设置：坏文件已被重新生成"));
+            const QJsonDocument d = QJsonDocument::fromJson(f.readAll());
+            check(d.isObject(), QStringLiteral("设置：重新生成的是合法 JSON"));
+        }
+
+        // ④ 某个键不可用 → **只重置那一个键**，其余保留；认不出的键不丢
+        {
+            QJsonObject o;
+            o.insert(QStringLiteral("host"), QStringLiteral("  192.168.1.9  "));
+            o.insert(QStringLiteral("port"), 999999);          // 越界
+            o.insert(QStringLiteral("name"), QStringLiteral("这个昵称实在是太长了超过二十四个字所以不合法不合法"));
+            o.insert(QStringLiteral("pack"), QStringLiteral("ok.zip"));
+            o.insert(QStringLiteral("future_key"), 42);        // 别的版本写的
+            QFile f(path);
+            f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            f.write(QJsonDocument(o).toJson());
+            f.close();
+        }
+        QStringList rep4;
+        Settings s4 = Settings::load(path, &rep4, &note);
+        checkEq(s4.host, QStringLiteral("192.168.1.9"), QStringLiteral("设置：地址两端空白被裁掉"));
+        checkEq(QString::number(s4.port), QStringLiteral("10086"), QStringLiteral("设置：越界端口回缺省"));
+        checkEq(s4.name, QString(), QStringLiteral("设置：超长昵称回缺省（空 = 用默认名）"));
+        checkEq(s4.pack, QStringLiteral("ok.zip"), QStringLiteral("设置：好的键不受别的键影响"));
+        check(rep4.contains(QStringLiteral("port")) && rep4.contains(QStringLiteral("name")),
+              QStringLiteral("设置：回报被重置的键（%1）").arg(rep4.join(QLatin1Char(','))));
+        check(!rep4.contains(QStringLiteral("host")), QStringLiteral("设置：合法键不进重置清单"));
+        checkEq(note, QStringLiteral("settings_repaired"), QStringLiteral("设置：回报「有键被重置」"));
+        {
+            QFile f(path);
+            f.open(QIODevice::ReadOnly);
+            const QJsonObject o2 = QJsonDocument::fromJson(f.readAll()).object();
+            checkEq(QString::number(o2.value(QStringLiteral("future_key")).toInt()), QStringLiteral("42"),
+                    QStringLiteral("设置：认不出的键原样保留（向前兼容）"));
+        }
+
+        // ---------- 材质包 ----------
+        // 目录形式：清单 + 牌面（位图）/牌背（矢量）/桌布/立直棒/字体
+        const QString pack = dir + QStringLiteral("/pack");
+        QDir().mkpath(pack + QStringLiteral("/assets/tiles"));
+        QDir().mkpath(pack + QStringLiteral("/assets/cloth"));
+        QDir().mkpath(pack + QStringLiteral("/assets/stick"));
+        QDir().mkpath(pack + QStringLiteral("/assets/font"));
+        {
+            // 1m 用**位图**（验证 png 也能用）；不提供 3m（验证"逐张回退默认素材"）
+            QImage img(40, 60, QImage::Format_ARGB32);
+            img.fill(QColor(200, 30, 30));
+            check(img.save(pack + QStringLiteral("/assets/tiles/1m.png")),
+                  QStringLiteral("材质包：测试位图写出成功"));
+            check(img.save(pack + QStringLiteral("/assets/cloth/felt.png")),
+                  QStringLiteral("材质包：测试桌布写出成功"));
+            check(img.save(pack + QStringLiteral("/assets/stick/stick.png")),
+                  QStringLiteral("材质包：测试立直棒写出成功"));
+            // 牌背的位图（与 1m 同目录、不同颜色）：用来钉住"牌背不能被随便抓一张别的牌顶上"
+            QImage backImg(40, 60, QImage::Format_ARGB32);
+            backImg.fill(QColor(20, 140, 150));
+            check(backImg.save(pack + QStringLiteral("/assets/tiles/back.png")),
+                  QStringLiteral("材质包：测试牌背位图写出成功"));
+            // 一张**坏**位图：内容是垃圾字节，扩展名却是 png
+            QFile bad(pack + QStringLiteral("/assets/tiles/2m.png"));
+            bad.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            bad.write("not an image at all");
+            bad.close();
+            // 牌背用 svg（验证"矢量与位图混用"）
+            QFile back(pack + QStringLiteral("/assets/tiles/back.svg"));
+            back.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            back.write("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">"
+                       "<rect width=\"10\" height=\"10\" fill=\"#123456\"/></svg>");
+            back.close();
+            QJsonObject m;
+            m.insert(QStringLiteral("name"), QStringLiteral("自检材质包"));
+            m.insert(QStringLiteral("tiles"), QStringLiteral("assets/tiles"));
+            m.insert(QStringLiteral("cloth"), QStringLiteral("/assets/cloth"));   // 带前导斜杠也要认
+            m.insert(QStringLiteral("stick"), QStringLiteral("assets/stick"));
+            m.insert(QStringLiteral("font"), QStringLiteral("assets/font"));
+            QFile mf(pack + QStringLiteral("/theme.json"));
+            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            mf.write(QJsonDocument(m).toJson());
+            mf.close();
+        }
+        {
+            const Theme::Status st = Theme::instance().load(pack);
+            TileRenderer::clearAssetCache();
+            check(st.loaded, QStringLiteral("材质包：目录包被接受"));
+            checkEq(st.name, QStringLiteral("自检材质包"), QStringLiteral("材质包：读到清单里的名字"));
+            check(st.applied.contains(QStringLiteral("tiles"))
+                          && st.applied.contains(QStringLiteral("cloth"))
+                          && st.applied.contains(QStringLiteral("stick")),
+                  QStringLiteral("材质包：生效类别 = %1").arg(st.applied.join(QLatin1Char(','))));
+            check(st.problems.contains(QStringLiteral("font_empty")),
+                  QStringLiteral("材质包：空的字体目录只影响它自己（%1）")
+                      .arg(st.problems.join(QLatin1Char(','))));
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("1m")),
+                    QStringLiteral("pack-raster"), QStringLiteral("材质包：1m 用了包里的位图"));
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("back")),
+                    QStringLiteral("pack-svg"), QStringLiteral("材质包：牌背用了包里的矢量图"));
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("2m")),
+                    QStringLiteral("file-svg"),
+                    QStringLiteral("材质包：包里的 2m.png 是坏的 → 回退默认素材"));
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("3m")),
+                    QStringLiteral("file-svg"), QStringLiteral("材质包：没提供的牌回退默认素材"));
+            check(!Theme::instance().cloth().isNull() && !Theme::instance().stick().isNull(),
+                  QStringLiteral("材质包：桌布与立直棒都已载入"));
+            // 牌背位图必须是**牌背自己**那张，不能是同目录里排序靠前/靠后的别的牌
+            //（踩过：`tiles` 目录里"取第一张图当牌背"会把 1m 画成牌背）
+            {
+                const QImage backRaster = Theme::instance().packImage(QStringLiteral("back"));
+                check(!backRaster.isNull(), QStringLiteral("材质包：牌背位图取到了"));
+                checkEq(backRaster.pixelColor(2, 2).name(), QStringLiteral("#148c96"),
+                        QStringLiteral("材质包：牌背位图是 back.png 而不是别的牌"));
+                const QImage face = Theme::instance().packImage(QStringLiteral("1m"));
+                checkEq(face.pixelColor(2, 2).name(), QStringLiteral("#c81e1e"),
+                        QStringLiteral("材质包：1m 位图是它自己那张"));
+            }
+            check(Theme::instance().fontData().isEmpty(), QStringLiteral("材质包：没给字体就不动 UI 字体"));
+            // 非法牌码**绝不**去碰包里的文件（安全闸）
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("../../etc/passwd")),
+                    QStringLiteral("procedural"), QStringLiteral("材质包：非法牌码一律程序化绘制"));
+        }
+
+        // 清单里的路径不安全 → 该键忽略（不碰包外文件）
+        {
+            QJsonObject m;
+            m.insert(QStringLiteral("tiles"), QStringLiteral("../../outside"));
+            m.insert(QStringLiteral("cloth"), QStringLiteral("C:/Windows"));
+            QFile mf(pack + QStringLiteral("/theme.json"));
+            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            mf.write(QJsonDocument(m).toJson());
+            mf.close();
+            const Theme::Status st = Theme::instance().load(pack);
+            TileRenderer::clearAssetCache();
+            check(st.loaded, QStringLiteral("材质包：清单还是合法的（只是路径不能用）"));
+            check(st.problems.contains(QStringLiteral("tiles_bad_path"))
+                          && st.problems.contains(QStringLiteral("cloth_bad_path")),
+                  QStringLiteral("材质包：绝对路径/上跳一律拒（%1）")
+                      .arg(st.problems.join(QLatin1Char(','))));
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("1m")),
+                    QStringLiteral("file-svg"), QStringLiteral("材质包：被拒的键回退默认素材"));
+        }
+
+        // 清单缺失 / 不是 JSON 对象 / 路径不存在 → 只回退，不崩
+        {
+            QFile::remove(pack + QStringLiteral("/theme.json"));
+            const Theme::Status st = Theme::instance().load(pack);
+            check(!st.loaded && st.problems.contains(QStringLiteral("manifest_missing")),
+                  QStringLiteral("材质包：没有 theme.json → 作废并回报"));
+            TileRenderer::clearAssetCache();
+            checkEq(TileRenderer::assetSourceForTest(QStringLiteral("1m")), QStringLiteral("file-svg"),
+                    QStringLiteral("材质包：作废后全用默认素材"));
+        }
+        {
+            QFile mf(pack + QStringLiteral("/theme.json"));
+            mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            mf.write("[1,2,3]");   // 是合法 JSON，但不是对象
+            mf.close();
+            const Theme::Status st = Theme::instance().load(pack);
+            check(!st.loaded && st.problems.contains(QStringLiteral("manifest_broken")),
+                  QStringLiteral("材质包：清单不是 JSON 对象 → 作废"));
+        }
+        {
+            const Theme::Status st = Theme::instance().load(dir + QStringLiteral("/no_such_pack"));
+            check(!st.loaded && st.problems.contains(QStringLiteral("pack_missing")),
+                  QStringLiteral("材质包：路径不存在 → 回退并回报"));
+        }
+        {   // 清空 = 全默认（后面的渲染断言也用这个状态）
+            const Theme::Status st = Theme::instance().load(QString());
+            TileRenderer::clearAssetCache();
+            check(!st.loaded && st.problems.isEmpty(), QStringLiteral("材质包：留空 = 用默认素材"));
+        }
+    }
+
     // ---------- 回归：语言文件（协议里只有 ASCII 码，中文全在这里）----------
     // 报文里**不再有中文**：役种/打点/流局原因/错误都只发 ASCII 码，客户端查这张表。
     // 所以这里必须钉住两件事：① 语言文件真的被载入（不是"返回 key"）；② 每个码都有对应文案。
@@ -1262,7 +1480,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("368"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("403"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -1289,7 +1507,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("11"),
                 QStringLiteral("error.* 条目数（含回放的两个码）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("246"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("281"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()

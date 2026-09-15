@@ -28,6 +28,12 @@ public:
     quint16 port() const;
     QString playerName() const;
 
+    /**
+     * 用**持久化的个人设置**预填三个输入框（启动时调一次；设置改完后再调一次）。
+     * 只填非空值：昵称留空时保留界面上的默认名，不把用户输入清成空。
+     */
+    void applySettings(const QString& host, quint16 port, const QString& name);
+
 signals:
     void connectRequested(const QString& host, quint16 port, const QString& name);
     void refreshRequested();
@@ -35,6 +41,8 @@ signals:
     void joinRoomRequested(const QString& roomId);
     /** 「对局回放」：打开回放窗口（未连接时入口无效）。 */
     void replayRequested();
+    /** 「设置」：打开个人设置对话框。 */
+    void settingsRequested();
 
 private:
     void onConnectClicked();
@@ -51,6 +59,7 @@ private:
     QListWidget* m_rooms = nullptr;
     QPushButton* m_refreshBtn = nullptr;
     QPushButton* m_replayBtn = nullptr;
+    QPushButton* m_settingsBtn = nullptr;
 
     QLineEdit* m_roomName = nullptr;
     QComboBox* m_preset = nullptr;   // 规则预设：mleague（默认）/ tenhou / majsoul

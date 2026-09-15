@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.19)
 
 # ⚠ 版本号有**两处**，改动要一起改：这里 + `src/main.cpp` 的 `setApplicationVersion()`
 #   （前者是工程元数据，后者是运行时 `QApplication::applicationVersion()`，发布说明引用的是后者）。
-project(mahjong-client VERSION 1.2.1 LANGUAGES CXX)
+project(mahjong-client VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,6 +70,10 @@ set(MJ_SOURCES
     src/model/AutoPolicy.h
     src/model/ReplayModel.cpp
     src/model/ReplayModel.h
+    src/model/Settings.cpp
+    src/model/Settings.h
+    src/model/Theme.cpp
+    src/model/Theme.h
     src/ui/AutoBar.cpp
     src/ui/AutoBar.h
     src/ui/TileFont.cpp
@@ -92,6 +96,8 @@ set(MJ_SOURCES
     src/ui/MainWindow.h
     src/ui/ReplayWindow.cpp
     src/ui/ReplayWindow.h
+    src/ui/SettingsDialog.cpp
+    src/ui/SettingsDialog.h
     src/ui/WallView.cpp
     src/ui/WallView.h
 )
@@ -108,6 +114,7 @@ set(MJ_MOC_HEADERS
     src/ui/ResultDialog.h
     src/ui/MainWindow.h
     src/ui/ReplayWindow.h
+    src/ui/SettingsDialog.h
     src/ui/WallView.h
 )
 
@@ -167,6 +174,25 @@ endif()
 target_include_directories(mahjong-client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(mahjong-client PRIVATE Qt6::Widgets Qt6::Network Qt6::Svg)
+
+# ---------------------------------------------------------------------------
+# 材质包支持 **zip**（可选能力）
+#
+# Qt 没有公开的 zip 读取 API；`QZipReader` 在 `QtCore/private/qzipreader_p.h`。
+# 我们把这条依赖做成**可选的**：
+#   · 有 Qt6::CorePrivate（装了私有头/配置）→ 定义 MAHJONG_HAVE_ZIP=1，支持 .zip 材质包；
+#   · 没有（精简安装 / 别人自己编的 Qt）→ 只支持**目录**材质包，其余照常工作。
+# 这样"换个 Qt 就编不过"这件事不会发生（见 docs/THEME.md 的"zip 支持"一节）。
+# ---------------------------------------------------------------------------
+find_package(Qt6 QUIET COMPONENTS CorePrivate)
+if(TARGET Qt6::CorePrivate)
+    target_link_libraries(mahjong-client PRIVATE Qt6::CorePrivate)
+    target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_ZIP=1)
+    message(STATUS "材质包：支持 .zip（Qt6::CorePrivate 可用）")
+else()
+    target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_ZIP=0)
+    message(STATUS "材质包：只支持目录形式（没有 Qt6::CorePrivate）")
+endif()
 
 if(MSVC)
     target_compile_options(mahjong-client PRIVATE /W4 /utf-8)

@@ -11,6 +11,7 @@
 
 #include "model/AutoPolicy.h"
 #include "model/TableModel.h"
+#include "model/Settings.h"
 #include "net/NetClient.h"
 
 class ActionBar;
@@ -46,6 +47,14 @@ public:
     AutoBar* autoBarForTest() const { return m_autoBar; }
     void feedEventForTest(const QJsonObject& ev) { onEvent(ev); }
 
+    /**
+     * 上电时把**持久化的个人设置**装进来：预填大厅的地址/端口/昵称，
+     * 并记住设置文件路径（用户改完设置、或从大厅连上过一次，就写回去）。
+     */
+    void applySettings(const Settings& st, const QString& path);
+    /** 打开个人设置对话框（大厅的「设置」按钮走这里）。 */
+    void openSettings();
+
 private slots:
     void onEvent(const QJsonObject& ev);
     void onConnected();
@@ -65,6 +74,8 @@ private:
     void updateWaitingRoom(const QJsonObject& room);
     void updateScorePanel();
     void appendChat(const QString& who, const QString& text);
+    /** 从大厅连上过一次 → 把地址/端口/昵称写回设置文件（材质包那条不动）。 */
+    void saveCurrentEndpoint();
     void sendCommand(const QJsonObject& obj);
     /** 按三个自动开关替玩家应答本次询问（不满足条件时什么都不做）。 */
     void applyAuto(const QString& kind, const QJsonObject& ask);
@@ -137,4 +148,6 @@ private:
     QString m_replayId;                 // 本场的回放 ID（`game_start` / `game_end` 里带）
     QString m_host;                     // 当前连接目标（回放窗口要用）
     quint16 m_port = 0;
+    Settings m_settings;                // 持久化的个人设置（地址/端口/昵称/材质包）
+    QString m_settingsPath;             // 设置文件路径（由 main 传进来）
 };
