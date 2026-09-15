@@ -1536,7 +1536,7 @@ int run(const QString& outDir)
                                              {QStringLiteral("scores"),
                                               QJsonArray{25000, 25000, 25000, 25000}},
                                              {QStringLiteral("dora_indicators"),
-                                              QJsonArray{QStringLiteral("1p")}}})));
+                                              QJsonArray{QStringLiteral("1z")}}})));
         }
         // 座位 1：摸 5s → 手切 3p → 摸 2s → 摸切 → 摸 4s → 立直手切 4s
         arr3.append(entry(5, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
@@ -1544,7 +1544,7 @@ int run(const QString& outDir)
                                      {QStringLiteral("tile"), QStringLiteral("5s")}})));
         arr3.append(entry(6, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
                                       {QStringLiteral("seat"), 1},
-                                      {QStringLiteral("tile"), QStringLiteral("3p")},
+                                      {QStringLiteral("tile"), QStringLiteral("6p")},
                                       {QStringLiteral("tsumogiri"), false},
                                       {QStringLiteral("riichi"), false}})));
         arr3.append(entry(7, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
@@ -1563,11 +1563,14 @@ int run(const QString& outDir)
                                        {QStringLiteral("tile"), QStringLiteral("4s")},
                                        {QStringLiteral("tsumogiri"), false},
                                        {QStringLiteral("riichi"), true}})));
+        arr3.append(entry(10, -1, obj({{QStringLiteral("ev"), QStringLiteral("dora_reveal")},
+                                       {QStringLiteral("dora_indicators"),
+                                        QJsonArray{QStringLiteral("3z"), QStringLiteral("4z")}}})));
         arr3.append(entry(11, -1, obj({{QStringLiteral("ev"), QStringLiteral("agari")},
                                        {QStringLiteral("winner"), 1},
                                        {QStringLiteral("from"), 0},
                                        {QStringLiteral("ura_indicators"),
-                                        QJsonArray{QStringLiteral("9m")}}})));
+                                        QJsonArray{QStringLiteral("2z")}}})));
         tp.addEntries(arr3);
         tp.build();
 
@@ -1593,10 +1596,10 @@ int run(const QString& outDir)
         checkEq(QString::number(head.at(2).toInt()), QStringLiteral("1"), QStringLiteral("牌谱：供託"));
         checkEq(QString::number(g.at(1).toArray().size()), QStringLiteral("4"),
                 QStringLiteral("牌谱：四家点数"));
-        checkEq(QString::number(g.at(2).toArray().at(0).toInt()), QStringLiteral("21"),
-                QStringLiteral("牌谱：表宝牌指示牌 1p → 21"));
-        checkEq(QString::number(g.at(3).toArray().at(0).toInt()), QStringLiteral("19"),
-                QStringLiteral("牌谱：里宝牌指示牌 9m → 19"));
+        checkEq(QString::number(g.at(2).toArray().at(0).toInt()), QStringLiteral("41"),
+                QStringLiteral("牌谱：表宝牌指示牌 1z → 41"));
+        checkEq(QString::number(g.at(3).toArray().at(0).toInt()), QStringLiteral("42"),
+                QStringLiteral("牌谱：里宝指示牌 2z → 42"));
         for (int s = 0; s < 4; ++s) {
             checkEq(QString::number(g.at(4 + s).toArray().size()), QStringLiteral("13"),
                     QStringLiteral("牌谱：座位 %1 配牌 13 张").arg(s));
@@ -1612,8 +1615,8 @@ int run(const QString& outDir)
         const QJsonArray d1 = g.at(13).toArray();
         checkEq(QString::number(d1.size()), QStringLiteral("3"),
                 QStringLiteral("牌谱：座位 1 打出 3 张"));
-        checkEq(QString::number(d1.at(0).toInt()), QStringLiteral("23"),
-                QStringLiteral("牌谱：手切 3p → 23"));
+        checkEq(QString::number(d1.at(0).toInt()), QStringLiteral("26"),
+                QStringLiteral("牌谱：手切 6p → 26"));
         checkEq(d1.at(1).toString(), QStringLiteral("60"), QStringLiteral("牌谱：摸切 → 60"));
         checkEq(d1.at(2).toString(), QStringLiteral("r34"),
                 QStringLiteral("牌谱：立直手切 4s → r34"));
@@ -1637,6 +1640,140 @@ int run(const QString& outDir)
         // 空记录不能崩，也不能谎报成功
         ReplayModel empty;
         check(!TenhouLog::build(empty).ok, QStringLiteral("牌谱：空记录导出失败（不谎报成功）"));
+
+        // ---- 完整牌谱（mjlog XML）----
+        // 关键判据：① 结构；② 牌号范围；③ **摸切复用刚摸到的那张牌号**
+        //（公开实现就是靠这个判断摸切，错了整局的手切/摸切都会标反）；
+        // ④ 位域 `m` 用**照抄参考实现的解码公式**解回来，必须还原出同一副鸣牌。
+        {
+            const TenhouLog::MjlogResult mj = TenhouLog::buildMjlog(tp);
+            check(mj.ok, QStringLiteral("mjlog：生成成功"));
+            check(mj.xml.startsWith(QStringLiteral("<mjloggm ver=\"2.3\">")),
+                  QStringLiteral("mjlog：根标签带版本"));
+            check(mj.xml.contains(QStringLiteral("<TAIKYOKU oya=\"0\"/>")),
+                  QStringLiteral("mjlog：TAIKYOKU"));
+            check(mj.xml.contains(QStringLiteral("<INIT seed=\"0,0,1,0,0,")),
+                  QStringLiteral("mjlog：INIT seed = 场局次,本场,供託,骰,骰,宝牌指示牌"));
+            check(mj.xml.contains(QStringLiteral("<UN n0=\"甲\"")),
+                  QStringLiteral("mjlog：UN 带四家名字"));
+            check(mj.xml.contains(QStringLiteral("<DORA hai=")),
+                  QStringLiteral("mjlog：DORA 有输出"));
+            check(!mj.xml.contains(QStringLiteral("<RYUUKYOKU ")),
+                  QStringLiteral("mjlog：这一局是和了，不该有流局标签"));
+            {
+                const QRegularExpression re(QStringLiteral("<([TUVWDEFG])(\\d+)/>"));
+                auto it = re.globalMatch(mj.xml);
+                int n = 0;
+                bool allOk = true;
+                while (it.hasNext()) {
+                    const QRegularExpressionMatch mm = it.next();
+                    const int id = mm.captured(2).toInt();
+                    if (id < 0 || id > 135) {
+                        allOk = false;
+                    }
+                    ++n;
+                }
+                check(n >= 7, QStringLiteral("mjlog：摸打标签个数合理（实际 %1）").arg(n));
+                check(allOk, QStringLiteral("mjlog：摸打牌号都在 0..135"));
+            }
+            // 摸切复用：座位 1 摸了 2s 之后摸切，两张牌号必须一样
+            {
+                // 反向引用：要求两张牌号**相同**（摸切 = 打出的就是刚摸到的那张）
+                const QRegularExpression re(QStringLiteral("<U(\\d+)/>\\s*<E\\1/>"));
+                const QRegularExpressionMatch mm = re.match(mj.xml);
+                check(mm.hasMatch(), QStringLiteral("mjlog：摸切那一对的牌号同号（= 刚摸到的那张）"));
+                if (mm.hasMatch()) {
+                    checkEq(mm.captured(1), QStringLiteral("76"),
+                            QStringLiteral("mjlog：摸切的是刚摸到的 2s（牌号 76）"));
+                }
+            }
+            check(mj.xml.contains(QStringLiteral("<REACH who=\"1\" step=\"1\"/>"))
+                          && mj.xml.contains(QStringLiteral("<REACH who=\"1\" step=\"2\"/>")),
+                  QStringLiteral("mjlog：立直两段都写了"));
+            {
+                const int i1 = mj.xml.indexOf(QStringLiteral("<REACH who=\"1\" step=\"1\"/>"));
+                const int i2 = mj.xml.indexOf(QStringLiteral("<REACH who=\"1\" step=\"2\"/>"));
+                const int idisc = mj.xml.indexOf(QStringLiteral("<E"), i1);
+                check(i1 < idisc && idisc < i2,
+                      QStringLiteral("mjlog：step=1 在宣言牌前、step=2 在其后"));
+            }
+            check(mj.xml.contains(QStringLiteral("<AGARI who=\"1\" fromWho=\"0\"")),
+                  QStringLiteral("mjlog：AGARI 带和了家与放銃家"));
+            check(mj.xml.contains(QStringLiteral("doraHaiUra=\"112\"")),
+                  QStringLiteral("mjlog：AGARI 带里宝牌（2z → 牌号 112）"));
+            check(mj.xml.contains(QStringLiteral("doraHai=\"108,116,120\"")),
+                  QStringLiteral("mjlog：AGARI 的宝牌指示牌复用 INIT/DORA 那三个牌号"));
+            check(mj.xml.contains(QStringLiteral("</mjloggm>")), QStringLiteral("mjlog：闭合标签"));
+            const QString xp = outDir + QStringLiteral("/tenhou_export.xml");
+            QString xerr;
+            check(TenhouLog::writeMjlogFile(mj, xp, &xerr), QStringLiteral("mjlog：能写出文件"));
+            QFile xf(xp);
+            check(xf.open(QIODevice::ReadOnly), QStringLiteral("mjlog：文件可读"));
+            const QString head = QString::fromUtf8(xf.readLine()).trimmed();
+            check(head.startsWith(QStringLiteral("<?xml")), QStringLiteral("mjlog：首行是 XML 声明"));
+            xf.close();
+        }
+        check(!TenhouLog::buildMjlog(empty).ok, QStringLiteral("mjlog：空记录不谎报成功"));
+
+        // 位域 `m`：自己编的，用参考实现的解码公式解回来
+        {
+            ReplayModel mp;
+            mp.setMeta(meta3);
+            QJsonArray a2;
+            a2.append(arr3.at(0));                       // replay_round
+            for (int s = 0; s < 4; ++s) {
+                a2.append(arr3.at(1 + s));               // 四条 round_start
+            }
+            a2.append(entry(5, 2, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                       {QStringLiteral("seat"), 2},
+                                       {QStringLiteral("tile"), QStringLiteral("2m")}})));
+            a2.append(entry(6, -1, obj({{QStringLiteral("ev"), QStringLiteral("discard")},
+                                        {QStringLiteral("seat"), 2},
+                                        {QStringLiteral("tile"), QStringLiteral("2m")},
+                                        {QStringLiteral("tsumogiri"), true}})));
+            a2.append(entry(7, 1, obj({{QStringLiteral("ev"), QStringLiteral("draw")},
+                                       {QStringLiteral("seat"), 1},
+                                       {QStringLiteral("tile"), QStringLiteral("2m")}})));
+            QJsonArray ponTiles;
+            ponTiles.append(QStringLiteral("5m"));
+            ponTiles.append(QStringLiteral("5m"));
+            ponTiles.append(QStringLiteral("5m"));
+            a2.append(entry(8, -1, obj({{QStringLiteral("ev"), QStringLiteral("meld")},
+                                        {QStringLiteral("seat"), 1},
+                                        {QStringLiteral("kind"), QStringLiteral("pon")},
+                                        {QStringLiteral("tiles"), ponTiles},
+                                        {QStringLiteral("from"), 2},
+                                        {QStringLiteral("called_index"), 0}})));
+            mp.addEntries(a2);
+            mp.build();
+            const TenhouLog::MjlogResult m2 = TenhouLog::buildMjlog(mp);
+            const QRegularExpression reN(QStringLiteral("<N who=\"1\" m=\"(\\d+)\"/>"));
+            const QRegularExpressionMatch mm = reN.match(m2.xml);
+            check(mm.hasMatch(), QStringLiteral("mjlog：碰写成了 <N who m>"));
+            if (mm.hasMatch()) {
+                const int m = mm.captured(1).toInt();
+                QString kind;
+                int dir = -1;
+                const QVector<int> dec = TenhouLog::decodeMeldForTest(m, &kind, &dir);
+                checkEq(kind, QStringLiteral("pon"), QStringLiteral("mjlog：位域解回来是「碰」"));
+                checkEq(QString::number(dir), QStringLiteral("1"),
+                        QStringLiteral("mjlog：相对座位 = 対面（座位 1 碰座位 2 的牌）"));
+                checkEq(QString::number(dec.size()), QStringLiteral("4"),
+                        QStringLiteral("mjlog：碰解出 4 项（被鸣 + 3 张）"));
+                QSet<int> kinds;
+                for (int i = 1; i < dec.size(); ++i) {
+                    kinds.insert(dec.at(i) / 4);
+                }
+                checkEq(QString::number(kinds.size()), QStringLiteral("1"),
+                        QStringLiteral("mjlog：碰的三张同种类"));
+                if (!kinds.isEmpty()) {
+                    checkEq(QString::number(*kinds.constBegin()), QStringLiteral("4"),
+                            QStringLiteral("mjlog：种类 = 5m（4）"));
+                }
+                check(dec.size() >= 2 && dec.mid(1).contains(dec.at(0)),
+                      QStringLiteral("mjlog：被鸣的那张属于这副鸣牌"));
+            }
+        }
     }
 
     // ---------- 回归：语言文件（协议里只有 ASCII 码，中文全在这里）----------
@@ -1658,7 +1795,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("409"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("411"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -1685,7 +1822,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("11"),
                 QStringLiteral("error.* 条目数（含回放的两个码）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("287"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("289"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()

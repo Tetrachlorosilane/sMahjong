@@ -407,5 +407,7 @@
   "ui.replay.export_failed": "导出失败：%1",
   "ui.replay.export_filter": "牌谱文本 (*.txt)",
   "ui.replay.export_hint": "导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）",
-  "ui.replay.export_title": "导出天鳳牌谱"
+  "ui.replay.export_title": "导出天鳳牌谱",
+  "ui.replay.export_mjlog": "完整牌谱（mjlog XML）已写到 %1",
+  "ui.replay.export_mjlog_failed": "完整牌谱写失败：%1"
 }
