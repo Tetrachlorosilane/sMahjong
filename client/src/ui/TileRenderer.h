@@ -35,4 +35,12 @@ public:
     static void drawFaceRot(QPainter& p, const QRectF& r, const QString& tile, bool red,
                             int quarterTurns);
     static void drawBackRot(QPainter& p, const QRectF& r, int quarterTurns);
+
+    /**
+     * 素材链最终取到哪一份（自检与"材质包到底生效没有"的诊断口径）：
+     * `pack-svg` / `pack-raster` / `file-svg` / `qrc` / `procedural`。
+     */
+    static QString assetSourceForTest(const QString& code);
+    /** 清掉素材缓存（换材质包后必须调用，否则还是旧图）。 */
+    static void clearAssetCache();
 };

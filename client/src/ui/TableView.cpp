@@ -2,6 +2,7 @@
 
 #include "i18n/Lang.h"
 #include "model/TableModel.h"
+#include "model/Theme.h"
 #include "model/Tile.h"
 #include "ui/TileRenderer.h"
 
@@ -64,6 +65,22 @@ void flatBox(QPainter& p, const QRectF& r, const QColor& fill, const QColor& edg
 
 void drawStick(QPainter& p, const QRectF& r, const QColor& color)
 {
+    // 材质包给了立直棒就画图（竖放的按 90° 旋转后再拉伸，与横放的长宽比一致）；
+    // 没给才用程序化圆角棒。见 `model/Theme`。
+    const QImage img = Theme::instance().stick();
+    if (!img.isNull()) {
+        const bool vertical = r.height() > r.width();
+        p.save();
+        if (vertical) {
+            p.translate(r.center());
+            p.rotate(90);
+            p.drawImage(QRectF(-r.height() / 2.0, -r.width() / 2.0, r.height(), r.width()), img);
+        } else {
+            p.drawImage(r, img);
+        }
+        p.restore();
+        return;
+    }
     // 圆角与中心点都按**短边**算：立直棒横放（上下两家）与竖放（左右两家）看起来才一致。
     const qreal thick = qMin(r.width(), r.height());
     p.setPen(Qt::NoPen);
@@ -207,6 +224,16 @@ void TableView::paintEvent(QPaintEvent* event)
 
 void TableView::paintBackground(QPainter& p)
 {
+    // 桌布：材质包给了就整幅拉伸铺满（作者负责给对比例），此时**不画**默认那圈描边
+    // —— 照片/图案上再压一圈线只会显得脏。没有材质包时保持原来的纯色 + 一圈描边。
+    const QImage cloth = Theme::instance().cloth();
+    if (!cloth.isNull()) {
+        p.save();
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(rect(), cloth);
+        p.restore();
+        return;
+    }
     p.fillRect(rect(), kTable);
     const QRectF ring = QRectF(rect()).adjusted(kPad * 0.55, kPad * 0.55, -kPad * 0.55, -kPad * 0.55);
     p.setPen(QPen(kTableRing, 2));

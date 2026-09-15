@@ -9,6 +9,7 @@
 #include "ui/LobbyDialog.h"
 #include "ui/ReplayWindow.h"
 #include "ui/ResultDialog.h"
+#include "ui/SettingsDialog.h"
 #include "ui/TableView.h"
 
 #include <QApplication>
@@ -59,6 +60,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_lobby = new LobbyDialog(this);
     // 大厅的「对局回放」：打开回放窗口（它自己连一条，与是否入座无关）
     connect(m_lobby, &LobbyDialog::replayRequested, this, [this]() { openReplayWindow(); });
+    // 大厅的「设置」：个人设置对话框（地址/端口/昵称/材质包）
+    connect(m_lobby, &LobbyDialog::settingsRequested, this, &MainWindow::openSettings);
     connect(m_lobby, &LobbyDialog::connectRequested, this,
             [this](const QString& host, quint16 port, const QString& name) {
                 if (port == 0) {
@@ -68,6 +71,8 @@ MainWindow::MainWindow(QWidget* parent)
                 m_myName = name;
                 m_host = host;      // 回放窗口要用同一个目标
                 m_port = port;
+                // 「个人设置」：从大厅连过一次就把地址/端口/昵称记下来，下次启动直接带出来
+                saveCurrentEndpoint();
                 QJsonObject hello;
                 hello.insert(QStringLiteral("cmd"), QStringLiteral("hello"));
                 hello.insert(QStringLiteral("name"), name);
@@ -500,6 +505,47 @@ void MainWindow::showResultDialog(const QString& title, const QString& html, con
         sendConfirmNextRound();
     });
     dlg->show();
+}
+
+void MainWindow::applySettings(const Settings& st, const QString& path)
+{
+    m_settings = st;
+    m_settingsPath = path;
+    if (m_lobby != nullptr) {
+        m_lobby->applySettings(st.host, st.port, st.name);
+    }
+}
+
+void MainWindow::saveCurrentEndpoint()
+{
+    if (m_settingsPath.isEmpty()) {
+        return;
+    }
+    // 只更新"跟连接有关"的三项；材质包那条路径由设置对话框负责（别在这里覆盖掉）
+    m_settings.host = m_host;
+    m_settings.port = m_port;
+    if (!m_myName.isEmpty() && m_myName != lang::t(QStringLiteral("ui.lobby.default_name"))) {
+        m_settings.name = m_myName;
+    }
+    QString err;
+    m_settings.save(m_settingsPath, &err);
+}
+
+void MainWindow::openSettings()
+{
+    SettingsDialog dlg(m_settings, m_settingsPath.isEmpty() ? Settings::defaultPath() : m_settingsPath,
+                       this);
+    connect(&dlg, &SettingsDialog::applied, this, [this, &dlg]() {
+        m_settings = dlg.settings();
+        if (m_lobby != nullptr) {
+            m_lobby->applySettings(m_settings.host, m_settings.port, m_settings.name);
+        }
+        // 材质包换过 → 整个牌桌重画（素材缓存已经在对话框里清掉了）
+        if (m_table != nullptr) {
+            m_table->update();
+        }
+    });
+    dlg.exec();
 }
 
 void MainWindow::openReplayWindow(const QString& replayId)

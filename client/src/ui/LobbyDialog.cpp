@@ -32,10 +32,17 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     m_port->setValue(10086);
     m_name = new QLineEdit(lang::t("ui.lobby.col_player"), connBox);
     m_connectBtn = new QPushButton(lang::t("ui.lobby.connect"), connBox);
+    m_settingsBtn = new QPushButton(lang::t(QStringLiteral("ui.settings.title")), connBox);
+    m_settingsBtn->setToolTip(lang::t(QStringLiteral("ui.settings.hint")));
+    connect(m_settingsBtn, &QPushButton::clicked, this, &LobbyDialog::settingsRequested);
     connForm->addRow(lang::t("ui.lobby.host"), m_host);
     connForm->addRow(lang::t("ui.lobby.port"), m_port);
     connForm->addRow(lang::t("ui.lobby.nickname"), m_name);
-    connForm->addRow(QString(), m_connectBtn);
+    auto* connBtns = new QHBoxLayout();
+    connBtns->addWidget(m_connectBtn);
+    connBtns->addWidget(m_settingsBtn);
+    connBtns->addStretch(1);
+    connForm->addRow(QString(), connBtns);
     root->addWidget(connBox);
 
     // ---- 房间列表 ----
@@ -153,6 +160,19 @@ QString LobbyDialog::playerName() const
     const QString n = m_name->text().trimmed();
     // 昵称留空时的默认名（**用户数据**，但也是给人看的字，所以走语言文件）
     return n.isEmpty() ? lang::t(QStringLiteral("ui.lobby.default_name")) : n;
+}
+
+void LobbyDialog::applySettings(const QString& host, quint16 port, const QString& name)
+{
+    if (!host.isEmpty()) {
+        m_host->setText(host);
+    }
+    if (port != 0) {
+        m_port->setValue(int(port));
+    }
+    if (!name.isEmpty()) {
+        m_name->setText(name);
+    }
 }
 
 void LobbyDialog::setConnected(bool on)

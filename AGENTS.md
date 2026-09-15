@@ -13,7 +13,7 @@
 → 其余（§5 目录、§8 状态与限制、§9 素材与字体）需要时再翻。
 
 文档地图：`docs/PROTOCOL.md`（协议契约 —— **改协议先改它**）· `docs/DESIGN.md`（架构与规则取舍）·
-`docs/AUDIT.md`（审计与修复清单）· `docs/THIRD-PARTY.md`（第三方许可与分发义务）· `docs/DEPLOY.md`（Ubuntu 部署）·
+`docs/AUDIT.md`（审计与修复清单）· `docs/THEME.md`（材质包/设置文件）· `docs/THIRD-PARTY.md`（第三方许可与分发义务）· `docs/DEPLOY.md`（Ubuntu 部署）·
 `client/README.md`（客户端构建与链接方式）· `README.md`（**面向玩家**）。
 
 ---
@@ -338,8 +338,8 @@ mahjong/
 │     ├─ AutoPlay.cpp      自走联调
 │     ├─ i18n/             Lang（语言文件加载 + t()/code()/yakuText()/tileName()）
 │     ├─ net/              NetClient(含 IPv4/IPv6 自动回退) Protocol
-│     ├─ model/            Tile TableModel(纯数据状态机) AutoPolicy(自动应答判据，纯逻辑)
-│     └─ ui/               TileRenderer TableView ActionBar AutoBar(自动开关) LobbyDialog ResultDialog MainWindow
+│     ├─ model/            Tile TableModel(纯数据状态机) AutoPolicy(自动应答判据) Settings Theme(材质包)
+│     └─ ui/               TileRenderer TableView ActionBar AutoBar LobbyDialog ResultDialog SettingsDialog MainWindow
 │                           ReplayWindow(回放) WallView(牌山 136 张)
 └─ tools/              联调与静态检查：e2e-test / timeout-test / clock-test / firstturn-test /
                        riichi-stale-test / claim-priority-test / utf8-test / check-i18n /
@@ -521,7 +521,7 @@ mahjong/
     加载顺序与 `tiles/`、`fonts/` 同约定（**exe 同级 `i18n/` → qrc → 返回码**）→ **改文案不用重编译**。
     ⚠ 认不出的码**原样显示码本身**（不是 `yaku.xxx` 裸键、也不是空串），这样"服务端加了码、语言文件没跟上"一眼可见；
     码为空串时回退老字段（`yaku[].name` / 原样 `limit` / `error.msg`），新旧两端混跑不显示空白。
-  - **界面固定文案也全在 `ui.*`（246 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
+  - **界面固定文案也全在 `ui.*`（281 条）**：按钮/标题/标签/tooltip/结算 HTML 的中文都在语言文件里，
     代码里只留 `lang::t("ui.…")`，**源码里不该再有中文字面量**。例外用 `// i18n-keep` 就地豁免
     （牌面字形「萬」「東」、立直标记「立」、默认玩家名、隐藏的测量按钮）；日志与自检输出不进语言文件。
     搬运三件套（同一份映射，**不会漂移**）：`i18n-map.mjs`（字面量 → key 的**唯一数据源**）→
@@ -655,7 +655,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **554** 项、客户端自检 **449** 项、§4 的全部 L3 工具（含 `replay-test`），
+**实测通过**：服务端自检 **554** 项、客户端自检 **517** 项、§4 的全部 L3 工具（含 `replay-test`），
 外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有两组"跑整场"的账：
 **杠后岭上摸牌**（`rinshanTests`）与**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）。
 
@@ -725,4 +725,4 @@ mahjong/
 ### 9.3 相关工具一览
 
 `tools/gen-tile-placeholders.mjs`（生成占位符 SVG，不覆盖已有）· `tools/inline-svg-style.ps1`（把 CSS 内联成表现属性）·
-`tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles`（轮廓化成 SVG）/ `--fontprobe`（实测连字语法，轮次 1=总览 2=组合符放大）。
+`tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles` / `--fontprobe`。
