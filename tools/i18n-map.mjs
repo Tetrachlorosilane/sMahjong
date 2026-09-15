@@ -317,6 +317,8 @@ export const EXTRA = {
   'ui.replay.export_filter': '牌谱文本 (*.txt)',
   'ui.replay.export_done': '已导出 %1（%2 个小局）。把文件里那一行链接粘到浏览器即可在 tenhou.net/6 打开',
   'ui.replay.export_failed': '导出失败：%1',
+  'ui.replay.export_mjlog': '完整牌谱（mjlog XML）已写到 %1',
+  'ui.replay.export_mjlog_failed': '完整牌谱写失败：%1',
   // ---- 个人设置 / 材质包 ----
   // 源码里直接写 `lang::t("ui.settings.*")`（与 ui.replay.* 同一做法），所以放 EXTRA。
   'ui.settings.title': '个人设置',

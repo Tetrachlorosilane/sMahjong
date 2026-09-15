@@ -54,6 +54,48 @@ public:
     /** 牌码 → 天鳳牌号（"1m"→11 … "0s"→53）；认不出的返回 -1。 */
     static int tileNumber(const QString& code);
 
+    // ================= 完整天鳳牌谱（mjlog XML）=================
+    //
+    // `#json=` 那份是**查看器用的瘦格式**（没有副露）；这一份是天鳳原生的 `mjlog` XML，
+    // **完整**：配牌、每一张摸牌/打牌、鸣牌（吃碰杠/暗杠/加杠）、立直宣言、杠宝牌、
+    // 和了与流局全部带着。标签与位域编码都按公开实现核对过（mjlog2mjai / mjlog2json /
+    // tenhou 的 `tehai.js` 反解公式），关键几条：
+    //   · 摸牌/打牌把**牌号写在标签名里**：`<T{id}/>`…`<W{id}/>` = 0..3 家摸牌，
+    //     `<D{id}/>`…`<G{id}/>` = 0..3 家打牌（`id` 是 0..135 的**唯一**牌号）。
+    //     所以**摸切的牌号必须与刚摸到的那张相同** —— 我们按这个不变量分配牌号。
+    //   · `<N who m/>` 的 `m` 是位域打包：`m&0x3` = 被鸣者相对座位（0=上家/3=自己=暗杠），
+    //     `0x4` 吃 / `0x8` 碰 / `0x10` 加杠 / `0x20` 拔北；吃是 `(pattern<<10)|三家副本偏移`，
+    //     碰/加杠是 `(pattern<<9)|(缺的那张副本<<5)`，`pattern = 种类*3 + 被鸣牌在其中的序号`；
+    //     杠是 `(代表牌号<<8)|相对座位`。
+    //   · 立直：`<REACH who step="1"/>` 在**宣言牌之前**、`step="2"` 在其后。
+    //
+    // ⚠ 两处**如实说明**的限制（不是漏做，是数据/格式本身如此）：
+    //   ① **不写 `<SHUFFLE>`（牌山）**：天鳳把整副牌山打包成一个 seed，那个编码没有公开规范；
+    //      而本格式里每一次摸牌都带牌号，**牌山本来就是冗余的**，不写不影响任何消费方还原牌局。
+    //   ② **不写 `yaku` 属性**：天鳳的役种是数字 id，那张表我无法在此环境核对；写错等于报错役。
+    //      （和了/流局的家、手牌、和了牌、宝牌/里宝、符数/点数/收支都在。）
+    struct MjlogResult
+    {
+        bool ok = false;
+        QString xml;
+        QStringList problems;
+        int rounds = 0;
+        int tiles = 0;   // 分配出去的牌号数（自检用来核"每个牌号最多用一次"）
+    };
+
+    /** 生成完整天鳳牌谱（mjlog XML）。 */
+    static MjlogResult buildMjlog(const ReplayModel& rp);
+
+    /** 写出 mjlog 文件（UTF-8，带 XML 声明）。 */
+    static bool writeMjlogFile(const MjlogResult& r, const QString& path, QString* err = nullptr);
+
+    /**
+     * 解一条 `m`（**照抄参考实现的解码公式**，只给自检用）：
+     * 返回被鸣的几张牌号 + 被鸣者相对座位；`kind` 回填 "chi"/"pon"/"kakan"/"kan"。
+     * 这是"我编的位域必须能被公开实现解回来"的判据。
+     */
+    static QVector<int> decodeMeldForTest(int m, QString* kind, int* dir);
+
     /**
      * 写出到文件（`.txt`，内容就是那一行链接 —— 与参考项目一致）。
      * @param path 目标文件；父目录不存在会创建
