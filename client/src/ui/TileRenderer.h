@@ -43,4 +43,20 @@ public:
     static QString assetSourceForTest(const QString& code);
     /** 清掉素材缓存（换材质包后必须调用，否则还是旧图）。 */
     static void clearAssetCache();
+
+    // ---- 位图缓存（性能）----
+    /** 位图缓存的命中统计（自检用来证明"第二帧全命中"）。 */
+    struct AssetCacheStats
+    {
+        qint64 hits = 0;
+        qint64 misses = 0;
+        int entries = 0;
+    };
+    static AssetCacheStats assetCacheStatsForTest();
+    static void resetAssetCacheStatsForTest();
+    /**
+     * 开关位图缓存（默认开）。**关掉 = 复现优化前的行为**（每帧重新栅格化矢量），
+     * 自检用它做同机同轮的基准对照。
+     */
+    static void setAssetCacheEnabledForTest(bool on);
 };
