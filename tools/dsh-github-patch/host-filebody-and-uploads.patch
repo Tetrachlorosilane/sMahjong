@@ -1,0 +1,359 @@
+diff --git a/src/index.ts b/src/index.ts
+index bb419a4..31a9f2c 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -2,7 +2,9 @@
+  * @dsh-external/dsh-github — GitHub REST API 访问与操作插件（hybrid 形态）。
+  *
+  * Host 半侧：
+- *  - github_request：带权限门禁的通用 GitHub REST 请求工具；
++ *  - github_request：带权限门禁的通用 GitHub REST 请求工具（body = 内联 JSON，bodyFile = 从文件读原样字节）；
++ *  - github_upload_release_asset：release 资产上传（走 uploads.github.com，非 api.github.com）；
++ *  - github_list_issues：issue 列表；
+  *  - github_permissions：只读权限状态工具（模型不能自行提权）；
+  *  - /dsh-github/api：权限管理面板的后端（token/apiBase/scopes 持久化到
+  *    DSH_HOME/storages/dsh-github/state.json）。
+@@ -10,12 +12,15 @@
+  * 权限模型：scope 是工具执行时的强制门禁。映射规则在 requiredScopeGroups()，
+  * 未知写路径 fail-closed 到 write:admin；token 只在使用 token-required scope
+  * 时附带，因此单独启用 read:public 时不会把私有数据一起带出来。
++ * ⚠ apiBase 只作用于 api.github.com 这一侧：资产上传主机是另一个 origin，
++ * 由 Config.uploadsBase 指定（留空则按 apiBase 推导），不参与同源钉死。
+  */
++
+ import type { Context } from '@deepseek-ai/cordis'
+ import { defineTool } from '@deepseek-ai/dsh-tools'
+ import z from '@deepseek-ai/schemastery'
+-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+-import { dirname, join } from 'node:path'
++import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
++import { basename, dirname, join } from 'node:path'
+ import { homedir } from 'node:os'
+ import type { IncomingMessage, ServerResponse } from 'node:http'
+ 
+@@ -39,6 +44,10 @@ export interface Config {
+   maxPages: number
+   /** 自动翻页后合并进单个工具结果的条目上限。 */
+   maxItems: number
++  /** release 资产上传基地址；留空则按 apiBase 自动推导（api.github.com → https://uploads.github.com）。 */
++  uploadsBase: string
++  /** 单次「从文件读请求体」的大小上限（字节）。 */
++  maxUploadBytes: number
+ }
+ 
+ export const Config = z.object({
+@@ -50,6 +59,8 @@ export const Config = z.object({
+   stateFile: z.string().default(''),
+   maxPages: z.number().min(1).max(10).default(3),
+   maxItems: z.number().min(1).max(2000).default(200),
++  uploadsBase: z.string().default(''),
++  maxUploadBytes: z.number().min(1024).max(2 * 1024 * 1024 * 1024).default(512 * 1024 * 1024),
+ }) as unknown as Config
+ 
+ /** 本插件内部使用的 JSON 值类型；与 dsh-session 的 JsonValue 结构一致。 */
+@@ -182,6 +193,16 @@ type AppContext = Context & {
+   logger?: { info?(...args: unknown[]): void }
+ }
+ 
++interface UploadAssetResult {
++  ok: boolean
++  status: number
++  name: string
++  size: number
++  assetId?: number
++  url?: string
++  error?: string
++}
++
+ const API_PATH = '/dsh-github/api'
+ const GITHUB_API_VERSION = '2022-11-28'
+ const USER_AGENT = 'dsh-github/0.0.1'
+@@ -409,6 +430,8 @@ export function apply(ctx: AppContext, config: Config): void {
+   const requestTimeoutMs = config.requestTimeoutMs ?? 30000
+   const maxPagesConfig = config.maxPages ?? 3
+   const maxItemsConfig = config.maxItems ?? 200
++  const uploadsBaseFallback = config.uploadsBase ?? ''
++  const maxUploadBytes = config.maxUploadBytes ?? 512 * 1024 * 1024
+   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+   const stateFile = (config.stateFile ?? '').trim()
+     || join(dshHome, 'storages', 'dsh-github', 'state.json')
+@@ -543,12 +566,76 @@ export function apply(ctx: AppContext, config: Config): void {
+     return { url: target, baseHref }
+   }
+ 
+-  function githubHeaders(token: string, hasBody: boolean): Record<string, string> {
++  /**
++   * 资产上传基地址：显式配置优先，否则按 apiBase 推导。
++   * github.com → https://uploads.github.com；企业版 → <origin><去掉 /api/v3 的路径>/uploads。
++   * 之所以单独解析：uploads 是另一个 origin，不能走 resolveGitHubUrl 的同源钉死。
++   */
++  function effectiveUploadsBase(): string {
++    const explicit = uploadsBaseFallback.trim()
++    if (explicit !== '') return explicit
++    try {
++      const base = new URL(effectiveApiBase())
++      if (base.hostname === 'api.github.com') return 'https://uploads.github.com'
++      const prefix = base.pathname.replace(/\/+$/, '').replace(/\/api\/v3$/, '/api')
++      return `${base.origin}${prefix}/uploads`
++    } catch {
++      return ''
++    }
++  }
++
++  /** 上传走 uploads 主机，但权限判据仍按 API 路径形状（/repos/…/releases/…/assets → write:repo）。 */
++  function resolveUploadsUrl(path: string): { url?: URL; error?: string } {
++    const base = effectiveUploadsBase()
++    if (base === '') return { error: 'uploadsBase 未配置且无法从 apiBase 推导' }
++    let parsed: URL
++    try {
++      parsed = new URL(base)
++    } catch {
++      return { error: 'uploadsBase 不是合法 URL' }
++    }
++    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
++      return { error: 'uploadsBase 只允许 http/https 协议' }
++    }
++    const href = parsed.href.endsWith('/') ? parsed.href : parsed.href + '/'
++    let target: URL
++    try {
++      target = new URL(path.replace(/^\/+/, ''), href)
++    } catch {
++      return { error: '无法解析上传路径' }
++    }
++    if (target.origin !== parsed.origin) {
++      return { error: '上传路径逃逸了 uploadsBase' }
++    }
++    return { url: target }
++  }
++
++  /** 从文件读请求体；先 stat 看大小，避免把超大文件整个读进内存。 */
++  function readBodyFile(file: string): { data?: Uint8Array; error?: string } {
++    const path = file.trim()
++    if (path === '') return { error: 'bodyFile 不能为空' }
++    let size: number
++    try {
++      size = statSync(path).size
++    } catch {
++      return { error: `bodyFile 不存在或不可读：${path}` }
++    }
++    if (size > maxUploadBytes) {
++      return { error: `bodyFile 有 ${size} 字节，超过 ${maxUploadBytes} 字节上限（可调大插件 Config.maxUploadBytes）` }
++    }
++    try {
++      return { data: readFileSync(path) }
++    } catch (error) {
++      return { error: '读取 bodyFile 失败：' + errorMessage(error) }
++    }
++  }
++
++  function githubHeaders(token: string, hasBody: boolean, contentType?: string): Record<string, string> {
+     return {
+       accept: 'application/vnd.github+json',
+       'user-agent': USER_AGENT,
+       'x-github-api-version': GITHUB_API_VERSION,
+-      ...(hasBody ? { 'content-type': 'application/json' } : {}),
++      ...(hasBody ? { 'content-type': contentType ?? 'application/json' } : {}),
+       ...(token !== '' ? { authorization: `Bearer ${token}` } : {}),
+     }
+   }
+@@ -560,6 +647,7 @@ export function apply(ctx: AppContext, config: Config): void {
+     body: Json | undefined,
+     signal: AbortSignal,
+     maxPages?: number,
++    fileBody?: { data: Uint8Array; contentType: string },
+   ): Promise<GithubToolResult> {
+     const permission = authorize(method, path)
+     if (!permission.allowed) {
+@@ -581,7 +669,7 @@ export function apply(ctx: AppContext, config: Config): void {
+       : 1
+ 
+     const token = SCOPE_BY_ID.get(permission.scope)?.tokenRequired ? tokenInfo().token : ''
+-    const hasBody = body !== undefined && method !== 'GET'
++    const hasBody = method !== 'GET' && (fileBody !== undefined || body !== undefined)
+     const controller = new AbortController()
+     const onAbort = (): void => controller.abort()
+     if (signal.aborted) {
+@@ -599,9 +687,11 @@ export function apply(ctx: AppContext, config: Config): void {
+       while (pages < pageCap) {
+         const response = await fetch(currentUrl, {
+           method,
+-          headers: githubHeaders(token, hasBody),
++          headers: githubHeaders(token, hasBody, fileBody?.contentType),
+           signal: controller.signal,
+-          ...(hasBody ? { body: JSON.stringify(body) } : {}),
++          ...(hasBody
++            ? { body: fileBody !== undefined ? (fileBody.data as never) : JSON.stringify(body) }
++            : {}),
+         })
+         const { text, exceeded } = await readResponseText(response, maxResponseBytes)
+         if (exceeded) {
+@@ -768,7 +858,15 @@ export function apply(ctx: AppContext, config: Config): void {
+       },
+       body: {
+         type: 'json',
+-        description: 'POST/PATCH/PUT/DELETE 的 JSON 请求体',
++        description: 'POST/PATCH/PUT/DELETE 的 JSON 请求体；与 bodyFile 互斥（给了 bodyFile 时忽略）',
++      },
++      bodyFile: {
++        type: 'string',
++        description: '请求体改从本地文件原样读取（不做 JSON 序列化），适合大体积内容；用 contentType 指定类型',
++      },
++      contentType: {
++        type: 'string',
++        description: 'bodyFile 的 Content-Type，缺省 application/octet-stream',
+       },
+       maxPages: {
+         type: 'integer',
+@@ -814,6 +912,24 @@ export function apply(ctx: AppContext, config: Config): void {
+       },
+     },
+     async execute(args, exec) {
++      if (args.bodyFile !== undefined && String(args.bodyFile).trim() !== '') {
++        const file = readBodyFile(String(args.bodyFile))
++        const data = file.data
++        if (data === undefined) {
++          return makeGithubResult(args.method, args.path, {
++            ok: false,
++            status: 0,
++            data: null,
++            error: file.error ?? '读取 bodyFile 失败',
++          })
++        }
++        return githubRequest(args.method, args.path, args.query, undefined, exec.signal, args.maxPages, {
++          data,
++          contentType: args.contentType !== undefined && String(args.contentType).trim() !== ''
++            ? String(args.contentType)
++            : 'application/octet-stream',
++        })
++      }
+       return githubRequest(args.method, args.path, args.query, args.body, exec.signal, args.maxPages)
+     },
+   })
+@@ -961,9 +1077,127 @@ export function apply(ctx: AppContext, config: Config): void {
+     },
+   })
+ 
++  const UPLOAD_ASSET_TOOL = defineTool({
++    name: 'github_upload_release_asset',
++    description: '上传 release 资产（二进制文件）。GitHub 的资产上传不走 api.github.com 而走 uploads.github.com，'
++      + '本工具专门处理该通道（按 apiBase 推导，或用 Config.uploadsBase 指定）。需要 write:repo 权限；'
++      + '同名资产已存在时要先 DELETE /repos/{owner}/{repo}/releases/assets/{id}。',
++    parameters: {
++      owner: { type: 'string', required: true, description: '仓库 owner，如 octocat' },
++      repo: { type: 'string', required: true, description: '仓库名，如 Hello-World' },
++      releaseId: {
++        type: 'integer',
++        required: true,
++        description: 'release 的数字 id（GET /repos/{owner}/{repo}/releases/tags/{tag} 里可取到）',
++      },
++      file: { type: 'string', required: true, description: '本地文件路径（原样字节上传，不做任何序列化）' },
++      name: { type: 'string', description: '资产名，缺省取文件名' },
++      label: { type: 'string', description: '资产标签（可空）' },
++      contentType: { type: 'string', description: 'Content-Type，缺省 application/octet-stream' },
++    },
++    output: {
++      schema: {
++        type: 'object',
++        additionalProperties: false,
++        properties: {
++          ok: { type: 'boolean', required: true },
++          status: { type: 'integer', required: true },
++          name: { type: 'string', required: true },
++          size: { type: 'integer', required: true },
++          assetId: { type: 'integer' },
++          url: { type: 'string' },
++          error: { type: 'string' },
++        },
++      },
++      render(_args: unknown, value: unknown) {
++        const result = value as UploadAssetResult
++        if (!result.ok) return [{ type: 'text', text: `资产上传失败：${result.error ?? '未知错误'}` }]
++        const tail = result.url !== undefined ? '\n' + result.url : ''
++        return [{
++          type: 'text',
++          text: `已上传 ${result.name}（${result.size} 字节）→ HTTP ${result.status}`
++            + (result.assetId !== undefined ? `（asset id ${result.assetId}）` : '') + tail,
++        }]
++      },
++    },
++    async execute(args, exec) {
++      const apiPath = `/repos/${String(args.owner)}/${String(args.repo)}/releases/${Number(args.releaseId)}/assets`
++      // 权限判据用 API 路径形状（匹配 releases → write:repo），实际请求打 uploads 主机。
++      const permission = authorize('POST', apiPath)
++      const name = args.name !== undefined && String(args.name).trim() !== ''
++        ? String(args.name).trim()
++        : basename(String(args.file))
++      const fail = (error: string): UploadAssetResult => ({ ok: false, status: 0, name, size: 0, error })
++      if (!permission.allowed) return fail(permission.error)
++
++      const file = readBodyFile(String(args.file))
++      const data = file.data
++      if (data === undefined) return fail(file.error ?? '读取文件失败')
++
++      const resolved = resolveUploadsUrl(apiPath)
++      if (resolved.url === undefined) return fail(resolved.error ?? '无法解析上传地址')
++      applyQuery(resolved.url, {
++        name,
++        ...(args.label !== undefined && String(args.label) !== '' ? { label: String(args.label) } : {}),
++      })
++
++      const token = SCOPE_BY_ID.get(permission.scope)?.tokenRequired ? tokenInfo().token : ''
++      const controller = new AbortController()
++      const onAbort = (): void => controller.abort()
++      if (exec.signal.aborted) return fail('调用已取消')
++      exec.signal.addEventListener('abort', onAbort)
++      const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
++      try {
++        const response = await fetch(resolved.url, {
++          method: 'POST',
++          headers: {
++            accept: 'application/vnd.github+json',
++            'user-agent': USER_AGENT,
++            'x-github-api-version': GITHUB_API_VERSION,
++            'content-type': args.contentType !== undefined && String(args.contentType) !== ''
++              ? String(args.contentType)
++              : 'application/octet-stream',
++            ...(token !== '' ? { authorization: `Bearer ${token}` } : {}),
++          },
++          // Node 的 Buffer 与 DOM/undici 的 BodyInit 在 typed-array 泛型上对不齐，
++          // 这里按「原样字节」语义断言，运行期就是 Buffer。
++          body: data as never,
++          signal: controller.signal,
++        })
++        const { text, exceeded } = await readResponseText(response, maxResponseBytes)
++        if (exceeded) return fail(`响应体超过 ${maxResponseBytes} 字节上限`)
++        const object = asJsonObject(parseJsonText(text))
++        if (!response.ok) {
++          const message = object !== null && typeof object.message === 'string'
++            ? object.message
++            : text.slice(0, 300)
++          return fail(`HTTP ${response.status}：${message}`)
++        }
++        const assetId = object !== null && typeof object.id === 'number' ? object.id : undefined
++        const assetUrl = object !== null && typeof object.browser_download_url === 'string'
++          ? object.browser_download_url
++          : undefined
++        return {
++          ok: true,
++          status: response.status,
++          name,
++          size: data.byteLength,
++          ...(assetId !== undefined ? { assetId } : {}),
++          ...(assetUrl !== undefined ? { url: assetUrl } : {}),
++        }
++      } catch (error) {
++        return fail(controller.signal.aborted ? '请求超时' : '网络请求失败：' + errorMessage(error))
++      } finally {
++        clearTimeout(timer)
++        exec.signal.removeEventListener('abort', onAbort)
++      }
++    },
++  })
++
+   ctx.effect(() => ctx.tools.register(REQUEST_TOOL), 'dsh-github: github_request tool')
+   ctx.effect(() => ctx.tools.register(LIST_ISSUES_TOOL), 'dsh-github: github_list_issues tool')
+   ctx.effect(() => ctx.tools.register(PERMISSIONS_TOOL), 'dsh-github: github_permissions tool')
++  ctx.effect(() => ctx.tools.register(UPLOAD_ASSET_TOOL), 'dsh-github: github_upload_release_asset tool')
+ 
+   // ── 权限管理面板后端 ───────────────────────────────────────────────────
+   async function readJsonBody(req: IncomingMessage): Promise<unknown> {

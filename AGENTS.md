@@ -779,3 +779,6 @@ mahjong/
   `github_request` 负责 blob/tree/commit/ref 与 release 元数据（`bodyFile` 可从文件读请求体），
   **资产上传必须走 `github_upload_release_asset`** —— api 主机与上传主机是两个 origin
   （`api.github.com` vs `uploads.github.com`），同名资产要先 `DELETE /repos/{owner}/{repo}/releases/assets/{id}`。
+  ⚠ 这两个能力是**打在本机插件上的补丁**（上游没有）：`tools/dsh-github-patch/`，
+  `pwsh -File tools\dsh-github-patch\apply.ps1` 打补丁并安装，装完要 `dev_reload_package dsh-github`；
+  为什么需要补丁、为什么不能用 `git apply` 打它，见该目录 `README.md`。
