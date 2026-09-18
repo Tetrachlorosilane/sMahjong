@@ -344,7 +344,8 @@ mahjong/
 └─ tools/              联调与静态检查：e2e-test / timeout / clock / firstturn / riichi-stale /
                        claim-priority / utf8 / check-i18n / i18n-scan / i18n-map + i18n-apply
                        + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server / gen-tile-placeholders
-                       / inline-svg-style / dump-otf-features
+                       / inline-svg-style / dump-otf-features / gen-sfx + gen-sfx-qrc（见 §9.3）
+                       / package-release.ps1（发布打包，见 §9.5）
 ```
 
 ---
@@ -760,3 +761,21 @@ mahjong/
 
 `tools/gen-tile-placeholders.mjs`（生成占位符 SVG，不覆盖已有）· `tools/inline-svg-style.ps1`（把 CSS 内联成表现属性）·
 `tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles` / `--fontprobe`。
+
+### 9.5 发布打包
+
+`pwsh -File tools\package-release.ps1 [-Version x.y.z]` → 在 `release\`（已 gitignore）下产出两个 zip：
+
+| 包 | 内容 | 要点 |
+| --- | --- | --- |
+| `sMahjong-client-v<版本>-win64.zip` | `client\dist` 全部内容 **去掉 `settings.json`** + 自带 `README.txt` | 自带 Qt 运行时与 `licenses\`（LGPLv3 要求），解压即用 |
+| `sMahjong-server-v<版本>.zip` | `mahjong-server.jar` + `build.sh`/`run.sh` + `DEPLOY.md` + `README.txt` | 目标机只要 JDK 17+ |
+
+- ⚠ **版本号有两处，脚本会两边一起核对**：`client/CMakeLists.txt` 的 `project(... VERSION)` 与
+  `client/src/main.cpp` 的 `setApplicationVersion()`。不一致直接报错 —— 「包名 v1.6.0、程序自称 1.5.0」
+  正是 v1.6.0 首次发布漏掉的一处，只能事后重新打包。
+- 打包前必须先 `client\build.ps1 -Deploy`（`dist\` 只在 `-Deploy` 时更新，见 §3.3），脚本会校验 exe 在不在。
+- 上传 GitHub（正常开发照旧 `git push`；在取不到凭据的受限环境里改走 `dsh-github` 插件）：
+  `github_request` 负责 blob/tree/commit/ref 与 release 元数据（`bodyFile` 可从文件读请求体），
+  **资产上传必须走 `github_upload_release_asset`** —— api 主机与上传主机是两个 origin
+  （`api.github.com` vs `uploads.github.com`），同名资产要先 `DELETE /repos/{owner}/{repo}/releases/assets/{id}`。
