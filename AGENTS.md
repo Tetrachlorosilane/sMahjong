@@ -801,3 +801,10 @@ mahjong/
   ⚠ 这两个能力是**打在本机插件上的补丁**（上游没有）：`tools/dsh-github-patch/`，
   `pwsh -File tools\dsh-github-patch\apply.ps1` 打补丁并安装，装完要 `dev_reload_package dsh-github`；
   为什么需要补丁、为什么不能用 `git apply` 打它，见该目录 `README.md`。
+- ⚠ **原地重打包（tag 不变、只换资产）会踩到 GitHub 的一个坑：删掉 release 的 tag 会把它打回 draft。**
+  `DELETE /git/refs/tags/<tag>` 之后该 release 变成 `draft: true`（`tarball_url` 变 `null`、
+  资产下载 URL 变 `https://…/releases/download/untagged-…/…`）；重新 `POST /git/refs` 建好 tag
+  **并不会**自动恢复关联 —— 必须再 `PATCH /repos/{o}/{r}/releases/{id}` 带上 **`"draft": false`
+  与 `tag_name`** 才会重新发布并关联（URL 变回 `/releases/download/<tag>/…`）。
+  完整链路：`DELETE` tag → `POST` tag（指向新提交）→ `DELETE` 旧资产 → `github_upload_release_asset`
+  传新资产 → `PATCH {draft:false, tag_name, body}`。别漏最后一步，否则 release 会静默变成草稿（只有自己看得见）。
