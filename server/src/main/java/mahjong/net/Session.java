@@ -350,21 +350,25 @@ public final class Session {
                     sendError("no_room");
                     return;
                 }
-                table = t;
-                seat = 0;
-                t.seat(0).session = this;
-                t.seat(0).pid = pid;
-                t.seat(0).name = name;
-                t.hostPid = pid;
-                // 补机器人数量必须钳制：`{"fill_bots":2147483647}` 会让这个循环空转
-                // 21 亿次（每次都要扫 4 个座位），一条 60 字节的报文就能把一个核占满几十秒（AUDIT F6）。
-                int bots = Math.max(0, Math.min(Json.i(msg, "fill_bots", 0), 4));
-                for (int i = 0; i < bots; i++) {
-                    t.addBot(-1);
+                // 房间状态类命令一律在桌子锁里做（见 Table.roomLock 的说明）：
+                // 等待室命令跑在各连接自己的线程上，判据 + 改座位 + 广播必须是一个原子步。
+                synchronized (t.roomLock()) {
+                    table = t;
+                    seat = 0;
+                    t.seat(0).session = this;
+                    t.seat(0).pid = pid;
+                    t.seat(0).name = name;
+                    t.hostPid = pid;
+                    // 补机器人数量必须钳制：`{"fill_bots":2147483647}` 会让这个循环空转
+                    // 21 亿次（每次都要扫 4 个座位），一条 60 字节的报文就能把一个核占满几十秒（AUDIT F6）。
+                    int bots = Math.max(0, Math.min(Json.i(msg, "fill_bots", 0), 4));
+                    for (int i = 0; i < bots; i++) {
+                        t.addBot(-1);
+                    }
+                    t.start();
+                    send(Json.obj("ev", "room_joined", "room", t.id, "seat", 0));
+                    t.broadcastRoom();
                 }
-                t.start();
-                send(Json.obj("ev", "room_joined", "room", t.id, "seat", 0));
-                t.broadcastRoom();
                 server.broadcastRooms();
                 break;
             }
@@ -378,30 +382,32 @@ public final class Session {
                     sendError("no_room");
                     return;
                 }
-                int idx = t.firstEmptySeat();
-                if (idx < 0 || t.playing) {
-                    // 牌局进行中不接新座位：本局手牌/牌河已经发完，中途入座既拿不到状态，
-                    // 也会让轮到的座位被一个不知情的客户端占住（AUDIT F10）。观战则有人数上限，
-                    // 否则 N 个客户端进来互相广播聊天就是 O(N²) 的分配放大（AUDIT S-19）。
-                    if (t.spectators.size() >= Table.MAX_SPECTATORS) {
-                        sendError("no_room");
+                synchronized (t.roomLock()) {
+                    int idx = t.firstEmptySeat();
+                    if (idx < 0 || t.playing) {
+                        // 牌局进行中不接新座位：本局手牌/牌河已经发完，中途入座既拿不到状态，
+                        // 也会让轮到的座位被一个不知情的客户端占住（AUDIT F10）。观战则有人数上限，
+                        // 否则 N 个客户端进来互相广播聊天就是 O(N²) 的分配放大（AUDIT S-19）。
+                        if (t.spectators.size() >= Table.MAX_SPECTATORS) {
+                            sendError("no_room");
+                            return;
+                        }
+                        t.spectators.add(this);
+                        table = t;
+                        seat = -1;
+                        spectator = true;
+                        send(Json.obj("ev", "spectate", "room", t.id));
+                        send(t.stateFor(-1));
                         return;
                     }
-                    t.spectators.add(this);
                     table = t;
-                    seat = -1;
-                    spectator = true;
-                    send(Json.obj("ev", "spectate", "room", t.id));
-                    send(t.stateFor(-1));
-                    return;
+                    seat = idx;
+                    t.seat(idx).session = this;
+                    t.seat(idx).pid = pid;
+                    t.seat(idx).name = name;
+                    send(Json.obj("ev", "room_joined", "room", t.id, "seat", idx));
+                    t.broadcastRoom();
                 }
-                table = t;
-                seat = idx;
-                t.seat(idx).session = this;
-                t.seat(idx).pid = pid;
-                t.seat(idx).name = name;
-                send(Json.obj("ev", "room_joined", "room", t.id, "seat", idx));
-                t.broadcastRoom();
                 server.broadcastRooms();
                 break;
             }
@@ -410,25 +416,31 @@ public final class Session {
                 if (t == null) {
                     return;
                 }
-                if (seat >= 0) {
-                    if (t.playing) {
-                        t.seat(seat).session = null;
-                        t.seat(seat).bot = true;
-                        t.seat(seat).ready = true;
+                synchronized (t.roomLock()) {
+                    // ⚠ 用**座位表里的真实座位**而不是 `this.seat`：换座只更新发起者的
+                    //   `seat`（另见 `Table.resyncSessionSeats`），万一两者还不一致，
+                    //   以座位表为准才不会把别人的座位清掉。
+                    final int mine = t.seatOfSession(this) >= 0 ? t.seatOfSession(this) : seat;
+                    if (mine >= 0 && mine < 4) {
+                        if (t.playing) {
+                            t.seat(mine).session = null;
+                            t.seat(mine).bot = true;
+                            t.seat(mine).ready = true;
+                        } else {
+                            t.seat(mine).session = null;
+                            t.seat(mine).pid = 0;
+                            t.seat(mine).name = "";
+                            t.seat(mine).ready = false;
+                        }
                     } else {
-                        t.seat(seat).session = null;
-                        t.seat(seat).pid = 0;
-                        t.seat(seat).name = "";
-                        t.seat(seat).ready = false;
+                        t.spectators.remove(this);
                     }
-                } else {
-                    t.spectators.remove(this);
+                    table = null;
+                    seat = -1;
+                    spectator = false;
+                    send(Json.obj("ev", "left_room"));
+                    t.broadcastRoom();
                 }
-                table = null;
-                seat = -1;
-                spectator = false;
-                send(Json.obj("ev", "left_room"));
-                t.broadcastRoom();
                 t.onSessionClosed(this);
                 t.recycleIfEmpty();
                 server.broadcastRooms();
@@ -440,8 +452,20 @@ public final class Session {
                     sendError("no_room");
                     return;
                 }
-                t.seat(seat).ready = Json.bool(msg, "ready", true);
-                t.broadcastRoom();
+                final boolean wantReady = Json.bool(msg, "ready", true);
+                synchronized (t.roomLock()) {
+                    // ⚠ 按座位表反查自己的座位，而不是信 `this.seat`：
+                    //   别人换座把自己换到别处时，旧代码会把"我已准备"写到**别人**的座位上
+                    //   （实测：B 的准备落在 A 的座位，B 自己一直不准备，牌局永远开不了）。
+                    final int mine = t.seatOfSession(this);
+                    if (mine < 0) {
+                        sendError("no_room");
+                        return;
+                    }
+                    t.seat(mine).ready = wantReady;
+                    seat = mine;          // 顺手把连接自己的座位号对齐
+                    t.broadcastRoom();
+                }
                 break;
             }
             case "add_bot": {
@@ -450,14 +474,17 @@ public final class Session {
                     sendError("not_host");
                     return;
                 }
-                if (t.playing) {
-                    // 牌局进行中不增删座位：中途空出来的座位会被 join_room 顶掉，
-                    // 而 `Round` 里的手牌/牌河还在，接任者拿不到任何本局状态（AUDIT F10）。
-                    Log.warn("忽略牌局进行中的 add_bot");
-                    return;
+                final int wantSeat = Json.i(msg, "seat", -1);
+                synchronized (t.roomLock()) {
+                    if (t.playing) {
+                        // 牌局进行中不增删座位：中途空出来的座位会被 join_room 顶掉，
+                        // 而 `Round` 里的手牌/牌河还在，接任者拿不到任何本局状态（AUDIT F10）。
+                        Log.warn("忽略牌局进行中的 add_bot");
+                        return;
+                    }
+                    t.addBot(wantSeat);
+                    t.broadcastRoom();
                 }
-                t.addBot(Json.i(msg, "seat", -1));
-                t.broadcastRoom();
                 break;
             }
             case "remove_bot": {
@@ -466,12 +493,15 @@ public final class Session {
                     sendError("not_host");
                     return;
                 }
-                if (t.playing) {
-                    Log.warn("忽略牌局进行中的 remove_bot");
-                    return;
+                final int wantSeat = Json.i(msg, "seat", -1);
+                synchronized (t.roomLock()) {
+                    if (t.playing) {
+                        Log.warn("忽略牌局进行中的 remove_bot");
+                        return;
+                    }
+                    t.removeBot(wantSeat);
+                    t.broadcastRoom();
                 }
-                t.removeBot(Json.i(msg, "seat", -1));
-                t.broadcastRoom();
                 break;
             }
             case "take_seat": {
@@ -496,10 +526,26 @@ public final class Session {
                     sendError("bad_seat");
                     return;
                 }
-                t.swapSeats(seat, want);
-                seat = want;
-                send(Json.obj("ev", "room_joined", "room", t.id, "seat", want));
-                t.broadcastRoom();
+                synchronized (t.roomLock()) {
+                    // ⚠ 判 `playing` 与换座必须在**同一把锁**里：牌桌线程也在锁里把 playing 置真
+                    //   （见 Table.run）。分开写就是 check-then-act —— 换座可以正好落在
+                    //   "发牌已开始、座位表正在被按座位号读"的那一瞬间。
+                    if (t.playing) {
+                        Log.warn("忽略牌局进行中的 take_seat");
+                        return;
+                    }
+                    // 用座位表反查我现在的座位（`this.seat` 理论上已被 resyncSessionSeats 对齐，
+                    // 这里再查一次是为了不依赖"理论上"）。
+                    final int mine = t.seatOfSession(this);
+                    if (mine < 0) {
+                        sendError("no_room");
+                        return;
+                    }
+                    t.swapSeats(mine, want);
+                    seat = want;
+                    send(Json.obj("ev", "room_joined", "room", t.id, "seat", want));
+                    t.broadcastRoom();
+                }
                 break;
             }
             case "shuffle_seats": {
@@ -510,17 +556,20 @@ public final class Session {
                     sendError("not_host");
                     return;
                 }
-                if (t.playing) {
-                    Log.warn("忽略牌局进行中的 shuffle_seats");
-                    return;
+                synchronized (t.roomLock()) {
+                    if (t.playing) {
+                        Log.warn("忽略牌局进行中的 shuffle_seats");
+                        return;
+                    }
+                    t.shuffleSeats();
+                    // 自己的座位号可能变了，重新认领（`shuffleSeats` 内部已 resync 过全体，
+                    // 这里再取一次是为了把本连接的 seat 也写准）
+                    seat = t.seatOfPid(pid);
+                    if (seat >= 0) {
+                        send(Json.obj("ev", "room_joined", "room", t.id, "seat", seat));
+                    }
+                    t.broadcastRoom();
                 }
-                t.shuffleSeats();
-                // 自己的座位号可能变了，重新认领
-                seat = t.seatOfPid(pid);
-                if (seat >= 0) {
-                    send(Json.obj("ev", "room_joined", "room", t.id, "seat", seat));
-                }
-                t.broadcastRoom();
                 break;
             }
             case "start_game": {
@@ -535,16 +584,18 @@ public final class Session {
                     sendError("not_host");
                     return;
                 }
-                if (t.playing) {
-                    return;
-                }
-                for (int i = 0; i < 4; i++) {
-                    if (!t.seat(i).occupied()) {
-                        t.addBot(i);
+                synchronized (t.roomLock()) {
+                    if (t.playing) {
+                        return;
                     }
-                    t.seat(i).ready = true;
+                    for (int i = 0; i < 4; i++) {
+                        if (!t.seat(i).occupied()) {
+                            t.addBot(i);
+                        }
+                        t.seat(i).ready = true;
+                    }
+                    t.broadcastRoom();
                 }
-                t.broadcastRoom();
                 break;
             }
             case "chat": {
