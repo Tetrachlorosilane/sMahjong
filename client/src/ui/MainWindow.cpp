@@ -229,8 +229,12 @@ void MainWindow::buildWaitingPage()
         sendCommand(cmd);
     });
     connect(leaveBtn, &QPushButton::clicked, this, &MainWindow::onLeaveRoom);
-    connect(sendBtn, &QPushButton::clicked, this, &MainWindow::onChatSend);
-    connect(m_waitChatEdit, &QLineEdit::returnPressed, this, &MainWindow::onChatSend);
+    // 聊天发送：**按钮与回车各接各的输入框**（等待页这两个控件同属这一页）。
+    // ⚠ 四个连接点都必须显式收下输入框 —— 见 sendChatFrom() 的说明。
+    connect(sendBtn, &QPushButton::clicked, this,
+            [this]() { sendChatFrom(m_waitChatEdit); });
+    connect(m_waitChatEdit, &QLineEdit::returnPressed, this,
+            [this]() { sendChatFrom(m_waitChatEdit); });
 
     m_stack->addWidget(m_waitPage);
 }
@@ -289,8 +293,11 @@ void MainWindow::buildTablePage()
     connect(m_autoBar, &AutoBar::flagsChanged, this, &MainWindow::onAutoFlagsChanged);
     connect(m_actions, &ActionBar::hint, this,
             [this](const QString& text) { statusBar()->showMessage(text, 4000); });
-    connect(m_chatEdit, &QLineEdit::returnPressed, this, &MainWindow::onChatSend);
-    connect(chatSendBtn, &QPushButton::clicked, this, &MainWindow::onChatSend);
+    // 牌桌右侧的聊天：同样把输入框显式交出去（按钮点击时 sender 是 QPushButton）
+    connect(m_chatEdit, &QLineEdit::returnPressed, this,
+            [this]() { sendChatFrom(m_chatEdit); });
+    connect(chatSendBtn, &QPushButton::clicked, this,
+            [this]() { sendChatFrom(m_chatEdit); });
 }
 
 void MainWindow::showLobby()
@@ -420,14 +427,25 @@ void MainWindow::appendChat(const QString& who, const QString& text)
         m_waitChat->append(line);
 }
 
-void MainWindow::onChatSend()
+/**
+ * 发送聊天：把**指定输入框**的内容发出去。
+ *
+ * <p>⚠ 这里必须显式收下输入框，**绝不能用 `sender()` 去反推**。
+ *   两个「发送」按钮分别接在**等待页**（`m_waitChatEdit`）与**牌桌右侧**（`m_chatEdit`），
+ *   而按钮点击时 `sender()` 是那个 `QPushButton`（不是 `QLineEdit`）——
+ *   用 `qobject_cast<QLineEdit*>(sender())` 会拿到 `nullptr`、函数直接 return，
+ *   于是**回车能发、点按钮毫无反应**（用户两次报障的正是这一条）。
+ *   回车那条路之所以"看起来正常"，只是因为那时 `sender()` 恰好就是输入框。
+ */
+void MainWindow::sendChatFrom(QLineEdit* edit)
 {
-    QLineEdit* edit = qobject_cast<QLineEdit*>(sender());
-    if (!edit)
+    if (edit == nullptr) {
         return;
+    }
     const QString text = edit->text().trimmed();
-    if (text.isEmpty())
-        return;
+    if (text.isEmpty()) {
+        return;   // 空白不发送（服务端也会当空文本丢掉，但客户端先挡掉更直观）
+    }
     QJsonObject cmd;
     cmd.insert(QStringLiteral("cmd"), QStringLiteral("chat"));
     cmd.insert(QStringLiteral("text"), text);

@@ -37,6 +37,8 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QLayout>
+#include <QLineEdit>
 #include <QTextBrowser>
 #include <QStringList>
 #include <QTextStream>
@@ -1202,6 +1204,78 @@ int run(const QString& outDir)
     }
 
     // ---------- 端到端接线：开关 → 策略 → ActionBar 组包 → sendCommand ----------
+    // ---------- 回归：聊天「发送」按钮必须真的能发出去 ----------
+    // 真踩过的坑：`onChatSend()` 用 `qobject_cast<QLineEdit*>(sender())` 反推输入框 ——
+    // **按钮点击时 sender 是 QPushButton**，cast 得到 nullptr、函数直接 return，
+    // 于是"回车能发、点按钮毫无反应"（用户两次报障）。回车那条路恰好 sender 是输入框，
+    // 所以只测回车是**测不出来**的：必须真的 `click()` 那个按钮。
+    {
+        MainWindow w;
+        if (LobbyDialog* dlg = w.findChild<LobbyDialog*>())
+            dlg->hide();
+        w.setAutoAnswer(false);
+
+        QStringList sentChats;
+        w.setCommandTapForTest([&](const QJsonObject& o) {
+            if (o.value(QStringLiteral("cmd")).toString() == QLatin1String("chat")) {
+                sentChats << o.value(QStringLiteral("text")).toString();
+            }
+        });
+
+        // 找「发送」按钮 + 同一页里的聊天输入框（不依赖私有成员：与 autoBarForTest 同一思路）。
+        // ⚠ 输入框与按钮**同属一个 QHBoxLayout**，而那个布局是**布局项**不是 widget ——
+        //   所以不能靠 `itemAt(i)->widget()` 找它，得在按钮所在页面上按"有占位文字的输入框"认。
+        auto findSendPairs = [&w]() {
+            QVector<QPair<QPushButton*, QLineEdit*>> out;
+            const QString sendLabel = lang::t(QStringLiteral("ui.main.send"));
+            for (QPushButton* b : w.findChildren<QPushButton*>()) {
+                if (b->text() != sendLabel || !b->parentWidget()) {
+                    continue;
+                }
+                QLineEdit* edit = nullptr;
+                for (QLineEdit* e : b->parentWidget()->findChildren<QLineEdit*>()) {
+                    if (!e->placeholderText().isEmpty()) {   // 聊天框都有占位提示
+                        edit = e;
+                        break;
+                    }
+                }
+                out.append({ b, edit });
+            }
+            return out;
+        };
+
+        const auto pairs = findSendPairs();
+        check(pairs.size() >= 2,
+              QStringLiteral("等待页与牌桌页各应有一个「发送」按钮，实际 %1 个").arg(pairs.size()));
+        for (int i = 0; i < pairs.size(); ++i) {
+            QPushButton* btn = pairs.at(i).first;
+            QLineEdit* edit = pairs.at(i).second;
+            check(edit != nullptr,
+                  QStringLiteral("第 %1 个「发送」按钮旁边必须有输入框").arg(i + 1));
+            if (!btn || !edit) {
+                continue;
+            }
+            const int before = sentChats.size();
+            edit->setText(QStringLiteral("测试消息%1").arg(i + 1));
+            btn->click();          // ← 这条就是原来静默失效的那条路径
+            checkEq(QString::number(sentChats.size() - before), QStringLiteral("1"),
+                    QStringLiteral("点「发送」按钮必须发出 chat 报文（第 %1 个）").arg(i + 1));
+            if (sentChats.size() > before) {
+                checkEq(sentChats.last(), QStringLiteral("测试消息%1").arg(i + 1),
+                        QStringLiteral("发出的正文必须是输入框里的内容（第 %1 个）").arg(i + 1));
+            }
+            check(edit->text().isEmpty(),
+                  QStringLiteral("发送后输入框必须清空（第 %1 个）").arg(i + 1));
+
+            // ② 空白不发（回车与按钮同一条路径，这里钉住符号行为）
+            const int beforeBlank = sentChats.size();
+            edit->setText(QStringLiteral("   "));
+            btn->click();
+            checkEq(QString::number(sentChats.size() - beforeBlank), QStringLiteral("0"),
+                    QStringLiteral("空白内容不发送（第 %1 个）").arg(i + 1));
+        }
+    }
+
     // 用命令钩子抓**真正发出去的报文**，把「自动应答」整条链子钉住：
     //   ① 自动摸切发的是 `{"cmd":"action","type":"discard","tile":"<摸到的那张>","ask_id":…}`；
     //   ② 摸到的牌能自摸时，自动摸切**一个动作都不许发**（用户点名的截获）；

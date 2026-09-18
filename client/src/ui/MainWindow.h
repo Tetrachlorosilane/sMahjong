@@ -64,7 +64,6 @@ private slots:
     void onTileClicked(const QString& tile, int index);
     void onRiichiModeChanged(bool on);
     void onAutoFlagsChanged();
-    void onChatSend();
     void onLeaveRoom();
 
 private:
@@ -74,6 +73,14 @@ private:
     void updateWaitingRoom(const QJsonObject& room);
     void updateScorePanel();
     void appendChat(const QString& who, const QString& text);
+    /**
+     * 发送聊天：把**指定输入框**的内容发出去。
+     *
+     * 两个「发送」按钮分别属于等待页（`m_waitChatEdit`）与牌桌页（`m_chatEdit`），
+     * 各自配自己的输入框 —— **不能**用 `sender()` 反推（按钮点击时它是 QPushButton，
+     * 反推会拿到 nullptr 并静默 return，症状就是"回车能发、点按钮没反应"）。
+     */
+    void sendChatFrom(QLineEdit* edit);
     /** 从大厅连上过一次 → 把地址/端口/昵称写回设置文件（材质包那条不动）。 */
     void saveCurrentEndpoint();
     void sendCommand(const QJsonObject& obj);
