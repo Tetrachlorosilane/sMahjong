@@ -10,6 +10,7 @@
 #include "SelfTest.h"
 #include "i18n/Lang.h"
 #include "model/Settings.h"
+#include "model/Sound.h"
 #include "model/Theme.h"
 #include "ui/MainWindow.h"
 #include "ui/ReplayWindow.h"
@@ -119,6 +120,13 @@ int main(int argc, char* argv[])
                 qUtf8Printable(repairedKeys.join(QStringLiteral(","))));
         fflush(stderr);
     }
+    // ---- 音效（尽早初始化：探测后端、读开关与音量）----
+    //   后端三档见 model/Sound.h：Qt Multimedia → Windows winmm → 静默。
+    //   这里只探测"能不能出声"，WAV 是首次播放时按需读的（避免启动读 8 个文件）。
+    sound::Player::instance().init();
+    sound::Player::instance().setVolume(settings.sfxVolume);
+    sound::Player::instance().setEnabled(settings.sfx);
+
     {
         const Theme::Status ts = Theme::instance().load(settings.pack);
         if (!settings.pack.isEmpty() && !ts.problems.isEmpty()) {

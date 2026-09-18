@@ -243,6 +243,16 @@ function Deploy-QtRuntime([string]$TargetDir) {
         Copy-Item (Join-Path $i18nSrc "*.json") $i18nDst -Force -ErrorAction SilentlyContinue
     }
 
+    # 音效（离线合成的 WAV，见 tools/gen-sfx.mjs）。
+    # 同样**目录优先**：换音效只需替换 wav、或由材质包的 `sfx/` 覆盖，
+    # 不必重新编译；删掉整个 sfx/ 也有 qrc 兜底（没声音但不会崩）。
+    $sfxSrc = Join-Path $PSScriptRoot "assets/sfx"
+    if (Test-Path $sfxSrc) {
+        $sfxDst = Join-Path $TargetDir "sfx"
+        New-Item -ItemType Directory -Force -Path $sfxDst | Out-Null
+        Copy-Item (Join-Path $sfxSrc "*.wav") $sfxDst -Force -ErrorAction SilentlyContinue
+    }
+
     # 第三方许可文本。Qt 是 **LGPLv3（动态链接）**：分发本程序时必须随附许可全文与版权声明，
     # 并让用户能够替换 Qt 的共享库 —— 详见 docs/THIRD-PARTY.md 与 licenses/NOTICE.txt。
     #

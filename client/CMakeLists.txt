@@ -68,6 +68,8 @@ set(MJ_SOURCES
     src/model/TableModel.h
     src/model/AutoPolicy.cpp
     src/model/AutoPolicy.h
+    src/model/Sound.cpp
+    src/model/Sound.h
     src/model/ReplayModel.cpp
     src/model/ReplayModel.h
     src/model/TenhouLog.cpp
@@ -109,6 +111,7 @@ set(MJ_MOC_HEADERS
     src/AutoPlay.h
     src/net/NetClient.h
     src/model/TableModel.h
+    src/model/Sound.h
     src/ui/AutoBar.h
     src/ui/TableView.h
     src/ui/ActionBar.h
@@ -161,6 +164,14 @@ list(APPEND MJ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/tiles.qrc)
 # 改文案不用重新编译；assets/i18n.qrc 只是目录缺失时的兜底（和 tiles 一个套路）。
 list(APPEND MJ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/i18n.qrc)
 
+# 音效（离线合成的 WAV，见 tools/gen-sfx.mjs）：同样**目录优先**
+# （build.ps1 拷 assets/sfx → <exe>/sfx），qrc 只是兜底。
+#   ⚠ AUTORCC 在本项目的**预生成 moc 回退模式**下不一定被打开（MJ_USE_AUTOMOC=OFF 时
+#   只关掉了 AUTOMOC），所以这里显式打开 —— 否则 `.qrc` 会被当成普通源文件忽略，
+#   `:/sfx/*.wav` 全不存在，自检的「qrc 兜底」那条就会红。
+set(CMAKE_AUTORCC ON)
+list(APPEND MJ_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/sfx.qrc)
+
 qt_add_executable(mahjong-client WIN32 ${MJ_SOURCES})
 
 if(MJ_USE_AUTOMOC)
@@ -176,6 +187,35 @@ endif()
 target_include_directories(mahjong-client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(mahjong-client PRIVATE Qt6::Widgets Qt6::Network Qt6::Svg)
+
+# ---------------------------------------------------------------------------
+# 音效后端（**可选能力**，与下面的 zip 支持同一个套路）
+#
+# 目的：让「音效」在**任何**构建环境下都能工作，而不是"装了 Multimedia 才有声音"。
+#   ① Windows → 链 `winmm`，用 `PlaySound`（**系统自带**，DLL 只有几 KB）。
+#      这是默认选择：Qt Multimedia 会连带 FFmpeg（avcodec/avformat… 约 20MB）
+#      与 `plugins/multimedia/` —— 对一个"绿色版客户端"来说代价太大，
+#      而我们只需要放几个短 WAV。
+#   ② 非 Windows 且装了 Qt6::Multimedia → `QSoundEffect`（低延迟、可叠放，
+#      WAV 解码器内置）。
+#   ③ 其余 → 静默（界面上音效开关置灰并写明原因）。
+# 三条路都编得过，缺哪一层都不会让"换个 Qt 就编不过"。
+# ---------------------------------------------------------------------------
+if(WIN32)
+    target_link_libraries(mahjong-client PRIVATE winmm)
+    target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=0)
+    message(STATUS "音效：Windows winmm（PlaySound，零额外体积）")
+else()
+    find_package(Qt6 QUIET COMPONENTS Multimedia)
+    if(TARGET Qt6::Multimedia)
+        target_link_libraries(mahjong-client PRIVATE Qt6::Multimedia)
+        target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=1)
+        message(STATUS "音效：Qt6::Multimedia（QSoundEffect）")
+    else()
+        target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=0)
+        message(STATUS "音效：本构建无可用后端（静默，开关置灰）")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # 材质包支持 **zip**（可选能力）

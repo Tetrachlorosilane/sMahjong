@@ -372,7 +372,7 @@
   "ui.settings.cancel": "取消",
   "ui.settings.clear": "用默认",
   "ui.settings.file": "设置文件：%1",
-  "ui.settings.hint": "服务器地址/端口、昵称、材质包。改完点确定即生效并写进 settings.json",
+  "ui.settings.hint": "服务器地址/端口、昵称、材质包、音效。改完点确定即生效并写进 settings.json",
   "ui.settings.ok": "确定",
   "ui.settings.pack": "材质包",
   "ui.settings.pack_bad_path": "键「%1」的路径非法（不能是绝对路径或含 ..），已忽略",
@@ -409,5 +409,9 @@
   "ui.replay.export_hint": "导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）",
   "ui.replay.export_title": "导出天鳳牌谱",
   "ui.replay.export_mjlog": "完整牌谱（mjlog XML）已写到 %1",
-  "ui.replay.export_mjlog_failed": "完整牌谱写失败：%1"
+  "ui.replay.export_mjlog_failed": "完整牌谱写失败：%1",
+  "ui.settings.sfx": "音效",
+  "ui.settings.sfx_on": "开启音效",
+  "ui.settings.sfx_test": "试听",
+  "ui.settings.sfx_unavailable": "这个客户端构建没有音频后端（既没有 Qt Multimedia，也没链 Windows winmm），音效不可用。"
 }

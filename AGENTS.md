@@ -728,7 +728,25 @@ mahjong/
   **任何一段含非法字元就整块不显示**，回退到原文字表示。
   宁可退回文字，也绝不让字体画出「看着像牌、其实是别的牌」的图。
 
-### 9.3 相关工具一览
+### 9.3 音效（离线合成 WAV + 后端分层）
+
+- **素材**：`client/assets/sfx/<名字>.wav` ×8（吃/碰/杠/立直/自摸/荣和/提示/摸牌），
+  由 `node tools/gen-sfx.mjs` **离线合成**（纯 PCM 加法合成，脚本进仓库 ⇒ 可复现）。
+  ⚠ 改了音效名要跑 `node tools/gen-sfx-qrc.mjs` 重生成 `assets/sfx.qrc`。
+- **为什么不用 MIDI**：Qt 没有 MIDI 合成器（Windows 上 QtMultimedia 只有 WMF/FFmpeg 后端），
+  自带 SoundFont 合成器要引第三方库 —— 与本项目"客户端只依赖 Qt"冲突。所以是**预渲染 PCM**。
+- **后端按构建能力分层**（三条路都编得过，见 `client/src/model/Sound.h`）：
+  Windows 用 `winmm` 的 `PlaySound`（系统自带、零额外体积 —— Qt Multimedia 会连带
+  FFmpeg 约 20 MB 与媒体插件，对绿色版客户端不划算）；非 Windows 有 Qt6::Multimedia 时用
+  `QSoundEffect`；都没有则静默（设置里音效开关置灰并写明原因）。
+- **加载顺序与牌面同约定**：材质包 `sfx/` → exe 同级 `sfx/` → qrc → 静音。
+  ⚠ `assets/sfx.qrc` 的 **prefix 与条目名必须与源码里的 `:/sfx/<名字>.wav` 逐字对齐**
+  （现在 = `prefix="/"` + `<file>sfx/<名字>.wav</file>`）：对不上时"qrc 兜底"整条静默失效，
+  自检里有一条断言专钉这件事。
+- 开关/音量在 `settings.json`（`sfx` / `sfx_volume`），关掉时**不去读文件**。
+- 触发点在 `MainWindow::onEvent`（按事件与 `meld.kind` 分派），不在服务端 —— 音效是纯客户端表现。
+
+### 9.4 相关工具一览
 
 `tools/gen-tile-placeholders.mjs`（生成占位符 SVG，不覆盖已有）· `tools/inline-svg-style.ps1`（把 CSS 内联成表现属性）·
 `tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles` / `--fontprobe`。

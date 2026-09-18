@@ -344,7 +344,7 @@ Theme::Status Theme::load(const QString& pathIn)
     st.loaded = true;
 
     // ---- 各类别目录（写错了只影响它自己）----
-    for (const char* key : {"tiles", "back", "cloth", "stick", "font"}) {
+    for (const char* key : {"tiles", "back", "cloth", "stick", "font", "sfx"}) {
         const QString k = QLatin1String(key);
         if (!o.contains(k)) {
             continue;
@@ -422,9 +422,29 @@ Theme::Status Theme::load(const QString& pathIn)
     if (m_dirs.contains(QStringLiteral("back"))) {
         st.applied << QStringLiteral("back");
     }
+    // 音效：与牌面同一套"逐张对应"的约定 —— 目录在就算这一类生效，
+    // 里面有没有某个音效由 `packSfx()` 逐名去查（缺哪个用哪个默认音效）。
+    if (m_dirs.contains(QStringLiteral("sfx"))) {
+        st.applied << QStringLiteral("sfx");
+    }
 
     m_status = st;
     return m_status;
+}
+
+QByteArray Theme::packSfx(const QString& name) const
+{
+    if (!m_status.loaded || name.isEmpty() || !m_dirs.contains(QStringLiteral("sfx"))) {
+        return QByteArray();
+    }
+    // 音效是**逐个文件对应**的（与牌面同一个约定）：必须精确叫 `<名字>.wav`，
+    // 不做"抓目录里第一个当音效"那种事 —— 否则换一个音效会把别的音效顶掉。
+    static const QStringList wavExts = { QStringLiteral("wav") };
+    const QString f = findAsset(m_dirs.value(QStringLiteral("sfx")), name, wavExts, false);
+    if (f.isEmpty()) {
+        return QByteArray();
+    }
+    return readFile(f);
 }
 
 QString Theme::backDir(bool* dedicated) const

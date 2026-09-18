@@ -322,7 +322,11 @@ export const EXTRA = {
   // ---- 个人设置 / 材质包 ----
   // 源码里直接写 `lang::t("ui.settings.*")`（与 ui.replay.* 同一做法），所以放 EXTRA。
   'ui.settings.title': '个人设置',
-  'ui.settings.hint': '服务器地址/端口、昵称、材质包。改完点确定即生效并写进 settings.json',
+  'ui.settings.hint': '服务器地址/端口、昵称、材质包、音效。改完点确定即生效并写进 settings.json',
+  'ui.settings.sfx': '音效',
+  'ui.settings.sfx_on': '开启音效',
+  'ui.settings.sfx_test': '试听',
+  'ui.settings.sfx_unavailable': '这个客户端构建没有音频后端（既没有 Qt Multimedia，也没链 Windows winmm），音效不可用。',
   'ui.settings.pack': '材质包',
   'ui.settings.pack_placeholder': '留空 = 用默认素材；填一个 zip 或文件夹路径',
   'ui.settings.browse': '浏览…',

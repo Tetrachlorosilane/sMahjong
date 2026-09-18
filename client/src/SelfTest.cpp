@@ -6,6 +6,7 @@
 #include "model/Settings.h"
 #include "model/TenhouLog.h"
 #include "model/Theme.h"
+#include "model/Sound.h"
 #include "model/TableModel.h"
 #include "model/Tile.h"
 #include "net/Protocol.h"
@@ -1827,7 +1828,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("411"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("415"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -1854,7 +1855,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("11"),
                 QStringLiteral("error.* 条目数（含回放的两个码）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("289"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("293"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()
@@ -2658,6 +2659,77 @@ int run(const QString& outDir)
             check(!nb.isEmpty() && nb.last().contains(QStringLiteral("<table")),
                   QStringLiteral("最后一块应当是点数收支表（含 <table>）"));
         }
+    }
+
+    // ---------- 新增：音效（离线合成 WAV + 材质包可替换 + 后端可用性）----------
+    {
+        sound::Player& sp = sound::Player::instance();
+        sp.init();
+        log << QStringLiteral("[i] 音效后端：%1（可用 %2）")
+                   .arg(sp.backendName(), sp.available() ? QStringLiteral("是") : QStringLiteral("否"));
+
+        // ① 8 个音效都要能取到素材（目录优先，qrc 兜底）。
+        //    取不到就是"开关开着但没声音"，玩家无从判断，所以必须钉住。
+        const QStringList names = sound::allNames();
+        checkEq(QString::number(names.size()), QStringLiteral("8"),
+                QStringLiteral("音效种类数（吃/碰/杠/立直/自摸/荣和/提示/摸牌）"));
+        checkEq(QString::number(sp.loadedCountForTest()), QStringLiteral("8"),
+                QStringLiteral("8 个音效都要能取到 WAV 素材"));
+        for (const QString& n : names) {
+            const int size = sp.dataSizeForTest(n);
+            check(size > 1000,
+                  QStringLiteral("音效 %1 的 WAV 大小应 > 1KB，实际 %2").arg(n).arg(size));
+        }
+        // qrc 兜底：删掉整个 sfx/ 目录也要有声音（与 tiles/ 同一套约定）
+        check(QFile::exists(QStringLiteral(":/sfx/chi.wav")),
+              QStringLiteral("qrc 兜底里必须有音效（删掉 sfx/ 目录也不会没声音）"));
+
+        // ② 材质包里的 `sfx/` 能覆盖：放进一个包 → packSfx 取到包内的那份
+        {
+            const QString packDir = dir.absoluteFilePath(QStringLiteral("sfxpack"));
+            QDir().mkpath(packDir + QStringLiteral("/assets/sfx"));
+            {
+                QFile mf(packDir + QStringLiteral("/theme.json"));
+                if (mf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    mf.write("{\"sfx\":\"/assets/sfx\"}\n");
+                }
+            }
+            // 包内放一个**可辨认**的 wav（内容随意，只要非空且与默认不同）
+            const QByteArray fake("RIFF____WAVEfmt ");
+            {
+                QFile wf(packDir + QStringLiteral("/assets/sfx/pon.wav"));
+                if (wf.open(QIODevice::WriteOnly)) {
+                    wf.write(fake);
+                }
+            }
+            const Theme::Status st = Theme::instance().load(packDir);
+            check(st.loaded, QStringLiteral("音效材质包应当载入成功"));
+            check(st.applied.contains(QStringLiteral("sfx")),
+                  QStringLiteral("材质包清单里的 sfx 类别应生效，实际：%1")
+                      .arg(st.applied.join(QStringLiteral(","))));
+            checkEq(QString::number(Theme::instance().packSfx(QStringLiteral("pon")).size()),
+                    QString::number(fake.size()),
+                    QStringLiteral("材质包里的 pon.wav 应被取到（逐文件对应）"));
+            check(Theme::instance().packSfx(QStringLiteral("chi")).isEmpty(),
+                  QStringLiteral("包里没给的音效取不到（其余用默认，不串味）"));
+            // 复原：换回无材质包，并按"换包"的正规路径清缓存
+            Theme::instance().load(QString());
+            sp.clearCache();
+            checkEq(QString::number(sp.loadedCountForTest()), QStringLiteral("8"),
+                    QStringLiteral("换回默认素材后 8 个音效仍可取到"));
+        }
+
+        // ③ 开关与后端：关掉不能出声、音量钳制在 0..100
+        sp.setEnabled(false);
+        check(!sp.enabled(), QStringLiteral("音效开关能关"));
+        sp.setVolume(150);
+        checkEq(QString::number(sp.volume()), QStringLiteral("100"),
+                QStringLiteral("音量超上限要被钳到 100"));
+        sp.setVolume(-5);
+        checkEq(QString::number(sp.volume()), QStringLiteral("0"),
+                QStringLiteral("音量负值要被钳到 0"));
+        sp.setVolume(70);
+        sp.setEnabled(true);
     }
 
     // ---------- 汇总 ----------

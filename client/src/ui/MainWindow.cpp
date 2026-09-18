@@ -2,6 +2,7 @@
 
 #include "i18n/Lang.h"
 #include "model/AutoPolicy.h"
+#include "model/Sound.h"
 #include "model/Tile.h"
 #include "net/Protocol.h"
 #include "ui/ActionBar.h"
@@ -524,6 +525,9 @@ void MainWindow::applySettings(const Settings& st, const QString& path)
     if (m_lobby != nullptr) {
         m_lobby->applySettings(st.host, st.port, st.name);
     }
+    // 音效开关/音量随设置立刻生效（设置对话框里试听也是这条路径）
+    sound::Player::instance().setVolume(st.sfxVolume);
+    sound::Player::instance().setEnabled(st.sfx);
 }
 
 void MainWindow::saveCurrentEndpoint()
@@ -736,6 +740,12 @@ void MainWindow::onEvent(const QJsonObject& ev)
     }
 
     // 2) 再处理界面
+    if (name == QLatin1String("draw")) {
+        // 摸牌音效：只在自己摸到时响（别家摸牌每巡都响会很吵）。
+        // 放在"模型已更新"之后：万一 applyEvent 抛异常也不会先出声。
+        if (ev.value(QStringLiteral("seat")).toInt(-1) == m_model.mySeat())
+            sound::Player::instance().play(QLatin1String(sound::name::Draw), false);
+    }
     if (name == QLatin1String("hello_ok")) {
         m_myPid = ev.value(QStringLiteral("pid")).toInt();
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
@@ -901,28 +911,45 @@ void MainWindow::onEvent(const QJsonObject& ev)
                                .arg(m_model.playerName(seat),
                                     ev.value(QStringLiteral("kind")).toString()),
                            QColor(0x9F, 0xC8, 0xE8));
+        // 鸣牌音效：按 kind 分开（吃/碰/杠三种声音不同 —— 听得出发生了什么）。
+        // 服务端发的是 ASCII 码（chi/pon/daiminkan/ankan/kakan），所以这里能直接判。
+        const QString kind = ev.value(QStringLiteral("kind")).toString();
+        const char* sfx = sound::name::Pon;
+        if (kind == QLatin1String("chi"))
+            sfx = sound::name::Chi;
+        else if (kind == QLatin1String("daiminkan") || kind == QLatin1String("ankan")
+                 || kind == QLatin1String("kakan"))
+            sfx = sound::name::Kan;
+        sound::Player::instance().play(QLatin1String(sfx));
     } else if (name == QLatin1String("riichi")) {
         const int seat = ev.value(QStringLiteral("seat")).toInt();
         m_table->showToast(lang::t("ui.main.log_riichi").arg(m_model.playerName(seat)),
                            QColor(0xFF, 0xD2, 0x4A));
+        sound::Player::instance().play(QLatin1String(sound::name::Riichi));
         // 立直之后**只能摸切**（规则如此），所以轮到自己时自动替玩家打出摸到的牌
         // （用户要求：「立直后应该自动开启自动摸切」）。只对自己那一张立直生效。
         if (seat == m_model.mySeat())
             m_autoBar->setAutoTsumogiri(true);
     } else if (name == QLatin1String("dora_reveal")) {
         m_table->showToast(lang::t("ui.main.log_new_dora"), QColor(0xFF, 0xD2, 0x4A));
+        sound::Player::instance().play(QLatin1String(sound::name::Notify));
     } else if (name == QLatin1String("agari")) {
         m_actions->clearAsk();
         m_table->setStatusText(QString());
         m_table->showToast(lang::t("ui.main.log_agari")
                                .arg(m_model.playerName(ev.value(QStringLiteral("winner")).toInt())),
                            QColor(0xFF, 0xD2, 0x4A));
+        // 自摸与荣和用不同音效（听感上立刻分得清）；`from < 0` 才是自摸。
+        const bool tsumo = ev.value(QStringLiteral("from")).toInt(-1) < 0;
+        sound::Player::instance().play(QLatin1String(tsumo ? sound::name::Tsumo
+                                                          : sound::name::Ron));
         showResultDialog(lang::t("ui.result.title_agari"),
                          ResultDialog::agariHtml(ev, &m_model),
                          ResultDialog::schematicOf(ev, &m_model, true));
     } else if (name == QLatin1String("ryuukyoku")) {
         m_actions->clearAsk();
         m_table->setStatusText(QString());
+        sound::Player::instance().play(QLatin1String(sound::name::Notify));
         showResultDialog(lang::t("ui.result.title_ryuukyoku"),
                          ResultDialog::ryuukyokuHtml(ev, &m_model));
     } else if (name == QLatin1String("round_end")) {
