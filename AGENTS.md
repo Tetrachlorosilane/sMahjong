@@ -636,6 +636,7 @@ mahjong/
 | 编译不过 / 链接失败 | exe 是否在运行（锁文件）；AUTOMOC 缓存陈旧 → 加 `-Clean` |
 | `Connection refused` | 服务端没起 / 端口错 / **WSL 只转发到 `[::1]`**（客户端已自动回退 IPv4↔IPv6；WSL 填 `localhost`） |
 | 大厅按钮是灰的 | `MainWindow::onConnected()` 必须调 `m_lobby->setConnected(true)`（曾漏过） |
+| **自选座位：点过的那一格一直灰着（"上一个按钮不会弹起"），反向点却正常** | 同一趟循环里**既更新又读**派生状态：`updateWaitingRoom()` 曾在 0→3 的循环里一边 `setMySeat(pid 命中的那格)` 一边用 `mySeat()` 决定按钮 enabled —— 座位号变**大**时，先被处理的正是"我刚离开的那一格"，读到的还是旧值 → 它被判成"我坐着"而永远置灰；号变**小**时新座位排在前面，就恰好正常。修法：**先用一趟把"我在哪一格"定下来，第二趟再画**。回归：`client --selftest` 的「自选座位」组（正反两向 + 开局后全灰） |
 | 手牌数量对不上 | `tsumogiri` 用了吗？有没有靠 kind 猜？ |
 | **庄家第一巡点了牌却打出另一张 / 手牌张数对得上但内容与服务端差一张（幽灵手牌）** | 「哪张是刚摸到的」被猜了：① 服务端 `round_start` 有没有发 `drawn`（仅庄家）？② 出牌取牌是不是按**牌码**（`Round.pickDiscardId`）？③ 客户端的 `discard` 分支是不是按牌码对账（而不是只信 `tsumogiri` 标记）？见 §2.3-11。回归：`SelfTest.discardAlignTests` + `client --selftest` 的两组 |
 | 一人牌河两张横置 | `riichi` 事件里是不是又去标"最后一张"了？横置只认 `discard.sideways` |
@@ -681,7 +682,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **597** 项、客户端自检 **647** 项、§4 的全部 L3 工具（含 `replay-test` 与
+**实测通过**：服务端自检 **597** 项、客户端自检 **655** 项、§4 的全部 L3 工具（含 `replay-test` 与
 `discard-align-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`）。
