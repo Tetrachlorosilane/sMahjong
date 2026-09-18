@@ -264,6 +264,8 @@ node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000     # 作废的立直不�
 node tools\claim-priority-test.mjs 127.0.0.1 10086 3000   # 鸣牌优先级：高优先级成立后不必等低优先级 + 废包不漏到下一巡
 node tools\discard-align-test.mjs 127.0.0.1 10086        # 出牌对齐（幽灵手牌）：庄家 round_start 必带 drawn +
                                                           # 「错报摸切也按牌码取牌」+「我报哪张就打哪张」不变式
+node tools\seat-swap-test.mjs 127.0.0.1 10086            # 换座/洗座：被换走那家的「准备」必须落在自己座位上 +
+                                                          # 并发 churn 下座位表恒为四家的排列 + 局中 take_seat 被忽略
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）
@@ -622,7 +624,20 @@ mahjong/
   - **赤宝牌张数**：`Wall(seed, rules)` 在 `rules.aka == 0` 时**发牌期就把赤五换成普通五**
     （`stripRedFives`），于是"看到的"与"计分的"一致；`aka == 4`（两张赤五筒）受牌 id 编码
     限制仍按 3 张处理（见 §8）。
-- **服务端并发模型**：**每桌一个线程串行推进状态机**，网络线程只往队列投消息，所以游戏逻辑内无需加锁。
+- **服务端并发模型**：**每桌一个线程串行推进状态机**，对局内的客户端命令只往队列投消息，所以
+  **对局逻辑内部**无需加锁。⚠ **但这句只管对局内**：等待室的命令（`create/join/leave/ready/
+  take_seat/shuffle_seats/start_game/add_bot/remove_bot`）是**各连接自己的线程直接执行的**，
+  它们读写的却是同一份座位数组 —— 所以房间状态有**一把锁** `Table.roomLock`（可重入）：
+  - 等待室命令把「判据 + 改座位 + `broadcastRoom`」放进 `synchronized (t.roomLock())`；
+  - 牌桌线程在**同一把锁**里把 `playing` 置真（`Table.run`），这样 `take_seat` 的
+    `if (playing)` 与真正的换座之间**不可能**插进"开始发牌"（否则按座位号发的牌会落到别人连接上）；
+  - `swapSeats` / `shuffleSeats` / `broadcastRoom` 内部也各自持锁（锁可重入，嵌套调用没问题）。
+  ⚠ 另一条独立 bug（不是竞态）：换座只更新**发起者**的 `session.seat`，被换走的那家还是旧值 ——
+  于是他点「准备」会把**别人**设成已准备（探针实测：B 的准备落在 A 的座位上，B 自己一直不准备，
+  牌局永远开不了）。修法：`Table.resyncSessionSeats()`（改过座位住户的地方都调它）
+  + 等待室命令按 `Table.seatOfSession(this)` **反查**自己的真实座位，不信 `session.seat`。
+  回归：`node tools\seat-swap-test.mjs`（换座/洗座后的准备落位 + 并发 churn 下的座位表排列不变式
+  + 牌局中 take_seat 被忽略）。
 
 ---
 
@@ -638,6 +653,8 @@ mahjong/
 | 大厅按钮是灰的 | `MainWindow::onConnected()` 必须调 `m_lobby->setConnected(true)`（曾漏过） |
 | **自选座位：点过的那一格一直灰着（"上一个按钮不会弹起"），反向点却正常** | 同一趟循环里**既更新又读**派生状态：`updateWaitingRoom()` 曾在 0→3 的循环里一边 `setMySeat(pid 命中的那格)` 一边用 `mySeat()` 决定按钮 enabled —— 座位号变**大**时，先被处理的正是"我刚离开的那一格"，读到的还是旧值 → 它被判成"我坐着"而永远置灰；号变**小**时新座位排在前面，就恰好正常。修法：**先用一趟把"我在哪一格"定下来，第二趟再画**。回归：`client --selftest` 的「自选座位」组（正反两向 + 开局后全灰） |
 | 手牌数量对不上 | `tsumogiri` 用了吗？有没有靠 kind 猜？ |
+| **换座之后点「准备」没反应 / 把别人设成已准备 / 牌局永远开不了** | 被换走的那一家 `session.seat` 没跟着改 → 「我已准备」写到了**别人**的座位上。见 §6.3「服务端并发模型」：`Table.resyncSessionSeats()` + 用 `Table.seatOfSession(this)` 反查。定性：`node tools\seat-swap-test.mjs <host> <port>` |
+| **多人同时换座/洗座后座位表错乱（同一人占两格、某人消失）** | 等待室命令跑在各连接线程上、没有互斥：`Table.roomLock` 有没有把「判 playing + 改座位 + broadcastRoom」包成一步？`swapFieldsOnly` 是逐字段交换，被切开就会写坏。见 §6.3 |
 | **庄家第一巡点了牌却打出另一张 / 手牌张数对得上但内容与服务端差一张（幽灵手牌）** | 「哪张是刚摸到的」被猜了：① 服务端 `round_start` 有没有发 `drawn`（仅庄家）？② 出牌取牌是不是按**牌码**（`Round.pickDiscardId`）？③ 客户端的 `discard` 分支是不是按牌码对账（而不是只信 `tsumogiri` 标记）？见 §2.3-11。回归：`SelfTest.discardAlignTests` + `client --selftest` 的两组 |
 | 一人牌河两张横置 | `riichi` 事件里是不是又去标"最后一张"了？横置只认 `discard.sideways` |
 | 鸣牌后牌河对不上 | `called_index` 有没有 `removeAt`？ |
@@ -682,8 +699,8 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **597** 项、客户端自检 **655** 项、§4 的全部 L3 工具（含 `replay-test` 与
-`discard-align-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
+**实测通过**：服务端自检 **597** 项、客户端自检 **655** 项、§4 的全部 L3 工具（含 `replay-test`、
+`discard-align-test` 与 `seat-swap-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`）。
 
