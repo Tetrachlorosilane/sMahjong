@@ -50,7 +50,7 @@ constexpr int kAutoDelayMs = 260;
  * 与"选门风"是同一件事 —— 自选座位按钮上直接写门风，玩家一眼看得出自己会坐哪。
  * 这里是字形不是文案，所以不进语言文件（同 `TileRenderer` 里的「東」）。
  */
-const char* const SEAT_WIND[4] = { "东", "南", "西", "北" };
+const char* const SEAT_WIND[4] = { "东", "南", "西", "北" };   // i18n-keep: 牌面字形（同「萬」「東」），不是文案
 
 } // namespace
 

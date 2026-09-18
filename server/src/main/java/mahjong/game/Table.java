@@ -762,6 +762,9 @@ public final class Table implements Runnable {
                 names.add(s.name);
             }
             replay = new ReplayRecorder(rules.toJson(), names);
+            // 记下房间号：大厅的回放列表按它显示"哪一桌打的"，用户据此找"刚才那一场"
+            // （用户要求：房间保存牌谱）。
+            replay.replay().roomId = id;
         }
 
         for (Seat s : seats) {

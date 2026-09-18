@@ -480,7 +480,7 @@
 
 // 服务端 → 客户端
 {"ev":"replay_list","total":12,"items":[
-  {"id":"7FQ3M2XK9A","created":1766...,"names":["甲","乙","丙","丁"],
+  {"id":"7FQ3M2XK9A","created":1766...,"names":["甲","乙","丙","丁"],"room":"AB12",
    "preset":"mleague","rounds":6,"entries":2500,"bytes":321456,"truncated":false}]}
 
 {"ev":"replay_get","id":"7FQ3M2XK9A","from":0,"total":2500,
@@ -524,6 +524,9 @@
   所以重建索引只需读每场文件的第一行。
 - 服务端开关：`--replay-dir <dir>`（默认 `replays`）、`--replay-max <n>`（默认 50 场）、
   `--replay-max-mb <n>`（默认 96 MB）、`--no-replay`。超出上限按创建时间**淘汰最旧的并删文件**。
+- **房间牌谱**：元信息里的 `room` 是这一场所属的**房间号**（录制的就是那个房间的对话与操作）。
+  客户端据此显示「（房间 AB12）」，玩家可以按"刚才那一桌"找那一场；
+  老记录没有这个字段时是空串（客户端不显示那一截）。
 
 #### 牌山视图的坐标（136 张 → 抓牌顺序）
 

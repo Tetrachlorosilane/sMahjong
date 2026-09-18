@@ -1310,6 +1310,8 @@ public final class SelfTest {
                     || meta.get("entries") instanceof Number);
             check("回放：元信息带局数：" + meta.get("rounds"),
                     Json.i(meta, "rounds", 0) >= 1);
+            // 房间牌谱（用户要求）：列表元信息里要有房间号，玩家才能按"哪一桌"找那一场
+            eq("回放：元信息带房间号（房间保存牌谱）", Json.str(meta, "room", ""), "REPLAY");
 
             Map<String, Object> head = store.header(rid);
             check("回放：能取到头信息", head != null);
