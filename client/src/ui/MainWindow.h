@@ -46,6 +46,11 @@ public:
     void setCommandTapForTest(std::function<void(const QJsonObject&)> tap);
     AutoBar* autoBarForTest() const { return m_autoBar; }
     void feedEventForTest(const QJsonObject& ev) { onEvent(ev); }
+    /** 自选座位按钮（0=东…3=北）：等待室的"上一个按钮有没有弹起"要看它的 enabled。 */
+    QPushButton* seatButtonForTest(int seat) const
+    {
+        return (seat >= 0 && seat < 4) ? m_takeSeatBtn[seat] : nullptr;
+    }
 
     /**
      * 上电时把**持久化的个人设置**装进来：预填大厅的地址/端口/昵称，
