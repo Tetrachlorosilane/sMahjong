@@ -97,6 +97,17 @@ public:
     int loadedCountForTest();
     /** 某个音效的 WAV 字节数（0 = 找不到）；用来断言"能取到素材"。 */
     int dataSizeForTest(const QString& sfx);
+    /**
+     * 某个音效的 `QSoundEffect` 是否真的**接受了这份素材**（只有多媒体后端有意义）。
+     *
+     * <p>自检里 `play()` 之后查它：`QSoundEffect::status()` 会随着加载从 `Loading`
+     * 变成 `Ready`（或 `Error`）。这是**无头环境下能拿到的最强证据** ——
+     * 「文件找到了」不等于「后端认得它」（WAV 头写坏就会被这里抓住），
+     * 但它仍然证明不了"扬声器真的响了"，那件事只能由人听。
+     */
+    bool effectReadyForTest(const QString& sfx);
+    /** 某个音效当前是否在播（仅多媒体后端）。 */
+    bool effectPlayingForTest(const QString& sfx);
 
 private:
     Player();

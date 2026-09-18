@@ -2730,6 +2730,24 @@ int run(const QString& outDir)
                 QStringLiteral("音量负值要被钳到 0"));
         sp.setVolume(70);
         sp.setEnabled(true);
+
+        // ④ 后端真的**接受了**素材吗？（"文件找到了"不等于"后端认得它"）
+        //    多媒体后端下 `QSoundEffect::status()` 会从 Loading 变成 Ready：
+        //    这是无头环境能拿到的最强证据（WAV 头写坏会被这里抓住）。
+        //    ⚠ 它仍然**证明不了扬声器真的响了** —— 那件事只能由人听。
+        if (sp.backendName() == QLatin1String("qsoundeffect")) {
+            const QString notify = QLatin1String(sound::name::Notify);
+            sp.play(notify);
+            for (int i = 0; i < 40 && !sp.effectReadyForTest(notify); ++i) {
+                QCoreApplication::processEvents();
+                QThread::msleep(25);
+            }
+            check(sp.effectReadyForTest(notify),
+                  QStringLiteral("Qt Multimedia 后端必须接受这份 WAV（status == Ready）"));
+        } else {
+            log << QStringLiteral("[i] 后端 %1 没有 Ready 状态可查（跳过该断言）")
+                       .arg(sp.backendName());
+        }
     }
 
     // ---------- 汇总 ----------

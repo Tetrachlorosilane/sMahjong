@@ -279,4 +279,26 @@ int Player::dataSizeForTest(const QString& sfx)
     return data(sfx).size();
 }
 
+bool Player::effectReadyForTest(const QString& sfx)
+{
+#if MAHJONG_HAVE_MULTIMEDIA
+    QSoundEffect* e = m_effects.value(sfx, nullptr);
+    return e != nullptr && e->status() == QSoundEffect::Ready;
+#else
+    Q_UNUSED(sfx);
+    return false;   // 该后端没有"就绪状态"这个概念
+#endif
+}
+
+bool Player::effectPlayingForTest(const QString& sfx)
+{
+#if MAHJONG_HAVE_MULTIMEDIA
+    QSoundEffect* e = m_effects.value(sfx, nullptr);
+    return e != nullptr && e->isPlaying();
+#else
+    Q_UNUSED(sfx);
+    return false;
+#endif
+}
+
 } // namespace sound

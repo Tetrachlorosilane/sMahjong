@@ -253,6 +253,26 @@ function Deploy-QtRuntime([string]$TargetDir) {
         Copy-Item (Join-Path $sfxSrc "*.wav") $sfxDst -Force -ErrorAction SilentlyContinue
     }
 
+    # Qt 自带的许可文本（LGPLv3 / GPLv3 / M+ 等）。因为音效走 Qt Multimedia，
+    # 随包分发了 Qt6Multimedia.dll 与它依赖的 FFmpeg（LGPL/GPL 双授权），
+    # 所以**必须**把上游许可文本一并带上（见 docs/THIRD-PARTY.md）。
+    # ⚠ 放在「已就绪就跳过」判断**之前**（与 tiles/fonts/i18n/sfx 同理无条件拷贝）：
+    #   否则已经就绪的旧目录永远补不进 licenses/qt/（这正是当年 dist 缺 styles 的同一个坑）。
+    #   上游把文本放在 **Qt 安装根**的 `Licenses/`（不是 `mingw_64/Licenses/`），
+    #   所以要从前缀往上找 —— 常见布局是 …/6.11.2/mingw_64（根在 6.11.2 的**父**目录）。
+    $licDirs = @((Join-Path $qt.Prefix "Licenses"),
+                 (Join-Path $qt.Prefix "licenses"),
+                 (Join-Path (Split-Path -Parent $qt.Prefix) "Licenses"),
+                 (Join-Path (Split-Path -Parent (Split-Path -Parent $qt.Prefix)) "Licenses"))
+    foreach ($src in $licDirs) {
+        if (Test-Path $src) {
+            $dst = Join-Path $TargetDir "licenses/qt"
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item "$src/*" $dst -Recurse -Force -ErrorAction SilentlyContinue
+            break
+        }
+    }
+
     # 第三方许可文本。Qt 是 **LGPLv3（动态链接）**：分发本程序时必须随附许可全文与版权声明，
     # 并让用户能够替换 Qt 的共享库 —— 详见 docs/THIRD-PARTY.md 与 licenses/NOTICE.txt。
     #
@@ -270,14 +290,22 @@ function Deploy-QtRuntime([string]$TargetDir) {
     #   漏一个模块的 DLL，用户双击 exe 会直接起不来（无任何输出）。
     #   注意不能只看 Qt6Core.dll 在不在就认为「已就绪」——那会让新模块永远拷不进来
     #   （历史上漏过 Qt6Svg.dll：本机因 PATH 里有 Qt 而能跑，用户机器上却起不来）。
+    #
+    #   Qt6Multimedia.dll：音效走 `QSoundEffect`（跨平台 Qt API，见 CMakeLists 里的选型说明）。
+    #   它**不是**可选装饰 —— exe 链接了它，缺了就直接起不来，所以必须进必需清单。
     $required = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll")
-    $missing = @($required | Where-Object { -not (Test-Path (Join-Path $TargetDir $_)) })
+    # 构建时如果找到了 Multimedia，就把它（以及 FFmpeg 后端那一组）一起当必需项。
+    $mmDll = Join-Path (Join-Path $qt.Prefix "bin") "Qt6Multimedia.dll"
+    $haveMultimedia = Test-Path $mmDll
+    if ($haveMultimedia) { $required += "Qt6Multimedia.dll" }
     # ⚠ 就绪判断必须覆盖**本函数负责的全部文件**，插件的**目录**也要算进去。
     #   曾经只看 5 个 DLL + platforms/qwindows.dll —— 只要这几个在就整个 return，
     #   于是 dist\ 永远补不进 styles\（build\ 因重建被清空过，走完整路径，所以有）。
     #   症状：build\ 与 dist\ 的插件集不一致，且用户机器上换个 Qt 样式就报缺插件。
+    $pluginSubs = @("platforms", "styles", "tls")
+    if ($haveMultimedia) { $pluginSubs += "multimedia" }
     $pluginsOk = $true
-    foreach ($sub in @("platforms", "styles", "tls")) {
+    foreach ($sub in $pluginSubs) {
         $p = Join-Path $TargetDir $sub
         if (-not (Test-Path $p) -or
             -not (Get-ChildItem (Join-Path $p "*.dll") -ErrorAction SilentlyContinue)) {
@@ -291,7 +319,7 @@ function Deploy-QtRuntime([string]$TargetDir) {
     if ($missing.Count -gt 0) {
         Write-QtWarn "需补齐的 Qt DLL: $($missing -join ', ')"
     } elseif (-not $pluginsOk) {
-        Write-QtWarn "需补齐的 Qt 插件目录: platforms / styles / tls"
+        Write-QtWarn "需补齐的 Qt 插件目录: $($pluginSubs -join ' / ')"
     }
 
     # 首选 windeployqt（会顺带处理插件与依赖）
@@ -313,6 +341,18 @@ function Deploy-QtRuntime([string]$TargetDir) {
             $src = Join-Path (Join-Path $qt.Prefix "bin") $d
             if (Test-Path $src) { Copy-Item $src $TargetDir -Force }
         }
+        # Qt Multimedia 的**媒体后端**是同目录下的一组 FFmpeg DLL（avcodec/avformat/avutil/
+        # swresample/swscale）。`QSoundEffect` 放 WAV 走的是内置解码器，但 Qt6Multimedia.dll
+        # 静态导入这些库 —— 缺了会直接起不来，所以一起拷。
+        if ($haveMultimedia) {
+            $mmExtra = @("avcodec-*.dll", "avformat-*.dll", "avutil-*.dll",
+                         "swresample-*.dll", "swscale-*.dll")
+            foreach ($pat in $mmExtra) {
+                Copy-Item (Join-Path (Join-Path $qt.Prefix "bin") $pat) $TargetDir `
+                          -Force -ErrorAction SilentlyContinue
+            }
+            # 许可文本已在上面的"无条件拷贝"里处理（licenses/qt），这里不再重复。
+        }
         $runtimeDlls = Get-MingwRuntimeDlls
         foreach ($n in $runtimeDlls.Keys) { Copy-Item $runtimeDlls[$n] $TargetDir -Force }
         if ($runtimeDlls.Count -lt 3) {
@@ -321,7 +361,7 @@ function Deploy-QtRuntime([string]$TargetDir) {
         }
         $pluginRoot = Join-Path $qt.Prefix "plugins"
         if (-not (Test-Path $pluginRoot)) { $pluginRoot = Join-Path (Split-Path -Parent $qt.Prefix) "plugins" }
-        foreach ($sub in @("platforms", "styles", "tls")) {
+        foreach ($sub in $pluginSubs) {
             $src = Join-Path $pluginRoot $sub
             if (-not (Test-Path $src)) { continue }
             $dst = Join-Path $TargetDir $sub

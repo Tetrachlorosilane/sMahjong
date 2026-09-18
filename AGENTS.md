@@ -740,10 +740,15 @@ mahjong/
   ⚠ 改了音效名要跑 `node tools/gen-sfx-qrc.mjs` 重生成 `assets/sfx.qrc`。
 - **为什么不用 MIDI**：Qt 没有 MIDI 合成器（Windows 上 QtMultimedia 只有 WMF/FFmpeg 后端），
   自带 SoundFont 合成器要引第三方库 —— 与本项目"客户端只依赖 Qt"冲突。所以是**预渲染 PCM**。
-- **后端按构建能力分层**（三条路都编得过，见 `client/src/model/Sound.h`）：
-  Windows 用 `winmm` 的 `PlaySound`（系统自带、零额外体积 —— Qt Multimedia 会连带
-  FFmpeg 约 20 MB 与媒体插件，对绿色版客户端不划算）；非 Windows 有 Qt6::Multimedia 时用
-  `QSoundEffect`；都没有则静默（设置里音效开关置灰并写明原因）。
+- **后端：优先 Qt Multimedia（`QSoundEffect`）**，跨平台统一走 Qt API（用户 2026-09 拍板：
+  客户端未来要支持多平台，体积不是约束）。**兜底分层**（三条路都编得过，见
+  `client/CMakeLists.txt` 与 `client/src/model/Sound.h`）：没有 Qt6::Multimedia 时 Windows 退回
+  `winmm` 的 `PlaySound`；再没有则静默（设置里开关置灰并写明原因）。
+  ⚠ 走 Multimedia 会让分发多出 `Qt6Multimedia.dll` + FFmpeg 后端（约 20 MB）与
+  `plugins/multimedia/`，`build.ps1` 已把这三样纳入必需清单与"已就绪"判断；
+  **许可义务同步更新**（Qt Multimedia 仍是 LGPLv3，但它捆绑的 FFmpeg 是另一家的组件）：
+  `build.ps1` 会把上游 Qt 安装根 `Licenses/` 的文本拷到 `dist/licenses/qt/` —— 见
+  `docs/THIRD-PARTY.md` §1/§3 与 `client/licenses/NOTICE.txt`（1b 节），**别删那个目录**。
 - **加载顺序与牌面同约定**：材质包 `sfx/` → exe 同级 `sfx/` → qrc → 静音。
   ⚠ `assets/sfx.qrc` 的 **prefix 与条目名必须与源码里的 `:/sfx/<名字>.wav` 逐字对齐**
   （现在 = `prefix="/"` + `<file>sfx/<名字>.wav</file>`）：对不上时"qrc 兜底"整条静默失效，

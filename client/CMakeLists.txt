@@ -189,32 +189,31 @@ target_include_directories(mahjong-client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(mahjong-client PRIVATE Qt6::Widgets Qt6::Network Qt6::Svg)
 
 # ---------------------------------------------------------------------------
-# 音效后端（**可选能力**，与下面的 zip 支持同一个套路）
+# 音效后端：**优先 Qt Multimedia**（`QSoundEffect`），找不到才退回系统原生 API
 #
-# 目的：让「音效」在**任何**构建环境下都能工作，而不是"装了 Multimedia 才有声音"。
-#   ① Windows → 链 `winmm`，用 `PlaySound`（**系统自带**，DLL 只有几 KB）。
-#      这是默认选择：Qt Multimedia 会连带 FFmpeg（avcodec/avformat… 约 20MB）
-#      与 `plugins/multimedia/` —— 对一个"绿色版客户端"来说代价太大，
-#      而我们只需要放几个短 WAV。
-#   ② 非 Windows 且装了 Qt6::Multimedia → `QSoundEffect`（低延迟、可叠放，
-#      WAV 解码器内置）。
-#   ③ 其余 → 静默（界面上音效开关置灰并写明原因）。
-# 三条路都编得过，缺哪一层都不会让"换个 Qt 就编不过"。
+# 选型理由（2026-09 用户拍板）：客户端未来要支持多平台，**跨平台的 Qt API 比平台原生 API
+# 更值**；体积不再是约束（Qt Multimedia 会连带 FFmpeg 约 20MB + `plugins/multimedia/`，
+# 用户明确表示不用为此担心）。Qt 是 **LGPLv3 动态链接**，所以随包分发 QtMultimedia 与
+# FFmpeg 后端时**必须保留许可文本并让用户能替换这些库** —— 见 licenses/ 与
+# docs/THIRD-PARTY.md（这两处也是本次一并更新的）。
+#
+# 分层仍然是"三条路都编得过"，只是**优先级反过来**：
+#   ① 有 Qt6::Multimedia → `QSoundEffect`（低延迟、可叠放，跨平台一致）；
+#   ② Windows 且没有 Multimedia → `winmm` 的 `PlaySound`（兜底，系统自带）；
+#   ③ 其余 → 静默（界面上的音效开关置灰并写明原因）。
 # ---------------------------------------------------------------------------
-if(WIN32)
+find_package(Qt6 QUIET COMPONENTS Multimedia)
+if(TARGET Qt6::Multimedia)
+    target_link_libraries(mahjong-client PRIVATE Qt6::Multimedia)
+    target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=1)
+    message(STATUS "音效：Qt6::Multimedia（QSoundEffect，跨平台）")
+elseif(WIN32)
     target_link_libraries(mahjong-client PRIVATE winmm)
     target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=0)
-    message(STATUS "音效：Windows winmm（PlaySound，零额外体积）")
+    message(STATUS "音效：没有 Qt6::Multimedia，退回 Windows winmm（PlaySound）")
 else()
-    find_package(Qt6 QUIET COMPONENTS Multimedia)
-    if(TARGET Qt6::Multimedia)
-        target_link_libraries(mahjong-client PRIVATE Qt6::Multimedia)
-        target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=1)
-        message(STATUS "音效：Qt6::Multimedia（QSoundEffect）")
-    else()
-        target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=0)
-        message(STATUS "音效：本构建无可用后端（静默，开关置灰）")
-    endif()
+    target_compile_definitions(mahjong-client PRIVATE MAHJONG_HAVE_MULTIMEDIA=0)
+    message(STATUS "音效：本构建无可用后端（静默，开关置灰）")
 endif()
 
 # ---------------------------------------------------------------------------
