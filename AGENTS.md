@@ -794,3 +794,8 @@ mahjong/
   `client/src/main.cpp` 的 `setApplicationVersion()`。不一致直接报错 —— 「包名 v1.6.0、程序自称 1.5.0」
   正是 v1.6.0 首次发布漏掉的一处，只能事后重新打包。
 - 打包前必须先 `client\build.ps1 -Deploy`（`dist\` 只在 `-Deploy` 时更新，见 §3.3），脚本会校验 exe 在不在。
+- ⚠ **原地重打包（tag 不变、只换资产）会踩到 GitHub 的一个坑：删掉 release 的 tag 会把它打回 draft。**
+  `DELETE /git/refs/tags/<tag>` 之后该 release 变成 `draft: true`（`tarball_url` 变 `null`、
+  资产下载 URL 变 `https://…/releases/download/untagged-…/…`）；重新 `POST /git/refs` 建好 tag
+  **并不会**自动恢复关联 —— 必须再 `PATCH /repos/{o}/{r}/releases/{id}` 带上 **`"draft": false`
+  与 `tag_name`** 才会重新发布并关联（URL 变回 `/releases/download/<tag>/…`）。
