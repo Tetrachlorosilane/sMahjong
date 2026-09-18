@@ -333,6 +333,30 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
     m_roomLabel->setText(lang::t("ui.main.room_status").arg(id, name));
 
     const QJsonArray seats = room.value(QStringLiteral("seats")).toArray();
+    const bool playing = room.value(QStringLiteral("playing")).toBool();
+
+    // ⚠ 先**单独一趟**把"我坐在哪一格"定下来，再画座位行与按钮。
+    //   曾经把 setMySeat() 与按钮状态写在同一个循环里（按下标 0→3 走），于是：
+    //   从东(0)往南(1)点（座位号**变大**）时，循环会先处理**我刚离开的那一格**（号小、在前），
+    //   那一刻 mySeat() 还是旧值 → 那一格被判成"我坐着"而被置灰，**永远不弹起**；
+    //   反过来点（号变小）时新座位排在旧座位**之前**，读到的已是新值，就恰好正常。
+    //   —— 这正是"一个方向好、另一个方向坏"的典型征兆：状态读到了同一趟循环里的中间值。
+    int mySeatNow = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= seats.size() || !seats.at(i).isObject()) {
+            continue;
+        }
+        if (m_myPid != 0
+                && seats.at(i).toObject().value(QStringLiteral("pid")).toInt(-1) == m_myPid) {
+            mySeatNow = i;      // 我的座位由 pid 反查（room 事件里不含 seat→me 的映射）
+            break;
+        }
+    }
+    if (mySeatNow >= 0) {
+        m_model.setMySeat(mySeatNow);
+        m_model.setPlayerName(mySeatNow, m_myName);
+    }
+
     for (int i = 0; i < 4; ++i) {
         QString text = lang::t("ui.main.seat_empty").arg(i);
         if (i < seats.size() && seats.at(i).isObject()) {
@@ -345,15 +369,9 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
                                                                      : lang::t("ui.main.not_ready"))
                        .arg(o.value(QStringLiteral("bot")).toBool() ? lang::t("ui.main.bot_tag")
                                                                     : QString());
-            // 用 pid 反查自己的座位（room 事件里不含 seat→me 的映射）
-            if (m_myPid != 0 && o.value(QStringLiteral("pid")).toInt(-1) == m_myPid) {
-                m_model.setMySeat(i);
-                m_model.setPlayerName(i, m_myName);
-            }
         }
         m_seatLabels[i]->setText(text);
         // 自选座位按钮：牌局进行中不可用；已经是我坐的那一格也不可用（点了没意义）
-        const bool playing = room.value(QStringLiteral("playing")).toBool();
         if (m_takeSeatBtn[i]) {
             m_takeSeatBtn[i]->setEnabled(!playing && i != m_model.mySeat());
         }

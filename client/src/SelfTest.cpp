@@ -1255,6 +1255,71 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 回归：自选座位的按钮状态必须**两个方向**都对 ----------
+    // 报障：「由东南西北按下去，上一个按钮不会弹起；而反向点选的时候是正常的」。
+    // 根因：`updateWaitingRoom()` 把「按 pid 反查自己的座位」与「按座位号把按钮置灰」
+    // 写在**同一个 0→3 的循环**里 —— 座位号变大（东→南）时，循环先处理**我刚离开的那一格**
+    // （号小、在前），此刻 `mySeat()` 还是旧值，那一格被判成"我坐着"而**永远置灰**；
+    // 反过来点（号变小）时新座位排在旧座位**之前**，读到的已是新值，于是恰好正常。
+    {
+        MainWindow w;
+        if (LobbyDialog* dlg = w.findChild<LobbyDialog*>())
+            dlg->hide();
+        w.setAutoAnswer(false);
+        w.feedEventForTest(parseEv(R"({"ev":"hello_ok","pid":1001,"name":"我"})"));
+
+        auto roomWithMeAt = [](int mySeat) {
+            QJsonArray seats;
+            for (int i = 0; i < 4; ++i) {
+                QJsonObject s;
+                s.insert(QStringLiteral("pid"), i == mySeat ? 1001 : 2000 + i);
+                s.insert(QStringLiteral("name"),
+                         i == mySeat ? QStringLiteral("我") : QStringLiteral("机器人"));
+                s.insert(QStringLiteral("bot"), i != mySeat);
+                s.insert(QStringLiteral("ready"), i != mySeat);
+                s.insert(QStringLiteral("score"), 25000);
+                seats.append(s);
+            }
+            QJsonObject ev;
+            ev.insert(QStringLiteral("ev"), QStringLiteral("room"));
+            ev.insert(QStringLiteral("id"), QStringLiteral("TEST"));
+            ev.insert(QStringLiteral("name"), QStringLiteral("自检房"));
+            ev.insert(QStringLiteral("playing"), false);
+            ev.insert(QStringLiteral("seats"), seats);
+            return ev;
+        };
+        auto seatEnabled = [&w](int seat) {
+            QPushButton* b = w.seatButtonForTest(seat);
+            return b != nullptr && b->isEnabled();
+        };
+
+        w.feedEventForTest(roomWithMeAt(0));      // 我坐在东
+        check(!seatEnabled(0) && seatEnabled(1) && seatEnabled(2) && seatEnabled(3),
+              QStringLiteral("自选座位：坐在东时，东置灰、其余三个可点"));
+
+        w.feedEventForTest(roomWithMeAt(1));      // 东 → 南（座位号**变大**）
+        check(seatEnabled(0),
+              QStringLiteral("自选座位：东→南后，刚离开的东必须重新可点（不能停在置灰）"));
+        check(!seatEnabled(1) && seatEnabled(2) && seatEnabled(3),
+              QStringLiteral("自选座位：东→南后，南置灰、西/北可点"));
+
+        w.feedEventForTest(roomWithMeAt(3));      // 南 → 北（继续变大）
+        check(seatEnabled(0) && seatEnabled(1) && seatEnabled(2),
+              QStringLiteral("自选座位：南→北后，前三个都必须可点"));
+        check(!seatEnabled(3), QStringLiteral("自选座位：南→北后，北置灰"));
+
+        w.feedEventForTest(roomWithMeAt(0));      // 北 → 东（反向）
+        check(seatEnabled(1) && seatEnabled(2) && seatEnabled(3),
+              QStringLiteral("自选座位：北→东（反向）后，其余三个都必须可点"));
+        check(!seatEnabled(0), QStringLiteral("自选座位：北→东（反向）后，东置灰"));
+
+        QJsonObject playing = roomWithMeAt(2);
+        playing.insert(QStringLiteral("playing"), true);
+        w.feedEventForTest(playing);
+        check(!seatEnabled(0) && !seatEnabled(1) && !seatEnabled(2) && !seatEnabled(3),
+              QStringLiteral("自选座位：牌局进行中四个按钮一律不可用"));
+    }
+
     // ---------- 端到端接线：开关 → 策略 → ActionBar 组包 → sendCommand ----------
     // ---------- 回归：聊天「发送」按钮必须真的能发出去 ----------
     // 真踩过的坑：`onChatSend()` 用 `qobject_cast<QLineEdit*>(sender())` 反推输入框 ——
