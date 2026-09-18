@@ -22,7 +22,16 @@ public:
     explicit AutoBar(QWidget* parent = nullptr);
 
     autopolicy::Flags flags() const;
-    void reset();                                  // 三个开关全部关掉（每小局结束）
+    void reset();                                  // 三个开关全部关掉（每小局结束/开始）
+    /**
+     * 单独打开/关闭「自动摸切」。
+     *
+     * 立直之后**必然**只能摸切（规则不允许再手切），所以客户端在收到 `riichi` 事件时
+     * 替玩家把它打开（用户要求：「立直后应该自动开启自动摸切」），并保持按钮
+     * `checkable` 的状态可见 —— 玩家仍可以自己关掉（关掉只是不再自动出牌，
+     * 不会违反规则：立直后的手牌点击会被服务端按摸切兜底）。
+     */
+    void setAutoTsumogiri(bool on);
 
     // 自检用
     QPushButton* buttonForTest(const QString& label) const;

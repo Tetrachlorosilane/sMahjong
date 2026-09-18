@@ -2,6 +2,7 @@
 
 #include "i18n/Lang.h"
 #include "model/AutoPolicy.h"
+#include "model/Sound.h"
 #include "model/Tile.h"
 #include "net/Protocol.h"
 #include "ui/ActionBar.h"
@@ -41,6 +42,15 @@ QString evName(const QJsonObject& ev)
 // 真正发出时若询问已失效（clearAsk / 超时 / 别处已提交），actionCmd() 会返回空对象，
 // onActionReady() 直接丢弃 —— 不需要自己维护「已自动应答过」的标志。
 constexpr int kAutoDelayMs = 260;
+
+/**
+ * 座位号 → 门风字形（0=东/起家、1=南、2=西、3=北）。
+ *
+ * 门风**就是**座次（`Round.seatWind()` 按 `(seat - dealer + 4) % 4` 推），所以"选座位"
+ * 与"选门风"是同一件事 —— 自选座位按钮上直接写门风，玩家一眼看得出自己会坐哪。
+ * 这里是字形不是文案，所以不进语言文件（同 `TileRenderer` 里的「東」）。
+ */
+const char* const SEAT_WIND[4] = { "东", "南", "西", "北" };   // i18n-keep: 牌面字形（同「萬」「東」），不是文案
 
 } // namespace
 
@@ -136,8 +146,16 @@ void MainWindow::buildWaitingPage()
     auto* seatBox = new QGroupBox(lang::t("ui.main.seat"), m_waitPage);
     auto* seatLayout = new QVBoxLayout(seatBox);
     for (int i = 0; i < 4; ++i) {
+        auto* row = new QHBoxLayout();
         m_seatLabels[i] = new QLabel(lang::t("ui.main.seat_empty").arg(i), seatBox);
-        seatLayout->addWidget(m_seatLabels[i]);
+        row->addWidget(m_seatLabels[i], 1);
+        // 开局前**自选座位**（门风就是座次：0=东/起家）。按钮在牌局开始后自动置灰。
+        m_takeSeatBtn[i] = new QPushButton(lang::t("ui.main.take_seat").arg(SEAT_WIND[i]), seatBox);
+        m_takeSeatBtn[i]->setToolTip(lang::t("ui.main.take_seat_tip"));
+        m_takeSeatBtn[i]->setFocusPolicy(Qt::NoFocus);
+        connect(m_takeSeatBtn[i], &QPushButton::clicked, this, [this, i]() { takeSeat(i); });
+        row->addWidget(m_takeSeatBtn[i]);
+        seatLayout->addLayout(row);
     }
     root->addWidget(seatBox);
 
@@ -146,11 +164,14 @@ void MainWindow::buildWaitingPage()
     m_addBotBtn = new QPushButton(lang::t("ui.main.add_bot"), m_waitPage);
     m_removeBotBtn = new QPushButton(lang::t("ui.main.remove_bot"), m_waitPage);
     m_startBtn = new QPushButton(lang::t("ui.main.start_game"), m_waitPage);
+    m_shuffleBtn = new QPushButton(lang::t("ui.main.shuffle_seats"), m_waitPage);
+    m_shuffleBtn->setToolTip(lang::t("ui.main.shuffle_seats_tip"));
     auto* leaveBtn = new QPushButton(lang::t("ui.main.leave_room"), m_waitPage);
     btnRow->addWidget(m_readyBtn);
     btnRow->addWidget(m_addBotBtn);
     btnRow->addWidget(m_removeBotBtn);
     btnRow->addWidget(m_startBtn);
+    btnRow->addWidget(m_shuffleBtn);
     btnRow->addStretch(1);
     btnRow->addWidget(leaveBtn);
     root->addLayout(btnRow);
@@ -201,9 +222,19 @@ void MainWindow::buildWaitingPage()
         cmd.insert(QStringLiteral("cmd"), QStringLiteral("start_game"));
         sendCommand(cmd);
     });
+    // 随机洗座（随机门风）：房主一键打乱四家座位；洗完大家重新准备。
+    connect(m_shuffleBtn, &QPushButton::clicked, this, [this]() {
+        QJsonObject cmd;
+        cmd.insert(QStringLiteral("cmd"), QStringLiteral("shuffle_seats"));
+        sendCommand(cmd);
+    });
     connect(leaveBtn, &QPushButton::clicked, this, &MainWindow::onLeaveRoom);
-    connect(sendBtn, &QPushButton::clicked, this, &MainWindow::onChatSend);
-    connect(m_waitChatEdit, &QLineEdit::returnPressed, this, &MainWindow::onChatSend);
+    // 聊天发送：**按钮与回车各接各的输入框**（等待页这两个控件同属这一页）。
+    // ⚠ 四个连接点都必须显式收下输入框 —— 见 sendChatFrom() 的说明。
+    connect(sendBtn, &QPushButton::clicked, this,
+            [this]() { sendChatFrom(m_waitChatEdit); });
+    connect(m_waitChatEdit, &QLineEdit::returnPressed, this,
+            [this]() { sendChatFrom(m_waitChatEdit); });
 
     m_stack->addWidget(m_waitPage);
 }
@@ -240,9 +271,18 @@ void MainWindow::buildTablePage()
     rightLayout->addWidget(chatLabel);
     m_chatView = new QTextBrowser(right);
     rightLayout->addWidget(m_chatView, 1);
+    // 聊天输入行：输入框 + 「发送」按钮。
+    // ⚠ 这里曾经**只有** QLineEdit 而没有任何按钮 —— 看得见输入框却发现点不了发送，
+    //   只有回车能发（用户报障："消息发送键没有绑定发送事件"）。
+    //   与等待页那一行保持同样的结构（输入框 + 按钮 + 同一个槽）。
+    auto* chatInputRow = new QHBoxLayout();
     m_chatEdit = new QLineEdit(right);
     m_chatEdit->setPlaceholderText(lang::t("ui.main.enter_to_send"));
-    rightLayout->addWidget(m_chatEdit);
+    chatInputRow->addWidget(m_chatEdit, 1);
+    auto* chatSendBtn = new QPushButton(lang::t("ui.main.send"), right);
+    chatSendBtn->setToolTip(lang::t("ui.main.enter_to_send"));
+    chatInputRow->addWidget(chatSendBtn);
+    rightLayout->addLayout(chatInputRow);
 
     root->addWidget(right);
     m_stack->addWidget(m_tablePage);
@@ -253,7 +293,11 @@ void MainWindow::buildTablePage()
     connect(m_autoBar, &AutoBar::flagsChanged, this, &MainWindow::onAutoFlagsChanged);
     connect(m_actions, &ActionBar::hint, this,
             [this](const QString& text) { statusBar()->showMessage(text, 4000); });
-    connect(m_chatEdit, &QLineEdit::returnPressed, this, &MainWindow::onChatSend);
+    // 牌桌右侧的聊天：同样把输入框显式交出去（按钮点击时 sender 是 QPushButton）
+    connect(m_chatEdit, &QLineEdit::returnPressed, this,
+            [this]() { sendChatFrom(m_chatEdit); });
+    connect(chatSendBtn, &QPushButton::clicked, this,
+            [this]() { sendChatFrom(m_chatEdit); });
 }
 
 void MainWindow::showLobby()
@@ -308,6 +352,11 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
             }
         }
         m_seatLabels[i]->setText(text);
+        // 自选座位按钮：牌局进行中不可用；已经是我坐的那一格也不可用（点了没意义）
+        const bool playing = room.value(QStringLiteral("playing")).toBool();
+        if (m_takeSeatBtn[i]) {
+            m_takeSeatBtn[i]->setEnabled(!playing && i != m_model.mySeat());
+        }
     }
 
     bool full = true;
@@ -320,6 +369,12 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
     m_addBotBtn->setEnabled(host);
     m_removeBotBtn->setEnabled(host);
     m_startBtn->setToolTip(host ? QString() : lang::t("ui.main.host_only_start"));
+    // 洗座只有房主能用，且只在开局前
+    if (m_shuffleBtn) {
+        m_shuffleBtn->setEnabled(host && !room.value(QStringLiteral("playing")).toBool());
+        m_shuffleBtn->setToolTip(host ? lang::t("ui.main.shuffle_seats_tip")
+                                      : lang::t("ui.main.host_only_start"));
+    }
 }
 
 void MainWindow::updateScorePanel()
@@ -372,19 +427,47 @@ void MainWindow::appendChat(const QString& who, const QString& text)
         m_waitChat->append(line);
 }
 
-void MainWindow::onChatSend()
+/**
+ * 发送聊天：把**指定输入框**的内容发出去。
+ *
+ * <p>⚠ 这里必须显式收下输入框，**绝不能用 `sender()` 去反推**。
+ *   两个「发送」按钮分别接在**等待页**（`m_waitChatEdit`）与**牌桌右侧**（`m_chatEdit`），
+ *   而按钮点击时 `sender()` 是那个 `QPushButton`（不是 `QLineEdit`）——
+ *   用 `qobject_cast<QLineEdit*>(sender())` 会拿到 `nullptr`、函数直接 return，
+ *   于是**回车能发、点按钮毫无反应**（用户两次报障的正是这一条）。
+ *   回车那条路之所以"看起来正常"，只是因为那时 `sender()` 恰好就是输入框。
+ */
+void MainWindow::sendChatFrom(QLineEdit* edit)
 {
-    QLineEdit* edit = qobject_cast<QLineEdit*>(sender());
-    if (!edit)
+    if (edit == nullptr) {
         return;
+    }
     const QString text = edit->text().trimmed();
-    if (text.isEmpty())
-        return;
+    if (text.isEmpty()) {
+        return;   // 空白不发送（服务端也会当空文本丢掉，但客户端先挡掉更直观）
+    }
     QJsonObject cmd;
     cmd.insert(QStringLiteral("cmd"), QStringLiteral("chat"));
     cmd.insert(QStringLiteral("text"), text);
     sendCommand(cmd);
     edit->clear();
+}
+
+/**
+ * 开局前自选座位（门风 = 座次：0=东/起家）。
+ *
+ * 服务端的语义是**互换**：目标是真人时两家对调，是机器人时机器人搬过去 ——
+ * 所以这个按钮永远不会把别人挤出去，玩家可以放心点。
+ */
+void MainWindow::takeSeat(int seat)
+{
+    if (seat < 0 || seat > 3) {
+        return;
+    }
+    QJsonObject cmd;
+    cmd.insert(QStringLiteral("cmd"), QStringLiteral("take_seat"));
+    cmd.insert(QStringLiteral("seat"), seat);
+    sendCommand(cmd);
 }
 
 void MainWindow::onLeaveRoom()
@@ -514,6 +597,9 @@ void MainWindow::applySettings(const Settings& st, const QString& path)
     if (m_lobby != nullptr) {
         m_lobby->applySettings(st.host, st.port, st.name);
     }
+    // 音效开关/音量随设置立刻生效（设置对话框里试听也是这条路径）
+    sound::Player::instance().setVolume(st.sfxVolume);
+    sound::Player::instance().setEnabled(st.sfx);
 }
 
 void MainWindow::saveCurrentEndpoint()
@@ -600,7 +686,12 @@ void MainWindow::onTileClicked(const QString& tile, int index)
         return;
     }
     // 同理：出牌也必须走这条唯一入口，否则连点手牌会发出两条弃牌。
-    onActionReady(m_actions->discardCmd(tile));
+    //
+    // `tsumogiri` 按**点的是哪一格**判定：`tileClicked` 的 index 指向 TableView 的
+    // `m_handTiles`，摸牌位**固定是最后一格**（手牌区在前、摸牌单独一格）。
+    // 这一格是布局层当时的真实情况，比"牌码是否相等"可靠（见 isTsumogiriDiscard 的说明）。
+    const bool tsumogiri = (index == m_model.hand().size()) && !m_model.drawnTile().isEmpty();
+    onActionReady(m_actions->discardCmd(tile, tsumogiri));
 }
 
 void MainWindow::autoStart(const QString& host, quint16 port, const QString& name, int bots)
@@ -648,6 +739,38 @@ void MainWindow::onAutoFlagsChanged()
         applyAuto(m_actions->currentKind(), m_actions->currentAsk());
 }
 
+namespace {
+
+/**
+ * 待打出的这张牌是不是**刚摸到的那一张**（决定 `discard.tsumogiri`）。
+ *
+ * <p>为什么必须发这个字段：`discard.tile` 只有一个牌码，服务端拿它无法区分
+ * 「摸切」与「手切一张同种牌」—— 手里已有 5m、又摸到 5m 时两者牌码相同，
+ * 而赤五（`0m`）与普通五（`5m`）同 kind，更是必然猜不出。猜错的后果是**两端手牌各差一张**：
+ * 服务端去动了摸牌位，客户端却按手切扣掉了暗牌，越打越歪（报障：幽灵手牌）。
+ *
+ * <p>判据取**保守侧**：只有当待打的牌确实是刚摸到的那张、**且暗手里没有同样的牌码**时
+ * 才声明摸切。否则一律按手切上报（服务端会在暗手里找同 kind 的副本）。
+ * 这样即使两端的"摸到哪张"认知有偏差，也只会退化成一次普通手切，
+ * 而不会让服务端的摸牌位被误动。
+ */
+bool isTsumogiriDiscard(const TableModel& model, const QString& tile)
+{
+    const QString drawn = model.drawnTile();
+    if (drawn.isEmpty())
+        return false;
+    // 立直后**只有摸切这一种合法出牌**（服务端也这么判），所以直接声明摸切：
+    // 此时 `tile` 一定来自服务端的"只能打摸到的那张"选项，不必再比对牌码
+    // ——比对反而会在"摸到普通 5m、手里还有赤 0m"这类同 kind 不同码的情况下判错。
+    if (model.riichi(model.mySeat()))
+        return true;
+    if (tile != drawn)
+        return false;
+    return !model.hand().contains(tile);
+}
+
+} // namespace
+
 void MainWindow::applyAuto(const QString& kind, const QJsonObject& ask)
 {
     const QJsonObject act = autopolicy::decide(m_autoFlags, ask, kind, m_model.drawnTile());
@@ -657,9 +780,13 @@ void MainWindow::applyAuto(const QString& kind, const QJsonObject& ask)
         const QString type = act.value(QStringLiteral("type")).toString();
         // 组包只能走 ActionBar 这两个入口 —— 它们会自动带上 ask_id，
         // 且在询问失效/超时时返回空对象（见 AGENTS §2.3-9）。
-        const QJsonObject cmd = (type == QLatin1String("discard"))
-                ? m_actions->discardCmd(act.value(QStringLiteral("tile")).toString())
-                : m_actions->actionCmd(type);
+        const QString tile = act.value(QStringLiteral("tile")).toString();
+        QJsonObject cmd;
+        if (type == QLatin1String("discard")) {
+            cmd = m_actions->discardCmd(tile, isTsumogiriDiscard(m_model, tile));
+        } else {
+            cmd = m_actions->actionCmd(type);
+        }
         onActionReady(cmd);
     });
 }
@@ -685,6 +812,12 @@ void MainWindow::onEvent(const QJsonObject& ev)
     }
 
     // 2) 再处理界面
+    if (name == QLatin1String("draw")) {
+        // 摸牌音效：只在自己摸到时响（别家摸牌每巡都响会很吵）。
+        // 放在"模型已更新"之后：万一 applyEvent 抛异常也不会先出声。
+        if (ev.value(QStringLiteral("seat")).toInt(-1) == m_model.mySeat())
+            sound::Player::instance().play(QLatin1String(sound::name::Draw), false);
+    }
     if (name == QLatin1String("hello_ok")) {
         m_myPid = ev.value(QStringLiteral("pid")).toInt();
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
@@ -745,6 +878,9 @@ void MainWindow::onEvent(const QJsonObject& ev)
         // 这里**不算玩家确认**（服务端已经开新局了，再发 confirm 会残留到下一次局间，
         // 把下一局的 5 秒等待直接吃掉）。
         closeResultDialog(false);
+        // 自动开关**每小局开始也复位一次**（用户要求：局间结算期间点开的自动，
+        // 不许带进新的一局）—— 与 round_end 那一次合起来是"一小局两次"。
+        resetAutoFlags();
         if (m_stack->currentWidget() != m_tablePage)
             m_stack->setCurrentWidget(m_tablePage);
         m_actions->clearAsk();
@@ -815,7 +951,7 @@ void MainWindow::onEvent(const QJsonObject& ev)
                         }
                     }
                     const QJsonObject cmd = (type == QLatin1String("discard"))
-                            ? m_actions->discardCmd(tile)
+                            ? m_actions->discardCmd(tile, isTsumogiriDiscard(m_model, tile))
                             : m_actions->actionCmd(type);
                     onActionReady(cmd);
                 });
@@ -847,32 +983,52 @@ void MainWindow::onEvent(const QJsonObject& ev)
                                .arg(m_model.playerName(seat),
                                     ev.value(QStringLiteral("kind")).toString()),
                            QColor(0x9F, 0xC8, 0xE8));
+        // 鸣牌音效：按 kind 分开（吃/碰/杠三种声音不同 —— 听得出发生了什么）。
+        // 服务端发的是 ASCII 码（chi/pon/daiminkan/ankan/kakan），所以这里能直接判。
+        const QString kind = ev.value(QStringLiteral("kind")).toString();
+        const char* sfx = sound::name::Pon;
+        if (kind == QLatin1String("chi"))
+            sfx = sound::name::Chi;
+        else if (kind == QLatin1String("daiminkan") || kind == QLatin1String("ankan")
+                 || kind == QLatin1String("kakan"))
+            sfx = sound::name::Kan;
+        sound::Player::instance().play(QLatin1String(sfx));
     } else if (name == QLatin1String("riichi")) {
         const int seat = ev.value(QStringLiteral("seat")).toInt();
         m_table->showToast(lang::t("ui.main.log_riichi").arg(m_model.playerName(seat)),
                            QColor(0xFF, 0xD2, 0x4A));
+        sound::Player::instance().play(QLatin1String(sound::name::Riichi));
+        // 立直之后**只能摸切**（规则如此），所以轮到自己时自动替玩家打出摸到的牌
+        // （用户要求：「立直后应该自动开启自动摸切」）。只对自己那一张立直生效。
+        if (seat == m_model.mySeat())
+            m_autoBar->setAutoTsumogiri(true);
     } else if (name == QLatin1String("dora_reveal")) {
         m_table->showToast(lang::t("ui.main.log_new_dora"), QColor(0xFF, 0xD2, 0x4A));
+        sound::Player::instance().play(QLatin1String(sound::name::Notify));
     } else if (name == QLatin1String("agari")) {
         m_actions->clearAsk();
         m_table->setStatusText(QString());
         m_table->showToast(lang::t("ui.main.log_agari")
                                .arg(m_model.playerName(ev.value(QStringLiteral("winner")).toInt())),
                            QColor(0xFF, 0xD2, 0x4A));
+        // 自摸与荣和用不同音效（听感上立刻分得清）；`from < 0` 才是自摸。
+        const bool tsumo = ev.value(QStringLiteral("from")).toInt(-1) < 0;
+        sound::Player::instance().play(QLatin1String(tsumo ? sound::name::Tsumo
+                                                          : sound::name::Ron));
         showResultDialog(lang::t("ui.result.title_agari"),
                          ResultDialog::agariHtml(ev, &m_model),
                          ResultDialog::schematicOf(ev, &m_model, true));
     } else if (name == QLatin1String("ryuukyoku")) {
         m_actions->clearAsk();
         m_table->setStatusText(QString());
+        sound::Player::instance().play(QLatin1String(sound::name::Notify));
         showResultDialog(lang::t("ui.result.title_ryuukyoku"),
                          ResultDialog::ryuukyokuHtml(ev, &m_model));
     } else if (name == QLatin1String("round_end")) {
         m_actions->clearAsk();
         m_table->setHighlightTiles(QStringList());
-        // 每小局结束：三个自动开关立刻全部回到关闭状态（用户要求）。
-        // 放在 round_end（而不是 round_start）是因为局间等待里玩家可能重新打开开关，
-        // 那是给**下一局**用的 —— 在 round_start 再清一次会把他的设置吞掉。
+        // 每小局结束：三个自动开关立刻全部回到关闭状态（用户要求：一小局两次，
+        // 另一次在 round_start —— 见 §6「三个自动开关」）。
         resetAutoFlags();
         const QJsonObject next = ev.value(QStringLiteral("next")).toObject();
         if (!next.isEmpty()) {
@@ -882,10 +1038,11 @@ void MainWindow::onEvent(const QJsonObject& ev)
                                QColor(0x9F, 0xE8, 0xC4));
         }
     } else if (name == QLatin1String("round_wait")) {
-        // 小局之间的间隔：服务端**先等满 5 秒（或所有人确认），再开下一局**。
-        // 所以这里的倒计时是「本局结算还剩多久」，不是「下一局已开始后的等待」。
+        // 小局之间的间隔：服务端已经先停顿了 DEFAULT_ROUND_DELAY_MS（默认 10 秒，
+        // 结算弹窗就停在那段时间里、文字依次浮现），然后**等满这次声明的时长（或所有人确认）**
+        // 再开下一局。所以这里的倒计时是「本局结算还剩多久」，不是「下一局已开始后的等待」。
         // 结算弹窗开着 → 倒计时到点自动关闭它（关闭即确认），不必等玩家点按钮；
-        // 已经关掉了 → 立刻替他确认，免得明明看完了还要干等满 5 秒。
+        // 已经关掉了 → 立刻替他确认，免得明明看完了还要干等。
         m_actions->clearAsk();
         const int ms = ev.value(QStringLiteral("ms")).toInt(5000);
         const int sec = qMax(1, ms / 1000);

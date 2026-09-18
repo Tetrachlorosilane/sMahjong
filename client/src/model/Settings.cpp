@@ -12,7 +12,7 @@
 namespace {
 
 /** 设置文件里我们**管**的键；其余键原样保留（见 Settings::extra）。 */
-const char* const kKnownKeys[] = {"host", "port", "name", "pack"};
+const char* const kKnownKeys[] = {"host", "port", "name", "pack", "sfx", "sfx_volume"};
 
 bool isKnownKey(const QString& k)
 {
@@ -101,6 +101,10 @@ void Settings::sanitize(QStringList* repaired)
     if (fix(codePointCount(pack) > 512 || hasControlChar(pack), "pack")) {
         pack = def.pack;
     }
+    // 音效音量：`fromJson` 用 -1 表示"给了但不在 0..100"（或类型不对）→ 只重置这一项。
+    if (fix(sfxVolume < 0 || sfxVolume > 100, "sfx_volume")) {
+        sfxVolume = def.sfxVolume;
+    }
 }
 
 Settings Settings::fromJson(const QJsonObject& o, QStringList* repaired)
@@ -121,6 +125,18 @@ Settings Settings::fromJson(const QJsonObject& o, QStringList* repaired)
     }
     s.name = o.value(QStringLiteral("name")).toString(s.name);
     s.pack = o.value(QStringLiteral("pack")).toString(s.pack);
+    // 音效：缺省开、音量 70。类型不对时用**缺省值**（sanitize 里登记为已修复）。
+    {
+        const QJsonValue sv = o.value(QStringLiteral("sfx"));
+        s.sfx = sv.isBool() ? sv.toBool() : true;
+        const QJsonValue vv = o.value(QStringLiteral("sfx_volume"));
+        if (vv.isDouble()) {
+            const double d = vv.toDouble();
+            s.sfxVolume = (d >= 0.0 && d <= 100.0) ? int(d) : -1;   // -1 => sanitize 重置
+        } else if (!vv.isUndefined()) {
+            s.sfxVolume = -1;
+        }
+    }
 
     for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
         if (!isKnownKey(it.key())) {
@@ -138,6 +154,8 @@ QJsonObject Settings::toJson() const
     o.insert(QStringLiteral("port"), int(port));
     o.insert(QStringLiteral("name"), name);
     o.insert(QStringLiteral("pack"), pack);
+    o.insert(QStringLiteral("sfx"), sfx);
+    o.insert(QStringLiteral("sfx_volume"), sfxVolume);
     return o;
 }
 

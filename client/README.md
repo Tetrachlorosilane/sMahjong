@@ -27,8 +27,9 @@ cd client
 5. 仓库内缓存 `<仓库根>\.qt\<版本>\mingw_64`
 6. **从 `download.qt.io` 在线仓库自动下载**（与 Qt 官方安装器同源；也可用 `-QtRepo` 换镜像）
 
-第 6 步只取本项目真正用到的模块 —— `qtbase`（Core/Gui/Widgets/Network）+ `qtsvg`（Svg），
-Qt 6.11.2 下合计约 **22 MB**（整包 `qt-everywhere-src` 是 973 MB，所以「按模块挑归档」很关键），
+第 6 步只取本项目真正用到的模块 —— `qtbase`（Core/Gui/Widgets/Network）+ `qtsvg`（Svg）
++ `qtmultimedia`（音效的 `QSoundEffect`，见 `docs/THIRD-PARTY.md` 的选型与许可说明），
+Qt 6.11.2 下合计约 **50 MB**（整包 `qt-everywhere-src` 是 973 MB，所以「按模块挑归档」很关键），
 解包出来就是一个完整的 Qt 前缀（`bin/moc.exe`、`include/`、`lib/cmake/`、`plugins/` 齐全）。
 MinGW / CMake / Ninja 缺失时，同样从该仓库取（`qt.tools.*`）。
 
@@ -75,15 +76,24 @@ Qt 官方在线安装器不提供 static 包。
 因此本项目的做法是**把动态链接做成"绿色版"**：`build.ps1` 每次构建后自动把
 
 ```
-Qt6Core.dll  Qt6Gui.dll  Qt6Widgets.dll  Qt6Network.dll
+Qt6Core.dll  Qt6Gui.dll  Qt6Widgets.dll  Qt6Network.dll  Qt6Svg.dll
+Qt6Multimedia.dll                                  ← 音效（QSoundEffect）
 libgcc_s_seh-1.dll  libstdc++-6.dll  libwinpthread-1.dll
+avcodec-*.dll  avformat-*.dll  avutil-*.dll  swresample-*.dll  swscale-*.dll
+                                                   ← Qt Multimedia 捆绑的 FFmpeg 后端
 platforms\qwindows.dll      ← 缺这个会报 "could not find or load the Qt platform plugin windows"
 styles\qmodernwindowsstyle.dll
 tls\qschannelbackend.dll  tls\qopensslbackend.dll  tls\qcertonlybackend.dll
+multimedia\ffmpegmediaplugin.dll  multimedia\windowsmediaplugin.dll
 ```
 
 拷到 exe 同级目录（优先用 `windeployqt`，它不可用时脚本自动改为手动拷贝）。
 拷完以后：**不需要装 Qt、不需要配 PATH、不需要管理员权限**，双击即运行。
+
+> ⚠ **`Qt6Multimedia.dll` 不是可选装饰**：exe 链接了它，缺了会**直接起不来**（双击无反应、
+> 命令行也无输出），而且它依赖同目录那组 FFmpeg DLL。所以它们都在 `build.ps1` 的必需清单里。
+> 许可义务见 `docs/THIRD-PARTY.md`：Qt Multimedia 仍是 LGPLv3，但它捆绑的 FFmpeg 属于
+> **另一家**的组件 —— 分发时会一并带上 `licenses/qt/`（上游许可文本），**别删**。
 
 > 已实测：把 PATH 清成 `C:\Windows\system32;C:\Windows`（完全不含 Qt/MinGW），
 > `client\build\mahjong-client.exe` 与 `client\dist\mahjong-client.exe` 均能启动 GUI，

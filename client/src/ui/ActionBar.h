@@ -46,7 +46,11 @@ public:
     // 调用方据此丢弃这次操作（这是「连点两下发出两条动作」的第二道闸）。
     QJsonObject actionCmd(const QString& type) const;
     QJsonObject riichiCmd(const QString& tile) const;
-    QJsonObject discardCmd(const QString& tile) const;
+    // `tsumogiri` 必须显式下发（PROTOCOL §2.2）：服务端要按它**从摸牌位还是暗手**取牌。
+    // 只发一个牌码字符串时，"手里已有 5m、摸到的也是 5m、点的是手里那张"这种局面下
+    // 服务端只能靠"同 kind 取第一个副本"去猜，取到的可能与玩家点的那张不是同一张
+    // （赤五 0m 与普通 5m 同 kind 更是必然猜不出）→ 手牌在两端悄悄错位（幽灵手牌）。
+    QJsonObject discardCmd(const QString& tile, bool tsumogiri) const;
 
     // 自检用
     QString titleTextForTest() const;
@@ -82,4 +86,7 @@ private:
     QVector<QPushButton*> m_buttons;
     QVector<QProgressBar*> m_bars;
     QTimer m_tick;
+    /** 提示闪烁：交替切换按钮样式（见 ActionBar.cpp 的 actionButtonStyle）。 */
+    QTimer m_alertTimer;
+    bool m_alertArmed = false;
 };

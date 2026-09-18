@@ -8,11 +8,16 @@
 #include "net/Protocol.h"
 
 #include <QJsonArray>
+#include <QFile>
 #include <QPushButton>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QScrollBar>
 #include <QTextBrowser>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -25,6 +30,12 @@ namespace {
 constexpr ushort kRowSep = 0x1F;
 constexpr ushort kLabelSep = 0x1E;
 constexpr ushort kAsideSep = 0x1D;
+
+/**
+ * 「文字依次浮现」的步进（毫秒）：10 秒的结算窗口里露完 3~5 块，
+ * 既不拖沓也不会一闪而过（用户要求：结算动画时间太短）。
+ */
+constexpr int kRevealIntervalMs = 220;
 
 /**
  * 示意串里是否**至少有一行能画出来**（字体可得 + 至少一段牌码合法）。
@@ -129,12 +140,100 @@ QString scoreTable(const QJsonObject& ev, const TableModel* model)
 
 } // namespace
 
+/**
+ * 把一段 HTML 切成**顶层块**（`<h2>` / `<h3>` / `<p>` / `<table>` …），
+ * 供结算界面「文字依次浮现」逐块显示（用户要求：结算动画时间太短，改成依次浮现）。
+ *
+ * <p>只做一层扫描：遇到块级开标签就深入找到配对的闭合标签，把整段当作一块；
+ * 其余零散文本也算一块。**不追求通用 HTML 解析** —— 这里的输入是我们自己
+ * `agariHtml()` 生成的固定结构，够用且不会错。
+ */
+QStringList splitHtmlBlocks(const QString& html)
+{
+    QStringList out;
+    QString pending;
+    int i = 0;
+    const int n = html.size();
+    while (i < n) {
+        if (html.at(i) != QLatin1Char('<')) {
+            pending += html.at(i);
+            ++i;
+            continue;
+        }
+        const int close = html.indexOf(QLatin1Char('>'), i);
+        if (close < 0) {
+            pending += html.mid(i);
+            break;
+        }
+        const QString tag = html.mid(i, close - i + 1);
+        // 块级开标签：深入找配对闭合
+        if (tag.startsWith(QLatin1String("<h2"))
+            || tag.startsWith(QLatin1String("<h3"))
+            || tag.startsWith(QLatin1String("<p"))
+            || tag.startsWith(QLatin1String("<table"))
+            || tag.startsWith(QLatin1String("<div"))
+            || tag.startsWith(QLatin1String("<ul"))) {
+            // 标签名 = 从 '<' 之后到第一个空白 / '>' 之前
+            int e = 1;
+            while (e < tag.size()) {
+                const QChar c = tag.at(e);
+                if (c.isSpace() || c == QLatin1Char('>') || c == QLatin1Char('/'))
+                    break;
+                ++e;
+            }
+            const QString name = tag.mid(1, e - 1);
+            if (!name.isEmpty()) {
+                const QString openTag = QStringLiteral("<%1").arg(name);
+                const QString closeTag = QStringLiteral("</%1>").arg(name);
+                int depth = 1;
+                int scan = close + 1;
+                while (scan < n && depth > 0) {
+                    const int lt = html.indexOf(QLatin1Char('<'), scan);
+                    if (lt < 0) {
+                        break;
+                    }
+                    if (html.mid(lt, openTag.size()).compare(openTag, Qt::CaseInsensitive) == 0) {
+                        depth++;
+                        scan = lt + openTag.size();
+                    } else if (html.mid(lt, closeTag.size()).compare(closeTag, Qt::CaseInsensitive) == 0) {
+                        depth--;
+                        scan = lt + closeTag.size();
+                    } else {
+                        scan = lt + 1;
+                    }
+                }
+                if (!pending.trimmed().isEmpty()) {
+                    out << pending;
+                }
+                pending.clear();
+                out << html.mid(i, qMin(n, scan) - i);
+                i = qMin(n, scan);
+                continue;
+            }
+        }
+        pending += tag;
+        i = close + 1;
+    }
+    if (!pending.trimmed().isEmpty()) {
+        out << pending;
+    }
+    return out;
+}
+
 ResultDialog::ResultDialog(const QString& title, const QString& html, const QString& schematic,
                            QWidget* parent)
     : QDialog(parent)
 {
     setWindowTitle(title);
-    setMinimumSize(420, 360);
+    // 结算信息量固定（牌面示意 + 役种 + 合计 + 点数收支），给一个够用的下限；
+    // 真正的高度由下面「正文最小高度」+ 布局自己算。
+    setMinimumSize(460, 420);
+    // ⚠ **限制最大宽度**：牌面示意那一行（14 张手牌 + 和了牌 + 副露）会很长，
+    //   而 QLabel 的 sizeHint 会把它算进窗口宽度 → 窗口被撑到 977px 宽、
+    //   高度反被挤掉，正文又只剩标题（真机上实测）。
+    //   限宽之后示意行由布局换行/裁切，正文拿到稳定的一整块高度。
+    setMaximumWidth(720);
+    setSizeGripEnabled(false);
     auto* root = new QVBoxLayout(this);
 
     // 牌面示意：用内嵌的牌面字体渲染牌码串（liga 默认生效）。
@@ -143,15 +242,20 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
     if (schematicRenderable(schematic)) {
         // 示意串结构：行间 U+001F；行内「标签 U+001E 牌串」；同行旁挂 U+001D。
         // 除手牌行外每行都是「小字标签 + 牌面」，用同一套内嵌字体渲染。
+        // 牌面示意的字号：44/34 都试过 —— 三行示意会把弹窗宽度与高度预算吃光
+        // （14 张手牌那一行可达 700px 宽），正文只剩两三行，真机上就是
+        // "结算界面看不全"。24 在 1080p 下仍看得清牌面，一行也收得进 720px。
         QFont tf(tilefont::family());
-        tf.setPixelSize(44);
+        tf.setPixelSize(24);
         QFont lf(QStringLiteral("Microsoft YaHei"));
-        lf.setPixelSize(16);
+        lf.setPixelSize(14);
 
         auto* wrap = new QWidget(this);
         auto* col = new QVBoxLayout(wrap);
-        col->setContentsMargins(12, 10, 12, 4);
-        col->setSpacing(6);
+        col->setContentsMargins(12, 8, 12, 2);
+        // 行距压到 2px：默认 6px × 3 行看着像"空了一大片"，而结算界面每一点高度
+        // 都应该留给正文（真机上"结算界面看不全"就是这么来的）。
+        col->setSpacing(2);
         bool anyRow = false;
 
         for (const QString& rowText : schematic.split(QChar(kRowSep))) {
@@ -198,7 +302,9 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
                 first = false;
             }
             rowLay->addStretch(1);
+            row->setVisible(false);            // 等「依次浮现」（见下面的 m_revealTimer）
             col->addWidget(row);
+            m_revealWidgets.append(row);
             anyRow = true;
         }
         if (anyRow) {
@@ -209,8 +315,31 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
     }
 
     m_browser = new QTextBrowser(this);
-    m_browser->setHtml(html);
+    // 正文给一个稳定的最小高度：它是本弹窗**唯一**可拉伸的控件，而牌面示意那一行
+    // 会跟着手牌长度变化 —— 不给下限时，长手牌会把高度预算吃光，正文只剩一行。
+    m_browser->setMinimumHeight(260);
+    // ⚠ 压掉 QTextDocument 给块级元素的默认外边距：默认值下 `<h2>` 与 `<h3>` 之间会空出
+    //   近 100px，结算弹窗看着"上面一大片空、内容却显示不全"（真机上就是这么表现的）。
+    //   用文档自带样式表设置，不改任何 HTML 文本（自检断言的是 HTML 字符串本身）。
+    m_browser->document()->setDefaultStyleSheet(
+        QStringLiteral("h2, h3, p, ul, li, table { margin: 0; padding: 0; }"
+                       " ul { margin-left: 18px; }"
+                       " li { margin: 0; }"));
+    m_htmlBlocks = splitHtmlBlocks(html);
+    m_htmlShown = m_htmlBlocks.size();
+    m_browser->setHtml(m_htmlBlocks.isEmpty() ? html : m_htmlBlocks.join(QStringLiteral("<br>")));
     root->addWidget(m_browser);
+    scrollBrowserToTop();
+
+    m_revealTimer = new QTimer(this);
+    m_revealTimer->setInterval(kRevealIntervalMs);
+    connect(m_revealTimer, &QTimer::timeout, this, [this]() { revealNextBlock(); });
+    // ⚠ **只让牌面行依次浮现，文字正文一次性给全**。
+    //   曾经两边都分块露出，结果真机上结算弹窗只剩标题：`setHtml()` 变长内容后
+    //   浏览器**保留旧滚动位置**，后露出的块被推到可视区之外（自检查 toPlainText
+    //   是查不出来的）。牌面行是独立 QLabel，没有滚动这回事，慢慢露很安全。
+    if (!m_revealWidgets.isEmpty())
+        m_revealTimer->start();
 
     // 底部一行：看回放按钮（拿到 replay_id 才显示）+ 局间倒计时文字 + 确认
     auto* bottom = new QHBoxLayout();
@@ -239,6 +368,73 @@ ResultDialog::ResultDialog(const QString& title, const QString& html, const QStr
         m_countdown->setText(lang::t("ui.result.auto_next")
                                  .arg((m_leftMs + 999) / 1000));
     });
+
+    // 最小高度按**布局真正需要的量**给：内容（牌面示意 + 役种 + 合计 + 收支表）
+    // 因局而异，写死一个数就会在某些局里把底部按钮行挤出窗口（真机上正文与
+    // 「确定」叠在一起）。这里用 layout 自己的 sizeHint，再兜一个下限 420。
+    root->setSizeConstraint(QLayout::SetMinimumSize);
+    if (QLayout* lay = layout()) {
+        const QSize need = lay->sizeHint();
+        setMinimumSize(qMax(460, need.width()), qMax(420, need.height()));
+    }
+    // ⚠ 最大宽度必须**在 setMinimumSize 之后**再钉一次：`setMinimumSize` 会按布局的
+    //   sizeHint 重设尺寸约束，把先前那句 setMaximumWidth 顶掉 —— 于是窗口又被那行
+    //   十几张牌的面示意撑到 833px 宽（真机上实测）。
+    setMaximumWidth(720);
+}
+
+/**
+ * 露出下一块（一行牌面示意 / 一段 HTML）。
+ *
+ * <p>两边的顺序是「先牌面行、后文字块」：牌面是这一局的结论，文字是明细。
+ * 全部露完就停表；`startCountdown()` 会直接调 `revealAll()` 跳过动画
+ * —— 局间倒计时一旦开始，玩家的注意力应该落在"还剩几秒"，不该再等文字。
+ */
+void ResultDialog::revealNextBlock()
+{
+    for (QWidget* w : m_revealWidgets) {
+        if (w && !w->isVisible()) {
+            w->setVisible(true);
+            return;
+        }
+    }
+    m_revealTimer->stop();
+}
+
+/**
+ * 把正文浏览器滚回顶部。
+ *
+ * <p>⚠ `setHtml()` **不会**重置滚动位置：内容变长后仍停在原来的位置，
+ * 于是"依次浮现"露出来的后续块全被推到可视区之外 —— 界面看上去永远只有第一行
+ * （真机上就是这么表现的：结算弹窗只剩标题，点数收支表"不见了"）。
+ * 每次换内容后必须显式回到顶部。
+ */
+void ResultDialog::scrollBrowserToTop()
+{
+    if (!m_browser)
+        return;
+    m_browser->moveCursor(QTextCursor::Start);
+    if (QScrollBar* bar = m_browser->verticalScrollBar())
+        bar->setValue(0);
+}
+QStringList ResultDialog::htmlBlocksForTest(const QString& html)
+{
+    return splitHtmlBlocks(html);
+}
+
+/** 立刻露完全部内容（倒计时开始 / 玩家点确认前都要保证信息完整）。 */
+void ResultDialog::revealAll(){
+    if (m_revealTimer)
+        m_revealTimer->stop();
+    for (QWidget* w : m_revealWidgets) {
+        if (w)
+            w->setVisible(true);
+    }
+    m_htmlShown = m_htmlBlocks.size();
+    if (m_browser && !m_htmlBlocks.isEmpty()) {
+        m_browser->setHtml(m_htmlBlocks.join(QStringLiteral("<br>")));
+        scrollBrowserToTop();
+    }
 }
 
 void ResultDialog::enableReplay(const QString& replayId)
@@ -258,6 +454,8 @@ void ResultDialog::startCountdown(int ms)
         accept();
         return;
     }
+    // 倒计时一开始就把内容全部露出来：玩家只有这几秒，不该再等浮现动画
+    revealAll();
     m_countdown->setText(lang::t("ui.result.auto_next")
                              .arg((m_leftMs + 999) / 1000));
     m_timer->start();
@@ -269,13 +467,30 @@ QString ResultDialog::schematicOf(const QJsonObject& ev, const TableModel* model
         return QString();   // 流局/终局没有可公开的手牌，不做示意
     }
     const int winner = ev.value(QStringLiteral("winner")).toInt(0);
-    const QStringList hand = proto::stringList(ev.value(QStringLiteral("hand")));
+    const bool tsumo = ev.value(QStringLiteral("tsumo")).toBool();
+    QStringList hand = proto::stringList(ev.value(QStringLiteral("hand")));
     const QString win = ev.value(QStringLiteral("winning_tile")).toString();
+
+    // ⚠ **自摸时 `hand` 里已经含和了牌**（自摸和了形是 14 张，服务端把和了牌算在手牌里），
+    //   而 `winning_tile` 又单独发一份 —— 直接把两者都画出来，界面上的和了牌会出现两次
+    //   （报障：自摸张在手牌里一次、在和了牌位又一次，看着像多了一张牌）。
+    //   所以自摸时先从手牌里摘掉**一张**同牌码的和了牌，再把它单独摆到和了牌位；
+    //   荣和时手牌是 13 张（不含和了牌），不必摘。
+    if (tsumo && !win.isEmpty()) {
+        const int dup = hand.indexOf(win);
+        if (dup >= 0) {
+            hand.removeAt(dup);
+        }
+    }
 
     // 手牌行：暗牌 +（空一格）+ 和了牌 +（空一格）+ 各副露
     QString handSeg = hand.join(QStringLiteral(" "));
     if (!win.isEmpty()) {
-        handSeg += QChar(kAsideSep) + win;   // 和了牌单独摆在旁边，不并进手牌
+        // 和了牌的朝向要区分自摸与荣和（用户要求）：
+        //   自摸 → **竖置**（牌码本身，字体默认竖着画）；
+        //   荣和 → **横置**（后置 `-`，与副露里"被鸣的那张"同一套语法）。
+        // 两者都靠 U+001D 旁挂分隔，渲染时插入固定一个牌位的间隔，所以是"空一小段距离"。
+        handSeg += QChar(kAsideSep) + (tsumo ? win : win + QLatin1Char('-'));
     }
     // 副露：被鸣的那张**后置 `-`** → 该字体渲染成横置牌（第三轮探针实测：
     // 任何位置、有无空格、多组相邻副露都成立）。

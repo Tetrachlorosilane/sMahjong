@@ -1,15 +1,18 @@
 #include "ui/SettingsDialog.h"
 
 #include "i18n/Lang.h"
+#include "model/Sound.h"
 #include "model/Theme.h"
 #include "ui/TileRenderer.h"
 
+#include <QCheckBox>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -96,7 +99,53 @@ void SettingsDialog::buildUi()
     packWrap->setLayout(packRow);
     form->addRow(lang::t(QStringLiteral("ui.settings.pack")), packWrap);
 
+    // 音效：开关 + 音量 + 试听（用户要求音效也要可配置；素材本身可被材质包的 sfx/ 替换）。
+    // 后端不可用（既没有 Qt Multimedia 也没链 winmm）时，点确定会**原样保留**、
+    // 并把开关置灰 + 写明原因，而不是让玩家对着一个点了没反应的开关。
+    auto* sfxRow = new QHBoxLayout();
+    m_sfxOn = new QCheckBox(lang::t(QStringLiteral("ui.settings.sfx_on")), this);
+    m_sfxOn->setChecked(m_settings.sfx);
+    sfxRow->addWidget(m_sfxOn);
+    m_sfxVolume = new QSlider(Qt::Horizontal, this);
+    m_sfxVolume->setRange(0, 100);
+    m_sfxVolume->setValue(m_settings.sfxVolume);
+    m_sfxVolume->setMinimumWidth(140);
+    sfxRow->addWidget(m_sfxVolume, 1);
+    m_sfxPercent = new QLabel(QStringLiteral("%1%").arg(m_settings.sfxVolume), this);
+    m_sfxPercent->setMinimumWidth(40);
+    sfxRow->addWidget(m_sfxPercent);
+    auto* sfxTry = new QPushButton(lang::t(QStringLiteral("ui.settings.sfx_test")), this);
+    sfxRow->addWidget(sfxTry);
+    auto* sfxWrap = new QWidget(this);
+    sfxWrap->setLayout(sfxRow);
+    form->addRow(lang::t(QStringLiteral("ui.settings.sfx")), sfxWrap);
+
+    connect(m_sfxOn, &QCheckBox::toggled, this, [this](bool on) {
+        // 立刻生效（试听要按新开关出声），取消时由外部回滚旧设置
+        sound::Player::instance().setEnabled(on);
+    });
+    connect(m_sfxVolume, &QSlider::valueChanged, this, [this](int v) {
+        m_sfxPercent->setText(QStringLiteral("%1%").arg(v));
+        sound::Player::instance().setVolume(v);
+    });
+    connect(sfxTry, &QPushButton::clicked, this, [this]() {
+        sound::Player::instance().play(QLatin1String(sound::name::Notify));
+    });
+    if (!sound::Player::instance().available()) {
+        m_sfxOn->setEnabled(false);
+        m_sfxVolume->setEnabled(false);
+        sfxTry->setEnabled(false);
+    }
+
     root->addLayout(form);
+
+    // 「本构建没有音频后端」的说明放在表单**下面**（置灰开关旁边写清楚，别让玩家纳闷）
+    if (!sound::Player::instance().available()) {
+        auto* why = new QLabel(lang::t(QStringLiteral("ui.settings.sfx_unavailable")), this);
+        why->setStyleSheet(QStringLiteral("color:#C08A3E;"));
+        why->setWordWrap(true);
+        root->addWidget(why);
+    }
 
     m_packStatus = new QLabel(this);
     m_packStatus->setWordWrap(true);
@@ -190,6 +239,8 @@ void SettingsDialog::collect()
     m_settings.port = quint16(m_port->value());
     m_settings.name = m_name->text();
     m_settings.pack = m_pack->text().trimmed();
+    m_settings.sfx = m_sfxOn->isChecked();
+    m_settings.sfxVolume = m_sfxVolume->value();
     QStringList repaired;
     m_settings.sanitize(&repaired);   // 与读文件时**同一套**校验（越界/控制字符都会被修掉）
 }

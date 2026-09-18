@@ -62,6 +62,7 @@ public final class SelfTest {
         jsonEncodingTests();
         yakuCodesTests();
         roundScoringTests();
+        roundSeedTests();
         scoreTableTests();
         paymentTests();
         notenPenaltyTests();
@@ -69,6 +70,8 @@ public final class SelfTest {
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
+        meldAkaPickTests();
+        seatSwapTests();
         nagashiLivePathTest();
         simulationTest();
         rinshanTests();
@@ -1291,6 +1294,7 @@ public final class SelfTest {
             t.botDelayMs = 0;
             t.roundDelayMs = 0;
             t.seedBase = 20260914L;
+            t.debugDeterministicSeed = true;   // 自检要可复现；生产路径是每局重取时刻种子
             for (int i = 0; i < 4; i++) {
                 t.addBot(i);
             }
@@ -1307,6 +1311,8 @@ public final class SelfTest {
                     || meta.get("entries") instanceof Number);
             check("回放：元信息带局数：" + meta.get("rounds"),
                     Json.i(meta, "rounds", 0) >= 1);
+            // 房间牌谱（用户要求）：列表元信息里要有房间号，玩家才能按"哪一桌"找那一场
+            eq("回放：元信息带房间号（房间保存牌谱）", Json.str(meta, "room", ""), "REPLAY");
 
             Map<String, Object> head = store.header(rid);
             check("回放：能取到头信息", head != null);
@@ -1468,6 +1474,105 @@ public final class SelfTest {
      * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
      * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
      */
+    /**
+     * 开局前的**自选座位 / 随机洗座**（用户要求：门风 = 座次，可自选或随机）。
+     *
+     * <p>三条不变量：
+     *   ① `take_seat` 是**互换**——两家的住户信息整体对调，谁也不被挤掉；
+     *   ② 换过座位的两家 `ready` 都要清掉（座位变了，"准备好了"不再指同一个位置）；
+     *   ③ `shuffle_seats` 之后**四家的住户正好是原来那四家**（一个不多一个不少），
+     *      否则洗座会凭空产生或吞掉一个玩家（这是最容易写错的地方：逐字段交换漏一项）。
+     */
+    private static void seatSwapTests() {
+        Table t = new Table("SEAT", "座位桌", Rules.defaults());
+        // 四个座位放四个"人"（名字/pid 各不相同，便于查住户是否整套搬过去）。
+        // ⚠ pid 不能用 0：`Seat.occupied()` 把 pid==0 当成"空位"（机器人也用 0），
+        //   用 0 会让"按 pid 反查座位"恒返回 -1。
+        for (int i = 0; i < 4; i++) {
+            t.seats[i].name = "P" + i;
+            t.seats[i].pid = 101 + i;
+            t.seats[i].score = 25000 + i;
+            t.seats[i].ready = true;
+        }
+        t.swapSeats(0, 2);
+        eq("换座：座位 0 的住户搬到 2", t.seats[2].name, "P0");
+        eq("换座：座位 2 的住户搬到 0", t.seats[0].name, "P2");
+        eq("换座：pid 跟着走", t.seats[0].pid, 103L);
+        eq("换座：分数跟着走", t.seats[0].score, 25002);
+        eq("换座：两家都要重新准备（0）", t.seats[0].ready, false);
+        eq("换座：两家都要重新准备（2）", t.seats[2].ready, false);
+        eq("换座：没动的座位不受影响", t.seats[1].name, "P1");
+        // 按 pid 反查座位（洗座后各连接靠它重新认领）
+        eq("按 pid 反查座位", t.seatOfPid(103L), 0);
+        eq("按 pid 查不到时返回 -1", t.seatOfPid(999L), -1);
+        // 非法参数不改变任何状态
+        t.swapSeats(0, 0);
+        t.swapSeats(-1, 2);
+        t.swapSeats(0, 9);
+        eq("非法换座参数不改状态", t.seats[0].name, "P2");
+
+        // 洗座：住户集合不变（只是换了位置）
+        t.shuffleSeats();
+        String[] names = new String[4];
+        for (int i = 0; i < 4; i++) {
+            names[i] = t.seats[i].name;
+        }
+        java.util.Arrays.sort(names);
+        eq("洗座后四家住户一个不多一个不少",
+                String.join(",", names), "P0,P1,P2,P3");
+        boolean allReady = false;   // 人类座位（这里都是"人"）必须重新准备
+        for (int i = 0; i < 4; i++) {
+            allReady = allReady || t.seats[i].ready;
+        }
+        eq("洗座后人类座位重新准备", allReady, false);
+    }
+
+    /**
+     * 副露的**赤宝选择**（用户要求：副露能不能选赤宝）。
+     *
+     * <p>赤五（`0m`）与普通五（`5m`）**同 kind 不同价值**，所以"拿哪一张去碰/吃"是
+     * 玩家该决定的事。客户端用精确牌码表达（`0m` = 赤、`5m` = 普通），服务端照它挑。
+     *
+     * <p>四条不变量：
+     *   ① 按客户端指定的赤/普通取到对应的那一张；
+     *   ② 客户端要的牌手里没有（要两张赤五却只有一张）→ 作废，**绝不拿普通五顶上**；
+     *   ③ 牌种对不上（拿 6m 的码去碰 5m）→ 作废；
+     *   ④ 个数不符 → 作废（调用方退回旧行为）。
+     */
+    private static void meldAkaPickTests() {
+        Round r = newRound();
+        final int aka5 = Tiles.id(Tiles.AKA_M, 0);       // 赤五固定 copy 0
+        final int norm5a = Tiles.id(Tiles.AKA_M, 1);
+        final int norm5b = Tiles.id(Tiles.AKA_M, 2);
+        final int called5 = Tiles.id(Tiles.AKA_M, 3);    // 被鸣的那张
+        r.hand[0].clear();
+        r.hand[0].add(aka5);
+        r.hand[0].add(norm5a);
+        r.hand[0].add(norm5b);
+
+        int[] wantNorm = r.debugPickHandTiles(0, called5, Arrays.asList("5m", "5m"), 2);
+        check("赤宝选择：要普通五就取普通五", wantNorm != null
+                && !Tiles.isRedId(wantNorm[0]) && !Tiles.isRedId(wantNorm[1]));
+        int[] wantMix = r.debugPickHandTiles(0, called5, Arrays.asList("0m", "5m"), 2);
+        int reds = 0;
+        if (wantMix != null) {
+            for (int id : wantMix) {
+                if (Tiles.isRedId(id)) {
+                    reds++;
+                }
+            }
+        }
+        eq("赤宝选择：赤+普通各一张", reds, 1);
+        eq("赤宝选择：要两张赤五但只有一张 → 作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("0m", "0m"), 2), null);
+        eq("赤宝选择：牌种对不上要作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("6m", "5m"), 2), null);
+        eq("赤宝选择：个数不符要作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("5m"), 2), null);
+        eq("赤宝选择：按赤/普通能精确取到那一张",
+                r.debugFindHandTile(0, Tiles.AKA_M, true), aka5);
+    }
+
     private static void akaRuleTests() {
         int[] def = new mahjong.core.Wall(20240914L, Rules.defaults()).debugAllTiles();
         int red = 0;
@@ -1626,6 +1731,52 @@ public final class SelfTest {
     }
 
     // ------------------------------------------------------------- 连庄判据
+
+    /**
+     * 每小局的种子必须**重新取**（用户报障：「同一房间每个半庄种子一样」）。
+     *
+     * <p>原来每局是 `mixSeed(seedBase + 局序号)`：同一个 `seedBase` 下整场是一条确定序列，
+     * 推出一局就能推出一整场。现在生产路径每局从"当前时刻毫秒数"重新起步。
+     *
+     * <p>同时钉住**自检那条岔路**：`debugDeterministicSeed` 打开时必须完全可复现，
+     * 否则模拟类自检会变成随机样本（那是自检质量下降，不是需求本意）。
+     */
+    private static void roundSeedTests() {
+        // ① 生产路径：同一张桌子连取几局，种子各不相同（哪怕都在同一毫秒内）
+        Table a = new Table("SEED", "种子桌", Rules.defaults());
+        long s1 = a.debugNextRoundSeed();
+        long s2 = a.debugNextRoundSeed();
+        long s3 = a.debugNextRoundSeed();
+        check("每局种子互不相同： " + s1 + "/" + s2 + "/" + s3,
+                s1 != s2 && s2 != s3 && s1 != s3);
+        check("每局种子来源（时刻）在推进", a.debugRoundSeedClock() > 0);
+
+        // ② 两张**基准不同**的桌子不会撞出同一副牌（seedBase 是 CSPRNG）
+        Table b = new Table("SEED2", "种子桌2", Rules.defaults());
+        b.seedBase = a.seedBase ^ 0x5DEECE66DL;
+        check("不同基准的桌子种子不同", a.debugNextRoundSeed() != b.debugNextRoundSeed());
+
+        // ③ 自检岔路：写死基准 + deterministic ⇒ 整场可复现
+        Table c = new Table("SEED3", "种子桌3", Rules.defaults());
+        c.seedBase = 777L;
+        c.debugDeterministicSeed = true;
+        Table d = new Table("SEED4", "种子桌4", Rules.defaults());
+        d.seedBase = 777L;
+        d.debugDeterministicSeed = true;
+        boolean same = true;
+        for (int i = 0; i < 5; i++) {
+            if (c.debugNextRoundSeed() != d.debugNextRoundSeed()) {
+                same = false;
+            }
+        }
+        check("自检岔路：同基准同序号 → 整场可复现", same);
+
+        // ④ 但同一张桌子上相邻两局仍然不同（不是退化成同一个种子）
+        Table e = new Table("SEED5", "种子桌5", Rules.defaults());
+        e.seedBase = 777L;
+        e.debugDeterministicSeed = true;
+        check("自检岔路内部也逐局不同", e.debugNextRoundSeed() != e.debugNextRoundSeed());
+    }
 
     private static void roundScoringTests() {
         // 和了：庄家和了才连庄
@@ -1945,6 +2096,7 @@ public final class SelfTest {
             t.botDelayMs = 0;      // 模拟时不要机器人延时
             t.roundDelayMs = 0;
             t.seedBase = 12345L + trial * 777;
+            t.debugDeterministicSeed = true;
             for (int i = 0; i < 4; i++) {
                 t.addBot(i);
             }
@@ -2014,6 +2166,7 @@ public final class SelfTest {
                 t.botDelayMs = 0;
                 t.roundDelayMs = 0;
                 t.seedBase = 90000L + game * 4099;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }
@@ -2220,6 +2373,7 @@ public final class SelfTest {
                 t.botDelayMs = 0;
                 t.roundDelayMs = 0;
                 t.seedBase = 51000L + game * 613;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }
@@ -2324,6 +2478,7 @@ public final class SelfTest {
                 t.roundDelayMs = 0;
                 // 与岭上用例同一组种子：已知那里会出现暗杠/加杠的 offer
                 t.seedBase = 90000L + game * 4099;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }

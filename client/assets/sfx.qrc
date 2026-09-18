@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/">
+        <file>sfx/chi.wav</file>
+        <file>sfx/draw.wav</file>
+        <file>sfx/kan.wav</file>
+        <file>sfx/notify.wav</file>
+        <file>sfx/pon.wav</file>
+        <file>sfx/riichi.wav</file>
+        <file>sfx/ron.wav</file>
+        <file>sfx/tsumo.wav</file>
+    </qresource>
+</RCC>

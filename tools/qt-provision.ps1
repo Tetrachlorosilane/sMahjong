@@ -37,8 +37,9 @@ $script:QtRepoDefault     = 'https://download.qt.io/online/qtsdkrepository/windo
 $script:QtOfficialDefault = 'https://download.qt.io/official_releases/qt'
 # 与本项目实际验证过的版本一致；MAHJONG_QT_VERSION 或 -QtVersion 可覆盖（支持 'latest'）
 $script:QtDefaultVersion  = '6.11.2'
-# 本项目需要的模块（Core/Gui/Widgets/Network 来自 qtbase，Svg 来自 qtsvg）
-$script:QtDefaultModules  = @('qtbase', 'qtsvg')
+# 本项目需要的模块（Core/Gui/Widgets/Network 来自 qtbase，Svg 来自 qtsvg，
+# Multimedia 来自 qtmultimedia —— 音效走 QSoundEffect，见 client/CMakeLists.txt 的选型说明）
+$script:QtDefaultModules  = @('qtbase', 'qtsvg', 'qtmultimedia')
 $script:FetchHelper       = Join-Path $PSScriptRoot 'fetch-url.mjs'
 $script:SkipDirNames      = @('Windows', 'ProgramData', '$Recycle.Bin', 'System Volume Information',
                               'node_modules', '.git', '.qt', 'AppData', 'Temp', 'tmp', 'build',

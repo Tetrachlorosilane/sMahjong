@@ -71,6 +71,18 @@ void AutoBar::reset()
     emit flagsChanged(flags());
 }
 
+void AutoBar::setAutoTsumogiri(bool on)
+{
+    if (!m_tsumogiriBtn || m_tsumogiriBtn->isChecked() == on)
+        return;
+    {
+        // 屏蔽 toggled → 只发一次 flagsChanged（与 reset() 同一套做法）
+        const QSignalBlocker b(m_tsumogiriBtn);
+        m_tsumogiriBtn->setChecked(on);
+    }
+    emit flagsChanged(flags());
+}
+
 QPushButton* AutoBar::buttonForTest(const QString& label) const
 {
     const QPushButton* all[3] = { m_winBtn, m_noCallBtn, m_tsumogiriBtn };

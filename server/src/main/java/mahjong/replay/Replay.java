@@ -93,6 +93,12 @@ public final class Replay {
     public boolean truncated;
     /** 落盘后的字节数（未落盘时为 0）。 */
     public long bytes;
+    /**
+     * 这一场属于哪个**房间**（用户要求：房间保存牌谱 —— 有了房间号，大厅的回放列表
+     * 就能按房间找"刚才那一桌打的那几场"，而不只是看到四个玩家名）。
+     * 老记录里没有这个字段，读出时为空串（向前兼容）。
+     */
+    public String roomId = "";
 
     public Replay(String id, long created, Map<String, Object> rules, List<String> names) {
         this.id = id;
@@ -110,6 +116,7 @@ public final class Replay {
                 "id", id,
                 "created", created,
                 "names", names,
+                "room", roomId,
                 "preset", Json.str(rules, "preset", "custom"),
                 "rounds", rounds.size(),
                 "entries", entries.size(),

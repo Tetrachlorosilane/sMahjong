@@ -24,6 +24,10 @@ struct Settings
     QString name;
     /** 材质包路径：目录或 `.zip`。空 = 全用默认素材。 */
     QString pack;
+    /** 音效总开关（缺省开）。 */
+    bool sfx = true;
+    /** 音效音量 0..100（缺省 70）。 */
+    int sfxVolume = 70;
 
     /** 设置文件位置（不保证存在，也不保证可写 —— `save()` 会如实回报错误）。 */
     static QString defaultPath();

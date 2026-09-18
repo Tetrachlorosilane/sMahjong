@@ -64,7 +64,6 @@ private slots:
     void onTileClicked(const QString& tile, int index);
     void onRiichiModeChanged(bool on);
     void onAutoFlagsChanged();
-    void onChatSend();
     void onLeaveRoom();
 
 private:
@@ -74,6 +73,14 @@ private:
     void updateWaitingRoom(const QJsonObject& room);
     void updateScorePanel();
     void appendChat(const QString& who, const QString& text);
+    /**
+     * 发送聊天：把**指定输入框**的内容发出去。
+     *
+     * 两个「发送」按钮分别属于等待页（`m_waitChatEdit`）与牌桌页（`m_chatEdit`），
+     * 各自配自己的输入框 —— **不能**用 `sender()` 反推（按钮点击时它是 QPushButton，
+     * 反推会拿到 nullptr 并静默 return，症状就是"回车能发、点按钮没反应"）。
+     */
+    void sendChatFrom(QLineEdit* edit);
     /** 从大厅连上过一次 → 把地址/端口/昵称写回设置文件（材质包那条不动）。 */
     void saveCurrentEndpoint();
     void sendCommand(const QJsonObject& obj);
@@ -92,6 +99,8 @@ private:
                            const QString& schematic = QString(), bool offerReplay = false);
     /** 关闭结算弹窗。confirm=true 视为玩家确认；服务端已推进时传 false（不发 confirm）。 */
     void closeResultDialog(bool confirm);
+    /** 开局前自选座位（门风 = 座次）。服务端把两家的住户**互换**，谁也不被踢出去。 */
+    void takeSeat(int seat);
     bool isHost() const;
 
     /**
@@ -111,10 +120,13 @@ private:
     QWidget* m_waitPage = nullptr;
     QLabel* m_roomLabel = nullptr;
     QLabel* m_seatLabels[4] = { nullptr, nullptr, nullptr, nullptr };
+    /** 开局前「自选座位」按钮（下标 = 座位号，也就是门风：0=东/起家）。 */
+    QPushButton* m_takeSeatBtn[4] = { nullptr, nullptr, nullptr, nullptr };
     QPushButton* m_readyBtn = nullptr;
     QPushButton* m_addBotBtn = nullptr;
     QPushButton* m_removeBotBtn = nullptr;
     QPushButton* m_startBtn = nullptr;
+    QPushButton* m_shuffleBtn = nullptr;   // 房主：随机洗座（随机门风）
     QTextBrowser* m_waitChat = nullptr;
     QLineEdit* m_waitChatEdit = nullptr;
     bool m_ready = false;
