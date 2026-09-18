@@ -901,6 +901,82 @@ int run(const QString& outDir)
         }
     }
 
+    // ---- 回归：牌河**固定左缘**（先假定一行放满、算出那条最左沿，再从那里向右放牌）----
+    // 用户第二次数（上一次改的是"每行按自己的宽度居中"，那只是行与行之间不齐）：
+    // 真正的毛病是**整条牌河随张数往左挪** —— 旧实现按「本帧已打出的最大列数」算左缘再居中，
+    // 于是只打 1 张时那张落在牌河带中间，每多打一张整体左移一点，打满 6 张才落到最左；
+    // 第 1 张的位置自己会动，看起来就是"没左对齐"。
+    // 要求：左缘 = **一行排满**时最左那张的左沿，与「已经打了几张」**完全无关**。
+    // ⚠ 断言用**局部坐标**（`riverSlotLocalForTest`）而不是屏幕坐标：屏幕那份带着四家的旋转，
+    //    「左沿」在左右两家那里其实是上下方向（`pos=1` 的 toScreen 把局部 u 映射到屏幕 y）。
+    {
+        TableModel mrv;
+        mrv.applyEvent(parseEv(
+            R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},)"
+            R"("seat":0,"dealer":0,"scores":[25000,25000,25000,25000],)"
+            R"("hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p"],)"
+            R"("tiles_left":60,"dead_wall_left":4})"));
+        TableView rv;
+        rv.setModel(&mrv);
+        rv.resize(1354, 930);
+        rv.grab();                       // 先跑一次 paintEvent → computeLayout，之后读到的就是定下来的几何
+
+        // 用**对家**（pos 2）的牌河：既不碰自家手牌，也省得看旋转
+        auto throwOne = [&mrv]() {
+            mrv.applyEvent(parseEv(R"({"ev":"discard","seat":2,"tile":"1m","tsumogiri":false})"));
+        };
+        const qreal anchor = rv.riverLeftUForTest();
+        const qreal rw = rv.riverWForTest();
+        const qreal rh = rv.riverHForTest();
+        const qreal cgap = qMax(1.0, rw * 0.09);   // 与布局/绘制同一公式
+
+        // ① 一把尺子：满行宽度 = 牌高（那 1 张横置）+ 5×牌宽 + 5×列间距；左缘 = 它的负一半
+        check(qAbs(rv.riverFullRowExtentForTest() - (rh + 5.0 * rw + 5.0 * cgap)) < 0.01,
+              QStringLiteral("一行排满的宽度应为 牌高 + 5×牌宽 + 5×列间距（实际 %1）")
+                  .arg(rv.riverFullRowExtentForTest()));
+        check(qAbs(anchor + rv.riverFullRowExtentForTest() / 2.0) < 0.01,
+              QStringLiteral("固定左缘应是一行排满宽度的负一半（实际 %1）").arg(anchor));
+
+        // ② 红证：旧实现打 1 张时按「1 列」算 → 落在 −牌高/2（≈ 牌河带中间），
+        //    与固定左缘差着好几张牌宽。这条一红就说明左缘还在跟着张数走。
+        check(qAbs(anchor - (-rh / 2.0)) > rw,
+              QStringLiteral("固定左缘必须远离「按 1 张居中」的旧位置（新 %1 / 旧 %2）")
+                  .arg(anchor).arg(-rh / 2.0));
+
+        // ③ 张数变化时左缘**不动**：1 → 3 → 6 → 7 → 13 → 18（跨越三行）
+        throwOne();
+        rv.grab();
+        checkEq(QString::number(mrv.discards(2).size()), QStringLiteral("1"),
+                QStringLiteral("对家先打 1 张"));
+        check(qAbs(rv.riverSlotLocalForTest(2, 0).left() - anchor) < 0.01,
+              QStringLiteral("只打 1 张时这张就在固定左缘上（%1 vs %2）")
+                  .arg(rv.riverSlotLocalForTest(2, 0).left()).arg(anchor));
+        for (int total : {3, 6, 7, 13, 18}) {
+            while (mrv.discards(2).size() < total)
+                throwOne();
+            rv.grab();
+            check(qAbs(rv.riverSlotLocalForTest(2, 0).left() - anchor) < 0.01,
+                  QStringLiteral("打到 %1 张后，第 1 张仍在同一条左缘上（%2 vs %3）")
+                      .arg(total).arg(rv.riverSlotLocalForTest(2, 0).left()).arg(anchor));
+        }
+        // 每一行的行首都共用这条左缘（第 2 行 = 第 7 张，第 3 行 = 第 13 张）
+        check(qAbs(rv.riverSlotLocalForTest(2, 6).left() - anchor) < 0.01,
+              QStringLiteral("第 2 行第 1 张与第 1 行同一条左缘（%1 vs %2）")
+                  .arg(rv.riverSlotLocalForTest(2, 6).left()).arg(anchor));
+        check(qAbs(rv.riverSlotLocalForTest(2, 12).left() - anchor) < 0.01,
+              QStringLiteral("第 3 行第 1 张与第 1 行同一条左缘（%1 vs %2）")
+                  .arg(rv.riverSlotLocalForTest(2, 12).left()).arg(anchor));
+
+        // ④ 排满是**向右**长：第 6 张的右沿 = 左缘 + 6 张普通牌宽 + 5 个列间距，
+        //    且不得越过「含一张横置牌」的满行右沿（那条才是预留范围）。
+        const QRectF last = rv.riverSlotLocalForTest(2, 5);
+        check(qAbs(last.right() - (anchor + 6.0 * rw + 5.0 * cgap)) < 0.01,
+              QStringLiteral("一行是左缘向右累加出来的（右沿 %1）").arg(last.right()));
+        check(last.right() <= -anchor + 0.01,
+              QStringLiteral("整行不得越出一行排满的预留范围（%1 vs %2）")
+                  .arg(last.right()).arg(-anchor));
+    }
+
     // ---- 回归：手里已有 5m 又摸到 5m，手切原来那张（tsumogiri=false）----
     // 旧实现靠「kind 是否等于摸到的牌」猜，会把摸牌当打出去的清掉，导致手牌数对不上。
     {
