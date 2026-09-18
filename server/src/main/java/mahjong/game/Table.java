@@ -58,6 +58,47 @@ public final class Table implements Runnable {
     public final Seat[] seats = new Seat[4];
     public final List<Session> spectators = new CopyOnWriteArrayList<>();
 
+    /**
+     * **房间状态**（座位住户 / 准备 / 开局切换）的互斥锁。
+     *
+     * <p>⚠ 与对局内动作不是一回事：对局内的客户端命令都走 {@link #submit}→{@code responses}
+     * 单队列、由牌桌线程串行消费，所以那里不需要锁；但**等待室的命令是各连接自己的线程直接执行的**
+     * （`Session` 的 create/join/leave/ready/take_seat/shuffle_seats/start_game/add_bot/remove_bot），
+     * 它们读写的却是同一份座位数组。没有这把锁就会有两类问题：
+     * <ul>
+     *   <li><b>换座与开局交错</b>：`if (t.playing)` 与真正的换座之间被"牌桌线程开始发牌"插进去 ——
+     *       牌桌线程按**座位号**发牌、按 `seats[i].session` 发报文，两者错位就会把一家的暗牌
+     *       发给另一家（`swapFieldsOnly` 还是逐字段交换，读到"半个座位"更糟）；</li>
+     *   <li><b>两条换座交错</b>：同一对座位的逐字段交换被切开 → 两个座位同一个 pid，
+     *       或某人的 pid 凭空消失。</li>
+     * </ul>
+     * 规矩：**凡是要改座位住户 / 准备状态 / `playing` 的代码，都在这把锁里做**
+     * （含随后的 {@link #broadcastRoom}；锁是可重入的，所以嵌套调用没问题）。
+     */
+    private final Object roomLock = new Object();
+
+    /** 房间状态锁 —— 等待室命令（`Session`）用它把"判据 + 改座位 + 广播"做成一个原子步。 */
+    public Object roomLock() {
+        return roomLock;
+    }
+
+    /**
+     * 把每个座位住户的 `session.seat` 重新对齐到座位号。
+     *
+     * <p>报障（探针实测确认）：别人换座把自己换到别处后，**自己的 `session.seat` 还是旧值** ——
+     * 于是自己点「准备」会把**别人**设成已准备（实测：B 的准备落在 A 的座位上，B 自己一直不准备、
+     * 牌局永远开不了），对局中还会让 `submit(seat, …)` 把动作算到别的座位头上。
+     * 根因是 `take_seat` 只更新**发起者**的座位号（`seat = want`），被换走的那家没人管。
+     * 凡是改过座位住户的地方（{@link #swapSeats} / {@link #shuffleSeats}）都要调它。
+     */
+    public void resyncSessionSeats() {
+        for (Seat s : seats) {
+            if (s.session != null) {
+                s.session.seat = s.index;
+            }
+        }
+    }
+
     /** 每个房间的观战人数上限（AUDIT S-19）。 */
     public static final int MAX_SPECTATORS = 8;
     public final ConcurrentHashMap<Integer, Long> pendingAsk = new ConcurrentHashMap<>();
@@ -469,28 +510,34 @@ public final class Table implements Runnable {
     // ------------------------------------------------------------- 房间事件
 
     public void broadcastRoom() {
-        List<Object> seatList = new ArrayList<>();
-        for (Seat s : seats) {
-            if (!s.occupied()) {
-                seatList.add(null);
-                continue;
+        // 锁是可重入的：调用方（等待室命令 / 牌桌线程）已经持有它时不会自锁。
+        // 锁在这里是为了让"四家快照"不被另一条换座线程切两半（否则房间列表里会出现
+        // 同一个 pid 占两行、或某人凭空消失）。
+        synchronized (roomLock) {
+            resyncSessionSeats();     // 兜底：任何改座位的路径都以本方法收尾
+            List<Object> seatList = new ArrayList<>();
+            for (Seat s : seats) {
+                if (!s.occupied()) {
+                    seatList.add(null);
+                    continue;
+                }
+                seatList.add(Json.obj(
+                        "seat", s.index,
+                        "pid", s.pid,
+                        "name", s.name,
+                        "ready", s.ready,
+                        "bot", s.bot,
+                        "score", s.score));
             }
-            seatList.add(Json.obj(
-                    "seat", s.index,
-                    "pid", s.pid,
-                    "name", s.name,
-                    "ready", s.ready,
-                    "bot", s.bot,
-                    "score", s.score));
+            broadcast(Json.obj(
+                    "ev", "room",
+                    "id", id,
+                    "name", name,
+                    "host", hostPid,
+                    "playing", playing,
+                    "rules", rules.toJson(),
+                    "seats", seatList));
         }
-        broadcast(Json.obj(
-                "ev", "room",
-                "id", id,
-                "name", name,
-                "host", hostPid,
-                "playing", playing,
-                "rules", rules.toJson(),
-                "seats", seatList));
     }
 
     public int firstEmptySeat() {
@@ -521,6 +568,25 @@ public final class Table implements Runnable {
     }
 
     /**
+     * 该连接坐在哪个座位（-1 = 不在座）。
+     *
+     * <p>与 `session.seat` 的区别：这是**从座位表反查**，永远是真值。等待室里凡是"按我自己的座位
+     * 改点什么"的命令（准备 / 离开）都用它当判据，这样即使 `session.seat` 因为什么原因没跟上，
+     * 也不会把状态写到别人的座位上（报障根因见 {@link #resyncSessionSeats}）。
+     */
+    public int seatOfSession(Session who) {
+        if (who == null) {
+            return -1;
+        }
+        for (Seat s : seats) {
+            if (s.session == who) {
+                return s.index;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * 互换两个座位上的住户（**开局前的自选座位**，用户要求）。
      *
      * <p>门风就是座次（0=东/起家），所以"选座位"就是"选门风"。
@@ -535,13 +601,17 @@ public final class Table implements Runnable {
         if (a < 0 || a > 3 || b < 0 || b > 3 || a == b) {
             return;
         }
-        swapFieldsOnly(a, b);
-        // 座位变了，"我准备好了"不再是对同一个位置说的 —— 两家都要重新确认。
-        // 机器人视为立即准备（与 `awaitRoundConfirm` 的约定一致），别让换座把机器人卡住。
-        seats[a].ready = seats[a].bot;
-        seats[b].ready = seats[b].bot;
-        lastScores[a] = seats[a].score;
-        lastScores[b] = seats[b].score;
+        synchronized (roomLock) {
+            swapFieldsOnly(a, b);
+            // 座位变了，"我准备好了"不再是对同一个位置说的 —— 两家都要重新确认。
+            // 机器人视为立即准备（与 `awaitRoundConfirm` 的约定一致），别让换座把机器人卡住。
+            seats[a].ready = seats[a].bot;
+            seats[b].ready = seats[b].bot;
+            lastScores[a] = seats[a].score;
+            lastScores[b] = seats[b].score;
+            // ⚠ 被换走的那一家的 `session.seat` 也要跟着改（原来只改发起者 → 见 resyncSessionSeats）
+            resyncSessionSeats();
+        }
         Log.info("牌桌 " + id + " 换座：" + a + " <-> " + b);
     }
 
@@ -553,14 +623,18 @@ public final class Table implements Runnable {
      */
     public void shuffleSeats() {
         java.security.SecureRandom rnd = new java.security.SecureRandom();
-        for (int i = 3; i > 0; i--) {
-            swapFieldsOnly(i, rnd.nextInt(i + 1));
-        }
-        for (Seat s : seats) {
-            s.ready = s.bot;      // 洗座后人类要重新准备（否则"准备了却被换了风"很困惑）
-        }
-        for (int i = 0; i < 4; i++) {
-            lastScores[i] = seats[i].score;
+        synchronized (roomLock) {
+            for (int i = 3; i > 0; i--) {
+                swapFieldsOnly(i, rnd.nextInt(i + 1));
+            }
+            for (Seat s : seats) {
+                s.ready = s.bot;      // 洗座后人类要重新准备（否则"准备了却被换了风"很困惑）
+            }
+            for (int i = 0; i < 4; i++) {
+                lastScores[i] = seats[i].score;
+            }
+            // 洗座把所有人都挪了窝：每个住户的 session.seat 都要跟着改
+            resyncSessionSeats();
         }
         Log.info("牌桌 " + id + " 随机洗座完成");
     }
@@ -698,7 +772,17 @@ public final class Table implements Runnable {
                     continue;
                 }
                 emptyTicks = 0;
-                if (!readyToStart()) {
+                // 开局切换与换座互斥（见 roomLock）：`playing = true` 必须在锁里完成，
+                // 否则会与另一条连接的 `take_seat`（它先判 `if (playing)` 再换座）交错 ——
+                // 那就是"发牌过程中座位被换"，牌桌线程按座位号发的牌会落到别人连接上。
+                boolean startNow = false;
+                synchronized (roomLock) {
+                    if (readyToStart()) {
+                        playing = true;      // 先落旗，再出锁：take_seat 只会看到 true
+                        startNow = true;
+                    }
+                }
+                if (!startNow) {
                     Thread.sleep(200);
                     continue;
                 }
@@ -707,11 +791,15 @@ public final class Table implements Runnable {
                 } catch (Exception e) {
                     Log.error("牌局异常", e);
                 }
-                playing = false;
-                for (Seat s : seats) {
-                    s.ready = s.bot;
+                // 收尾同样在锁里：`playing` 归位、把人类的 ready 清掉、再广播一次房间状态。
+                // 顺序不能反 —— 先广播再清 ready 的话，客户端会看到"还没打完却可以换座"的中间态。
+                synchronized (roomLock) {
+                    playing = false;
+                    for (Seat s : seats) {
+                        s.ready = s.bot;
+                    }
+                    broadcastRoom();
                 }
-                broadcastRoom();
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
