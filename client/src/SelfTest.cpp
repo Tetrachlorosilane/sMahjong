@@ -930,9 +930,10 @@ int run(const QString& outDir)
         const qreal rh = rv.riverHForTest();
         const qreal cgap = qMax(1.0, rw * 0.09);   // 与布局/绘制同一公式
 
-        // ① 一把尺子：满行宽度 = 牌高（那 1 张横置）+ 5×牌宽 + 5×列间距；左缘 = 它的负一半
-        check(qAbs(rv.riverFullRowExtentForTest() - (rh + 5.0 * rw + 5.0 * cgap)) < 0.01,
-              QStringLiteral("一行排满的宽度应为 牌高 + 5×牌宽 + 5×列间距（实际 %1）")
+        // ① 一把尺子：满行宽度 = **6 张普通牌 + 5 个列间距**（横置牌的额外宽度不算进去，
+        //    用户口径）；左缘 = 它的负一半。
+        check(qAbs(rv.riverFullRowExtentForTest() - (6.0 * rw + 5.0 * cgap)) < 0.01,
+              QStringLiteral("一行排满的宽度应为 6×牌宽 + 5×列间距（实际 %1）")
                   .arg(rv.riverFullRowExtentForTest()));
         check(qAbs(anchor + rv.riverFullRowExtentForTest() / 2.0) < 0.01,
               QStringLiteral("固定左缘应是一行排满宽度的负一半（实际 %1）").arg(anchor));
@@ -967,14 +968,47 @@ int run(const QString& outDir)
               QStringLiteral("第 3 行第 1 张与第 1 行同一条左缘（%1 vs %2）")
                   .arg(rv.riverSlotLocalForTest(2, 12).left()).arg(anchor));
 
-        // ④ 排满是**向右**长：第 6 张的右沿 = 左缘 + 6 张普通牌宽 + 5 个列间距，
-        //    且不得越过「含一张横置牌」的满行右沿（那条才是预留范围）。
+        // ④ 排满是**向右**长：第 6 张的右沿 = 左缘 + 6 张普通牌宽 + 5 个列间距
+        //    —— 正好等于这条预留线的右端（普通行不多不少地铺满它）。
         const QRectF last = rv.riverSlotLocalForTest(2, 5);
         check(qAbs(last.right() - (anchor + 6.0 * rw + 5.0 * cgap)) < 0.01,
               QStringLiteral("一行是左缘向右累加出来的（右沿 %1）").arg(last.right()));
         check(last.right() <= -anchor + 0.01,
-              QStringLiteral("整行不得越出一行排满的预留范围（%1 vs %2）")
+              QStringLiteral("普通行不得越出一行排满的预留范围（%1 vs %2）")
                   .arg(last.right()).arg(-anchor));
+
+        // ⑤ 左缘**与有没有横置牌无关**；立直那一行允许比普通行**向右多出 (牌高 − 牌宽)**
+        //    （用户口径：横置牌的额外宽度不算进左缘，宁可让立直行右偏一点）。
+        {
+            TableModel ms;
+            ms.applyEvent(parseEv(
+                R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},)"
+                R"("seat":0,"dealer":0,"scores":[25000,25000,25000,25000],)"
+                R"("hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p"],)"
+                R"("tiles_left":60,"dead_wall_left":4})"));
+            TableView sv;
+            sv.setModel(&ms);
+            sv.resize(1354, 930);
+            for (int i = 0; i < 6; ++i) {
+                // 第 1 张是立直宣言牌（横置），其余 5 张普通牌 —— 刚好铺满一行
+                ms.applyEvent(parseEv(i == 0
+                    ? R"({"ev":"discard","seat":2,"tile":"1m","tsumogiri":false,"sideways":true})"
+                    : R"({"ev":"discard","seat":2,"tile":"1m","tsumogiri":false,"sideways":false})"));
+            }
+            sv.grab();
+            const qreal sideAnchor = sv.riverLeftUForTest();
+            const QRectF sideFirst = sv.riverSlotLocalForTest(2, 0);
+            check(qAbs(sideAnchor - anchor) < 0.01,
+                  QStringLiteral("左缘不得因为这一行有横置牌而改变（%1 vs %2）")
+                      .arg(sideAnchor).arg(anchor));
+            check(qAbs(sideFirst.left() - sideAnchor) < 0.01,
+                  QStringLiteral("横置宣言牌也从固定左缘起排（%1 vs %2）")
+                      .arg(sideFirst.left()).arg(sideAnchor));
+            const QRectF sideLast = sv.riverSlotLocalForTest(2, 5);
+            check(qAbs(sideLast.right() - (-sideAnchor + (rh - rw))) < 0.01,
+                  QStringLiteral("立直行正好比普通行多出 (牌高 − 牌宽)（%1 vs %2）")
+                      .arg(sideLast.right()).arg(-sideAnchor + (rh - rw)));
+        }
     }
 
     // ---- 回归：手里已有 5m 又摸到 5m，手切原来那张（tsumogiri=false）----
