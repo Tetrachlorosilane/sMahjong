@@ -72,6 +72,7 @@ public final class SelfTest {
         akaRuleTests();
         meldAkaPickTests();
         seatSwapTests();
+        discardAlignTests();
         nagashiLivePathTest();
         simulationTest();
         rinshanTests();
@@ -1571,6 +1572,78 @@ public final class SelfTest {
                 r.debugPickHandTiles(0, called5, Arrays.asList("5m"), 2), null);
         eq("赤宝选择：按赤/普通能精确取到那一张",
                 r.debugFindHandTile(0, Tiles.AKA_M, true), aka5);
+    }
+
+    /**
+     * 出牌对齐（幽灵手牌的正面防线）：**牌码决定打哪张，`tsumogiri` 只决定去哪一摞里找**。
+     *
+     * <p>报障现象是「庄家第一巡点手里的牌/摸牌位，服务端却打了另一张」，之后两端手牌
+     * **张数相同、内容差一张**（越打越歪）。根因两条：
+     * <ol>
+     *   <li>庄家第一巡的 14 张配牌是**已排序**发下去的，客户端按"最后一张 = 刚摸到的"
+     *       去认摸牌位，而服务端的 `drawn` 是第 14 张 `openingTile`（排序后通常在中间）——
+     *       两端对"摸到的是哪张"认知不同；</li>
+     *   <li>旧的服务端在「声明了摸切但牌码对不上」时退回**默认摸切**，也就是打出刚摸到的
+     *       那张 —— 恰恰是玩家没点的那张牌，而客户端已经按自己的点击扣了牌。</li>
+     * </ol>
+     * 这里把第 2 条的判据逐条钉死；第 1 条由「庄家 `round_start` 必须点名 `drawn`」钉死。
+     */
+    private static void discardAlignTests() {
+        final int aka5 = Tiles.id(Tiles.AKA_M, 0);       // 赤五（copy 0）
+        final int norm5a = Tiles.id(Tiles.AKA_M, 1);
+        final int norm5b = Tiles.id(Tiles.AKA_M, 2);
+        final int p7 = Tiles.id(15, 0);                  // 7p
+        final int s9 = Tiles.id(26, 0);                  // 9s
+        List<Integer> hand = new ArrayList<>(List.of(s9, norm5a, aka5, p7, norm5b));
+
+        // ① 声明摸切且牌码吻合 → 就是摸牌位那张
+        eq("出牌对齐：摸切且牌码吻合 → 取摸牌位那张",
+                Round.pickDiscardId(hand, norm5b, "5m", true), norm5b);
+        // ② **声明摸切但牌码对不上** → 按牌码当手切（绝不退回"打刚摸到的那张"）
+        //    这正是客户端把已排序手牌的最后一张当成摸牌位时的情形。
+        eq("出牌对齐：摸切声明对不上 → 按牌码取，绝不打摸到的那张",
+                Round.pickDiscardId(hand, norm5b, "9s", true), s9);
+        eq("出牌对齐：摸切声明对不上（要的是中间那张）→ 按牌码取",
+                Round.pickDiscardId(hand, norm5b, "7p", true), p7);
+        // ③ 不提摸切 → 同样按牌码
+        eq("出牌对齐：手切按牌码", Round.pickDiscardId(hand, norm5b, "7p", false), p7);
+        // ④ 赤五与普通五必须分得开（同 kind 不同牌码）
+        eq("出牌对齐：要普通 5m → 普通那张", Round.pickDiscardId(hand, -1, "5m", false), norm5a);
+        eq("出牌对齐：要赤 0m → 赤那张", Round.pickDiscardId(hand, -1, "0m", false), aka5);
+        // ⑤ 手里只剩赤五时要 5m → 退回赤五（否则玩家点这张就成了非法动作）
+        eq("出牌对齐：只有赤五时要 5m → 退回赤五",
+                Round.pickDiscardId(new ArrayList<>(List.of(aka5)), -1, "5m", false), aka5);
+        // ⑥ 牌码不在手里 → -1（调用方这才退回默认摸切）
+        eq("出牌对齐：牌码不在手里 → -1", Round.pickDiscardId(hand, -1, "1z", false), -1);
+        eq("出牌对齐：声称摸切但牌码也不在手里 → -1",
+                Round.pickDiscardId(hand, norm5b, "1z", true), -1);
+        // ⑦ 本巡没摸牌（drawn < 0）时"声明摸切"没有意义 → 仍按牌码
+        eq("出牌对齐：无摸牌时按牌码", Round.pickDiscardId(hand, -1, "7p", true), p7);
+
+        // ⑧ 庄家 `round_start` 必须点名 `drawn`，且就是第 14 张；闲家不带这个字段
+        Round r = newRound();                       // 座位 0 是庄
+        r.debugSetup();                             // 配牌在 play() 里，这里手动跑一遍
+        Map<String, Object> dealerEv = r.debugRoundStartEvent(r.dealer);
+        List<?> dealerHand = (List<?>) dealerEv.get("hand");
+        Object drawn = dealerEv.get("drawn");
+        eq("出牌对齐：庄家配牌 14 张", dealerHand.size(), 14);
+        check("出牌对齐：庄家 round_start 必须带 drawn", drawn != null);
+        eq("出牌对齐：drawn 就是第 14 张 openingTile",
+                String.valueOf(drawn), Tiles.toStr(r.debugOpeningTile()));
+        check("出牌对齐：drawn 必须真的在 hand 里", dealerHand.contains(drawn));
+        Map<String, Object> otherEv = r.debugRoundStartEvent((r.dealer + 1) % 4);
+        check("出牌对齐：闲家 round_start 不带 drawn", otherEv.get("drawn") == null);
+        eq("出牌对齐：闲家配牌 13 张", ((List<?>) otherEv.get("hand")).size(), 13);
+
+        // ⑨ 兜底自愈：牌码**永远**决定服务端打哪张（哪怕客户端错报了摸切）
+        //    —— 只要牌码还在手里，两端就不会各留一张不同的牌。
+        //    ⚠ 牌码与"刚摸到的那张"**同码**时（这里是 5m ≡ norm5b）声明摸切是对的，
+        //      不在本条覆盖范围：那种情况取摸牌位那张，牌码相同，不影响两端一致。
+        for (int code : new int[]{s9, aka5, p7}) {
+            String s = Tiles.toStr(code);
+            eq("出牌对齐：报 " + s + " 就一定打 " + s,
+                    Round.pickDiscardId(hand, norm5b, s, true), code);
+        }
     }
 
     private static void akaRuleTests() {

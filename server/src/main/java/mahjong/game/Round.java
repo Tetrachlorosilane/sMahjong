@@ -468,18 +468,48 @@ public final class Round {
         // 只给回放看，不发给客户端 —— 正常报文里凭空多 136 个牌 id 是白花的下行。
         table.noteRoundWall(roundWindName(), kyoku, honba, dealer, wallOrder());
         for (int s = 0; s < 4; s++) {
-            table.send(s, Json.obj(
-                    "ev", "round_start",
-                    "round", roundJson(),
-                    "seat", s,
-                    "dealer", dealer,
-                    "scores", intList(scores),
-                    "hand", tileStrs(hand[s]),
-                    "dora_indicators", kindsToStrs(doraIndicators()),
-                    "tiles_left", tilesLeft(),
-                    "dead_wall_left", deadWallLeft(),
-                    "cans", Json.obj("riichi", canRiichiAny(s), "kyuushu", false)));
+            table.send(s, roundStartEvent(s));
         }
+    }
+
+    /** 构造座位 {@code s} 的 `round_start` 报文（拆出来是为了让自检能直接断言内容）。 */
+    private Map<String, Object> roundStartEvent(int s) {
+        Map<String, Object> ev = Json.obj(
+                "ev", "round_start",
+                "round", roundJson(),
+                "seat", s,
+                "dealer", dealer,
+                "scores", intList(scores),
+                "hand", tileStrs(hand[s]),
+                "dora_indicators", kindsToStrs(doraIndicators()),
+                "tiles_left", tilesLeft(),
+                "dead_wall_left", deadWallLeft(),
+                "cans", Json.obj("riichi", canRiichiAny(s), "kyuushu", false));
+        // 庄家的第 14 张（配牌时就入手、第一巡不再摸）必须**点名**告诉客户端是哪一张。
+        // `hand` 是**已排序**的 14 张，客户端从里面挑不出"刚摸到的那张"：它若按"最后一张"
+        // 认，就会拿排序最大的那张当摸牌位 —— 与服务端的 `openingTile` 几乎总是不同一张，
+        // 于是玩家点摸牌位时 `discard.tsumogiri` 的牌码对不上，服务端打 A、客户端扣 B，
+        // 两端手牌张数相同、内容差一张（幽灵手牌）。见 PROTOCOL §3.3 与 §2.2。
+        if (s == dealer && openingTile >= 0 && hand[s].contains(openingTile)) {
+            ev.put("drawn", Tiles.toStr(openingTile));
+        }
+        return ev;
+    }
+
+    /** 供自检：拿到座位 {@code s} 的 `round_start` 报文（只构造，不发送）。 */
+    public Map<String, Object> debugRoundStartEvent(int s) {
+        sortHands();
+        return roundStartEvent(s);
+    }
+
+    /** 供自检：跑一遍配牌 —— 配牌在 {@link #play()} 里，构造函数不配牌。 */
+    public void debugSetup() {
+        setup();
+    }
+
+    /** 供自检：庄家起手多发的那张（第 14 张）。 */
+    public int debugOpeningTile() {
+        return openingTile;
     }
 
     private Map<String, Object> roundJson() {
@@ -969,13 +999,24 @@ public final class Round {
     }
 
     int resolveTileStr(String s, int seat) {
+        return findByCode(hand[seat], s);
+    }
+
+    /**
+     * 按**牌码**在一摞牌里找那张：先按 kind 缩小，再按"要不要赤五"精确匹配
+     * （`0m` 要赤、`5m` 要普通）；要普通却只有赤五时退回赤五（否则玩家点 `5m` 会变成非法动作）。
+     *
+     * <p>抽成静态方法是为了让出牌判据（{@link #pickDiscardId}）能被自检直接调用，
+     * 不必先把牌桌跑起来。
+     */
+    static int findByCode(List<Integer> pile, String s) {
         int kind = Tiles.parseKind(s);
         if (kind < 0) {
             return -1;
         }
         boolean wantRed = Tiles.isRedStr(s);
         int fallback = -1;
-        for (int id : hand[seat]) {
+        for (int id : pile) {
             if (Tiles.kind(id) != kind) {
                 continue;
             }
@@ -999,42 +1040,38 @@ public final class Round {
     }
 
     /**
-     * 出牌用的**精确**取牌：按客户端是否声明「摸切」决定去摸牌位还是暗手里找。
+     * 出牌用的**精确**取牌：按客户端下发的 `tile` 牌码取，`tsumogiri` 只决定去哪一摞里找。
      *
-     * <p>为什么不能只按牌种取（见 `play()` 里那段注释）：摸切与"手切一张同种牌"
-     * 在牌码层面完全一样，只有客户端知道玩家点的是哪一格。取错一张的具体后果是
-     * **两端手牌各差一张**（客户端按手切扣暗牌、服务端却动了摸牌位），越打越歪。
+     * <p>规则只有一条（见 {@link #pickDiscardId}）：**牌码决定打哪张**。
+     * 声明摸切且牌码就是刚摸到的那张 → 取摸牌位那张；其余一律按牌码在暗手里找
+     * （刚摸到的那张也在 `hand` 里，照常参与查找）。
      *
-     * <p>两边都要**校验得通**才算数：声明摸切就必须真的等于刚摸到的那张；
-     * 声明手切就必须在暗手里找到同牌码的那张 —— 否则返回 {@code -1}，
-     * 由调用方退回默认摸切（宁可摸切，也绝不替玩家打出一张他没选的牌）。
+     * <p>⚠ 为什么"声明了摸切但牌码对不上"**不能**直接退回默认摸切（旧写法就是那样）：
+     * 默认摸切打的是**刚摸到的那张**，而那正是玩家没点的那张牌。庄家第一巡的旧客户端
+     * 把**已排序**的 14 张配牌的最后一张当成摸牌位（服务端的 `drawn` 其实是第 14 张
+     * `openingTile`，排序后通常在中间），牌码必然对不上 —— 于是服务端打 A、客户端按点击
+     * 扣掉 B，两端手牌**张数相同、内容差一张**（幽灵手牌，且不会自愈：下一步又会按
+     * "手里有这张吗"去猜，越打越歪）。现在改为按牌码取，服务端打的就一定是玩家点的那张。
      *
      * @param wantTsumogiri 客户端声明的摸切标记（老客户端不带这个字段时为 false）
      * @param drawn         本巡摸到的牌 id；{@code < 0} 表示本巡没有摸牌
      */
     private int resolveDiscardId(Map<String, Object> act, int seat, boolean wantTsumogiri, int drawn) {
         String s = Json.str(act, "tile", null);
-        if (s == null) {
-            return -1;
+        return s == null ? -1 : pickDiscardId(hand[seat], drawn, s, wantTsumogiri);
+    }
+
+    /**
+     * 出牌取牌的**纯判据**（不依赖牌桌状态，自检可直接调）：返回要打出的牌 id，{@code -1} = 兑现不了。
+     *
+     * <p>刻意做成静态方法：这条规则是「幽灵手牌」的唯一防线，必须能脱离网络与整场对局
+     * 逐条断言（见 `SelfTest.discardAlignTests`）。
+     */
+    public static int pickDiscardId(List<Integer> hand, int drawn, String code, boolean claimTsumogiri) {
+        if (claimTsumogiri && drawn >= 0 && code.equals(Tiles.toStr(drawn))) {
+            return drawn;                       // 声明摸切且牌码吻合：铁证，就是摸牌位那张
         }
-        if (wantTsumogiri) {
-            // 摸切：只可能是刚摸到的那张
-            if (drawn >= 0 && s.equals(Tiles.toStr(drawn))) {
-                return drawn;
-            }
-            return -1;
-        }
-        // 手切：在**暗手**里找（摸到的那张也是暗手的一部分，所以照常参与查找）
-        int id = resolveTileStr(s, seat);
-        if (id < 0) {
-            return -1;
-        }
-        if (drawn >= 0 && id == drawn && hand[seat].indexOf(drawn) >= 0) {
-            // 玩家点的就是摸牌位那一张，但没声明摸切 —— 以服务端事实为准：这就是摸切
-            // （客户端可能是不带 tsumogiri 的老版本）。不算错，按摸切执行。
-            return id;
-        }
-        return id;
+        return findByCode(hand, code);           // 其余一律按牌码取（含"摸切声明对不上"的情况）
     }
 
     // ================================================================= 询问

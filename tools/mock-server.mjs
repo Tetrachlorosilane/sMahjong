@@ -353,7 +353,9 @@ const srv = net.createServer((sock) => {
            round: { bakaze: 'E', kyoku: 1, honba: 0 } });
     send({ ev: 'round_start', round: { bakaze: 'E', kyoku: 1, honba: 0, riichi_sticks: 0 },
            seat: 0, dealer: 0, scores: [25000, 25000, 25000, 25000],
-           hand: HAND14, dora_indicators: ['5m'], tiles_left: 60, dead_wall_left: 4 });
+           // 庄家 14 张：必须点名 `drawn`（本巡"刚摸到"的那张）。`hand` 是已排序的，
+           // 客户端从里面推不出是哪一张 —— 缺这个字段就只能瞎猜（幽灵手牌的来源，见 PROTOCOL §3.3）。
+           hand: HAND14, drawn: '9m', dora_indicators: ['5m'], tiles_left: 60, dead_wall_left: 4 });
     setTimeout(() => {
       send({ ev: 'draw', seat: 0, tiles_left: 59, rinshan: false, tile: '9m' });
       setTimeout(() => {

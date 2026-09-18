@@ -936,6 +936,58 @@ int run(const QString& outDir)
         check(m2.hand().size() == before2, QStringLiteral("摸切不动手牌（摸牌本来就不在里面）"));
     }
 
+    // ---- 回归：庄家第一巡「哪张是刚摸到的」必须由 round_start.drawn 点名 ----
+    // 报障：庄家第一巡点摸牌位，服务端却打了另一张（摸切），之后手牌内容与服务端差一张。
+    // 根因：`round_start.hand` 是**已排序**的 14 张，客户端按"最后一张"认摸牌位，
+    // 而服务端真正刚摸到的是第 14 张 openingTile（排序后通常在中间）—— 两端认知不同，
+    // 牌码对不上，服务端打 A、客户端扣 B，**张数相同、内容差一张**（幽灵手牌）。
+    {
+        TableModel md;
+        // 14 张：排序后最后一张是 9s，真正刚摸到的是 3p（服务端点名 drawn）
+        md.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","2m","3m","5m","6m","7m","1p","2p","3p","1s","2s","3s","3p","9s"],"drawn":"3p","dora_indicators":["5p"],"tiles_left":69,"dead_wall_left":4})"),
+            nullptr));
+        checkEq(md.drawnTile(), QStringLiteral("3p"),
+                QStringLiteral("庄家配牌：摸牌位是 drawn 点名的那张（不是排序后的最后一张）"));
+        checkEq(QString::number(md.hand().size()), QStringLiteral("13"),
+                QStringLiteral("庄家配牌：点名的摸牌不留在暗牌里（14 → 13）"));
+        // 3p 有两张（重复牌是常态）：点名的只是"其中一张"，总数不能变
+        const int n3p = int(md.hand().count(QStringLiteral("3p")))
+                + (md.drawnTile() == QStringLiteral("3p") ? 1 : 0);
+        checkEq(QString::number(n3p), QStringLiteral("2"),
+                QStringLiteral("庄家配牌：3p 的总数仍是 2 张"));
+        check(md.hand().contains(QStringLiteral("9s")),
+              QStringLiteral("庄家配牌：排序最后那张仍在暗牌里"));
+
+        // 服务端的摸切声明与客户端摸牌位**牌码不同**（两端"摸到哪张"认知不同）：
+        // 客户端必须按**牌码**对账 —— 扣掉服务端真正打出的那张、把摸牌位的牌并回暗手，
+        // 而不是信标记把摸牌位那一张清掉（旧写法就会那样：张数还对得上，内容差一张）。
+        md.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"discard","seat":0,"tile":"5m","tsumogiri":true,"riichi":false,"riichi_stick":false})"),
+            nullptr));
+        checkEq(md.drawnTile(), QString(), QStringLiteral("错配摸切后摸牌位也清空"));
+        checkEq(QString::number(md.hand().size()), QStringLiteral("13"),
+                QStringLiteral("错配摸切后暗牌恰好少一张（14 → 13）"));
+        check(!md.hand().contains(QStringLiteral("5m")),
+              QStringLiteral("错配摸切：服务端打出的 5m 已从暗牌扣掉"));
+        checkEq(QString::number(md.hand().count(QStringLiteral("3p"))), QStringLiteral("2"),
+                QStringLiteral("错配摸切：被并回暗手的摸牌没有被误清掉"));
+    }
+
+    // ---- 老服务端没有 `drawn` 字段时，退回"最后一张是刚摸到的"（不崩，但会认错）----
+    {
+        TableModel mo;
+        mo.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","2m","3m","5m","6m","7m","1p","2p","3p","1s","2s","3s","3p","9s"],"dora_indicators":["5p"],"tiles_left":69,"dead_wall_left":4})"),
+            nullptr));
+        // 这份配牌里真正的第 14 张是 3p，但它排序后在中间 —— 旧启发式只能拿最后一张，
+        // 于是摸牌位显示 9s。这正是「服务端必须发 drawn」的原因：客户端猜不出来。
+        checkEq(mo.drawnTile(), QStringLiteral("9s"),
+                QStringLiteral("老服务端无 drawn → 按最后一张认摸牌位（会认错）"));
+        checkEq(QString::number(mo.hand().size()), QStringLiteral("13"),
+                QStringLiteral("老服务端路径暗牌仍是 13 张"));
+    }
+
     // ---- 回归：杠后从岭上摸牌，界面上的「岭上 N」必须跟着减 ----
     // 报障：「杠后摸的牌（明杠/加杠/暗杠）应该从岭上摸，但岭上牌并没有减少」。
     // 根因是服务端只在开局报了一次 `dead_wall_left`；现在每次摸牌都带，
