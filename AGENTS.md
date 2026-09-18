@@ -476,8 +476,11 @@ mahjong/
   `tsumo`/`ron` 时**只有「自动胡了」**能替玩家动 —— 自动摸切绝不切出能胡的那张牌、
   不吃碰杠绝不把到手荣和 `pass` 掉（用户点名的要求）。自动动作也必须走
   `ActionBar::actionCmd/discardCmd`（带 `ask_id`；询问失效时它们返回空对象 → 自动动作自动作废）。
-  **每小局结束（`round_end`）立刻 `resetAutoFlags()` 全关**；别改到 `round_start` 去清
-  —— 那会把玩家在局间重新打开（给下一局用）的设置吞掉。
+  **每小局结束（`round_end`）立刻 `resetAutoFlags()` 全关**，且**每小局开始（`round_start`）
+  再复位一次** —— 一小局两次（用户要求：局间结算期间点开的自动不许带进新的一局）。
+  ⚠ 这条**口径被用户改过**：原文是"只在 `round_end` 清，别改到 `round_start`"（担心吞掉
+  玩家在局间为下一局准备的设置）。现在是**刻意**两次都清；再看到 `round_start` 里那句
+  `resetAutoFlags()`，不要当成 bug 删掉。
   回归：`client --selftest` 的「自动开关」两组（含命令钩子抓真实报文）。
 - **「吃」必须由服务端自己校验顺子**（`Round.pickChiTiles`）：`want` 来自客户端，
   只查"手里有没有这两张"的话 1m+5m 能配 3m 吃下去，而 `Evaluator` 是按 `Meld.baseKind()+isRun()`
@@ -487,7 +490,10 @@ mahjong/
 - **接收侧的资源上限**：单条报文 1 MB（`Session.readBoundedLine` **边读边判**，绝不能等
   `readLine()` 收完再判）、同时在线上限 `Server.MAX_SESSIONS`、`fill_bots` ≤ 4、
   客户端传来的 `rules` 一律过 `Rules.clampToSane()`；**发牌种子**用 `SecureRandom` 基准 +
-  每局 SplitMix 打散（原 `nanoTime` 且逐局 +1 → 推出一局即推出整场）。
+  每局 SplitMix 打散，且**每小局都从"当前时刻毫秒数"重新起步**（`Table.nextRoundSeed()`）——
+  原来每局只有 `mixSeed(seedBase + 局序号)`，同一个 `seedBase` 推出来的一整场是确定序列
+  （推出一局即推出整场）。自检要可复现，所以它显式打开 `Table.debugDeterministicSeed`
+  走旧的确定岔路；**生产路径永远是时刻种子**，别把那条岔路当默认行为。
 - **局间时序：服务端先等满 5 秒（或所有人确认），再开下一局**：
   `round_end` → `sleepMs(roundDelayMs)` → `awaitRoundConfirm()`（广播 `round_wait{ms:5000}` 后等）
   → 下一局 `round_start`。**服务端侧两条铁律**（都踩过，见 §2.3-8）：

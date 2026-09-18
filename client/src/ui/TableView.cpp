@@ -604,23 +604,33 @@ void TableView::paintRiver(QPainter& p, const SeatFrame& f, int seat, const QStr
     // 布局按**同一函数**预留行数（m_layout.m_riverRows），两者必须同源。
     const int rows = TableLayout::riverRowsFor(n);
 
+    // 牌河**左对齐**（用户要求）：所有行共用同一条左缘，行内不居中。
+    // 左缘按「本帧预留的最大列数」算，与 `TableLayout::riverSlotScreen` 用**同一把尺子**
+    // （那边算飞行动画终点、这边画牌，两处必须同源，否则动画终点与静态位置会差半个牌位）。
+    int reserveCols = 0;
+    for (int r = 0; r < rows; ++r) {
+        reserveCols = qMax(reserveCols, qMin(kRiverCols, n - r * kRiverCols));
+    }
+    qreal rowExtent = 0;
+    for (int c = 0; c < reserveCols; ++c) {
+        rowExtent += (c == 0 ? m_layout.m_riverH : m_layout.m_riverW) + cgap;
+    }
+    if (rowExtent > 0)
+        rowExtent -= cgap;
+
     for (int r = 0; r < rows; ++r) {
         QVector<int> idx;
-        qreal rowW = 0;
         for (int c = 0; c < kRiverCols; ++c) {
             const int i = r * kRiverCols + c;
             if (i >= n)
                 break;
-            const bool side = (i < sideways.size()) && sideways.at(i);
             idx.append(i);
-            rowW += (side ? m_layout.m_riverH : m_layout.m_riverW) + cgap;
         }
         if (idx.isEmpty())
             continue;
-        rowW -= cgap;
 
         const qreal v = f.riverStartV + r * (m_layout.m_riverH + rgap);
-        qreal u = -rowW / 2.0;
+        qreal u = -rowExtent / 2.0;          // 与上一行同一条左缘
         for (int i : idx) {
             const bool side = (i < sideways.size()) && sideways.at(i);
             const qreal w = side ? m_layout.m_riverH : m_layout.m_riverW;
@@ -767,32 +777,48 @@ void TableView::paintSeat(QPainter& p, int pos)
         const QVector<qreal> lefts = TableLayout::meldLeftsOf(melds, seat, L.meldRight,
                                                               m_layout.m_riverW, m_layout.m_riverH,
                                                               hgap, L.meldBetween);
-        const qreal my = y + (m_layout.m_tileH - m_layout.m_riverH) / 2.0;   // 与手牌行垂直居中对齐
+        // 副露与手牌行**下沿对齐**（用户要求）：原来按牌高居中，小一号的副露牌
+        // 上下都空出一截、看着"浮"在手牌行中间。手牌行的下沿是 handV0 + 手牌高，
+        // 副露牌矮（riverH < tileH），所以顶边要按这个差往下推。
+        const qreal my = y + (m_layout.m_tileH - m_layout.m_riverH);
         for (int mi = 0; mi < melds.size(); ++mi) {
             const Meld& m = melds.at(mi);
-            qreal mx = lefts.at(mi);           // 本副露内部仍是从左到右
             const int rotIdx = TableLayout::meldRotatedIndex(m, seat);
             // 显示顺序：被鸣的那张按来源方位落位（吃时可能与点数顺序不同）
             const QStringList disp = meldDisplayTiles(m, rotIdx);
             const int cnt = disp.size();
+            // 加杠：第 4 张（加上的那张）**叠在碰的中张（下标 1）之上**，不占新槽位。
+            // 排布仍是一横排三格，所以这里先按"前 3 张"算出每格的左缘，
+            // 再把叠上去的那张画到第 1 格的位置上（后画即在上层）。
+            const bool stacked = (m.kind == QLatin1String("kakan") && cnt >= 4);
+            const int slotCount = stacked ? 3 : cnt;
+            QVector<qreal> slotLeft(slotCount + 1, 0.0);
+            {
+                qreal acc = lefts.at(mi);           // 本副露内部仍是从左到右
+                for (int ti = 0; ti < slotCount; ++ti) {
+                    slotLeft[ti] = acc;
+                    acc += (ti == rotIdx ? m_layout.m_riverH : m_layout.m_riverW) + hgap;
+                }
+                slotLeft[slotCount] = acc;
+            }
             for (int ti = 0; ti < cnt; ++ti) {
                 const QString& t = disp.at(ti);
                 const bool edge = m.isConcealed() && (ti == 0 || ti == cnt - 1);
+                // 叠放时第 4 张落在第 1 格的左缘上；其余每张走自己的格
+                const qreal sx = slotLeft.at(stacked && ti == 3 ? 1 : ti);
                 if (ti == rotIdx) {
-                    const QRectF slot(mx, my + (m_layout.m_riverH - m_layout.m_riverW) / 2.0,
+                    const QRectF slot(sx, my + (m_layout.m_riverH - m_layout.m_riverW) / 2.0,
                                       m_layout.m_riverH, m_layout.m_riverW);
                     if (edge)
                         TileRenderer::drawBackRot(p, slot, 1);
                     else
                         TileRenderer::drawFaceRot(p, slot, t, TileRenderer::isRed(t), 1);
-                    mx += m_layout.m_riverH + hgap;
                 } else {
-                    const QRectF tr(mx, my, m_layout.m_riverW, m_layout.m_riverH);
+                    const QRectF tr(sx, my, m_layout.m_riverW, m_layout.m_riverH);
                     if (edge)
                         TileRenderer::drawBackF(p, tr);
                     else
                         TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
-                    mx += m_layout.m_riverW + hgap;
                 }
             }
         }

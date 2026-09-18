@@ -292,7 +292,17 @@ public final class Round {
                 if (badRiichi) {
                     discardId = defaultDiscardId(turn, drawn);
                 } else {
-                    discardId = (act == null) ? -1 : resolveTile(act, "tile", turn);
+                    // ⚠ 「摸切」必须按客户端下发的 `tsumogiri` 判定，**绝不能靠牌种去猜**。
+                    //   两种取牌方式对应的是两张不同的牌 id：
+                    //     · 摸切 → 取刚摸到的那一张（`drawn`）；
+                    //     · 手切 → 必须在**暗手**里找，找不到才算非法。
+                    //   猜法（"牌种等于摸到的牌就是摸切"）在「手里已有 5m、又摸到 5m、
+                    //   玩家点的是手里那张」时必然猜错：服务端会去动摸牌位，而客户端按手切
+                    //   扣了暗牌 —— 两端手牌从此各差一张，越打越歪（幽灵手牌）。
+                    //   赤五与普通五同 kind，更是注定猜不出（0m vs 5m）。
+                    final boolean wantTsumogiri = drawn >= 0 && Json.bool(act, "tsumogiri", false);
+                    discardId = (act == null) ? -1
+                                              : resolveDiscardId(act, turn, wantTsumogiri, drawn);
                     if (discardId < 0 || !hand[turn].contains(discardId)
                             || (drawn >= 0 && riichi[turn] && discardId != drawn)) {
                         discardId = defaultDiscardId(turn, drawn);
@@ -986,6 +996,45 @@ public final class Round {
     private int resolveTile(Map<String, Object> act, String field, int seat) {
         String s = Json.str(act, field, null);
         return s == null ? -1 : resolveTileStr(s, seat);
+    }
+
+    /**
+     * 出牌用的**精确**取牌：按客户端是否声明「摸切」决定去摸牌位还是暗手里找。
+     *
+     * <p>为什么不能只按牌种取（见 `play()` 里那段注释）：摸切与"手切一张同种牌"
+     * 在牌码层面完全一样，只有客户端知道玩家点的是哪一格。取错一张的具体后果是
+     * **两端手牌各差一张**（客户端按手切扣暗牌、服务端却动了摸牌位），越打越歪。
+     *
+     * <p>两边都要**校验得通**才算数：声明摸切就必须真的等于刚摸到的那张；
+     * 声明手切就必须在暗手里找到同牌码的那张 —— 否则返回 {@code -1}，
+     * 由调用方退回默认摸切（宁可摸切，也绝不替玩家打出一张他没选的牌）。
+     *
+     * @param wantTsumogiri 客户端声明的摸切标记（老客户端不带这个字段时为 false）
+     * @param drawn         本巡摸到的牌 id；{@code < 0} 表示本巡没有摸牌
+     */
+    private int resolveDiscardId(Map<String, Object> act, int seat, boolean wantTsumogiri, int drawn) {
+        String s = Json.str(act, "tile", null);
+        if (s == null) {
+            return -1;
+        }
+        if (wantTsumogiri) {
+            // 摸切：只可能是刚摸到的那张
+            if (drawn >= 0 && s.equals(Tiles.toStr(drawn))) {
+                return drawn;
+            }
+            return -1;
+        }
+        // 手切：在**暗手**里找（摸到的那张也是暗手的一部分，所以照常参与查找）
+        int id = resolveTileStr(s, seat);
+        if (id < 0) {
+            return -1;
+        }
+        if (drawn >= 0 && id == drawn && hand[seat].indexOf(drawn) >= 0) {
+            // 玩家点的就是摸牌位那一张，但没声明摸切 —— 以服务端事实为准：这就是摸切
+            // （客户端可能是不带 tsumogiri 的老版本）。不算错，按摸切执行。
+            return id;
+        }
+        return id;
     }
 
     // ================================================================= 询问

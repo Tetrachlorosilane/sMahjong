@@ -240,9 +240,18 @@ void MainWindow::buildTablePage()
     rightLayout->addWidget(chatLabel);
     m_chatView = new QTextBrowser(right);
     rightLayout->addWidget(m_chatView, 1);
+    // 聊天输入行：输入框 + 「发送」按钮。
+    // ⚠ 这里曾经**只有** QLineEdit 而没有任何按钮 —— 看得见输入框却发现点不了发送，
+    //   只有回车能发（用户报障："消息发送键没有绑定发送事件"）。
+    //   与等待页那一行保持同样的结构（输入框 + 按钮 + 同一个槽）。
+    auto* chatInputRow = new QHBoxLayout();
     m_chatEdit = new QLineEdit(right);
     m_chatEdit->setPlaceholderText(lang::t("ui.main.enter_to_send"));
-    rightLayout->addWidget(m_chatEdit);
+    chatInputRow->addWidget(m_chatEdit, 1);
+    auto* chatSendBtn = new QPushButton(lang::t("ui.main.send"), right);
+    chatSendBtn->setToolTip(lang::t("ui.main.enter_to_send"));
+    chatInputRow->addWidget(chatSendBtn);
+    rightLayout->addLayout(chatInputRow);
 
     root->addWidget(right);
     m_stack->addWidget(m_tablePage);
@@ -254,6 +263,7 @@ void MainWindow::buildTablePage()
     connect(m_actions, &ActionBar::hint, this,
             [this](const QString& text) { statusBar()->showMessage(text, 4000); });
     connect(m_chatEdit, &QLineEdit::returnPressed, this, &MainWindow::onChatSend);
+    connect(chatSendBtn, &QPushButton::clicked, this, &MainWindow::onChatSend);
 }
 
 void MainWindow::showLobby()
@@ -600,7 +610,12 @@ void MainWindow::onTileClicked(const QString& tile, int index)
         return;
     }
     // 同理：出牌也必须走这条唯一入口，否则连点手牌会发出两条弃牌。
-    onActionReady(m_actions->discardCmd(tile));
+    //
+    // `tsumogiri` 按**点的是哪一格**判定：`tileClicked` 的 index 指向 TableView 的
+    // `m_handTiles`，摸牌位**固定是最后一格**（手牌区在前、摸牌单独一格）。
+    // 这一格是布局层当时的真实情况，比"牌码是否相等"可靠（见 isTsumogiriDiscard 的说明）。
+    const bool tsumogiri = (index == m_model.hand().size()) && !m_model.drawnTile().isEmpty();
+    onActionReady(m_actions->discardCmd(tile, tsumogiri));
 }
 
 void MainWindow::autoStart(const QString& host, quint16 port, const QString& name, int bots)
@@ -648,6 +663,38 @@ void MainWindow::onAutoFlagsChanged()
         applyAuto(m_actions->currentKind(), m_actions->currentAsk());
 }
 
+namespace {
+
+/**
+ * 待打出的这张牌是不是**刚摸到的那一张**（决定 `discard.tsumogiri`）。
+ *
+ * <p>为什么必须发这个字段：`discard.tile` 只有一个牌码，服务端拿它无法区分
+ * 「摸切」与「手切一张同种牌」—— 手里已有 5m、又摸到 5m 时两者牌码相同，
+ * 而赤五（`0m`）与普通五（`5m`）同 kind，更是必然猜不出。猜错的后果是**两端手牌各差一张**：
+ * 服务端去动了摸牌位，客户端却按手切扣掉了暗牌，越打越歪（报障：幽灵手牌）。
+ *
+ * <p>判据取**保守侧**：只有当待打的牌确实是刚摸到的那张、**且暗手里没有同样的牌码**时
+ * 才声明摸切。否则一律按手切上报（服务端会在暗手里找同 kind 的副本）。
+ * 这样即使两端的"摸到哪张"认知有偏差，也只会退化成一次普通手切，
+ * 而不会让服务端的摸牌位被误动。
+ */
+bool isTsumogiriDiscard(const TableModel& model, const QString& tile)
+{
+    const QString drawn = model.drawnTile();
+    if (drawn.isEmpty())
+        return false;
+    // 立直后**只有摸切这一种合法出牌**（服务端也这么判），所以直接声明摸切：
+    // 此时 `tile` 一定来自服务端的"只能打摸到的那张"选项，不必再比对牌码
+    // ——比对反而会在"摸到普通 5m、手里还有赤 0m"这类同 kind 不同码的情况下判错。
+    if (model.riichi(model.mySeat()))
+        return true;
+    if (tile != drawn)
+        return false;
+    return !model.hand().contains(tile);
+}
+
+} // namespace
+
 void MainWindow::applyAuto(const QString& kind, const QJsonObject& ask)
 {
     const QJsonObject act = autopolicy::decide(m_autoFlags, ask, kind, m_model.drawnTile());
@@ -657,9 +704,13 @@ void MainWindow::applyAuto(const QString& kind, const QJsonObject& ask)
         const QString type = act.value(QStringLiteral("type")).toString();
         // 组包只能走 ActionBar 这两个入口 —— 它们会自动带上 ask_id，
         // 且在询问失效/超时时返回空对象（见 AGENTS §2.3-9）。
-        const QJsonObject cmd = (type == QLatin1String("discard"))
-                ? m_actions->discardCmd(act.value(QStringLiteral("tile")).toString())
-                : m_actions->actionCmd(type);
+        const QString tile = act.value(QStringLiteral("tile")).toString();
+        QJsonObject cmd;
+        if (type == QLatin1String("discard")) {
+            cmd = m_actions->discardCmd(tile, isTsumogiriDiscard(m_model, tile));
+        } else {
+            cmd = m_actions->actionCmd(type);
+        }
         onActionReady(cmd);
     });
 }
@@ -745,6 +796,9 @@ void MainWindow::onEvent(const QJsonObject& ev)
         // 这里**不算玩家确认**（服务端已经开新局了，再发 confirm 会残留到下一次局间，
         // 把下一局的 5 秒等待直接吃掉）。
         closeResultDialog(false);
+        // 自动开关**每小局开始也复位一次**（用户要求：局间结算期间点开的自动，
+        // 不许带进新的一局）—— 与 round_end 那一次合起来是"一小局两次"。
+        resetAutoFlags();
         if (m_stack->currentWidget() != m_tablePage)
             m_stack->setCurrentWidget(m_tablePage);
         m_actions->clearAsk();
@@ -815,7 +869,7 @@ void MainWindow::onEvent(const QJsonObject& ev)
                         }
                     }
                     const QJsonObject cmd = (type == QLatin1String("discard"))
-                            ? m_actions->discardCmd(tile)
+                            ? m_actions->discardCmd(tile, isTsumogiriDiscard(m_model, tile))
                             : m_actions->actionCmd(type);
                     onActionReady(cmd);
                 });
@@ -851,6 +905,10 @@ void MainWindow::onEvent(const QJsonObject& ev)
         const int seat = ev.value(QStringLiteral("seat")).toInt();
         m_table->showToast(lang::t("ui.main.log_riichi").arg(m_model.playerName(seat)),
                            QColor(0xFF, 0xD2, 0x4A));
+        // 立直之后**只能摸切**（规则如此），所以轮到自己时自动替玩家打出摸到的牌
+        // （用户要求：「立直后应该自动开启自动摸切」）。只对自己那一张立直生效。
+        if (seat == m_model.mySeat())
+            m_autoBar->setAutoTsumogiri(true);
     } else if (name == QLatin1String("dora_reveal")) {
         m_table->showToast(lang::t("ui.main.log_new_dora"), QColor(0xFF, 0xD2, 0x4A));
     } else if (name == QLatin1String("agari")) {
@@ -870,9 +928,8 @@ void MainWindow::onEvent(const QJsonObject& ev)
     } else if (name == QLatin1String("round_end")) {
         m_actions->clearAsk();
         m_table->setHighlightTiles(QStringList());
-        // 每小局结束：三个自动开关立刻全部回到关闭状态（用户要求）。
-        // 放在 round_end（而不是 round_start）是因为局间等待里玩家可能重新打开开关，
-        // 那是给**下一局**用的 —— 在 round_start 再清一次会把他的设置吞掉。
+        // 每小局结束：三个自动开关立刻全部回到关闭状态（用户要求：一小局两次，
+        // 另一次在 round_start —— 见 §6「三个自动开关」）。
         resetAutoFlags();
         const QJsonObject next = ev.value(QStringLiteral("next")).toObject();
         if (!next.isEmpty()) {
@@ -882,10 +939,11 @@ void MainWindow::onEvent(const QJsonObject& ev)
                                QColor(0x9F, 0xE8, 0xC4));
         }
     } else if (name == QLatin1String("round_wait")) {
-        // 小局之间的间隔：服务端**先等满 5 秒（或所有人确认），再开下一局**。
-        // 所以这里的倒计时是「本局结算还剩多久」，不是「下一局已开始后的等待」。
+        // 小局之间的间隔：服务端已经先停顿了 DEFAULT_ROUND_DELAY_MS（默认 10 秒，
+        // 结算弹窗就停在那段时间里、文字依次浮现），然后**等满这次声明的时长（或所有人确认）**
+        // 再开下一局。所以这里的倒计时是「本局结算还剩多久」，不是「下一局已开始后的等待」。
         // 结算弹窗开着 → 倒计时到点自动关闭它（关闭即确认），不必等玩家点按钮；
-        // 已经关掉了 → 立刻替他确认，免得明明看完了还要干等满 5 秒。
+        // 已经关掉了 → 立刻替他确认，免得明明看完了还要干等。
         m_actions->clearAsk();
         const int ms = ev.value(QStringLiteral("ms")).toInt(5000);
         const int sec = qMax(1, ms / 1000);

@@ -91,6 +91,55 @@ public final class Table implements Runnable {
     public long seedBase = new java.security.SecureRandom().nextLong();
 
     /**
+     * 每一小局都**重取一次**的种子来源（用户要求：同一房间不能整场只有一条种子链）。
+     *
+     * <p>原来每局种子是 `mixSeed(seedBase + 局序号)` —— 同一个 `seedBase` 推出来的一整场
+     * 是**确定序列**，只要一局的牌山被还原，后面每一局都能顺着推（`mixSeed` 只是打散了
+     * 相邻性，没有引入新的熵）。现在每局都从"当前时刻毫秒数"重新起步：
+     * 相邻两局的种子不再有可推导的关系。
+     *
+     * <p>自检要"给定一局种子就能复现那一局"，所以走 {@link #debugDeterministicSeed} 那条岔路
+     * （`mixSeed(seedBase + roundIndex)`）—— 两条路径互不干扰，生产环境永远是时刻种子。
+     */
+    private long roundSeedClock = System.currentTimeMillis();
+
+    /**
+     * 自检开关：为真时每局种子退回 `mixSeed(seedBase + 局序号)`，使一整场可复现。
+     *
+     * <p>模拟类自检（点数守恒 / 岭上账 / 杠上限）的第一件事就是写死 {@link #seedBase}；
+     * 换成时刻种子后它们会变成不可复现的随机样本 —— 那是**自检质量**的下降，不是需求的本意。
+     */
+    public boolean debugDeterministicSeed;
+
+    /** 供自检：读回当前每局种子来源（确认时刻种子确实在推进）。 */
+    public long debugRoundSeedClock() {
+        return roundSeedClock;
+    }
+
+    /** 供自检：验证"同一毫秒开的两局也拿不到同一个种子"。 */
+    public long debugNextRoundSeed() {
+        return nextRoundSeed();
+    }
+
+    /**
+     * 取本小局的种子。
+     *
+     * <p>生产路径：**当前时刻毫秒数**（打散后）与 {@code seedBase} 混合，并在取用后 +1ms ——
+     * 于是「同一毫秒内连开两局」也不会撞出同一副牌，而下一场的种子与这一场无关。
+     * `seedBase` 是建桌时取的 CSPRNG，保证"两台服务器同一毫秒"也不会同牌。
+     */
+    private long nextRoundSeed() {
+        roundSeedClock += 1;
+        if (debugDeterministicSeed) {
+            return mixSeed(seedBase + roundSeedIndex++);
+        }
+        return mixSeed(mixSeed(seedBase) ^ roundSeedClock);
+    }
+
+    /** 见 {@link #debugDeterministicSeed}。 */
+    private int roundSeedIndex;
+
+    /**
      * 把「基准 + 局序号」打散成真正的种子（SplitMix64 终混）。
      *
      * <p>不打散的话相邻两局只差 1，一旦推出一局就能推出全部；打散之后每局种子
@@ -110,7 +159,17 @@ public final class Table implements Runnable {
      * 服务端的 `--fast` 也是同一套开关（自动化测试用，别在生产局里开）。
      */
     public static volatile long DEFAULT_BOT_DELAY_MS = 800;
-    public static volatile long DEFAULT_ROUND_DELAY_MS = 1200;
+    /**
+     * 每小局之间的停顿（毫秒）——**在广播 `round_end` 之后、`round_wait` 之前**。
+     *
+     * <p>用户要求「结算动画时间太短，把每小局结算界面时长延长到 10 秒」：这段时间里
+     * 结算弹窗停在屏幕上（客户端的文字还在依次浮现），10 秒后才广播 `round_wait`
+     * 让客户端开始倒计时确认。客户端点「确定」可以立刻跳过（`confirm` 提前开下一局）。
+     *
+     * <p>自测把 {@link #roundDelayMs} 置 0 跑完整场，所以 L1 不受这个值影响；
+     * `--fast` 也是同一个开关。
+     */
+    public static volatile long DEFAULT_ROUND_DELAY_MS = 10000;
 
     public volatile long botDelayMs = DEFAULT_BOT_DELAY_MS;
     public volatile long roundDelayMs = DEFAULT_ROUND_DELAY_MS;
@@ -583,7 +642,6 @@ public final class Table implements Runnable {
         int sticks = 0;
         long roundSeed = seedBase;
         int roundIndex = 0;
-
         // 回放录制：整场一个录制器（未启用回放时是 null，零开销）。
         // 记的是**客户端实际收到的报文**，所以回放与实时对局走同一条渲染路径。
         ReplayStore store = ReplayStore.current();
@@ -613,7 +671,7 @@ public final class Table implements Runnable {
                 seats[i].timeBankMs = rules.thinkingBankMs;
             }
             Round r = new Round(this, roundWind, kyoku, honba, dealer, scores, sticks,
-                    mixSeed(roundSeed + roundIndex++));
+                    nextRoundSeed());
             Round.Result res;
             try {
                 res = r.play();

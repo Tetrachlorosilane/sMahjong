@@ -58,9 +58,15 @@ int TableLayout::meldRotatedIndex(const Meld& m, int ownerSeat)
 
 qreal TableLayout::meldWidthOf(const Meld& m, int ownerSeat, qreal tileW, qreal tileH, qreal hgap)
 {
-    const int cnt = m.tiles.size();
+    int cnt = m.tiles.size();
     if (cnt <= 0)
         return 0.0;
+    // 加杠（小明杠）：**加上的第 4 张叠在碰的中张之上**，不占新槽位 ——
+    // 横着的一排仍然只有 3 格（中间那格是横置牌，占牌高）。按 4 格算会让副露带
+    // 凭空宽出一格，右侧的牌就被推出行末。
+    if (m.kind == QLatin1String("kakan") && cnt >= 4) {
+        cnt = 3;
+    }
     const qreal sidewaysW = (meldRotatedIndex(m, ownerSeat) >= 0) ? tileH : tileW;
     return (cnt - 1) * tileW + sidewaysW + (cnt - 1) * hgap;
 }
@@ -423,17 +429,27 @@ QRectF TableLayout::riverSlotScreen(int seat, int index, const TableModel& model
 
     const int row = index / kRiverCols;
     const qreal cgap = qMax(1.0, m_riverW * kRiverColGap);
-    qreal rowW = 0;
-    for (int c = 0; c < kRiverCols; ++c) {
-        const int i = row * kRiverCols + c;
-        if (i >= n)
-            break;
-        rowW += (model.discardSideways(seat, i) ? m_riverH : m_riverW) + cgap;
-    }
-    if (rowW > 0)
-        rowW -= cgap;
 
-    qreal u = -rowW / 2.0;
+    // 牌河**左对齐**：每一行都从同一条左边缘起排，行内**不居中**
+    // （用户要求：原来每行按自己的宽度居中，导致每行左右都不齐、读牌费眼）。
+    // 左边缘留出的宽度按「本帧预留的最大列数」算 —— 与 `computeLayout` 里
+    // `riverRowNeed` 的假设同一把尺子（横置 1 张 + 5 张普通 + 5 个列间距），
+    // 所以行排不满时右侧空着，后续行不会左右乱跳。
+    int reserveCols = 0;
+    {
+        const int rows = qMax(1, TableLayout::riverRowsFor(n));
+        for (int r = 0; r < rows; ++r) {
+            reserveCols = qMax(reserveCols, qMin(kRiverCols, n - r * kRiverCols));
+        }
+    }
+    qreal rowExtent = 0;
+    for (int c = 0; c < reserveCols; ++c) {
+        rowExtent += (c == 0 ? m_riverH : m_riverW) + cgap;   // 一行最多 1 张横置（在行首）
+    }
+    if (rowExtent > 0)
+        rowExtent -= cgap;
+
+    qreal u = -rowExtent / 2.0;          // 固定左缘：所有行共用
     const qreal v = f.riverStartV + row * f.riverStep;
     for (int c = 0; c < kRiverCols; ++c) {
         const int i = row * kRiverCols + c;

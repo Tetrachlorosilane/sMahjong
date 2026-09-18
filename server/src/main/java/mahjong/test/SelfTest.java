@@ -62,6 +62,7 @@ public final class SelfTest {
         jsonEncodingTests();
         yakuCodesTests();
         roundScoringTests();
+        roundSeedTests();
         scoreTableTests();
         paymentTests();
         notenPenaltyTests();
@@ -1291,6 +1292,7 @@ public final class SelfTest {
             t.botDelayMs = 0;
             t.roundDelayMs = 0;
             t.seedBase = 20260914L;
+            t.debugDeterministicSeed = true;   // 自检要可复现；生产路径是每局重取时刻种子
             for (int i = 0; i < 4; i++) {
                 t.addBot(i);
             }
@@ -1627,6 +1629,52 @@ public final class SelfTest {
 
     // ------------------------------------------------------------- 连庄判据
 
+    /**
+     * 每小局的种子必须**重新取**（用户报障：「同一房间每个半庄种子一样」）。
+     *
+     * <p>原来每局是 `mixSeed(seedBase + 局序号)`：同一个 `seedBase` 下整场是一条确定序列，
+     * 推出一局就能推出一整场。现在生产路径每局从"当前时刻毫秒数"重新起步。
+     *
+     * <p>同时钉住**自检那条岔路**：`debugDeterministicSeed` 打开时必须完全可复现，
+     * 否则模拟类自检会变成随机样本（那是自检质量下降，不是需求本意）。
+     */
+    private static void roundSeedTests() {
+        // ① 生产路径：同一张桌子连取几局，种子各不相同（哪怕都在同一毫秒内）
+        Table a = new Table("SEED", "种子桌", Rules.defaults());
+        long s1 = a.debugNextRoundSeed();
+        long s2 = a.debugNextRoundSeed();
+        long s3 = a.debugNextRoundSeed();
+        check("每局种子互不相同： " + s1 + "/" + s2 + "/" + s3,
+                s1 != s2 && s2 != s3 && s1 != s3);
+        check("每局种子来源（时刻）在推进", a.debugRoundSeedClock() > 0);
+
+        // ② 两张**基准不同**的桌子不会撞出同一副牌（seedBase 是 CSPRNG）
+        Table b = new Table("SEED2", "种子桌2", Rules.defaults());
+        b.seedBase = a.seedBase ^ 0x5DEECE66DL;
+        check("不同基准的桌子种子不同", a.debugNextRoundSeed() != b.debugNextRoundSeed());
+
+        // ③ 自检岔路：写死基准 + deterministic ⇒ 整场可复现
+        Table c = new Table("SEED3", "种子桌3", Rules.defaults());
+        c.seedBase = 777L;
+        c.debugDeterministicSeed = true;
+        Table d = new Table("SEED4", "种子桌4", Rules.defaults());
+        d.seedBase = 777L;
+        d.debugDeterministicSeed = true;
+        boolean same = true;
+        for (int i = 0; i < 5; i++) {
+            if (c.debugNextRoundSeed() != d.debugNextRoundSeed()) {
+                same = false;
+            }
+        }
+        check("自检岔路：同基准同序号 → 整场可复现", same);
+
+        // ④ 但同一张桌子上相邻两局仍然不同（不是退化成同一个种子）
+        Table e = new Table("SEED5", "种子桌5", Rules.defaults());
+        e.seedBase = 777L;
+        e.debugDeterministicSeed = true;
+        check("自检岔路内部也逐局不同", e.debugNextRoundSeed() != e.debugNextRoundSeed());
+    }
+
     private static void roundScoringTests() {
         // 和了：庄家和了才连庄
         check("庄家自摸/荣和 → 连庄", RoundScoring.winBy(0, 0));
@@ -1945,6 +1993,7 @@ public final class SelfTest {
             t.botDelayMs = 0;      // 模拟时不要机器人延时
             t.roundDelayMs = 0;
             t.seedBase = 12345L + trial * 777;
+            t.debugDeterministicSeed = true;
             for (int i = 0; i < 4; i++) {
                 t.addBot(i);
             }
@@ -2014,6 +2063,7 @@ public final class SelfTest {
                 t.botDelayMs = 0;
                 t.roundDelayMs = 0;
                 t.seedBase = 90000L + game * 4099;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }
@@ -2220,6 +2270,7 @@ public final class SelfTest {
                 t.botDelayMs = 0;
                 t.roundDelayMs = 0;
                 t.seedBase = 51000L + game * 613;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }
@@ -2324,6 +2375,7 @@ public final class SelfTest {
                 t.roundDelayMs = 0;
                 // 与岭上用例同一组种子：已知那里会出现暗杠/加杠的 offer
                 t.seedBase = 90000L + game * 4099;
+                t.debugDeterministicSeed = true;
                 for (int i = 0; i < 4; i++) {
                     t.addBot(i);
                 }

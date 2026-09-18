@@ -36,6 +36,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QTextBrowser>
 #include <QStringList>
 #include <QTextStream>
 #include <QThread>
@@ -518,6 +519,23 @@ int run(const QString& outDir)
         a.calledTile = QStringLiteral("5z");
         checkEq(QString::number(TableView::meldRotatedIndexForTest(a, 0)), QStringLiteral("-1"),
                 QStringLiteral("暗杠不横置"));
+
+        // 加杠（小明杠）：横的是**第 4 张（加上的那张）**，它叠在碰的中张之上。
+        // 旧实现横下标 1 → 加上的那张被排成一个新槽位，整副多占一格（报障：加杠跑到一边）。
+        Meld k;
+        k.kind = QStringLiteral("kakan");
+        k.tiles = QStringList { QStringLiteral("6z"), QStringLiteral("6z"),
+                                QStringLiteral("6z"), QStringLiteral("6z") };
+        k.calledTile = QStringLiteral("6z");
+        k.from = 1;
+        checkEq(QString::number(TableView::meldRotatedIndexForTest(k, 0)), QStringLiteral("3"),
+                QStringLiteral("加杠横置的是第 4 张（加上的那张）"));
+        // 宽度按"三格一横排"算：叠上去那张不占新槽位
+        const qreal kw = TableLayout::meldWidthOf(k, 0, 10.0, 13.6, 1.0);
+        const qreal expectKw = 2.0 * 10.0 + 13.6 + 2.0 * 1.0;   // 两竖直 + 一横置 + 两个间隔
+        check(qAbs(kw - expectKw) < 0.01,
+              QStringLiteral("加杠宽度应按三格算（叠放不占槽位），期望 %1 实际 %2")
+                  .arg(expectKw).arg(kw));
     }
 
     // ---- 回归：一个人牌河里最多只能有一张横置牌 ----
@@ -1044,8 +1062,22 @@ int run(const QString& outDir)
                 QStringLiteral("riichiCmd 组出的 tile"));
         checkEq(QString::number(rc.value(QStringLiteral("ask_id")).toInt()), QStringLiteral("77"),
                 QStringLiteral("立直回包必须带 ask_id（服务端据此丢弃重复/过期包）"));
-        checkEq(QString::number(ab.discardCmd(QStringLiteral("1m")).value(QStringLiteral("ask_id")).toInt()),
+        checkEq(QString::number(ab.discardCmd(QStringLiteral("1m"), false)
+                                    .value(QStringLiteral("ask_id")).toInt()),
                 QStringLiteral("77"), QStringLiteral("普通出牌回包也必须带 ask_id"));
+
+        // 摸切标记必须显式下发：服务端要靠它区分「从摸牌位取」还是「从暗手取」。
+        // 只发牌码时，手里已有 5m、摸到的也是 5m 这种局面两端会取到不同副本（幽灵手牌）。
+        {
+            const QJsonObject sg = ab.discardCmd(QStringLiteral("5m"), true);
+            check(sg.value(QStringLiteral("tsumogiri")).isBool(),
+                  QStringLiteral("discard 回包必须带 tsumogiri（bool）"));
+            checkEq(QString::number(sg.value(QStringLiteral("tsumogiri")).toBool() ? 1 : 0),
+                    QStringLiteral("1"), QStringLiteral("摸切时 tsumogiri=true"));
+            const QJsonObject hd = ab.discardCmd(QStringLiteral("5m"), false);
+            checkEq(QString::number(hd.value(QStringLiteral("tsumogiri")).toBool() ? 1 : 0),
+                    QStringLiteral("0"), QStringLiteral("手切时 tsumogiri=false"));
+        }
 
         QPushButton* rb = ab.buttonForTest(QStringLiteral("立直"));
         check(rb != nullptr, QStringLiteral("询问栏里有「立直」按钮"));
@@ -1072,7 +1104,7 @@ int run(const QString& outDir)
         ab.clearAsk();
         check(ab.riichiCmd(QStringLiteral("4m")).isEmpty(),
               QStringLiteral("提交后 riichiCmd 必须返回空对象（连点第二下发不出动作）"));
-        check(ab.discardCmd(QStringLiteral("1m")).isEmpty(),
+        check(ab.discardCmd(QStringLiteral("1m"), false).isEmpty(),
               QStringLiteral("提交后 discardCmd 必须返回空对象"));
         check(ab.buttonForTest(QStringLiteral("立直")) == nullptr,
               QStringLiteral("提交后「立直」按钮已销毁"));
@@ -2248,6 +2280,52 @@ int run(const QString& outDir)
             checkEq(QString::number(lobbyBtn), QStringLiteral("1"),
                     QStringLiteral("大厅有「对局回放」入口按钮"));
             ResultDialog rd(QStringLiteral("t"), QStringLiteral("<p>x</p>"));
+            // 「依次浮现」的落地检查：正文必须真的进了 QTextBrowser。
+            // 只断言 htmlBlocksForTest 的条数是不够的 —— 那个函数与构造函数的调用
+            // 之间还有一段（谁把块喂给浏览器），错了照样是空白框。
+            {
+                const QList<QTextBrowser*> brs = rd.findChildren<QTextBrowser*>();
+                checkEq(QString::number(brs.size()), QStringLiteral("1"),
+                        QStringLiteral("结算弹窗应当有一个正文浏览器"));
+                if (!brs.isEmpty()) {
+                    check(brs.first()->toPlainText().contains(QStringLiteral("x")),
+                          QStringLiteral("结算正文必须进入浏览器（依次浮现拿的是同一份块），实际：%1")
+                              .arg(brs.first()->toPlainText().left(60)));
+                }
+                // 真机路径：多块内容 + 真实尺寸 + 真实计时器，抓成图看正文是否**真的显示出来**。
+                // 这一条是为「内容进了浏览器但被滚出可视区」那个坑加的 —— 只查 toPlainText
+                // 是查不出滚动位置的（真机上结算弹窗当时只剩标题，正文在滚动区外）。
+                const QString bigHtml = QStringLiteral("<h2>标题</h2><ul><li>役一</li></ul>")
+                                        + QStringLiteral("<p>合计 <b>3</b> 番 40 符</p>")
+                                        + QStringLiteral("<h3>点数收支</h3><table width='100%'>")
+                                        + QStringLiteral("<tr><td>甲</td><td>+8000</td></tr>")
+                                        + QStringLiteral("<tr><td>乙</td><td>-2000</td></tr>")
+                                        + QStringLiteral("<tr><td>丙</td><td>-2000</td></tr>")
+                                        + QStringLiteral("<tr><td>丁</td><td>-4000</td></tr></table>");
+                ResultDialog big(QStringLiteral("t"), bigHtml);
+                big.resize(560, 460);
+                for (int i = 0; i < 8; ++i) {
+                    QCoreApplication::processEvents();
+                    QThread::msleep(30);
+                }
+                const QImage img = big.grab().toImage();
+                const QString shot = dir.absoluteFilePath(QStringLiteral("result_dialog.png"));
+                img.save(shot);
+                check(shot.endsWith(QStringLiteral("result_dialog.png")),
+                      QStringLiteral("结算弹窗出图：%1").arg(shot));
+                // 正文区里必须出现**足够多**的深色像素（文字），而不是一片空白
+                int dark = 0;
+                for (int y = 0; y < img.height(); ++y) {
+                    for (int x = 0; x < img.width(); ++x) {
+                        const QRgb c = img.pixel(x, y);
+                        if (qRed(c) < 120 && qGreen(c) < 120 && qBlue(c) < 120)
+                            ++dark;
+                    }
+                }
+                check(dark > 220,
+                      QStringLiteral("结算弹窗正文必须真的画出来（深色文字像素 %1 > 220）").arg(dark));
+                big.close();
+            }
             int hiddenBtn = 0;
             int shownBtn = 0;
             for (QPushButton* b : rd.findChildren<QPushButton*>()) {
@@ -2491,6 +2569,95 @@ int run(const QString& outDir)
               QStringLiteral("终局表格应含表头（顺位/精算）与行数据，实际：%1").arg(g1.left(160)));
         check(g1.contains(QStringLiteral("<table")) && g1.contains(QStringLiteral("</table>")),
               QStringLiteral("终局表格的 HTML 结构必须完整（整块文案里含 <table> 开标签）"));
+
+        // ⑩ 自主摸 vs 荣和（用户报障：「自摸时自摸张在结算界面出现两次」）
+        //    自摸的 `hand` 里**含**和了牌（14 张），荣和的 `hand` 不含（13 张）——
+        //    示意图必须先把自摸那张从手牌里摘掉，再单独摆到和了牌位；
+        //    并且自摸**竖置**（裸牌码）、荣和**横置**（后置 `-`）。
+        {
+            const QChar aside(0x1D);
+            const QChar rowSep(0x1F);
+            auto handOf = [rowSep](const QString& row) {
+                return row.section(QChar(0x1E), 1).section(rowSep, 0, 0);
+            };
+            // 自摸：手牌 14 张，5m 出现两次（一张在手里，一张是和了牌）
+            const QJsonObject tsumoEv = proto::decodeLine(
+                QStringLiteral(R"({"ev":"agari","winner":0,"from":-1,"tsumo":true,)"
+                               R"("hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","9m","9m",)"
+                               R"("5m","5m","5m"],"melds":[],"winning_tile":"5m",)"
+                               R"("dora_indicators":["1p"],"ura_indicators":[],"yaku":[],"han":1,)"
+                               R"("fu":40,"yakuman":0,"limit":"","base_points":0,)"
+                               R"("score_delta":[0,0,0,0],"scores_after":[0,0,0,0]})").toUtf8(),
+                nullptr);
+            TableModel tm;
+            const QString sTsumo = ResultDialog::schematicOf(tsumoEv, &tm, true);
+            const QString handRow = handOf(sTsumo);
+            const QStringList parts = handRow.split(aside);
+            checkEq(QString::number(parts.size()), QStringLiteral("2"),
+                    QStringLiteral("自摸示意：手牌段 + 和了牌段两段"));
+            if (parts.size() == 2) {
+                const QStringList handTiles = parts.at(0).split(QLatin1Char(' '));
+                checkEq(QString::number(handTiles.size()), QStringLiteral("13"),
+                        QStringLiteral("自摸示意：和了牌必须从手牌里摘掉（应剩 13 张）"));
+                checkEq(parts.at(1), QStringLiteral("5m"),
+                        QStringLiteral("自摸：和了牌**竖置**（裸牌码，不带 `-`）"));
+            }
+
+            // 荣和：手牌只有 13 张、winning_tile 另发 → 不摘，且和了牌横置
+            const QJsonObject ronEv = proto::decodeLine(
+                QStringLiteral(R"({"ev":"agari","winner":0,"from":1,"tsumo":false,)"
+                               R"("hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","9m","9m",)"
+                               R"("5m","5m"],"melds":[],"winning_tile":"5m",)"
+                               R"("dora_indicators":["1p"],"ura_indicators":[],"yaku":[],"han":1,)"
+                               R"("fu":40,"yakuman":0,"limit":"","base_points":0,)"
+                               R"("score_delta":[0,0,0,0],"scores_after":[0,0,0,0]})").toUtf8(),
+                nullptr);
+            const QString sRon = ResultDialog::schematicOf(ronEv, &tm, true);
+            const QStringList rparts = handOf(sRon).split(aside);
+            checkEq(QString::number(rparts.size()), QStringLiteral("2"),
+                    QStringLiteral("荣和示意：手牌段 + 和了牌段两段"));
+            if (rparts.size() == 2) {
+                checkEq(QString::number(rparts.at(0).split(QLatin1Char(' ')).size()),
+                        QStringLiteral("13"), QStringLiteral("荣和示意：手牌保持 13 张（不摘）"));
+                checkEq(rparts.at(1), QStringLiteral("5m-"),
+                        QStringLiteral("荣和：和了牌**横置**（后置 `-`）"));
+            }
+        }
+
+        // ⑪ 结算 HTML 的块切分（「文字依次浮现」的根据）+ **标签配平**。
+        //    真踩过的坑：役满分支的合计文案曾经只有 `</p>` 没有 `<p>`
+        //    （`ui.result.total_yakuman` 少了个开标签），块扫描于是把后面的
+        //    「点数收支」表当成嵌套内容吞掉 —— 役满时结算界面只剩标题。
+        //    这里对 y1（役满）/ n1（普通役）两份 HTML 都钉住条数与配平。
+        {
+            auto tagsBalanced = [](const QString& h) {
+                const QStringList names = { QStringLiteral("p"), QStringLiteral("h3"),
+                                            QStringLiteral("ul"), QStringLiteral("table"),
+                                            QStringLiteral("tr") };
+                for (const QString& t : names) {
+                    const int open = h.count(QStringLiteral("<%1").arg(t));
+                    const int close = h.count(QStringLiteral("</%1>").arg(t));
+                    if (open != close)
+                        return false;
+                }
+                return true;
+            };
+            check(tagsBalanced(y1),
+                  QStringLiteral("役满结算 HTML 的标签必须配平（total_yakuman 少过 <p>）：%1")
+                      .arg(y1.left(160)));
+            check(tagsBalanced(n1),
+                  QStringLiteral("普通役结算 HTML 的标签必须配平"));
+            const QStringList yb = ResultDialog::htmlBlocksForTest(y1);
+            check(yb.size() >= 4,
+                  QStringLiteral("役满结算至少切成 4 块（标题/役种/合计/收支），实际 %1")
+                      .arg(yb.size()));
+            const QStringList nb = ResultDialog::htmlBlocksForTest(n1);
+            check(nb.size() >= 4,
+                  QStringLiteral("普通役结算至少切成 4 块，实际 %1").arg(nb.size()));
+            // 最后一块必须真的含「点数收支」表 —— 只数条数会被"吞掉一块"蒙过去
+            check(!nb.isEmpty() && nb.last().contains(QStringLiteral("<table")),
+                  QStringLiteral("最后一块应当是点数收支表（含 <table>）"));
+        }
     }
 
     // ---------- 汇总 ----------
