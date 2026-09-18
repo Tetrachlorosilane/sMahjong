@@ -111,6 +111,14 @@ struct TableLayout {
 
     /** 牌河第 index 张在**屏幕**上的矩形（飞行动画终点）。 */
     QRectF riverSlotScreen(int seat, int index, const TableModel& model) const;
+    /**
+     * 牌河第 index 张在**该家局部坐标系**里的矩形（+u 朝该家自己的右手侧）。
+     *
+     * <p>与 `riverSlotScreen` 是同一份几何（后者只是把它经 `SeatFrame::toScreen` 旋转到屏幕），
+     * 抽出来是为了让「牌河固定左缘」这条不变量能**不看旋转**直接断言：
+     * 第 0/6/12 张的局部左沿都必须等于 `riverLeftU()`。
+     */
+    QRectF riverSlotLocal(int seat, int index, const TableModel& model) const;
     /** 该家手牌行里第 index 张牌的**局部**矩形（飞行动画起点）。 */
     QRectF handSlotLocal(int pos, int index, bool drawn, const TableModel& model) const;
 
@@ -125,6 +133,23 @@ struct TableLayout {
      * 多出来的行才不会压到手牌。
      */
     static int riverRowsFor(int n);
+
+    /**
+     * 牌河**一行排满**时的横向宽度（一族 6 列，且允许最左那张是横置牌）。
+     *
+     * ⚠ 这是牌河**固定左缘**的唯一尺子：左缘 = `-riverFullRowExtent() / 2`，
+     *   与「这一帧已经打出了几张」**完全无关**。用户要求的是「**先假定一行放满**，
+     *   算出它的最最左沿在哪，再从这个地方开始向右放牌」—— 于是第一张就打在最左，
+     *   之后只向右长：同一局的前后两手、以及同一家的每一行，左沿都不动。
+     *   旧实现按「本帧已打出的最大列数」算，**牌河会随着张数变多整体往左挪**
+     *   （第一张的位置自己在移动，看着就像"没左对齐"）。
+     *   横置牌占的是**牌高**，一行最多 1 张，所以满行宽度 = 牌高 + 5×牌宽 + 5×列间距，
+     *   与「横置的是第几列」无关（几张牌的总宽是同一个数）。
+     */
+    qreal riverFullRowExtent() const;
+
+    /** 牌河固定左缘（局部 u，+u 朝向该家自己的右手侧）。 */
+    qreal riverLeftU() const { return -riverFullRowExtent() / 2.0; }
 
     /**
      * 副露里哪一张横置。
