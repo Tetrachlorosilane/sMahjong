@@ -68,8 +68,9 @@
 | `yaku[].code` / `yaku[].tile` | `agari` 事件 | 役种**只发 ASCII 码**（`"riichi"`），参数化役种（役牌/场风/自风）另带一张牌码 `tile`。**没有 `name` 字段**——中文在客户端语言文件里。认不出的码由客户端原样显示（见 §6）。 |
 | `limit` / `reason` / `error.code` | `agari` / `ryuukyoku` / `error` | 同样是 ASCII 码（`"mangan"` / `"exhaustive"` / `"no_room"`）。**`error.arg` 是可选的 ASCII 参数**（如 `unknown_cmd` 带命令名）。报文里**只有** `name`/`text`/`msg` 三个字段允许非 ASCII。 |
 | `dead_wall_left` | `draw` / `round_start` / `state` | 剩余**岭上**牌数。⚠ **每次摸牌都要带**：杠后那张取自王牌，`tiles_left` 在**岭上摸牌时不动**（开杠那一刻牌山末尾一张移进王牌才减 1），所以「岭上有没有被摸走」只能看它。一局 4 张：4→3→2→1。见 §6「王牌/岭上」与 PROTOCOL §3.4。 |
+| `drawn` | `round_start`（**仅庄家**） | 本巡「刚摸到的那张」的牌码（= 14 张里的第 14 张）。**必须有**：`hand` 是**已排序**下发的，位置推不出来，客户端只能猜 —— 猜错就是幽灵手牌（见 §2.3-11）。客户端摆摸牌位只认它；缺这个字段的老服务端会退回"最后一张是摸到的"（会认错）。 |
 
-### 2.3 十条曾经踩过的坑（同类问题会再犯）
+### 2.3 十一条曾经踩过的坑（同类问题会再犯）
 
 1. **`riichi` 事件到达时，绝不能把"牌河最后一张"标成横置。**
    服务端顺序是**先广播 `riichi`、再广播 `discard`**，此刻牌河最后一张还是宣言牌**之前**那张，标它就等于一人牌河两张横置。
@@ -131,6 +132,21 @@
     不处理这两条的症状：**玩家没动就被代打**（废包被 `awaitAction` 当成本巡答复）；
     或下一次鸣牌询问被废包"先答了"，真答复被顶掉。
     回归：`SelfTest.roundClaimsTests/dropRepliesTests` + `node tools\claim-priority-test.mjs`。
+
+11. **「哪张是刚摸到的」只能由服务端点名，客户端不许猜；出牌取牌只认牌码。**
+    庄家第一巡的 14 张配牌是**已排序**下发的，客户端若按"最后一张 = 刚摸到的"去认摸牌位，
+    就会与服务端的第 14 张（`openingTile`）认成两张不同的牌 —— 玩家点摸牌位时
+    `discard.tsumogiri` 的牌码对不上，而旧服务端此时会**退回默认摸切**（打出刚摸到的那张，
+    恰恰是玩家没点的那张）。两端于是各留一张不同的牌：**张数相同、内容差一张**，
+    而且不会自愈（下一巡又按"手里有没有这张"去猜，越打越歪）—— 这就是「幽灵手牌」。
+    修法三条一起才闭环（**只加 `tsumogiri` 字段是不够的**，那正是第一版修完仍然复发的原因）：
+    - 服务端 `round_start` **点名** `drawn`（= 第 14 张），客户端按它摆摸牌位；
+    - 服务端出牌取牌**牌码决定打哪张**（`Round.pickDiscardId`）：声明摸切**且**牌码吻合才取摸牌位，
+      其余一律按牌码在暗手里找 —— **绝不**把"摸切声明对不上"兜底成摸切；
+    - 客户端对账也按**牌码**：只有"声明摸切且摸牌位那张的牌码就是事件里的 `tile`"才清摸牌位，
+      否则扣暗牌里那一张、再把摸牌位的牌并入暗牌（顺序不能反，反了坏报文会让手牌涨到 14 张）。
+    回归：`SelfTest.discardAlignTests`（逐条判据 + 庄家 `round_start` 必带 `drawn`）
+    + `client --selftest` 的两组（`drawn` 点名 / 错配摸切按牌码对账）。
 
 ### 2.4 别做危险操作
 
@@ -246,6 +262,8 @@ node tools\clock-test.mjs 127.0.0.1 10086                # 思考时间：基本
 node tools\firstturn-test.mjs 127.0.0.1 10086 3000       # 「每局第一巡」的实测等待 = 声明 deadline
 node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000     # 作废的立直不得替玩家打牌 + 重复包被丢弃
 node tools\claim-priority-test.mjs 127.0.0.1 10086 3000   # 鸣牌优先级：高优先级成立后不必等低优先级 + 废包不漏到下一巡
+node tools\discard-align-test.mjs 127.0.0.1 10086        # 出牌对齐（幽灵手牌）：庄家 round_start 必带 drawn +
+                                                          # 「错报摸切也按牌码取牌」+「我报哪张就打哪张」不变式
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）
@@ -619,6 +637,7 @@ mahjong/
 | `Connection refused` | 服务端没起 / 端口错 / **WSL 只转发到 `[::1]`**（客户端已自动回退 IPv4↔IPv6；WSL 填 `localhost`） |
 | 大厅按钮是灰的 | `MainWindow::onConnected()` 必须调 `m_lobby->setConnected(true)`（曾漏过） |
 | 手牌数量对不上 | `tsumogiri` 用了吗？有没有靠 kind 猜？ |
+| **庄家第一巡点了牌却打出另一张 / 手牌张数对得上但内容与服务端差一张（幽灵手牌）** | 「哪张是刚摸到的」被猜了：① 服务端 `round_start` 有没有发 `drawn`（仅庄家）？② 出牌取牌是不是按**牌码**（`Round.pickDiscardId`）？③ 客户端的 `discard` 分支是不是按牌码对账（而不是只信 `tsumogiri` 标记）？见 §2.3-11。回归：`SelfTest.discardAlignTests` + `client --selftest` 的两组 |
 | 一人牌河两张横置 | `riichi` 事件里是不是又去标"最后一张"了？横置只认 `discard.sideways` |
 | 鸣牌后牌河对不上 | `called_index` 有没有 `removeAt`？ |
 | 门前役全不生效 | `Round` 构造里 `menzen[i] = true` 还在吗？ |
@@ -662,10 +681,10 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **578** 项、客户端自检 **625** 项、§4 的全部 L3 工具（含 `replay-test`），
-外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
+**实测通过**：服务端自检 **597** 项、客户端自检 **647** 项、§4 的全部 L3 工具（含 `replay-test` 与
+`discard-align-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
-与**开局前自选/随机座位**（`seatSwapTests`）。
+与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`）。
 
 **未做 / 妥协**：
 

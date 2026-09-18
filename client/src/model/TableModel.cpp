@@ -496,8 +496,18 @@ void TableModel::applyEvent(const QJsonObject& ev)
                                    "round_start.hand");
         m_drawn.clear();
         m_drawnSeat = -1;
-        // 庄家 14 张时把最后一张视为刚摸到的牌
-        if (m_hand.size() % 3 == 2 && !m_hand.isEmpty()) {
+        // 「刚摸到的那张」以服务端点名的 `drawn` 为准。
+        // ⚠ 庄家第一巡的 14 张是**已排序**发下来的，第 14 张（真的是本巡那张）通常在中间：
+        //   客户端按"最后一张"认必然认错，于是玩家点摸牌位时 `tsumogiri` 的牌码与服务端的
+        //   摸牌对不上 —— 服务端打 A、客户端扣 B，两端手牌张数相同、内容差一张（幽灵手牌）。
+        //   牌码本身带赤/普通（`0m` vs `5m`），所以按牌码整串扣就是精确的。
+        const QString drawnCode = ev.value(QStringLiteral("drawn")).toString();
+        if (!drawnCode.isEmpty() && m_hand.contains(drawnCode)) {
+            m_hand.removeOne(drawnCode);
+            m_drawn = drawnCode;
+            m_drawnSeat = m_mySeat;
+        } else if (m_hand.size() % 3 == 2 && !m_hand.isEmpty()) {
+            // 老服务端没有 `drawn` 字段：退回"最后一张是刚摸到的"（大概率不对，只是不至于崩）
             m_drawn = m_hand.takeLast();
             m_drawnSeat = m_mySeat;
         }
@@ -577,21 +587,28 @@ void TableModel::applyEvent(const QJsonObject& ev)
             const bool tsumogiri = ev.value(QStringLiteral("tsumogiri")).toBool(false);
             const int concealedBefore = m_hand.size() + (m_drawn.isEmpty() ? 0 : 1);
             if (seat == m_mySeat && m_hasSeat) {
-                // 以服务端下发的 tsumogiri 为准。绝不能靠「kind 是否等于摸到的牌」去猜：
-                // 手里已有 5m 又摸到 5m 而手切原来那张时，猜法会把摸牌当成打出去的，
-                // 于是手牌数多出一张（这就是「超时后手牌 +1」的根因）。
-                if (tsumogiri && !m_drawn.isEmpty()) {
-                    // 摸切：打出的就是刚摸到的那张 —— 摸牌位清空，暗牌原样不动
+                // 服务端的 `tsumogiri` 说明**它是从哪一摞取的**，但客户端这边的对账按**牌码**做：
+                //   · 声明摸切 **且** 摸牌位那张的牌码就是 `tile` → 打的确实是它，清摸牌位；
+                //   · 其余（手切、或两端的"摸到哪张"认知不同）→ 按牌码从**暗牌**里扣掉那一张，
+                //     再把摸牌位的牌并入暗牌。
+                // 旧写法只信标记：标记说摸切就清摸牌位，于是"标记与牌码不一致"时会清掉**另一张**
+                // 牌（张数还对得上，内容却与服务端差一张 —— 幽灵手牌，且不会自愈）。
+                //
+                // ⚠ 顺序必须是「先扣暗牌、再并入摸牌」：服务端在 `tsumogiri=false` 时**不可能**
+                //   打出摸牌位那张（它的 `tsumogiri` 就是按 `discardId == drawn` 算出来的），所以
+                //   要扣的那张一定在合并前的暗牌里。倒过来写的话，"牌码不在手里"的坏报文会把
+                //   摸牌留在暗牌里，手牌凭空涨到 14 张（数量一旦错位，后面每一巡都会跟着错）。
+                if (tsumogiri && !m_drawn.isEmpty() && m_drawn == tile) {
                     m_drawn.clear();
                 } else {
-                    // 手切：先从暗牌里扣掉打出的那张……
                     if (!takeFromHand(tile)) {
-                        // 兜底：理论上不该发生（服务端下发的 tile 一定在自己手里）
-                        qWarning("mahjong: 出牌 %s 不在手牌中，手牌数可能失真", qUtf8Printable(tile));
+                        // 对不上说明两端已经不一致（或对端是坏报文）：**不凭空扣一张牌**
+                        // —— 宁可数量暂时不符，也绝不伪造一张玩家手里没有的牌。
+                        qWarning("mahjong: 出牌 %s 不在手牌中（两端手牌可能已不一致）",
+                                 qUtf8Printable(tile));
                     }
-                    // ……再把刚摸到的牌**立即并入暗牌**。
-                    // 出完牌它就不再是「刚摸到」了：留在摸牌位上会让手牌区空出一个槽，
-                    // 也会让人误以为自己还有一张可以打。
+                    // 刚摸到的牌立刻并入暗牌：出完牌它就不再是「刚摸到」了，
+                    // 留在摸牌位上会让手牌区空出一个槽，也会让人误以为自己还有一张可以打。
                     if (!m_drawn.isEmpty()) {
                         m_hand.append(m_drawn);
                         m_drawn.clear();
@@ -599,9 +616,9 @@ void TableModel::applyEvent(const QJsonObject& ev)
                     }
                 }
                 const int concealedAfter = m_hand.size() + (m_drawn.isEmpty() ? 0 : 1);
-                if (concealedAfter >= concealedBefore) {
-                    // 兜底：无论走哪条分支，自己的暗牌都必须恰好少一张
-                    takeFromHand(tile);
+                if (concealedAfter != concealedBefore - 1) {
+                    qWarning("mahjong: 出牌 %s 后自己的暗牌从 %d 变成 %d（应恰好 -1）",
+                             qUtf8Printable(tile), concealedBefore, concealedAfter);
                 }
             }
             if (isRiichi && !m_riichi.at(seat)) {
