@@ -1262,6 +1262,13 @@ public final class Round {
         ClaimType type;
         int seat;
         int[] tiles = new int[0];
+        /**
+         * 客户端为**碰 / 大明杠**指定的精确牌码（用于副露赤宝选择，用户要求）。
+         *
+         * <p>形如 `["0m","5m"]`：写 `0m` = 用赤五、写 `5m` = 用普通五。为空 = 老客户端，
+         * 走"手里同 kind 取前 n 张"的旧行为。
+         */
+        List<String> wantTiles;
         List<Integer> multiRon;
     }
 
@@ -1451,12 +1458,15 @@ public final class Round {
                     Claim c = new Claim();
                     c.type = ClaimType.KAN;
                     c.seat = s;
+                    // 副露赤宝选择：客户端可指定用哪几张（`["0m","0m","5m"]` 这种）
+                    c.wantTiles = Json.strList(a, "tiles");
                     return c;
                 }
                 if (t == ClaimType.PON && "pon".equals(ty)) {
                     Claim c = new Claim();
                     c.type = ClaimType.PON;
                     c.seat = s;
+                    c.wantTiles = Json.strList(a, "tiles");
                     return c;
                 }
                 if (t == ClaimType.CHI && "chi".equals(ty)) {
@@ -1514,21 +1524,76 @@ public final class Round {
             return null;                    // 必须恰好连成三张
         }
         int[] ids = new int[2];
-        int idx = 0;
-        for (int wantKind : new int[]{k0, k1}) {
-            int found = -1;
-            for (int id : hand[seat]) {
-                if (Tiles.kind(id) == wantKind && !containsId(ids, idx, id)) {
-                    found = id;
+        for (int i = 0; i < 2; i++) {
+            final String s = want.get(i);
+            final int k = (i == 0) ? k0 : k1;
+            // 副露赤宝选择：客户端写 `0m` 表示"用赤五"，写 `5m` 表示"用普通五"；
+            // 服务端照它挑（挑不到就作废这次吃，绝不替玩家拿错一张）。
+            final int id = findHandTile(seat, k, Tiles.isRedStr(s), new ArrayList<>());
+            if (id < 0) {
+                return null;
+            }
+            ids[i] = id;
+            // 两张不同 kind（上面已校验），所以不必再防"同一张用两次"
+        }
+        return ids;
+    }
+
+    /**
+     * 从手里找一张「牌种 = kind、赤/普通 = red」的牌，跳过 {@code used} 里已占用的。
+     *
+     * <p>用于**副露的赤宝选择**（用户要求：副露能不能选赤宝）：
+     * 赤五（`0m`）与普通五（`5m`）**同 kind 不同价值**（赤宝牌多一番），
+     * 所以"用哪一张去鸣牌"是玩家该决定的事 —— 客户端用 `0m`/`5m` 这种精确牌码表达偏好，
+     * 服务端照它挑。挑不到（客户端要赤五但手里只有普通五）返回 -1，由调用方按"没这张"处理。
+     *
+     * @param used 已选中的牌 id 列表（同一张不能被选两次）
+     */
+    private int findHandTile(int seat, int kind, boolean red, List<Integer> used) {
+        for (int id : hand[seat]) {
+            if (Tiles.kind(id) != kind || Tiles.isRedId(id) != red) {
+                continue;
+            }
+            boolean taken = false;
+            for (int u : used) {
+                if (u == id) {
+                    taken = true;
                     break;
                 }
             }
-            if (found < 0) {
-                return null;                // 手里没有（或同一张不能用两次）
+            if (!taken) {
+                return id;
             }
-            ids[idx++] = found;
         }
-        return ids;
+        return -1;
+    }
+
+    /**
+     * 按客户端给的**精确牌码**在手里挑 n 张（用于碰 / 大明杠的赤宝选择）。
+     *
+     * <p>`want` 为空时返回 {@code null} —— 调用方退回"取前 n 张"的旧行为（老客户端）。
+     * 形状不对（个数不符 / 牌种不符 / 找了赤五手里没有）一律返回 {@code null}：
+     * 宁可退回默认取法，也不替玩家拿错一张牌。
+     *
+     * @param tileId 被鸣的那张（它的牌种是基准）
+     */
+    private List<Integer> pickHandTiles(int seat, int tileId, List<String> want, int n) {
+        if (want == null || want.isEmpty() || want.size() != n) {
+            return null;
+        }
+        final int kind = Tiles.kind(tileId);
+        List<Integer> out = new ArrayList<>(n);
+        for (String s : want) {
+            if (Tiles.parseKind(s) != kind) {
+                return null;                       // 牌种必须与被鸣的那张一致
+            }
+            final int id = findHandTile(seat, kind, Tiles.isRedStr(s), out);
+            if (id < 0) {
+                return null;                       // 手里没有这一种（例如要赤五却只有普通五）
+            }
+            out.add(id);
+        }
+        return out;
     }
 
     /**
@@ -1537,6 +1602,24 @@ public final class Round {
      */
     public int[] debugPickChiTiles(int seat, int tileId, List<String> want) {
         return pickChiTiles(seat, tileId, want);
+    }
+
+    /** 供自检：按精确牌码挑 n 张（副露赤宝选择）。 */
+    public int[] debugPickHandTiles(int seat, int tileId, List<String> want, int n) {
+        List<Integer> l = pickHandTiles(seat, tileId, want, n);
+        if (l == null) {
+            return null;
+        }
+        int[] a = new int[l.size()];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = l.get(i);
+        }
+        return a;
+    }
+
+    /** 供自检：按 kind + 赤/普通 找一张手里的牌（-1 = 没有）。 */
+    public int debugFindHandTile(int seat, int kind, boolean red) {
+        return findHandTile(seat, kind, red, new ArrayList<>());
     }
 
     /**
@@ -1633,10 +1716,14 @@ public final class Round {
         //   与 `pickChiTiles` 那个审计项是同一类问题。
         List<Integer> kanPicked = null;
         if (cl.type == ClaimType.KAN) {
-            kanPicked = new ArrayList<>();
-            for (int id : hand[seat]) {
-                if (Tiles.kind(id) == kind && kanPicked.size() < 3) {
-                    kanPicked.add(id);
+            // 同样是赤宝选择：客户端可指定用哪三张
+            kanPicked = pickHandTiles(seat, tileId, cl.wantTiles, 3);
+            if (kanPicked == null) {
+                kanPicked = new ArrayList<>();
+                for (int id : hand[seat]) {
+                    if (Tiles.kind(id) == kind && kanPicked.size() < 3) {
+                        kanPicked.add(id);
+                    }
                 }
             }
             if (kanPicked.size() < 3) {
@@ -1704,11 +1791,21 @@ public final class Round {
                 break;
             }
             case PON: {
-                List<Integer> picked = new ArrayList<>();
-                for (int id : hand[seat]) {
-                    if (Tiles.kind(id) == kind && picked.size() < 2) {
-                        picked.add(id);
+                // 副露赤宝选择：客户端给了精确牌码就照它挑（要赤五给赤五、要普通五给普通五）；
+                // 没给（老客户端）走"同 kind 取前两张"的旧行为。
+                List<Integer> picked = pickHandTiles(seat, tileId, cl.wantTiles, 2);
+                if (picked == null) {
+                    picked = new ArrayList<>();
+                    for (int id : hand[seat]) {
+                        if (Tiles.kind(id) == kind && picked.size() < 2) {
+                            picked.add(id);
+                        }
                     }
+                }
+                if (picked.size() < 2) {
+                    return;   // 与大明杠同理：状态改之前就挡住（防越界 / 防伪造报文改分）
+                }                if (picked.size() < 2) {
+                    return;   // 与大明杠同理：状态改之前就挡住（防越界 / 防伪造报文改分）
                 }
                 for (int id : picked) {
                     hand[seat].remove((Integer) id);

@@ -70,6 +70,7 @@ public final class SelfTest {
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
+        meldAkaPickTests();
         seatSwapTests();
         nagashiLivePathTest();
         simulationTest();
@@ -1524,6 +1525,52 @@ public final class SelfTest {
             allReady = allReady || t.seats[i].ready;
         }
         eq("洗座后人类座位重新准备", allReady, false);
+    }
+
+    /**
+     * 副露的**赤宝选择**（用户要求：副露能不能选赤宝）。
+     *
+     * <p>赤五（`0m`）与普通五（`5m`）**同 kind 不同价值**，所以"拿哪一张去碰/吃"是
+     * 玩家该决定的事。客户端用精确牌码表达（`0m` = 赤、`5m` = 普通），服务端照它挑。
+     *
+     * <p>四条不变量：
+     *   ① 按客户端指定的赤/普通取到对应的那一张；
+     *   ② 客户端要的牌手里没有（要两张赤五却只有一张）→ 作废，**绝不拿普通五顶上**；
+     *   ③ 牌种对不上（拿 6m 的码去碰 5m）→ 作废；
+     *   ④ 个数不符 → 作废（调用方退回旧行为）。
+     */
+    private static void meldAkaPickTests() {
+        Round r = newRound();
+        final int aka5 = Tiles.id(Tiles.AKA_M, 0);       // 赤五固定 copy 0
+        final int norm5a = Tiles.id(Tiles.AKA_M, 1);
+        final int norm5b = Tiles.id(Tiles.AKA_M, 2);
+        final int called5 = Tiles.id(Tiles.AKA_M, 3);    // 被鸣的那张
+        r.hand[0].clear();
+        r.hand[0].add(aka5);
+        r.hand[0].add(norm5a);
+        r.hand[0].add(norm5b);
+
+        int[] wantNorm = r.debugPickHandTiles(0, called5, Arrays.asList("5m", "5m"), 2);
+        check("赤宝选择：要普通五就取普通五", wantNorm != null
+                && !Tiles.isRedId(wantNorm[0]) && !Tiles.isRedId(wantNorm[1]));
+        int[] wantMix = r.debugPickHandTiles(0, called5, Arrays.asList("0m", "5m"), 2);
+        int reds = 0;
+        if (wantMix != null) {
+            for (int id : wantMix) {
+                if (Tiles.isRedId(id)) {
+                    reds++;
+                }
+            }
+        }
+        eq("赤宝选择：赤+普通各一张", reds, 1);
+        eq("赤宝选择：要两张赤五但只有一张 → 作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("0m", "0m"), 2), null);
+        eq("赤宝选择：牌种对不上要作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("6m", "5m"), 2), null);
+        eq("赤宝选择：个数不符要作废",
+                r.debugPickHandTiles(0, called5, Arrays.asList("5m"), 2), null);
+        eq("赤宝选择：按赤/普通能精确取到那一张",
+                r.debugFindHandTile(0, Tiles.AKA_M, true), aka5);
     }
 
     private static void akaRuleTests() {
