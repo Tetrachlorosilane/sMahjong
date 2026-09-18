@@ -1,6 +1,8 @@
 # ---------------------------------------------------------------------------
 # 构建产物：一律不进仓库（构建脚本会重新生成）
 #   build/ 与 dist/ 里含 exe、Qt DLL、中间产物；*.jar 是服务端产物
+#   本仓库实测：client/build ≈ 88 MB、client/dist ≈ 85 MB（含 Qt Multimedia +
+#   FFmpeg 后端）、server/build ≈ 0.4 MB、.qt/ ≈ 773 MB —— 全都不该进仓库。
 # ---------------------------------------------------------------------------
 build/
 dist/
@@ -8,6 +10,22 @@ dist/
 *.obj
 *.o
 *.log
+
+# 构建系统的其它产物形态（换生成器 / 换 IDE / 本地跑 cmake 会冒出来）
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.a
+*.dll
+*.exe
+*.so
+*.dylib
+
+# 自检产物：`client --selftest <outdir>` 把 PNG / 日志写在这里
+#   （默认就是 client/build/st，已被上面的 build/ 覆盖；这条是给换目录的情况兜底）
+st/
 
 # ---------------------------------------------------------------------------
 # ★ 自动获取的 Qt 与构建工具缓存（client/build.ps1 下载到仓库根下的 .qt/）
@@ -27,6 +45,12 @@ dist/
 .tools/cookies.json
 .tools/*.html
 .obscura-profile/
+# 本地环境 / 抓取工具的临时文件（不属于交付内容）
+.env
+.env.*
+*.tmp
+*.bak
+tmp/
 
 # ---------------------------------------------------------------------------
 # Node 依赖（.tools/fetch-wiki.mjs 用；只有 package.json / 脚本本身进仓库）
@@ -62,4 +86,11 @@ desktop.ini
 
 # 提交信息临时文件（用 git commit -F 时的中转）
 .commit-msg.txt
+
+# ---------------------------------------------------------------------------
+# 发布包（手工打包 release 资产时留在本地的 zip）：产物，不是源码
+#   正式发布走 GitHub Releases，见 docs/DEPLOY.md 与本文件末尾的说明。
+# ---------------------------------------------------------------------------
+release/
+*.zip
 
