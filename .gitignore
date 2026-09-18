@@ -59,3 +59,7 @@ server/replays/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 提交信息临时文件（用 git commit -F 时的中转）
+.commit-msg.txt
+
