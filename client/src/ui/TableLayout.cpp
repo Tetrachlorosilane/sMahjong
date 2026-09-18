@@ -51,13 +51,12 @@ int TableLayout::riverRowsFor(int n)
 
 qreal TableLayout::riverFullRowExtent() const
 {
-    // 一行最多 1 张横置牌，且它占的是**牌高**；总宽与它在第几列无关，
-    // 所以这里固定按"最左那张横置"累加，得到的仍是这一行可能达到的最大宽度。
+    // **只按 6 张普通牌 + 5 个列间距算**（用户口径）：横置牌占的是牌高、比普通牌宽
+    // （约 1.36 倍牌宽），把它算进左缘的话，**每一行**（哪怕整局没人立直）都会在右侧空出
+    // 那一截、整条牌河看着偏左。现在的取舍是：左缘按普通行定，**立直那一行允许向右多出
+    // (牌高 − 牌宽)** —— 一行最多一张横置，偏移量很小，且只影响立直家自己的河。
     const qreal cgap = qMax(1.0, m_riverW * kRiverColGap);
-    qreal extent = 0.0;
-    for (int c = 0; c < kRiverCols; ++c)
-        extent += (c == 0 ? m_riverH : m_riverW) + cgap;
-    return extent - cgap;
+    return kRiverCols * m_riverW + (kRiverCols - 1) * cgap;
 }
 
 int TableLayout::meldRotatedIndex(const Meld& m, int ownerSeat)
