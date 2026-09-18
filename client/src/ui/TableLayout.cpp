@@ -49,6 +49,17 @@ int TableLayout::riverRowsFor(int n)
     return n <= 0 ? 0 : (n + kRiverCols - 1) / kRiverCols;
 }
 
+qreal TableLayout::riverFullRowExtent() const
+{
+    // 一行最多 1 张横置牌，且它占的是**牌高**；总宽与它在第几列无关，
+    // 所以这里固定按"最左那张横置"累加，得到的仍是这一行可能达到的最大宽度。
+    const qreal cgap = qMax(1.0, m_riverW * kRiverColGap);
+    qreal extent = 0.0;
+    for (int c = 0; c < kRiverCols; ++c)
+        extent += (c == 0 ? m_riverH : m_riverW) + cgap;
+    return extent - cgap;
+}
+
 int TableLayout::meldRotatedIndex(const Meld& m, int ownerSeat)
 {
     // 规则本体见 meldSidewaysIndex()（model/TableModel.h 里的自由函数）——
@@ -416,7 +427,7 @@ qreal TableLayout::plateReserve() const
     return qMax(72.0, m_plateReserve);
 }
 
-QRectF TableLayout::riverSlotScreen(int seat, int index, const TableModel& model) const
+QRectF TableLayout::riverSlotLocal(int seat, int index, const TableModel& model) const
 {
     if (index < 0)
         return QRectF();
@@ -430,26 +441,10 @@ QRectF TableLayout::riverSlotScreen(int seat, int index, const TableModel& model
     const int row = index / kRiverCols;
     const qreal cgap = qMax(1.0, m_riverW * kRiverColGap);
 
-    // 牌河**左对齐**：每一行都从同一条左边缘起排，行内**不居中**
-    // （用户要求：原来每行按自己的宽度居中，导致每行左右都不齐、读牌费眼）。
-    // 左边缘留出的宽度按「本帧预留的最大列数」算 —— 与 `computeLayout` 里
-    // `riverRowNeed` 的假设同一把尺子（横置 1 张 + 5 张普通 + 5 个列间距），
-    // 所以行排不满时右侧空着，后续行不会左右乱跳。
-    int reserveCols = 0;
-    {
-        const int rows = qMax(1, TableLayout::riverRowsFor(n));
-        for (int r = 0; r < rows; ++r) {
-            reserveCols = qMax(reserveCols, qMin(kRiverCols, n - r * kRiverCols));
-        }
-    }
-    qreal rowExtent = 0;
-    for (int c = 0; c < reserveCols; ++c) {
-        rowExtent += (c == 0 ? m_riverH : m_riverW) + cgap;   // 一行最多 1 张横置（在行首）
-    }
-    if (rowExtent > 0)
-        rowExtent -= cgap;
-
-    qreal u = -rowExtent / 2.0;          // 固定左缘：所有行共用
+    // 牌河**固定左缘**：按「一行排满」预算，与已经打出几张无关（见 riverFullRowExtent）。
+    // 绘制那边（`TableView::paintRiver`）读的是同一个 `riverLeftU()`——两处必须同源，
+    // 否则飞行动画的终点与牌静止后的位置会差半个牌位。
+    qreal u = riverLeftU();
     const qreal v = f.riverStartV + row * f.riverStep;
     for (int c = 0; c < kRiverCols; ++c) {
         const int i = row * kRiverCols + c;
@@ -458,13 +453,20 @@ QRectF TableLayout::riverSlotScreen(int seat, int index, const TableModel& model
         const bool side = model.discardSideways(seat, i);
         const qreal w = side ? m_riverH : m_riverW;
         const qreal h = side ? m_riverW : m_riverH;
-        if (i == index) {
-            const QRectF local(u, v + (side ? (m_riverH - m_riverW) / 2.0 : 0.0), w, h);
-            return f.toScreen.mapRect(local);
-        }
+        if (i == index)
+            return QRectF(u, v + (side ? (m_riverH - m_riverW) / 2.0 : 0.0), w, h);
         u += w + cgap;
     }
     return QRectF();
+}
+
+QRectF TableLayout::riverSlotScreen(int seat, int index, const TableModel& model) const
+{
+    const QRectF local = riverSlotLocal(seat, index, model);
+    if (local.isNull())
+        return QRectF();
+    const int pos = ((seat - model.mySeat()) % 4 + 4) % 4;
+    return m_frames[pos].toScreen.mapRect(local);
 }
 
 QRectF TableLayout::handSlotLocal(int pos, int index, bool drawn, const TableModel& model) const

@@ -438,6 +438,20 @@ int TableView::riverRowCountForTest(int tiles)
     return TableLayout::riverRowsFor(tiles);
 }
 
+QRectF TableView::riverSlotForTest(int seat, int index) const
+{
+    // 与飞行动画终点同源（都是 m_layout.riverSlotScreen）——
+    // 「牌河固定左缘」这条不变量就是对它断言：同一行第一张的左沿必须与已打出张数无关。
+    return riverSlotScreen(seat, index);
+}
+
+QRectF TableView::riverSlotLocalForTest(int pos, int index) const
+{
+    if (!m_model || pos < 0 || pos > 3)
+        return QRectF();
+    return m_layout.riverSlotLocal((m_model->mySeat() + pos) % 4, index, *m_model);
+}
+
 QVector<qreal> TableView::meldLeftsForTest(int pos) const
 {
     if (!m_model || pos < 0 || pos > 3 || m_layout.m_tileW <= 0.0)
@@ -604,19 +618,11 @@ void TableView::paintRiver(QPainter& p, const SeatFrame& f, int seat, const QStr
     // 布局按**同一函数**预留行数（m_layout.m_riverRows），两者必须同源。
     const int rows = TableLayout::riverRowsFor(n);
 
-    // 牌河**左对齐**（用户要求）：所有行共用同一条左缘，行内不居中。
-    // 左缘按「本帧预留的最大列数」算，与 `TableLayout::riverSlotScreen` 用**同一把尺子**
-    // （那边算飞行动画终点、这边画牌，两处必须同源，否则动画终点与静态位置会差半个牌位）。
-    int reserveCols = 0;
-    for (int r = 0; r < rows; ++r) {
-        reserveCols = qMax(reserveCols, qMin(kRiverCols, n - r * kRiverCols));
-    }
-    qreal rowExtent = 0;
-    for (int c = 0; c < reserveCols; ++c) {
-        rowExtent += (c == 0 ? m_layout.m_riverH : m_layout.m_riverW) + cgap;
-    }
-    if (rowExtent > 0)
-        rowExtent -= cgap;
+    // 牌河**固定左缘**（用户要求）：先假定一行放满、算出那条最左沿，所有行都从那里起排，
+    // **行内不居中、也不随张数漂** —— 旧实现按「本帧已打出的最大列数」算左缘，
+    // 于是每多打一张，整条牌河就往左挪一点（第一张的位置自己会动）。
+    // ⚠ 这把尺子只有一份：`TableLayout::riverLeftU()`（飞行动画终点也读它，两处必须同源）。
+    const qreal leftU = m_layout.riverLeftU();
 
     for (int r = 0; r < rows; ++r) {
         QVector<int> idx;
@@ -630,7 +636,7 @@ void TableView::paintRiver(QPainter& p, const SeatFrame& f, int seat, const QStr
             continue;
 
         const qreal v = f.riverStartV + r * (m_layout.m_riverH + rgap);
-        qreal u = -rowExtent / 2.0;          // 与上一行同一条左缘
+        qreal u = leftU;                     // 每一行都从同一条固定左缘起排
         for (int i : idx) {
             const bool side = (i < sideways.size()) && sideways.at(i);
             const qreal w = side ? m_layout.m_riverH : m_layout.m_riverW;
