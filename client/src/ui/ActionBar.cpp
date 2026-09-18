@@ -34,6 +34,49 @@ QString joinTiles(const QStringList& tiles)
     return names.join(QStringLiteral(" "));
 }
 
+/**
+ * 按动作种类给按钮上色的样式表（用户要求：「附录提示不明显，增大按钮或添加不同按钮颜色
+ * 或按钮颜色闪烁」）。
+ *
+ * 三种语义档次，颜色与「有多该点」一致：
+ *   · `win`  —— 和牌（自摸 / 荣和）：金色，最醒目；
+ *   · `call` —— 鸣牌（吃 / 碰 / 杠 / 立直 / 九种九牌）：蓝色，次之；
+ *   · `pass` —— 跳过：灰底细边，刻意不抢眼（它是"什么都不做"，不该比动作更亮）。
+ *
+ * `armed` 为真时给一圈更粗的亮边 —— 由 `m_alertTimer` 交替切换，
+ * 效果就是"提示按钮在闪"。只改样式表、不重排布局，所以不会让牌桌重新布局。
+ */
+QString actionButtonStyle(const QString& type, bool armed)
+{
+    const bool isPass = (type == QLatin1String("pass"));
+    const bool isWin = (type == QLatin1String("tsumo") || type == QLatin1String("ron"));
+
+    QString bg, fg, border;
+    if (isPass) {
+        bg = QStringLiteral("#4A5A55");
+        fg = QStringLiteral("#D8E4DF");
+        border = QStringLiteral("#6B7C76");
+    } else if (isWin) {
+        bg = QStringLiteral("#E8B33A");
+        fg = QStringLiteral("#2A1F00");
+        border = armed ? QStringLiteral("#FFF3C4") : QStringLiteral("#A87A16");
+    } else {
+        bg = QStringLiteral("#2E6E8E");
+        fg = QStringLiteral("#EAF4FA");
+        border = armed ? QStringLiteral("#CFEBFA") : QStringLiteral("#1C4A62");
+    }
+    const int width = armed ? 3 : 1;
+    return QStringLiteral("QPushButton {"
+                          " background-color: %1; color: %2;"
+                          " border: %3px solid %4; border-radius: 6px;"
+                          " padding: 8px 18px; font-size: 16px; font-weight: bold; }"
+                          "QPushButton:hover { border-color: #FFFFFF; }"
+                          "QPushButton:disabled { background-color: #3A4642; color: #90A09A; }")
+        .arg(bg, fg)
+        .arg(width)
+        .arg(border);
+}
+
 } // namespace
 
 ActionBar::ActionBar(QWidget* parent)
@@ -53,6 +96,19 @@ ActionBar::ActionBar(QWidget* parent)
 
     m_tick.setInterval(250);
     connect(&m_tick, &QTimer::timeout, this, &ActionBar::onTick);
+
+    // 提示闪烁：交替切换按钮边框粗细/亮度（见 actionButtonStyle）。
+    // 只在"有询问且未提交"时跑，步进 550ms —— 比心跳慢、比倒计时肉眼可见，
+    // 关键是不重排布局（只换样式表），所以牌桌尺寸不会跟着跳。
+    m_alertTimer.setInterval(550);
+    connect(&m_alertTimer, &QTimer::timeout, this, [this]() {
+        m_alertArmed = !m_alertArmed;
+        for (QPushButton* b : m_buttons) {
+            const QString t = b->property("mjAction").toString();
+            if (!t.isEmpty())
+                b->setStyleSheet(actionButtonStyle(t, m_alertArmed));
+        }
+    });
 
     // 固定高度：按钮是动态增删的，若让布局自己撑高，牌桌控件的高度会随
     // 「有几个选项」变化，导致整张牌桌重新布局、牌面尺寸跳动。
@@ -79,6 +135,8 @@ void ActionBar::clearAsk()
     if (m_riichiMode)
         setRiichiMode(false);
     m_tick.stop();
+    m_alertTimer.stop();
+    m_alertArmed = false;
     rebuild();
 }
 
@@ -162,12 +220,14 @@ QJsonObject ActionBar::riichiCmd(const QString& tile) const
     return cmd;
 }
 
-QJsonObject ActionBar::discardCmd(const QString& tile) const
+QJsonObject ActionBar::discardCmd(const QString& tile, bool tsumogiri) const
 {
     QJsonObject cmd = actionCmd(QStringLiteral("discard"));
     if (cmd.isEmpty())
         return cmd;
     cmd.insert(QStringLiteral("tile"), tile);
+    // 摸切标记：服务端据此决定从**摸牌位**还是**暗手**取牌（见头文件里的说明）。
+    cmd.insert(QStringLiteral("tsumogiri"), tsumogiri);
     return cmd;
 }
 
@@ -273,9 +333,14 @@ void ActionBar::rebuild()
     m_layout->addWidget(m_title);
 
     if (!m_valid) {
+        m_alertTimer.stop();
+        m_alertArmed = false;
         refreshTitle();
         return;
     }
+    // 有询问才闪（闪烁 = 「轮到你操作了」的提示）
+    m_alertArmed = false;
+    m_alertTimer.start();
 
     for (const QJsonObject& opt : m_options) {
         const QString type = opt.value(QStringLiteral("type")).toString();
@@ -302,8 +367,11 @@ void ActionBar::rebuild()
             continue;
 
         QPushButton* btn = new QPushButton(label, this);
-        btn->setMinimumWidth(96);
+        btn->setMinimumWidth(120);
         btn->setFocusPolicy(Qt::NoFocus);
+        // 动作种类存成动态属性：闪烁时按它重算样式（不需要为每种动作各存一个指针）
+        btn->setProperty("mjAction", type);
+        btn->setStyleSheet(actionButtonStyle(type, false));
         m_layout->addWidget(btn);
         m_buttons.append(btn);
 

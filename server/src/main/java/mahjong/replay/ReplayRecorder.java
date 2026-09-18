@@ -90,6 +90,16 @@ public final class ReplayRecorder {
         return replay.id;
     }
 
+    /**
+     * 记录本体（只读用途：牌桌用它写下 `roomId`，见 {@code Table.playGame}）。
+     *
+     * <p>之所以不另开一个 `setRoom()`：房间号只是元信息里的一个字段，
+     * 走记录本体的公开字段比再加一层转调更不容易漏。
+     */
+    public Replay replay() {
+        return replay;
+    }
+
     public boolean truncated() {
         return replay.truncated;
     }

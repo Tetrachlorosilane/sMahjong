@@ -476,8 +476,11 @@ mahjong/
   `tsumo`/`ron` 时**只有「自动胡了」**能替玩家动 —— 自动摸切绝不切出能胡的那张牌、
   不吃碰杠绝不把到手荣和 `pass` 掉（用户点名的要求）。自动动作也必须走
   `ActionBar::actionCmd/discardCmd`（带 `ask_id`；询问失效时它们返回空对象 → 自动动作自动作废）。
-  **每小局结束（`round_end`）立刻 `resetAutoFlags()` 全关**；别改到 `round_start` 去清
-  —— 那会把玩家在局间重新打开（给下一局用）的设置吞掉。
+  **每小局结束（`round_end`）立刻 `resetAutoFlags()` 全关**，且**每小局开始（`round_start`）
+  再复位一次** —— 一小局两次（用户要求：局间结算期间点开的自动不许带进新的一局）。
+  ⚠ 这条**口径被用户改过**：原文是"只在 `round_end` 清，别改到 `round_start`"（担心吞掉
+  玩家在局间为下一局准备的设置）。现在是**刻意**两次都清；再看到 `round_start` 里那句
+  `resetAutoFlags()`，不要当成 bug 删掉。
   回归：`client --selftest` 的「自动开关」两组（含命令钩子抓真实报文）。
 - **「吃」必须由服务端自己校验顺子**（`Round.pickChiTiles`）：`want` 来自客户端，
   只查"手里有没有这两张"的话 1m+5m 能配 3m 吃下去，而 `Evaluator` 是按 `Meld.baseKind()+isRun()`
@@ -487,7 +490,10 @@ mahjong/
 - **接收侧的资源上限**：单条报文 1 MB（`Session.readBoundedLine` **边读边判**，绝不能等
   `readLine()` 收完再判）、同时在线上限 `Server.MAX_SESSIONS`、`fill_bots` ≤ 4、
   客户端传来的 `rules` 一律过 `Rules.clampToSane()`；**发牌种子**用 `SecureRandom` 基准 +
-  每局 SplitMix 打散（原 `nanoTime` 且逐局 +1 → 推出一局即推出整场）。
+  每局 SplitMix 打散，且**每小局都从"当前时刻毫秒数"重新起步**（`Table.nextRoundSeed()`）——
+  原来每局只有 `mixSeed(seedBase + 局序号)`，同一个 `seedBase` 推出来的一整场是确定序列
+  （推出一局即推出整场）。自检要可复现，所以它显式打开 `Table.debugDeterministicSeed`
+  走旧的确定岔路；**生产路径永远是时刻种子**，别把那条岔路当默认行为。
 - **局间时序：服务端先等满 5 秒（或所有人确认），再开下一局**：
   `round_end` → `sleepMs(roundDelayMs)` → `awaitRoundConfirm()`（广播 `round_wait{ms:5000}` 后等）
   → 下一局 `round_start`。**服务端侧两条铁律**（都踩过，见 §2.3-8）：
@@ -655,9 +661,10 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **554** 项、客户端自检 **586** 项、§4 的全部 L3 工具（含 `replay-test`），
-外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有两组"跑整场"的账：
-**杠后岭上摸牌**（`rinshanTests`）与**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）。
+**实测通过**：服务端自检 **578** 项、客户端自检 **625** 项、§4 的全部 L3 工具（含 `replay-test`），
+外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
+**杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
+与**开局前自选/随机座位**（`seatSwapTests`）。
 
 **未做 / 妥协**：
 
@@ -673,6 +680,10 @@ mahjong/
 - 赤宝牌支持 **0 / 3 张**（`rules.aka = 4` 即"两张赤五筒"受牌 id 编码限制，仍按 3 张处理）。
 - 古役默认关闭（`rules.koyaku`）。
 - 断线重连 `rejoin` 协议已实现，UI 未暴露入口。
+- **副露的赤宝选择只做到服务端 + 协议层**（`pons`/`kan` 带 `tiles` 就能精确选赤/普通五，
+  见 PROTOCOL §2.2 与 `SelfTest.meldAkaPickTests`）；**客户端没有"选赤宝"菜单** ——
+  `chi` 的选项里赤五本来就以 `0m` 列出（选它即用赤五），`pon` 直接点按钮走默认取法。
+  要补界面级选择，只需在发 `pon`/`kan` 时带上 `tiles`。
 - 观战复用牌桌界面，无专门观战 UI。
 - 字体**不打进 exe 资源**（同级 `fonts/` 够用）；**5 饼中央红点是刻意美术**，别当 bug。
 
@@ -722,7 +733,30 @@ mahjong/
   **任何一段含非法字元就整块不显示**，回退到原文字表示。
   宁可退回文字，也绝不让字体画出「看着像牌、其实是别的牌」的图。
 
-### 9.3 相关工具一览
+### 9.3 音效（离线合成 WAV + 后端分层）
+
+- **素材**：`client/assets/sfx/<名字>.wav` ×8（吃/碰/杠/立直/自摸/荣和/提示/摸牌），
+  由 `node tools/gen-sfx.mjs` **离线合成**（纯 PCM 加法合成，脚本进仓库 ⇒ 可复现）。
+  ⚠ 改了音效名要跑 `node tools/gen-sfx-qrc.mjs` 重生成 `assets/sfx.qrc`。
+- **为什么不用 MIDI**：Qt 没有 MIDI 合成器（Windows 上 QtMultimedia 只有 WMF/FFmpeg 后端），
+  自带 SoundFont 合成器要引第三方库 —— 与本项目"客户端只依赖 Qt"冲突。所以是**预渲染 PCM**。
+- **后端：优先 Qt Multimedia（`QSoundEffect`）**，跨平台统一走 Qt API（用户 2026-09 拍板：
+  客户端未来要支持多平台，体积不是约束）。**兜底分层**（三条路都编得过，见
+  `client/CMakeLists.txt` 与 `client/src/model/Sound.h`）：没有 Qt6::Multimedia 时 Windows 退回
+  `winmm` 的 `PlaySound`；再没有则静默（设置里开关置灰并写明原因）。
+  ⚠ 走 Multimedia 会让分发多出 `Qt6Multimedia.dll` + FFmpeg 后端（约 20 MB）与
+  `plugins/multimedia/`，`build.ps1` 已把这三样纳入必需清单与"已就绪"判断；
+  **许可义务同步更新**（Qt Multimedia 仍是 LGPLv3，但它捆绑的 FFmpeg 是另一家的组件）：
+  `build.ps1` 会把上游 Qt 安装根 `Licenses/` 的文本拷到 `dist/licenses/qt/` —— 见
+  `docs/THIRD-PARTY.md` §1/§3 与 `client/licenses/NOTICE.txt`（1b 节），**别删那个目录**。
+- **加载顺序与牌面同约定**：材质包 `sfx/` → exe 同级 `sfx/` → qrc → 静音。
+  ⚠ `assets/sfx.qrc` 的 **prefix 与条目名必须与源码里的 `:/sfx/<名字>.wav` 逐字对齐**
+  （现在 = `prefix="/"` + `<file>sfx/<名字>.wav</file>`）：对不上时"qrc 兜底"整条静默失效，
+  自检里有一条断言专钉这件事。
+- 开关/音量在 `settings.json`（`sfx` / `sfx_volume`），关掉时**不去读文件**。
+- 触发点在 `MainWindow::onEvent`（按事件与 `meld.kind` 分派），不在服务端 —— 音效是纯客户端表现。
+
+### 9.4 相关工具一览
 
 `tools/gen-tile-placeholders.mjs`（生成占位符 SVG，不覆盖已有）· `tools/inline-svg-style.ps1`（把 CSS 内联成表现属性）·
 `tools/dump-otf-features.mjs`（列 GSUB 特性）/ `--gentiles` / `--fontprobe`。

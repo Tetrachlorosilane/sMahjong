@@ -474,6 +474,55 @@ public final class Session {
                 t.broadcastRoom();
                 break;
             }
+            case "take_seat": {
+                // 开局前**自选座位**（用户要求）：把自己的 session 与目标座位上的住户**互换**。
+                // 门风就是座次（东=0/南=1/西=2/北=3），所以"选座位"等价于"选门风"。
+                //
+                // 三条边界：
+                //   · 只有**入座**的人能换（观战者 seat=-1 不能）；
+                //   · 牌局进行中不许换（`Round` 里手牌/牌河已经按座位发完，换座会让两家错位）；
+                //   · 目标是**机器人**时直接顶掉它（机器人没有连接，不需要跟它交换）。
+                Table t = table;
+                if (t == null || seat < 0) {
+                    sendError("no_room");
+                    return;
+                }
+                if (t.playing) {
+                    Log.warn("忽略牌局进行中的 take_seat");
+                    return;
+                }
+                final int want = Json.i(msg, "seat", -1);
+                if (want < 0 || want >= 4 || want == seat) {
+                    sendError("bad_seat");
+                    return;
+                }
+                t.swapSeats(seat, want);
+                seat = want;
+                send(Json.obj("ev", "room_joined", "room", t.id, "seat", want));
+                t.broadcastRoom();
+                break;
+            }
+            case "shuffle_seats": {
+                // 房主一键**随机洗座**（随机门风）。洗座会打乱准备状态，所以洗完全部取消准备，
+                // 让四家重新确认 —— 否则"准备了却被换到别的风"会让人以为点错了。
+                Table t = table;
+                if (t == null || pid != t.hostPid) {
+                    sendError("not_host");
+                    return;
+                }
+                if (t.playing) {
+                    Log.warn("忽略牌局进行中的 shuffle_seats");
+                    return;
+                }
+                t.shuffleSeats();
+                // 自己的座位号可能变了，重新认领
+                seat = t.seatOfPid(pid);
+                if (seat >= 0) {
+                    send(Json.obj("ev", "room_joined", "room", t.id, "seat", seat));
+                }
+                t.broadcastRoom();
+                break;
+            }
             case "start_game": {
                 Table t = table;
                 if (t == null || seat < 0) {

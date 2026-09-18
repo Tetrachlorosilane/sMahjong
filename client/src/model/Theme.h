@@ -86,6 +86,15 @@ public:
     QByteArray fontData() const { return m_font; }
     QString fontFileName() const { return m_fontName; }
 
+    // ---- 音效（用户要求：音效同样进入材质包可替换范围）----
+    /**
+     * 包内 `sfx/<name>.wav` 的内容；没有返回空。
+     *
+     * <p>音效是**逐个文件**对应的（与牌面同一套约定）：包里有 `pon.wav`
+     * 就只换"碰"，其余用默认音效 —— 不做"抓一个文件顶上所有音效"那种事。
+     */
+    QByteArray packSfx(const QString& name) const;
+
     /** 清掉所有缓存与已载入的素材（换包 / 自检里复原用）。 */
     void clear();
     /** 只清**解码缓存**（保留已载入的包）—— 换素材后由 `TileRenderer` 调用。 */

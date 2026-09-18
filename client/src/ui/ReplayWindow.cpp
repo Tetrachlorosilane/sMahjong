@@ -269,11 +269,17 @@ void ReplayWindow::onEvent(const QJsonObject& ev)
             for (const QJsonValue& n : o.value(QStringLiteral("names")).toArray()) {
                 names << n.toString();
             }
+            // 房间号（老服务端没有这个字段 → 留空，文案里那一截自然消失）。
+            // 有了它才能按"哪一桌打的"找刚才那一场（房间保存牌谱）。
+            const QString room = o.value(QStringLiteral("room")).toString();
             auto* item = new QListWidgetItem(
                     lang::t(QStringLiteral("ui.replay.list_item"))
                             .arg(id, ts, names.join(QStringLiteral("/")))
                             .arg(o.value(QStringLiteral("rounds")).toInt())
-                            .arg(o.value(QStringLiteral("entries")).toInt()));
+                            .arg(o.value(QStringLiteral("entries")).toInt())
+                            .arg(room.isEmpty() ? QString()
+                                                : lang::t(QStringLiteral("ui.replay.list_room"))
+                                                          .arg(room)));
             item->setData(Qt::UserRole, id);
             m_list->addItem(item);
         }

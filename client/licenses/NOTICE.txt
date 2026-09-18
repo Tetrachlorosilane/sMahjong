@@ -10,7 +10,9 @@
 本程序以**动态链接**方式使用 Qt，随 exe 同目录分发其共享库：
 
     Qt6Core.dll  Qt6Gui.dll  Qt6Widgets.dll  Qt6Network.dll  Qt6Svg.dll
+    Qt6Multimedia.dll
     platforms\qwindows.dll  styles\qmodernwindowsstyle.dll  tls\*.dll
+    multimedia\ffmpegmediaplugin.dll  multimedia\windowsmediaplugin.dll
 
 * 这些都是**独立的 .dll 文件**，因此**可被替换**：你可以自行编译同版本（或 ABI 兼容版本）
   的 Qt 共享库覆盖它们，从而改变本程序所使用的 Qt。本程序不做任何阻止替换的校验。
@@ -18,11 +20,25 @@
 * Qt 的完整源码可从 https://download.qt.io/ 获取（本项目使用 Qt 6.11.2，
   对应源码包 qt-everywhere-src-6.11.2.tar.xz）。
 * 本项目**未使用**任何「仅 GPLv3」的 Qt 模块（如 Qt Quick 3D、Qt Virtual Keyboard、
-  Qt MQTT、Qt HTTP Server、Qt Graphs、Qt Wayland Compositor 等）。
+  Qt MQTT、Qt HTTP Server、Qt Graphs、Qt Wayland Compositor 等）；
+  Qt Multimedia **不在**该名单里，它同样是 LGPLv3 模块。
 * 许可全文见同目录 **Qt-LICENSE.txt**（含 GNU LGPLv3 与 GNU GPLv3 全文；
   LGPLv3 是 GPLv3 的补充条款，两者需一并提供）。
 * 第三方组件版权声明见同目录 **Qt-Copyright.txt**。
 * Qt 是 The Qt Company Ltd. 的商标。
+
+1b) FFmpeg —— Qt Multimedia 捆绑的媒体后端
+────────────────────────────────────────────────────────────
+音效（吃/碰/杠/立直/自摸/荣和/提示/摸牌）通过 Qt Multimedia 的 QSoundEffect 播放，
+而 Qt6Multimedia.dll 依赖 Qt 官方二进制包捆绑的一组 FFmpeg 库：
+
+    avcodec-*.dll  avformat-*.dll  avutil-*.dll  swresample-*.dll  swscale-*.dll
+
+* FFmpeg 自身采用 **LGPLv2.1 或更高（默认构建）**，其源码见 https://ffmpeg.org/ 。
+* Qt 官方捆绑的那一份**具体构建配置未在上游文档中给出确定性说明**，因此本分发把
+  Qt 安装目录 `Licenses/` 下的全部文本原样带在 **licenses/qt/**（COPYING.txt、
+  Copyright.txt、LICENSE、LICENSE.FDL）作为许可来源；**请勿删除该目录**。
+* 这些 FFmpeg 库同样是**独立 .dll**，可以被替换。
 
 ────────────────────────────────────────────────────────────
 2) MinGW 运行时（libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll）

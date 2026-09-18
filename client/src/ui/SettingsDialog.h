@@ -13,8 +13,10 @@
 #include "model/Settings.h"
 
 class QLabel;
+class QCheckBox;
 class QLineEdit;
 class QPushButton;
+class QSlider;
 class QSpinBox;
 
 class SettingsDialog : public QDialog
@@ -49,6 +51,10 @@ private:
     QSpinBox* m_port = nullptr;
     QLineEdit* m_name = nullptr;
     QLineEdit* m_pack = nullptr;
+    // 音效：开关 + 音量 + 试听（后端不可用时置灰，并写明原因）
+    QCheckBox* m_sfxOn = nullptr;
+    QSlider* m_sfxVolume = nullptr;
+    QLabel* m_sfxPercent = nullptr;
     QLabel* m_packStatus = nullptr;
     QLabel* m_pathLabel = nullptr;
 };
