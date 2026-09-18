@@ -29,6 +29,11 @@ export const MAP = {
     '移除机器人': 'ui.main.remove_bot',
     '开始游戏': 'ui.main.start_game',
     '离开房间': 'ui.main.leave_room',
+    // 开局前自选座位（门风 = 座次）+ 随机洗座
+    '坐这（%1）': 'ui.main.take_seat',
+    '与那一家的座位互换（门风就是座次：東=起家）': 'ui.main.take_seat_tip',
+    '随机洗座': 'ui.main.shuffle_seats',
+    '打乱四家座位（随机门风）；洗完所有人重新准备': 'ui.main.shuffle_seats_tip',
     '发送聊天…': 'ui.main.chat_placeholder',
     '发送': 'ui.main.send',
     '没有可移除的机器人': 'ui.main.no_bot_to_remove',

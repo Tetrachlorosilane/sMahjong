@@ -84,6 +84,8 @@
 {"cmd":"join_room","room":"AB12"}                 // 加入房间（作为玩家；满员则成为观战者）
 {"cmd":"leave_room"}
 {"cmd":"ready","ready":true}                      // 准备/取消准备
+{"cmd":"take_seat","seat":2}                      // **开局前自选座位**（门风 = 座次，见下）
+{"cmd":"shuffle_seats"}                           // 房主：随机洗座（随机门风），洗完所有人重新准备
 {"cmd":"add_bot"}                                 // 房主给空位补一个机器人
 {"cmd":"remove_bot","seat":2}                     // 房主移除机器人
 {"cmd":"start_game"}                              // 房主（4 人齐且全 ready 时）开始
@@ -94,6 +96,19 @@
 ```
 
 `rules` 见 §5。
+
+**座位与门风（`take_seat` / `shuffle_seats`）**
+
+门风**就是**座次（`seat` 0=東/起家、1=南、2=西、3=北），所以"选座位"与"选门风"是同一件事。
+两个命令都只在**开局前**有效：
+
+- `take_seat`：把自己与目标座位的住户**互换**（目标是真人就两家对调，是机器人就机器人搬过去）
+  —— 语义是互换而**不是抢占**，任何情况下都不会把别人挤出去。成功后服务端回
+  `room_joined`（新的座位号）并广播 `room`。座位号非法或牌局已开始：`error.code = bad_seat`
+  （前者）/ 静默忽略（后者，同时记日志）。
+- `shuffle_seats`：**房主专用**（非房主回 `not_host`）。用 CSPRNG 洗四家座位，
+  洗完把所有人的 `ready` 清成 false（机器人视为已准备）—— 否则"准备了却被换了风"会让人困惑。
+- 两端都要能接受**没有**这两个命令的对端：老服务端回 `unknown_cmd`，老客户端不发它们。
 
 ### 2.2 对局动作
 
@@ -186,7 +201,7 @@
 
 `error.code` 的取值（全部 ASCII，文案在客户端 `error.*`）：
 `too_large` / `bad_json` / `internal` / `need_hello` / `bad_token` / `in_room` /
-`no_room` / `not_host` / `unknown_cmd`（`arg` = 那个命令名）。
+`no_room` / `not_host` / `bad_seat` / `unknown_cmd`（`arg` = 那个命令名）。
 
 ### 3.2 开局
 

@@ -1,5 +1,6 @@
 {
   "error.bad_json": "JSON 解析失败",
+  "error.bad_seat": "座位号不合法（只能是 0~3）",
   "error.bad_token": "重连凭证无效",
   "error.in_room": "已在房间中",
   "error.internal": "服务端内部错误",
@@ -413,5 +414,9 @@
   "ui.settings.sfx": "音效",
   "ui.settings.sfx_on": "开启音效",
   "ui.settings.sfx_test": "试听",
-  "ui.settings.sfx_unavailable": "这个客户端构建没有音频后端（既没有 Qt Multimedia，也没链 Windows winmm），音效不可用。"
+  "ui.settings.sfx_unavailable": "这个客户端构建没有音频后端（既没有 Qt Multimedia，也没链 Windows winmm），音效不可用。",
+  "ui.main.shuffle_seats": "随机洗座",
+  "ui.main.shuffle_seats_tip": "打乱四家座位（随机门风）；洗完所有人重新准备",
+  "ui.main.take_seat": "坐这（%1）",
+  "ui.main.take_seat_tip": "与那一家的座位互换（门风就是座次：東=起家）"
 }

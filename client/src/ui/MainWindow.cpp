@@ -43,6 +43,15 @@ QString evName(const QJsonObject& ev)
 // onActionReady() 直接丢弃 —— 不需要自己维护「已自动应答过」的标志。
 constexpr int kAutoDelayMs = 260;
 
+/**
+ * 座位号 → 门风字形（0=东/起家、1=南、2=西、3=北）。
+ *
+ * 门风**就是**座次（`Round.seatWind()` 按 `(seat - dealer + 4) % 4` 推），所以"选座位"
+ * 与"选门风"是同一件事 —— 自选座位按钮上直接写门风，玩家一眼看得出自己会坐哪。
+ * 这里是字形不是文案，所以不进语言文件（同 `TileRenderer` 里的「東」）。
+ */
+const char* const SEAT_WIND[4] = { "东", "南", "西", "北" };
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -137,8 +146,16 @@ void MainWindow::buildWaitingPage()
     auto* seatBox = new QGroupBox(lang::t("ui.main.seat"), m_waitPage);
     auto* seatLayout = new QVBoxLayout(seatBox);
     for (int i = 0; i < 4; ++i) {
+        auto* row = new QHBoxLayout();
         m_seatLabels[i] = new QLabel(lang::t("ui.main.seat_empty").arg(i), seatBox);
-        seatLayout->addWidget(m_seatLabels[i]);
+        row->addWidget(m_seatLabels[i], 1);
+        // 开局前**自选座位**（门风就是座次：0=东/起家）。按钮在牌局开始后自动置灰。
+        m_takeSeatBtn[i] = new QPushButton(lang::t("ui.main.take_seat").arg(SEAT_WIND[i]), seatBox);
+        m_takeSeatBtn[i]->setToolTip(lang::t("ui.main.take_seat_tip"));
+        m_takeSeatBtn[i]->setFocusPolicy(Qt::NoFocus);
+        connect(m_takeSeatBtn[i], &QPushButton::clicked, this, [this, i]() { takeSeat(i); });
+        row->addWidget(m_takeSeatBtn[i]);
+        seatLayout->addLayout(row);
     }
     root->addWidget(seatBox);
 
@@ -147,11 +164,14 @@ void MainWindow::buildWaitingPage()
     m_addBotBtn = new QPushButton(lang::t("ui.main.add_bot"), m_waitPage);
     m_removeBotBtn = new QPushButton(lang::t("ui.main.remove_bot"), m_waitPage);
     m_startBtn = new QPushButton(lang::t("ui.main.start_game"), m_waitPage);
+    m_shuffleBtn = new QPushButton(lang::t("ui.main.shuffle_seats"), m_waitPage);
+    m_shuffleBtn->setToolTip(lang::t("ui.main.shuffle_seats_tip"));
     auto* leaveBtn = new QPushButton(lang::t("ui.main.leave_room"), m_waitPage);
     btnRow->addWidget(m_readyBtn);
     btnRow->addWidget(m_addBotBtn);
     btnRow->addWidget(m_removeBotBtn);
     btnRow->addWidget(m_startBtn);
+    btnRow->addWidget(m_shuffleBtn);
     btnRow->addStretch(1);
     btnRow->addWidget(leaveBtn);
     root->addLayout(btnRow);
@@ -200,6 +220,12 @@ void MainWindow::buildWaitingPage()
     connect(m_startBtn, &QPushButton::clicked, this, [this]() {
         QJsonObject cmd;
         cmd.insert(QStringLiteral("cmd"), QStringLiteral("start_game"));
+        sendCommand(cmd);
+    });
+    // 随机洗座（随机门风）：房主一键打乱四家座位；洗完大家重新准备。
+    connect(m_shuffleBtn, &QPushButton::clicked, this, [this]() {
+        QJsonObject cmd;
+        cmd.insert(QStringLiteral("cmd"), QStringLiteral("shuffle_seats"));
         sendCommand(cmd);
     });
     connect(leaveBtn, &QPushButton::clicked, this, &MainWindow::onLeaveRoom);
@@ -319,6 +345,11 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
             }
         }
         m_seatLabels[i]->setText(text);
+        // 自选座位按钮：牌局进行中不可用；已经是我坐的那一格也不可用（点了没意义）
+        const bool playing = room.value(QStringLiteral("playing")).toBool();
+        if (m_takeSeatBtn[i]) {
+            m_takeSeatBtn[i]->setEnabled(!playing && i != m_model.mySeat());
+        }
     }
 
     bool full = true;
@@ -331,6 +362,12 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
     m_addBotBtn->setEnabled(host);
     m_removeBotBtn->setEnabled(host);
     m_startBtn->setToolTip(host ? QString() : lang::t("ui.main.host_only_start"));
+    // 洗座只有房主能用，且只在开局前
+    if (m_shuffleBtn) {
+        m_shuffleBtn->setEnabled(host && !room.value(QStringLiteral("playing")).toBool());
+        m_shuffleBtn->setToolTip(host ? lang::t("ui.main.shuffle_seats_tip")
+                                      : lang::t("ui.main.host_only_start"));
+    }
 }
 
 void MainWindow::updateScorePanel()
@@ -396,6 +433,23 @@ void MainWindow::onChatSend()
     cmd.insert(QStringLiteral("text"), text);
     sendCommand(cmd);
     edit->clear();
+}
+
+/**
+ * 开局前自选座位（门风 = 座次：0=东/起家）。
+ *
+ * 服务端的语义是**互换**：目标是真人时两家对调，是机器人时机器人搬过去 ——
+ * 所以这个按钮永远不会把别人挤出去，玩家可以放心点。
+ */
+void MainWindow::takeSeat(int seat)
+{
+    if (seat < 0 || seat > 3) {
+        return;
+    }
+    QJsonObject cmd;
+    cmd.insert(QStringLiteral("cmd"), QStringLiteral("take_seat"));
+    cmd.insert(QStringLiteral("seat"), seat);
+    sendCommand(cmd);
 }
 
 void MainWindow::onLeaveRoom()

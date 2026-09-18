@@ -502,6 +502,117 @@ public final class Table implements Runnable {
         return -1;
     }
 
+    /**
+     * 该 pid 坐在哪个座位（-1 = 不在座）。洗座后各连接要重新认领自己的座位号。
+     *
+     * <p>判据用 `pid != 0` 而不是 `occupied()`：机器人是 `pid = 0 / bot = true`
+     * （PROTOCOL §3.1），而这里问的是"哪个**人类连接**在哪个座位"。
+     */
+    public int seatOfPid(long wantPid) {
+        if (wantPid == 0) {
+            return -1;
+        }
+        for (Seat s : seats) {
+            if (s.pid == wantPid) {
+                return s.index;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 互换两个座位上的住户（**开局前的自选座位**，用户要求）。
+     *
+     * <p>门风就是座次（0=东/起家），所以"选座位"就是"选门风"。
+     *
+     * <p>语义是**互换**而不是"抢占"：目标是真人时两家对调（谁也不会被踢出去，
+     * 这点很重要 —— 否则"选座"会变成一种把别人挤走的操作）；目标是机器人时
+     * 机器人本来就没有连接，等价的互换就是这台机器搬过去。
+     *
+     * <p>换完清掉两家的 `ready`：座位变了，双方的"我准备好了"不再是对同一个位置说的。
+     */
+    public void swapSeats(int a, int b) {
+        if (a < 0 || a > 3 || b < 0 || b > 3 || a == b) {
+            return;
+        }
+        swapFieldsOnly(a, b);
+        // 座位变了，"我准备好了"不再是对同一个位置说的 —— 两家都要重新确认。
+        // 机器人视为立即准备（与 `awaitRoundConfirm` 的约定一致），别让换座把机器人卡住。
+        seats[a].ready = seats[a].bot;
+        seats[b].ready = seats[b].bot;
+        lastScores[a] = seats[a].score;
+        lastScores[b] = seats[b].score;
+        Log.info("牌桌 " + id + " 换座：" + a + " <-> " + b);
+    }
+
+    /**
+     * 随机洗座（**随机门风**，用户要求，房主触发）。
+     *
+     * <p>用 `SecureRandom` 洗牌：门风是先手信息（谁做庄、谁先摸），
+     * 拿可预测的随机源等于是把先后手送给猜得到的人。
+     */
+    public void shuffleSeats() {
+        java.security.SecureRandom rnd = new java.security.SecureRandom();
+        for (int i = 3; i > 0; i--) {
+            swapFieldsOnly(i, rnd.nextInt(i + 1));
+        }
+        for (Seat s : seats) {
+            s.ready = s.bot;      // 洗座后人类要重新准备（否则"准备了却被换了风"很困惑）
+        }
+        for (int i = 0; i < 4; i++) {
+            lastScores[i] = seats[i].score;
+        }
+        Log.info("牌桌 " + id + " 随机洗座完成");
+    }
+    /** 互换两个座位的**住户信息**（不含座位号本身）。 */
+    private static void swapField(Seat a, Seat b, int f) {
+        switch (f) {
+            case 0: {
+                Session t = a.session;
+                a.session = b.session;
+                b.session = t;
+                break;
+            }
+            case 1: {
+                long t = a.pid;
+                a.pid = b.pid;
+                b.pid = t;
+                break;
+            }
+            case 2: {
+                String t = a.name;
+                a.name = b.name;
+                b.name = t;
+                break;
+            }
+            case 3: {
+                boolean t = a.bot;
+                a.bot = b.bot;
+                b.bot = t;
+                break;
+            }
+            case 4: {
+                int t = a.score;
+                a.score = b.score;
+                b.score = t;
+                break;
+            }
+            default: {
+                int t = a.timeBankMs;
+                a.timeBankMs = b.timeBankMs;
+                b.timeBankMs = t;
+                break;
+            }
+        }
+    }
+
+    /** 只换住户、不动座位号的版本（洗座用；`swapSeats` 逐字段调用它）。 */
+    private void swapFieldsOnly(int a, int b) {
+        for (int f = 0; f <= 5; f++) {
+            swapField(seats[a], seats[b], f);
+        }
+    }
+
     public void addBot(int at) {
         int idx = at >= 0 ? at : firstEmptySeat();
         // `idx >= 4` 也要挡：`{"cmd":"add_bot","seat":99}` 会直接 seats[99] 越界（AUDIT F19）。

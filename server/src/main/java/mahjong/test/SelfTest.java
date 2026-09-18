@@ -70,6 +70,7 @@ public final class SelfTest {
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
+        seatSwapTests();
         nagashiLivePathTest();
         simulationTest();
         rinshanTests();
@@ -1470,6 +1471,59 @@ public final class SelfTest {
      * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
      * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
      */
+    /**
+     * 开局前的**自选座位 / 随机洗座**（用户要求：门风 = 座次，可自选或随机）。
+     *
+     * <p>三条不变量：
+     *   ① `take_seat` 是**互换**——两家的住户信息整体对调，谁也不被挤掉；
+     *   ② 换过座位的两家 `ready` 都要清掉（座位变了，"准备好了"不再指同一个位置）；
+     *   ③ `shuffle_seats` 之后**四家的住户正好是原来那四家**（一个不多一个不少），
+     *      否则洗座会凭空产生或吞掉一个玩家（这是最容易写错的地方：逐字段交换漏一项）。
+     */
+    private static void seatSwapTests() {
+        Table t = new Table("SEAT", "座位桌", Rules.defaults());
+        // 四个座位放四个"人"（名字/pid 各不相同，便于查住户是否整套搬过去）。
+        // ⚠ pid 不能用 0：`Seat.occupied()` 把 pid==0 当成"空位"（机器人也用 0），
+        //   用 0 会让"按 pid 反查座位"恒返回 -1。
+        for (int i = 0; i < 4; i++) {
+            t.seats[i].name = "P" + i;
+            t.seats[i].pid = 101 + i;
+            t.seats[i].score = 25000 + i;
+            t.seats[i].ready = true;
+        }
+        t.swapSeats(0, 2);
+        eq("换座：座位 0 的住户搬到 2", t.seats[2].name, "P0");
+        eq("换座：座位 2 的住户搬到 0", t.seats[0].name, "P2");
+        eq("换座：pid 跟着走", t.seats[0].pid, 103L);
+        eq("换座：分数跟着走", t.seats[0].score, 25002);
+        eq("换座：两家都要重新准备（0）", t.seats[0].ready, false);
+        eq("换座：两家都要重新准备（2）", t.seats[2].ready, false);
+        eq("换座：没动的座位不受影响", t.seats[1].name, "P1");
+        // 按 pid 反查座位（洗座后各连接靠它重新认领）
+        eq("按 pid 反查座位", t.seatOfPid(103L), 0);
+        eq("按 pid 查不到时返回 -1", t.seatOfPid(999L), -1);
+        // 非法参数不改变任何状态
+        t.swapSeats(0, 0);
+        t.swapSeats(-1, 2);
+        t.swapSeats(0, 9);
+        eq("非法换座参数不改状态", t.seats[0].name, "P2");
+
+        // 洗座：住户集合不变（只是换了位置）
+        t.shuffleSeats();
+        String[] names = new String[4];
+        for (int i = 0; i < 4; i++) {
+            names[i] = t.seats[i].name;
+        }
+        java.util.Arrays.sort(names);
+        eq("洗座后四家住户一个不多一个不少",
+                String.join(",", names), "P0,P1,P2,P3");
+        boolean allReady = false;   // 人类座位（这里都是"人"）必须重新准备
+        for (int i = 0; i < 4; i++) {
+            allReady = allReady || t.seats[i].ready;
+        }
+        eq("洗座后人类座位重新准备", allReady, false);
+    }
+
     private static void akaRuleTests() {
         int[] def = new mahjong.core.Wall(20240914L, Rules.defaults()).debugAllTiles();
         int red = 0;
