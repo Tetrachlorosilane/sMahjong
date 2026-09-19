@@ -582,13 +582,8 @@ public final class Evaluator {
         // 累计役满：M.League 不采用 —— 番数 ≥13 且没有役满役时只按**三倍满**（6000）计
         // （docs/日本麻将.md：M.League 以三倍满为普通役的上限）
         if (s.han >= 13) {
-            if (r.kazoeYakuman) {
-                s.base = 8000;
-                s.limit = "累计役满";
-            } else {
-                s.base = 6000;
-                s.limit = "三倍满";
-            }
+            s.base = basePoints(s.han, s.fu, r);
+            s.limit = r.kazoeYakuman ? "累计役满" : "三倍满";
             s.fu = 0;
             s.valid = hanYaku >= r.minHan;
             if (!s.valid) {
@@ -610,29 +605,56 @@ public final class Evaluator {
         s.valid = true;
         if (s.han >= 5) {
             if (s.han >= 11) {
-                s.base = 6000;
                 s.limit = "三倍满";
             } else if (s.han >= 8) {
-                s.base = 4000;
                 s.limit = "倍满";
             } else if (s.han >= 6) {
-                s.base = 3000;
                 s.limit = "跳满";
             } else {
-                s.base = 2000;
                 s.limit = "满贯";
             }
+            s.base = basePoints(s.han, s.fu, r);
         } else {
-            int b = s.fu * (1 << (2 + s.han));
-            // 切上满贯：3 番 60 符 / 4 番 30 符（基本点都是 1920）按满贯计 —— M.League 采用，
-            // 《雀魂》《天凤》不采用（此时 1920 就照 1920 收，见 docs/日本麻将.md 打点表前的说明）
-            if (b > 2000 || (r.kiriageMangan && b >= 1920)) {
-                b = 2000;
+            s.base = basePoints(s.han, s.fu, r);
+            if (s.base >= 2000) {
                 s.limit = "满贯";
             }
-            s.base = b;
         }
         return s;
+    }
+
+    /**
+     * 番数 + 符数 → **基本点**（满贯以上各档 + 累计役满的规则取舍 + 切上满贯）。
+     *
+     * <p>为什么单独暴露：打点表的"逐格比对"（`SelfTest.scoreTableTests`）原来在测试里**抄了一份**
+     * 这个映射，于是 `Evaluator` 真正用的档位映射（6〜12 番：跳满 / 倍满 / 三倍满）**从来没被断言过**
+     * —— 副本与实现漂移也发现不了。现在实局判定与打点表共用这一份。
+     *
+     * <p>⚠ `han` 是**总番数**（含宝牌）；`rules` 影响两处：13 番档（累计役满 8000 / 三倍满 6000）
+     * 与切上满贯（3 番 60 符 / 4 番 30 符按满贯）。所以取舍类断言必须**显式传规则集**。
+     * ⚠ 役满**不走这里**（役满是 `8000 × 倍数`，符数与番数全部失效，见上面的役满分支）。
+     */
+    public static int basePoints(int han, int fu, Rules rules) {
+        if (han >= 13) {
+            return rules.kazoeYakuman ? 8000 : 6000;
+        }
+        if (han >= 11) {
+            return 6000;
+        }
+        if (han >= 8) {
+            return 4000;
+        }
+        if (han >= 6) {
+            return 3000;
+        }
+        if (han >= 5) {
+            return 2000;
+        }
+        int b = fu * (1 << (2 + han));
+        if (b > 2000 || (rules.kiriageMangan && b >= 1920)) {
+            return 2000;
+        }
+        return b;
     }
 
     // ------------------------------------------------------------------ 符

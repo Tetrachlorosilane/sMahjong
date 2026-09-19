@@ -64,6 +64,7 @@ public final class SelfTest {
         roundScoringTests();
         roundSeedTests();
         scoreTableTests();
+        fuOpenTests();
         paymentTests();
         notenPenaltyTests();
         fourKanAbortTests();
@@ -1904,23 +1905,23 @@ public final class SelfTest {
     }
     // ------------------------------------------------------------- 打点表
 
+    /**
+     * 打点表用的规则集：**《天凤》**（累计役满开、切上满贯关）。
+     *
+     * <p>⚠ 这张表的期望值是按《天凤》口径列的（13 番 = 累计役满 32000、3 番 60 符 = 7700 不切上），
+     * 所以必须**显式**声明用哪套规则 —— 否则默认预设一换（现在是 M.League），
+     * 这张表就会在"13 番该是 32000 还是 24000"上悄悄改变含义。
+     */
+    private static final Rules TABLE_RULES = preset("tenhou");
+
+    /**
+     * 番数 + 符数 → 基本点。
+     *
+     * <p>⚠ 它**不再**在这里抄一份映射，而是调 {@link Evaluator#basePoints}：
+     * 原来那份副本让 `Evaluator` 真正的档位映射（6〜12 番）成了测试盲区（审计 S-68）。
+     */
     private static int base(int han, int fu) {
-        if (han >= 13) {
-            return 8000;
-        }
-        if (han >= 11) {
-            return 6000;
-        }
-        if (han >= 8) {
-            return 4000;
-        }
-        if (han >= 6) {
-            return 3000;
-        }
-        if (han >= 5) {
-            return 2000;
-        }
-        return Math.min(fu * (1 << (2 + han)), 2000);
+        return Evaluator.basePoints(han, fu, TABLE_RULES);
     }
 
     private static Evaluator.HandScore fake(int han, int fu) {
@@ -1937,12 +1938,93 @@ public final class SelfTest {
                 .delta[(winner + 1) % 4];
     }
 
+    /** 闲家自摸的「庄付/闲付」两个金额（绝对值），形如 {@code "2000/1000"} 便于逐格比对。 */
+    private static String tsumoNon(int han, int fu) {
+        Payments.Result p = Payments.compute(fake(han, fu), 1, -1, 0, 0, 0, true, -1, 0);
+        return (-p.delta[0]) + "/" + (-p.delta[2]);
+    }
+
+    /** 庄家自摸的「每家付」金额。 */
+    private static int tsumoDealer(int han, int fu) {
+        Payments.Result p = Payments.compute(fake(han, fu), 0, -1, 0, 0, 0, true, -1, 0);
+        return -p.delta[1];
+    }
+
+    /** 指定规则集 + 宝牌指示牌的和牌评价（打点表里"档位"要真手牌覆盖时用）。 */
+    private static Evaluator.HandScore evalDora(String hand, String win, boolean tsumo,
+                                                boolean riichi, String doraInd, Rules rules) {
+        int[] c = counts(hand);
+        WinContext ctx = new WinContext();
+        ctx.rules = rules;
+        ctx.seat = 1;
+        ctx.dealerSeat = 0;
+        ctx.roundWind = 27;
+        ctx.tsumo = tsumo;
+        ctx.menzen = true;
+        ctx.riichi = riichi;
+        ctx.winKind = Tiles.parseKind(win);
+        ctx.doraIndicators = new ArrayList<>();
+        for (int id : parse(doraInd)) {
+            ctx.doraIndicators.add(Tiles.kind(id));
+        }
+        ctx.uraIndicators = new ArrayList<>();
+        ctx.allTileIds = parse(hand);
+        return Evaluator.evaluate(ctx, c, new ArrayList<>(), ctx.winKind);
+    }
+
+    // ------------------------------------------------------------- 带副露的符（S-70）
+
+    /** 碰（明刻）。 */
+    private static Meld pon(String tile) {
+        int k = Tiles.parseKind(tile);
+        return new Meld(Meld.Kind.PON, new int[]{Tiles.id(k, 1), Tiles.id(k, 2), Tiles.id(k, 3)},
+                0, Tiles.id(k, 0));
+    }
+
+    /** 吃（顺子，`tiles` 三张牌码）。 */
+    private static Meld chi(String a, String b, String c) {
+        int[] t = {Tiles.id(Tiles.parseKind(a), 1), Tiles.id(Tiles.parseKind(b), 1),
+                   Tiles.id(Tiles.parseKind(c), 1)};
+        java.util.Arrays.sort(t);
+        return new Meld(Meld.Kind.CHI, t, 0, t[0]);
+    }
+
+    /** 杠：`wire` = `daiminkan` / `ankan`。 */
+    private static Meld kan(String wire, String tile) {
+        int k = Tiles.parseKind(tile);
+        Meld.Kind kind = Meld.Kind.of(wire);
+        return new Meld(kind, new int[]{Tiles.id(k, 0), Tiles.id(k, 1), Tiles.id(k, 2),
+                                        Tiles.id(k, 3)}, kind == Meld.Kind.ANKAN ? -1 : 0,
+                Tiles.id(k, 0));
+    }
+
+    /** 带副露的和牌评价（`hand` 是**含和了牌**的暗牌，副露另算）。 */
+    private static Evaluator.HandScore evalOpen(String hand, List<Meld> melds, String win,
+                                                boolean tsumo) {
+        int[] c = counts(hand);
+        WinContext ctx = new WinContext();
+        ctx.rules = Rules.defaults();
+        ctx.seat = 1;
+        ctx.dealerSeat = 0;
+        ctx.roundWind = 27;
+        ctx.tsumo = tsumo;
+        ctx.menzen = false;
+        ctx.winKind = Tiles.parseKind(win);
+        ctx.doraIndicators = new ArrayList<>();
+        ctx.uraIndicators = new ArrayList<>();
+        ctx.allTileIds = parse(hand);
+        return Evaluator.evaluate(ctx, c, melds, ctx.winKind);
+    }
+
     private static void scoreTableTests() {
         // 闲家荣和
         eq("闲1番30符荣", ron(1, 30, 1, 0), 1000);
         eq("闲1番40符荣", ron(1, 40, 1, 0), 1300);
         eq("闲1番50符荣", ron(1, 50, 1, 0), 1600);
-        // 注：文档表格「闲1番60符=2900」与其自摸栏(500/1000)矛盾，按公式应为 1920→2000`n        eq("闲1番60符荣", ron(1, 60, 1, 0), 2000);
+        // 注：文档打点表的「闲1番60符」一栏自相矛盾（表里写 2900，与它自己的自摸栏 500/1000 不符）。
+        // 按公式：60 × 2^(2+1) = 480 → 闲家荣和 480×4 = 1920 → 切上 100 → **2000**（与自摸栏自洽）。
+        // ⚠ 这一行曾经被行内的字面 `n 吞进注释里（审计 S-69），等于这一格从来没测过。
+        eq("闲1番60符荣", ron(1, 60, 1, 0), 2000);
         eq("闲1番70符荣", ron(1, 70, 1, 0), 2300);
         eq("闲1番80符荣", ron(1, 80, 1, 0), 2600);
         eq("闲1番90符荣", ron(1, 90, 1, 0), 2900);
@@ -2027,6 +2109,87 @@ public final class SelfTest {
         Payments.Result p6 = Payments.compute(fake(13, 30), 0, -1, 0, 0, 0, true, -1, 0);
         eq("庄役满自摸", -p6.delta[1], 16000);
 
+        // ---------- 自摸逐格（原来只有 6 格，实战最常见的 1〜3 番 30〜50 符反而没测）
+        eq("闲1番30符自摸", tsumoNon(1, 30), "500/300");
+        eq("闲2番25符自摸", tsumoNon(2, 25), "800/400");
+        eq("闲2番40符自摸", tsumoNon(2, 40), "1300/700");
+        eq("闲3番20符自摸", tsumoNon(3, 20), "1300/700");
+        eq("闲3番25符自摸", tsumoNon(3, 25), "1600/800");
+        eq("闲3番30符自摸", tsumoNon(3, 30), "2000/1000");
+        eq("闲3番50符自摸", tsumoNon(3, 50), "3200/1600");
+        eq("闲4番20符自摸", tsumoNon(4, 20), "2600/1300");
+        eq("闲4番25符自摸", tsumoNon(4, 25), "3200/1600");
+        eq("闲1番40符自摸", tsumoNon(1, 40), "700/400");
+        eq("庄1番40符自摸", tsumoDealer(1, 40), 700);
+        eq("庄3番30符自摸", tsumoDealer(3, 30), 2000);
+        eq("庄3番25符自摸", tsumoDealer(3, 25), 1600);
+        eq("庄6番30符自摸", tsumoDealer(6, 30), 6000);
+        eq("庄13番自摸", tsumoDealer(13, 30), 16000);
+
+        // ---------- 满贯以上各档：**自摸**也要逐档（跳满/倍满/三倍满/累计役满）
+        // ⚠ 满贯以上「自摸」= 亲 2N / 闲 N（N = 基本点），**不是**把荣和的数字对半 ——
+        //   一开始我把这几格按"对半"写，自检立刻报 9 条（那正是这批断言的价值：它抓的是我）。
+        eq("闲6番跳满自摸", tsumoNon(6, 30), "6000/3000");
+        eq("闲7番跳满自摸", tsumoNon(7, 30), "6000/3000");
+        eq("闲8番倍满自摸", tsumoNon(8, 30), "8000/4000");
+        eq("闲10番倍满自摸", tsumoNon(10, 30), "8000/4000");
+        eq("闲11番三倍满自摸", tsumoNon(11, 30), "12000/6000");
+        eq("闲12番三倍满自摸", tsumoNon(12, 30), "12000/6000");
+        eq("闲13番累计役满自摸", tsumoNon(13, 30), "16000/8000");
+        eq("庄8番倍满自摸", tsumoDealer(8, 30), 8000);
+        eq("庄11番三倍满自摸", tsumoDealer(11, 30), 12000);
+
+        // ---------- 档位映射直接对拍（K 档位取决于规则集，两侧都钉住）
+        eq("基本点：13 番 + 累计役满开 → 8000", Evaluator.basePoints(13, 30, TABLE_RULES), 8000);
+        eq("基本点：13 番 + M.League（无累计役满）→ 三倍满 6000",
+                Evaluator.basePoints(13, 30, preset("mleague")), 6000);
+        eq("基本点：3 番 60 符 + 切上满贯关（天凤）→ 1920",
+                Evaluator.basePoints(3, 60, TABLE_RULES), 1920);
+        eq("基本点：3 番 60 符 + 切上满贯开（M.League）→ 满贯 2000",
+                Evaluator.basePoints(3, 60, preset("mleague")), 2000);
+        eq("基本点：6 番 → 跳满 3000", Evaluator.basePoints(6, 30, TABLE_RULES), 3000);
+        eq("基本点：8 番 → 倍满 4000", Evaluator.basePoints(8, 30, TABLE_RULES), 4000);
+        eq("基本点：11 番 → 三倍满 6000", Evaluator.basePoints(11, 30, TABLE_RULES), 6000);
+
+        // ---------- 满贯以上各档：**真实手牌**走完整链路（役种 → 番数 → 符 → 基本点）
+        // 清一色（门清 6）+ 平和（1）= 7 番 → 跳满（这手**不含** 789m，所以没有一気通貫）
+        Evaluator.HandScore t1 = evalClosed("1m2m2m3m3m3m4m4m4m5m5m6m9m9m", "6m", false, 1, 0, 0);
+        eq("真实手牌：清一色+平和 = 7 番", t1.han, 7);
+        eq("真实手牌：7 番 → 跳满基本点 3000", t1.base, 3000);
+        check("真实手牌：limit = 跳满（" + t1.limit + "）", "跳满".equals(t1.limit));
+        // 清一色（6）+ 一気通貫（2）+ 平和（1）= 9 番 → 倍满
+        Evaluator.HandScore t2 = evalClosed("1m2m3m4m5m6m7m8m9m2m3m4m5m5m", "4m", false, 1, 0, 0);
+        eq("真实手牌：清一色+一気通貫+平和 = 9 番", t2.han, 9);
+        eq("真实手牌：9 番 → 倍满基本点 4000", t2.base, 4000);
+        // 清一色（6）+ 二杯口（3）等 = 12 番 → 三倍满（实测 12：另有一杯口系与断幺的复合见 yaku 列表）
+        Evaluator.HandScore t3 = evalDora("1m1m2m2m3m3m4m4m5m5m6m6m7m7m", "7m", true, true, "",
+                TABLE_RULES);
+        eq("真实手牌：清一色+二杯口+立直+自摸 = 12 番", t3.han, 12);
+        eq("真实手牌：12 番 → 三倍满基本点 6000", t3.base, 6000);
+        // 再加 2 张宝牌 = 14 番 → 累计役满（《天凤》开）/ 三倍满（M.League 关）
+        Evaluator.HandScore t4 = evalDora("1m1m2m2m3m3m4m4m5m5m6m6m7m7m", "7m", true, true, "2m",
+                TABLE_RULES);
+        eq("真实手牌：12 番 + 宝牌 2 = 14 番", t4.han, 14);
+        eq("真实手牌：14 番 + 累计役满开 → 8000（天凤）", t4.base, 8000);
+        check("真实手牌：limit = 累计役满（" + t4.limit + "）", "累计役满".equals(t4.limit));
+        Evaluator.HandScore t5 = evalDora("1m1m2m2m3m3m4m4m5m5m6m6m7m7m", "7m", true, true, "2m",
+                preset("mleague"));
+        eq("真实手牌：同 14 番在 M.League → 三倍满 6000", t5.base, 6000);
+        check("真实手牌：M.League 的 limit = 三倍满（" + t5.limit + "）",
+                "三倍满".equals(t5.limit));
+
+        // ---------- 番缚（minHan）：宝牌不算番缚
+        Rules minHan2 = preset("tenhou");
+        minHan2.minHan = 2;
+        // 手役只有役牌中 1 番（中中中）+ 双碰 5p/7z
+        Evaluator.HandScore m1 = evalDora("2m3m4m5m6m7m2p3p4p5p5p7z7z7z", "7z", false, false, "",
+                minHan2);
+        check("一番缚不足（手役只有役牌 1 番）→ 不和", !m1.valid);
+        check("番缚不足的原因码（" + m1.reason + "）", "番缚不足".equals(m1.reason));
+        // 同一手牌在默认一番缚下可以和
+        check("同一手牌在 minHan=1 下成立",
+                evalDora("2m3m4m5m6m7m2p3p4p5p5p7z7z7z", "7z", false, false, "", TABLE_RULES).valid);
+
         // 守恒
         for (int i = 0; i < 4; i++) {
             for (int h = 0; h < 4; h++) {
@@ -2046,6 +2209,61 @@ public final class SelfTest {
             }
         }
         pass++;
+    }
+
+    /**
+     * **带副露的符**（审计 S-70：原来 `evalCtx` 恒传空 `melds` → 明刻/明杠/暗杠/加杠符、
+     * 食い平和、副露 + 自摸符、荣和补刻按明刻，全部零断言）。
+     *
+     * <p>设计要点：符最后会**进位到 10**，所以选局面时要让"错的算法"跨过进位线 ——
+     * 否则 2 符与 4 符的差别会被进位吃掉、断言测不出东西。
+     */
+    private static void fuOpenTests() {
+        // 中张明刻（2 符）：副露 5m 碰 + 门清以外的 20 符底 → 20 + 2 = 22 → 30
+        Evaluator.HandScore a1 = evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(pon("5m")), "4p", false);
+        eq("中张明刻：20 + 2 = 22 → 30", a1.fu, 30);
+        // 同样的牌型把刻子放在手里（暗刻 4 符 + 门前荣和 10）：20 + 10 + 4 = 34 → 40
+        Evaluator.HandScore a2 = evalClosed("5m5m5m2m3m4m6m7m8m2p3p4p5p5p", "4p", false, 1, 0, 0);
+        eq("同样的形、刻子在手里：20 + 10 + 4 = 34 → 40", a2.fu, 40);
+        // 幺九明刻（4 符）→ 20 + 4 = 24 → 30；幺九暗刻（8）+ 门前 → 20 + 10 + 8 = 38 → 40
+        Evaluator.HandScore a3 = evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(pon("1m")), "4p", false);
+        eq("幺九明刻：20 + 4 = 24 → 30", a3.fu, 30);
+        Evaluator.HandScore a4 = evalClosed("1m1m1m2m3m4m6m7m8m2p3p4p5p5p", "4p", false, 1, 0, 0);
+        eq("幺九暗刻 + 门前：20 + 10 + 8 = 38 → 40", a4.fu, 40);
+        // 杠：中张明杠 8 / 幺九明杠 16 / 中张暗杠 16 / 幺九暗杠 32（都不带门前荣和 10）
+        eq("中张明杠：20 + 8 = 28 → 30",
+                evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(kan("daiminkan", "5m")), "4p", false).fu,
+                30);
+        eq("幺九明杠：20 + 16 = 36 → 40",
+                evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(kan("daiminkan", "1m")), "4p", false).fu,
+                40);
+        eq("中张暗杠：20 + 16 = 36 → 40",
+                evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(kan("ankan", "5m")), "4p", false).fu,
+                40);
+        eq("幺九暗杠：20 + 32 = 52 → 60",
+                evalOpen("2m3m4m6m7m8m2p3p4p5p5p", List.of(kan("ankan", "1m")), "4p", false).fu,
+                60);
+        // 食い平和（副露 + 荣和）：一个符都没有 → 20，但**最低 30 符**（docs/日本麻将.md §符）
+        Evaluator.HandScore a5 = evalOpen("4m5m6m7m8m9m2p3p4p5p5p", List.of(chi("1m", "2m", "3m")),
+                "4p", false);
+        eq("食い平和（副露荣和）：20 → 最低 30 符", a5.fu, 30);
+        // 荣和补刻（シャボロン）按**明刻**算：双碰等张，和了牌补出的那组算明刻。
+        // 副露吃牌 + 幺九暗刻 9m + 双碰 5p/7p，和 7p：
+        //   20（底）+ 0（双碰）+ 2（7p 明刻 中张）+ 8（9m 幺九暗刻）= 30 → 30
+        Evaluator.HandScore a6 = evalOpen("4m5m6m9m9m9m5p5p7p7p7p",
+                List.of(chi("1m", "2m", "3m")), "7p", false);
+        eq("荣和补刻按明刻：20 + 2 + 8 = 30 → 30（若误按暗刻 = 32 → 40）", a6.fu, 30);
+        // 同一手牌自摸：7p 此时是**暗刻**（4）且多 2 符自摸 → 20 + 2 + 4 + 8 = 34 → 40
+        Evaluator.HandScore a7 = evalOpen("4m5m6m9m9m9m5p5p7p7p7p",
+                List.of(chi("1m", "2m", "3m")), "7p", true);
+        eq("同形自摸（暗刻 + 自摸符 2）：20 + 2 + 4 + 8 = 34 → 40", a7.fu, 40);
+        // 副露 + 自摸符：单独把自摸那 2 符卡在进位线上
+        //   副露 + 幺九暗刻 8 + 单骑 2 = 30 → 30；再加自摸 2 → 32 → 40
+        //   ⚠ 一手带一副露时，暗牌（含和了牌）必须是 **11 张**（14 − 3），少了会被判不成和了形（fu=0）
+        eq("副露单骑荣和：20 + 8 + 2 = 30 → 30",
+                evalOpen("4m5m6m9m9m9m2p3p4p5s5s", List.of(chi("1m", "2m", "3m")), "5s", false).fu, 30);
+        eq("副露单骑自摸（多 2 符自摸）：20 + 2 + 8 + 2 = 32 → 40",
+                evalOpen("4m5m6m9m9m9m2p3p4p5s5s", List.of(chi("1m", "2m", "3m")), "5s", true).fu, 40);
     }
 
     private static void paymentTests() {
@@ -2084,6 +2302,14 @@ public final class SelfTest {
         Payments.Result r5 = Payments.compute(ys, 1, 2, 0, 0, 0, false, 3, 8000);
         eq("包牌荣和：包牌者一半", -r5.delta[3], 16000);
         eq("包牌荣和：放铳者一半", -r5.delta[2], 16000);
+        // 包牌 + 本场：**本场棒全部由包牌者出**（原来这条路径零断言，见审计 S-72）
+        Payments.Result r6 = Payments.compute(ys, 1, 2, 0, 2, 0, false, 3, 8000);
+        eq("包牌荣和 + 2 本场：放铳者仍只付一半", -r6.delta[2], 16000);
+        eq("包牌荣和 + 2 本场：包牌者付另一半 + 全部本场棒", -r6.delta[3], 16000 + 600);
+        eq("包牌荣和 + 2 本场：和牌者全额收", r6.delta[1], 32600);
+        Payments.Result r7 = Payments.compute(ys, 1, -1, 0, 1, 0, true, 3, 8000);
+        eq("包牌自摸 + 1 本场：包牌者付全额 + 全部本场（3×100）", -r7.delta[3], 32000 + 300);
+        eq("包牌自摸 + 1 本场：闲家一分不付", r7.delta[2], 0);
     }
 
     /**
