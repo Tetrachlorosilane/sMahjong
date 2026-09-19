@@ -1026,11 +1026,11 @@ public final class Table implements Runnable {
                 }
             }
             if (!gameOver) {
+                // 本场数：连庄与**流局后轮庄**都 +1，只有"闲家和了轮庄"才清零
+                // （判据抽在 RoundScoring.nextHonba，真值表在自检里；这里原来内联写着，
+                //  且与规则反了 —— 中途流局不加、荒牌流局庄家不听时清零，见 AUDIT S-46）
+                honba = RoundScoring.nextHonba(honba, res.dealerRenchan, res.agari, res.nagashi);
                 if (res.dealerRenchan) {
-                    // 中途流局（九种九牌/四风连打/四家立直/四杠散了）连庄但本场不增加
-                    if (!res.abortive) {
-                        honba++;
-                    }
                     if (rules.agariyame && kyoku == 4 && roundWind == lastWind() && res.agari) {
                         int top = -1;
                         for (int i = 0; i < 4; i++) {
@@ -1041,7 +1041,6 @@ public final class Table implements Runnable {
                         }
                     }
                 } else {
-                    honba = 0;
                     int nd = (dealer + 1) % 4;
                     int nw = roundWind;
                     int nk;

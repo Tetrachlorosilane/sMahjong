@@ -1902,6 +1902,70 @@ public final class SelfTest {
                 RoundScoring.tenpai(countsOf("1m1m1m2m2m2m3m3m3m4m4m"), 1));
         // 途中流局一律连庄
         check("途中流局 → 连庄", RoundScoring.abortive());
+
+        // ---------- 本场数真值表（审计 S-46：原来中途流局不加、荒牌流局轮庄反而清零）
+        eq("和了连庄 → 本场 +1", RoundScoring.nextHonba(0, true, true, false), 1);
+        eq("和了连庄（已有本场）→ 本场 +1", RoundScoring.nextHonba(3, true, true, false), 4);
+        eq("闲家和了轮庄 → 本场清零", RoundScoring.nextHonba(2, false, true, false), 0);
+        eq("荒牌流局庄家不听轮庄 → 本场 +1（**不清零**）",
+                RoundScoring.nextHonba(0, false, false, false), 1);
+        eq("荒牌流局庄家不听轮庄（已有本场）→ 本场 +1",
+                RoundScoring.nextHonba(2, false, false, false), 3);
+        eq("中途流局（连庄）→ 本场 +1", RoundScoring.nextHonba(1, true, false, false), 2);
+        eq("流局满贯轮庄 → 本场清零（按和了处理）", RoundScoring.nextHonba(2, false, false, true), 0);
+
+        // ---------- 端到端：Table 真的按这条判据推进本场（接线检查，不是重算公式）
+        // 只看"流局之后那一局"：本场**必须 +1**（旧实现会清零）。这条断言不复用被测函数，
+        // 而是把规则原样写出来，所以能抓到"判据写对了但没接上"。
+        List<List<int[]>> games = new ArrayList<>();   // 每场一份 {本场, 是否和了}
+        for (int g = 0; g < 2; g++) {
+            final List<int[]> honbaSeq = new ArrayList<>();
+            games.add(honbaSeq);
+            Table t = new Table("HONBA" + g, "本场桌", Rules.defaults());
+            t.botDelayMs = 0;
+            t.roundDelayMs = 0;
+            t.debugDeterministicSeed = true;
+            t.debugMaxHands = 6;
+            t.seedBase = 31337L + g * 104729L;
+            for (int i = 0; i < 4; i++) {
+                // ⚠ 用**弱策略**而不是 teacher：teacher 现在很少流局（不鸣无役手 + 留宝牌），
+                //   几局里碰不到一次流局，这条"非空转"断言就会红（第一次跑就是这样）。
+                //   `firstLegal` 每巡打第一张合法牌 → 流局成常态，且顺带覆盖策略注入那条路。
+                t.policy[i] = mahjong.ai.Policies.fromAction(mahjong.ai.Policies.firstLegal());
+                t.addBot(i);
+            }
+            t.debugEventTap = (recipient, ev) -> {
+                if (recipient == -1 && "round_end".equals(Json.str(ev, "ev", ""))) {
+                    Map<String, Object> rd = Json.map(ev, "round");
+                    honbaSeq.add(new int[]{Json.i(rd, "honba", 0),
+                            Json.bool(ev, "agari", false) ? 1 : 0});
+                }
+            };
+            t.playGame();
+        }
+        int drawPairs = 0;
+        boolean honbaOk = true;
+        // ⚠ **逐场**比对：跨场的相邻两条不是同一局序列（上一场最后一局之后是新的一场，本场从 0 起）。
+        //   第一次写成"全部场次拼成一条"时就踩了这个：报「流局之后本场应为 6，实际 0」。
+        for (List<int[]> honbaSeq : games) {
+            for (int i = 0; i + 1 < honbaSeq.size(); i++) {
+                int[] cur = honbaSeq.get(i);
+                int[] next = honbaSeq.get(i + 1);
+                if (cur[1] == 0) {                    // 本局不是和了（流局）
+                    drawPairs++;
+                    if (next[0] != cur[0] + 1) {
+                        honbaOk = false;
+                        failures.add("流局之后本场应为 " + (cur[0] + 1) + "，实际 " + next[0]);
+                        fail++;
+                    } else {
+                        pass++;
+                    }
+                }
+            }
+        }
+        System.out.println("  [覆盖] 本场推进：检查了 " + drawPairs + " 次「流局 → 下一局」");
+        check("样本里确实出现过流局（否则上面那条是空转）", drawPairs > 0);
+        check("流局之后本场 +1（端到端）", honbaOk);
     }
     // ------------------------------------------------------------- 打点表
 
