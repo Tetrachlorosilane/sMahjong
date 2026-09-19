@@ -60,6 +60,7 @@ public final class SelfTest {
         kuikaeTests();
         multiRonTests();
         tsubameTests();
+        endGameTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -1387,6 +1388,171 @@ public final class SelfTest {
     private static int[] ronOn5p(Round r, boolean riichiDiscard) {
         return r.debugRonDeltas(new ArrayList<>(Arrays.asList(2)), 1,
                 Tiles.id(Tiles.parseKind("5p"), 2), riichiDiscard);
+    }
+
+    // ------------------------------------------------- 终局：余棒分配 / 和了止·听牌止 / 一位必要点数
+
+    /**
+     * 批次三的三条终局口径（`docs/日本麻将.md` L116/L143/L145/L157 + M.League 原文）：
+     * <ol>
+     *   <li>**终局余棒**：流局结束时立直棒归 1 位；**并列第一**时由相关者均分，
+     *       按 100 点为单位、尾数归更接近起家者（原文 3 人 1000 → 400/300/300、2000 → 800/600/600）；</li>
+     *   <li>**和了止 / 听牌止**：All Last 庄家达到一位必要点数且为 1 位时，和了**或荒牌流局庄家听牌**都结束；</li>
+     *   <li>**一位必要点数**：延长战的门槛是它，**不是精算基准**（《雀魂》= 30000 vs 25000）。</li>
+     * </ol>
+     */
+    private static void endGameTests() {
+        // ---------- ① 终局余棒：与 M.League 原文逐字对照 ----------
+        int[] s1 = {31000, 29000, 20000, 20000};
+        int[] a1 = RoundScoring.endGameSticks(s1, 1);
+        eq("1 位只有一家 → 全部余棒归它", a1[0], 1000);
+        eq("余棒只给 1 位（其余三家 0）", a1[1] + a1[2] + a1[3], 0);
+
+        // 3 人并列第一：原文「将 1000 点分为 400、300、300」
+        int[] s3 = {30000, 30000, 30000, 10000};
+        int[] a3 = RoundScoring.endGameSticks(s3, 1);
+        eq("3 人并列 1 位、1 根：更接近起家者拿 400", a3[0], 400);
+        eq("3 人并列 1 位、1 根：其余各 300", a3[1] + a3[2], 600);
+        eq("3 人并列：两根 → 800/600/600", RoundScoring.endGameSticks(s3, 2)[0], 800);
+        eq("3 人并列：两根其余各 600",
+                RoundScoring.endGameSticks(s3, 2)[1] + RoundScoring.endGameSticks(s3, 2)[2], 1200);
+        // 2 人并列：1000 能整除 → 500/500（尾数为 0）
+        int[] s2 = {25000, 10000, 25000, 10000};
+        int[] a2 = RoundScoring.endGameSticks(s2, 1);
+        eq("2 人并列 1 位 → 均分 500", a2[0], 500);
+        eq("2 人并列的另一家同样 500", a2[2], 500);
+        // 尾数归**更接近起家**的那家：并列的是座次 1/2/3，额外那 200 点应给座次 1
+        //（而不是无脑给"座次 0"或别家 —— 座次 0 在这组里根本没并列）
+        int[] s123 = {10000, 30000, 30000, 30000};
+        int[] a123 = RoundScoring.endGameSticks(s123, 2);
+        eq("余棒尾数归更接近起家者（并列 1/2/3，座次 1 拿 800 而非 600）", a123[1], 800);
+        eq("并列的其余两家各 600", a123[2] + a123[3], 1200);
+        eq("没并列的座次 0 一分不加", a123[0], 0);
+        // 守恒：加出去的总量恒等于 sticks × 1000
+        int sum = 0;
+        for (int v : a3) {
+            sum += v;
+        }
+        eq("余棒分配零和（总数 = 根数 × 1000）", sum, 1000);
+        eq("根数为 0 时不动分数", RoundScoring.endGameSticks(s3, 0)[0], 0);
+
+        // ---------- ② 和了止 / 听牌止（三个条件一起看）----------
+        final Rules th = preset("tenhou");                 // agariyame=true, requiredPoints=30000
+        final int[] top = {31000, 20000, 20000, 20000};    // 庄家（座位 0）= 1 位且达 30000
+        final boolean[] tenpaiDealer = {true, false, false, false};
+        final boolean[] notenDealer = {false, true, true, true};
+        check("和了止：庄家和了 + 1 位 + 达一位必要点数 → 结束",
+                RoundScoring.stopAtAllLast(0, true, false, tenpaiDealer, top, th));
+        check("听牌止：荒牌流局且**庄家听牌** + 1 位 + 达门槛 → 结束",
+                RoundScoring.stopAtAllLast(0, false, false, tenpaiDealer, top, th));
+        check("荒牌流局但庄家**不听** → 不结束（轮庄）",
+                !RoundScoring.stopAtAllLast(0, false, false, notenDealer, top, th));
+        check("闲家和了 → 谈不上和了止",
+                !RoundScoring.stopAtAllLast(0, false, false, notenDealer, top, th));
+        check("流局满贯**不算**听牌止（原文只说荒牌流局）",
+                !RoundScoring.stopAtAllLast(0, false, true, tenpaiDealer, top, th));
+        // 没达到一位必要点数 / 不是 1 位
+        check("庄家只有 29000（未达一位必要点数）→ 不结束",
+                !RoundScoring.stopAtAllLast(0, true, false, tenpaiDealer,
+                        new int[]{29000, 29000, 21000, 21000}, th));
+        check("庄家达门槛但不是 1 位 → 不结束",
+                !RoundScoring.stopAtAllLast(0, true, false, tenpaiDealer,
+                        new int[]{31000, 40000, 10000, 10000}, th));
+        check("M.League 预设关掉和了止 → 永远不中止",
+                !RoundScoring.stopAtAllLast(0, true, false, tenpaiDealer, top, preset("mleague")));
+
+        // ---------- ③ 一位必要点数：延长战门槛用 requiredPoints，不是精算基准 ----------
+        // ⚠ 必须挑**两个数不一样**的预设才验得出来：《雀魂》= 一位必要点数 30000 + 精算基准 25000；
+        //   《天凤》两者都是 30000（那一组换回 returnScore 也照样通过 → 等于没测）。
+        Rules west = preset("majsoul");
+        west.westExtension = true;
+        eq("门槛取自一位必要点数（不是精算基准）", west.requiredPoints, 30000);
+        eq("同一预设的精算基准是另一个数", west.returnScore, 25000);
+        check("1 位 27000（> 精算基准 25000 但 < 一位必要点数 30000）→ 继续西入",
+                RoundScoring.keepPlayingWest(west, 27000, 2, 1));
+        check("1 位 30000 → 结束（达到一位必要点数）",
+                !RoundScoring.keepPlayingWest(west, 30000, 2, 1));
+        check("没开延长战开关 → 结束",
+                !RoundScoring.keepPlayingWest(preset("tenhou"), 27000, 2, 1));
+        // S-54：场风上限 = lastWind + 1（东风战 → 南入、半庄 → 西入），**没有北入**
+        check("半庄：西入（场风 2）允许", RoundScoring.keepPlayingWest(west, 10000, 2, 1));
+        check("半庄：**北入（场风 3）不允许**（旧实现写死 nw<=3 会放行）",
+                !RoundScoring.keepPlayingWest(west, 10000, 3, 1));
+        check("东风战：南入（场风 1）允许", RoundScoring.keepPlayingWest(west, 10000, 1, 0));
+        check("东风战：**西场（场风 2）不允许**（东风战只延长到南场）",
+                !RoundScoring.keepPlayingWest(west, 10000, 2, 0));
+        check("《雀魂》预设 = 一位必要点数 30000 而精算基准 25000（两个字段不是一回事）",
+                preset("majsoul").requiredPoints == 30000 && preset("majsoul").returnScore == 25000);
+
+        // ---------- ④ 默认思考时间统一为 20+5（额外 20s + 每巡 5s）----------
+        Rules def = Rules.defaults();
+        eq("默认每巡基本时长 = 5000ms", def.thinkingBaseMs, 5000);
+        eq("默认额外时长总额 = 20000ms", def.thinkingBankMs, 20000);
+        eq("默认 preset 是 mleague", def.preset, "mleague");
+        eq("三套预设都不改思考时间（都继承同一组默认值）",
+                preset("majsoul").thinkingBaseMs + "/" + preset("majsoul").thinkingBankMs,
+                "5000/20000");
+        eq("旧字段 thinking_ms 与 base 同步", def.thinkingMs, def.thinkingBaseMs);
+        // 钳制仍然挡着荒谬值（否则牌桌线程真的会等约 24 天）
+        Rules crazy = Rules.fromJson(Json.obj("thinking_base_ms", 2147483647,
+                "thinking_bank_ms", 2147483647, "required_points", 99999999));
+        check("思考时间被钳到合理区间", crazy.thinkingBaseMs == 60000 && crazy.thinkingBankMs == 600000);
+        eq("一位必要点数也被钳制", crazy.requiredPoints, 1000000);
+
+        // ---------- ⑤ 实局路径（非空转）：1 小局就以**流局**结束、桌上留着 1 根立直棒 ----------
+        // 种子 19 是**实测定出来的**（4 机器人、debugMaxHands=1、确定性种子）：那一局以荒牌流局
+        // 结束，三家并列 1 位、桌上 1 根立直棒 → 正是"流局结束 + 并列 1 位"那一支。
+        // 最后一条 round_end 的分数就是**分配余棒之前**的分数，两者之差 = 本次分掉的余棒。
+        RoundScoring.debugResetCounts();
+        Table et = new Table("ENDSTICK", "终局余棒桌", Rules.defaults());
+        et.botDelayMs = 0;
+        et.roundDelayMs = 0;
+        et.debugDeterministicSeed = true;
+        et.debugMaxHands = 1;
+        et.seedBase = 19;
+        final List<Integer> beforeSticks = new ArrayList<>();
+        final int[] sticksOnTable = {0};
+        et.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "round_end".equals(Json.str(ev, "ev", ""))) {
+                beforeSticks.clear();
+                for (Object o : Json.list(ev, "scores")) {
+                    beforeSticks.add(((Number) o).intValue());
+                }
+                sticksOnTable[0] = Json.i(Json.map(ev, "round"), "riichi_sticks", 0);
+            }
+        };
+        for (int i = 0; i < 4; i++) {
+            et.addBot(i);
+        }
+        et.playGame();
+        check("终局余棒分配在实局路径上被调用（不是死代码）：" + RoundScoring.debugCallCounts(),
+                RoundScoring.debugCallCounts().contains("endSticks=1"));
+        eq("实局：最后一条 round_end 带回了分配前的分数", beforeSticks.size(), 4);
+        eq("实局：这一局桌上正好 3 根立直棒（三家立直后荒牌流局）", sticksOnTable[0], 3);
+        int totalAfter = 0;
+        int diffSum = 0;
+        final List<Integer> diff = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            totalAfter += et.seat(i).score;
+            final int d = et.seat(i).score - beforeSticks.get(i);
+            diff.add(d);
+            diffSum += d;
+        }
+        eq("实局：余棒分配后总分守恒", totalAfter, 100000);
+        eq("实局：分掉的余棒总量 = 桌上根数 × 1000", diffSum, sticksOnTable[0] * 1000);
+        List<Integer> sortedDiff = new ArrayList<>(diff);
+        sortedDiff.sort(java.util.Comparator.reverseOrder());
+        // 3 根 / 3 家并列 1 位：3000 能被 3 整除到 100 点 → 每家 1000（没有尾数）。
+        // ⚠ 尾数那一支（1 根 → 400/300/300、2 根 → 800/600/600）在 ①② 里逐字钉着。
+        eq("实局：3 根余棒 / 3 家并列 → 每家 1000", sortedDiff.toString(),
+                Arrays.asList(1000, 1000, 1000, 0).toString());
+        // 同一份"分配前分数 + 根数"喂给判据，必须逐位一致（证明实局确实走的是它）
+        int[] before = new int[4];
+        for (int i = 0; i < 4; i++) {
+            before[i] = beforeSticks.get(i);
+        }
+        eq("实局余棒分配与判据逐位一致", diff.toString(),
+                Json.intList(RoundScoring.endGameSticks(before, sticksOnTable[0])).toString());
     }
 
     // ------------------------------------------------ 被取消询问的回包必须摘掉

@@ -29,6 +29,8 @@ public final class RoundScoring {
     static int callsNagashiEligible;
     static int callsNagashiPay;
     static int callsTenpai;
+    static int callsEndSticks;
+    static int callsAgariyame;
 
     private RoundScoring() {
     }
@@ -39,17 +41,21 @@ public final class RoundScoring {
         callsNagashiEligible = 0;
         callsNagashiPay = 0;
         callsTenpai = 0;
+        callsEndSticks = 0;
+        callsAgariyame = 0;
     }
 
-    /** 自测：读计数（连庄 / 满贯成立 / 满贯支付 / 形式听牌）。 */
+    /** 自测：读计数（连庄 / 满贯成立 / 满贯支付 / 形式听牌 / 终局余棒分配 / 和了止判据）。 */
     public static String debugCallCounts() {
         return "renchan=" + callsRenchan + " nagashiEligible=" + callsNagashiEligible
-                + " nagashiPay=" + callsNagashiPay + " tenpai=" + callsTenpai;
+                + " nagashiPay=" + callsNagashiPay + " tenpai=" + callsTenpai
+                + " endSticks=" + callsEndSticks + " agariyame=" + callsAgariyame;
     }
 
     /** 自测：计数总和。 */
     public static int debugTotalCalls() {
-        return callsRenchan + callsNagashiEligible + callsNagashiPay + callsTenpai;
+        return callsRenchan + callsNagashiEligible + callsNagashiPay + callsTenpai
+                + callsEndSticks + callsAgariyame;
     }
 
     /** 单人荣和 / 自摸：庄家和了才连庄。 */
@@ -116,6 +122,72 @@ public final class RoundScoring {
     }
 
     /**
+     * **和了止 / 听牌止**（`docs/日本麻将.md` L116）：
+     * 「《天凤》在 All Last 庄家**达到一位必要点数、且为 1 位**时，采用自动和了止、**听牌止**；
+     * M.League 则继续按通常的连庄条件进行，直到庄家轮庄」。
+     *
+     * <p>三个条件全满足才结束对局：
+     * <ol>
+     *   <li>{@code rules.agariyame} 开着（M.League 关 → 永远不中止）；</li>
+     *   <li>本局是「庄家和了」**或**「荒牌流局且庄家听牌」：后者就是**听牌止**。
+     *       ⚠ 流局满贯**不算** —— 原文只说"荒牌流局时庄家听牌"，而流局满贯是另一种流局
+     *       （`res.nagashi`），它按和了结算。</li>
+     *   <li>庄家是 1 位**且**持点 ≥ {@code rules.requiredPoints}（一位必要点数）。</li>
+     * </ol>
+     *
+     * <p>调用方只负责判断"这是不是 All Last、且庄家连庄"（{@code kyoku == 4 && 场风 == 最后一场}
+     * 且 {@code res.dealerRenchan}）—— 那两条与"本局怎么结束的"无关，留在这里更好单测。
+     *
+     * @param agari 本局的 {@code Result.agari}（是否有人和牌）
+     */
+    public static boolean stopAtAllLast(int dealer, boolean agari, boolean nagashi,
+                                       boolean[] tenpai, int[] scores, Rules rules) {
+        callsAgariyame++;
+        if (rules == null || !rules.agariyame || dealer < 0 || dealer > 3 || scores == null) {
+            return false;
+        }
+        final boolean tenpaiAbort = !nagashi && tenpai != null && dealer < tenpai.length
+                && tenpai[dealer];
+        if (!agari && !tenpaiAbort) {
+            return false;                    // 闲家和了 / 庄家不听 —— 都谈不上和了止、听牌止
+        }
+        if (scores[dealer] < rules.requiredPoints) {
+            return false;                    // 没达到一位必要点数 → 继续打
+        }
+        int top = Integer.MIN_VALUE;
+        for (int v : scores) {
+            top = Math.max(top, v);
+        }
+        return scores[dealer] >= top;        // 必须是 1 位（并列第一也算）
+    }
+
+    /**
+     * All Last 轮庄后要不要**进延长战**（东风战 → 南入、半庄战 → 西入）。
+     *
+     * <p>`docs/日本麻将.md` L143/L145：「决定是否进入延长战的分数称为**一位必要点数**」；
+     * 「如果 All Last 轮庄后 1 位玩家的点数还没有达到一位必要点数，那么游戏会进入延长战」。
+     *
+     * <p>⚠ 门槛是 **`requiredPoints`（一位必要点数）**，而不是 `returnScore`（返点 = 精算基准）：
+     * 《雀魂》正是「一位必要点数 30000 + 精算基准 25000」，用 `returnScore` 当门槛会让
+     * 「27000 点也要结束（不延长）」——两者**经常设成相同数值**，但概念不同（原文 L143 明说）。
+     *
+     * <p>⚠ 场风上限是 **`lastWind + 1`**（东风战 → 南入、半庄战 → 西入），**没有北入**
+     * （原文 L145 明写「大部分规则没有北风场，因而也没有北入」，且「半庄战最多进行到西 4 局」）。
+     * 旧实现写死 `nw &lt;= 3`，于是半庄的西 4 轮庄后会进**北 1 局**、东风战还能一路进到**西场**
+     * （审计 S-54；三套预设 `westExtension` 全关 → 休眠缺陷，但开关一开就错）。
+     *
+     * @param top             当前 1 位的持点
+     * @param nextRoundWind   轮庄后的场风编号（0=东 1=南 2=西 3=北）
+     * @param lastWind        本场赛制的最后一场风（东风战 0 / 半庄 1）
+     */
+    public static boolean keepPlayingWest(Rules rules, int top, int nextRoundWind, int lastWind) {
+        callsRenchan++;
+        return rules != null && rules.westExtension
+                && nextRoundWind <= lastWind + 1
+                && top < rules.requiredPoints;
+    }
+
+    /**
      * 流局满贯（荒牌满贯）是否成立。
      *
      * <p>条件：该家**没打过非幺九牌**，且**牌河没有被鸣走过**。
@@ -177,6 +249,64 @@ public final class RoundScoring {
     }
 
     // ================================================================= 精算点数
+
+    /**
+     * **终局余棒（供託里的立直棒）的分配** —— M.League 原文（见 `docs/DESIGN.md`「终局与精算」）：
+     *
+     * <blockquote>
+     * 因流局导致半庄结束时，立直棒加算给第一位（Top者）。<br>
+     * 因流局结束时的立直棒由**相关者**均分。3 人时，将 1000 点分为 400、300、300，
+     * 若无法整除则按此倍数分配。（2000 点时为 800、600、600）。
+     * 与顺位点相同，更接近起家的一方获得更多点数。
+     * </blockquote>
+     *
+     * <p>⚠ **只有「流局结束」这一支**：和了结束时 `agariRon` 已经把供託全给和牌者
+     * （`Result.sticksLeft = 0`），所以调用方只在 `sticks > 0`（= 最后一局是流局）时问这里。
+     * 于是本函数要分的两种情况：
+     * <ol>
+     *   <li>1 位**只有一家** → 全给它（原文第一句「加算给第一位（Top者）」）；</li>
+     *   <li>1 位**并列** → 由**相关者**（= 并列第一的那几家）均分：按 100 点为单位向下取整，
+     *       尾数全给**更接近起家**的那家 —— 所以 3 人 1000 → **400/300/300**、
+     *       2000 → **800/600/600**，与原文逐字一致。</li>
+     * </ol>
+     *
+     * <p>「更接近起家」= **座次更小**（`seat 0` = 起家），与
+     * {@link #settle(int[], Rules)} 里"同点按座次先后定名次"用的是**同一把尺子**。
+     * ⚠ 注意这里只动**持点**：并列的几家仍然**同顺位**（名次不由这个分配改变）。
+     *
+     * @param scores 终局四家持点（不修改）
+     * @param sticks 供託里的立直棒根数
+     * @return 长度 4 的加点数组，总和恒为 {@code sticks * 1000}（点数守恒）
+     */
+    public static int[] endGameSticks(int[] scores, int sticks) {
+        callsEndSticks++;
+        final int[] add = new int[4];
+        if (scores == null || scores.length < 4 || sticks <= 0) {
+            return add;
+        }
+        int top = scores[0];
+        for (int i = 1; i < 4; i++) {
+            top = Math.max(top, scores[i]);
+        }
+        final java.util.List<Integer> tied = new java.util.ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            if (scores[i] == top) {
+                tied.add(i);                      // 自然按座次升序 → tied.get(0) 就是更接近起家那家
+            }
+        }
+        final int total = sticks * 1000;
+        if (tied.size() == 1) {
+            add[tied.get(0)] = total;
+            return add;
+        }
+        final int n = tied.size();
+        final int unit = (total / n / 100) * 100;   // 每家先拿 100 点的整数倍（向下取整）
+        for (int s : tied) {
+            add[s] = unit;
+        }
+        add[tied.get(0)] += total - unit * n;       // 尾数（< n×100）全归更接近起家者
+        return add;
+    }
 
     /**
      * 一局的最终精算结果（按**座位**索引）。

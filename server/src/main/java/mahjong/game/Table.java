@@ -1031,14 +1031,13 @@ public final class Table implements Runnable {
                 //  且与规则反了 —— 中途流局不加、荒牌流局庄家不听时清零，见 AUDIT S-46）
                 honba = RoundScoring.nextHonba(honba, res.dealerRenchan, res.agari, res.nagashi);
                 if (res.dealerRenchan) {
-                    if (rules.agariyame && kyoku == 4 && roundWind == lastWind() && res.agari) {
-                        int top = -1;
-                        for (int i = 0; i < 4; i++) {
-                            top = Math.max(top, scores[i]);
-                        }
-                        if (scores[dealer] >= top) {
-                            gameOver = true;
-                        }
+                    // ---------- 和了止 / 听牌止（`docs/日本麻将.md` L116）----------
+                    // 三条判据抽在 RoundScoring.stopAtAllLast（本局是 All Last、庄家连庄由这里判，
+                    // "本局怎么结束的 + 一位必要点数 + 是不是 1 位"由那个纯函数判，便于单测）。
+                    if (kyoku == 4 && roundWind == lastWind()
+                            && RoundScoring.stopAtAllLast(dealer, res.agari, res.nagashi,
+                                                          res.tenpai, scores, rules)) {
+                        gameOver = true;
                     }
                 } else {
                     int nd = (dealer + 1) % 4;
@@ -1055,7 +1054,11 @@ public final class Table implements Runnable {
                         for (int i = 0; i < 4; i++) {
                             top = Math.max(top, scores[i]);
                         }
-                        if (rules.westExtension && nw <= 3 && top < rules.returnScore) {
+                        // 延长战（南入 / 西入）：1 位**没达到一位必要点数**就继续
+                        //（`docs/日本麻将.md` L143/L145）。门槛判据抽在 RoundScoring.keepPlayingWest，
+                        // ⚠ 门槛是 `requiredPoints`，**不是** `returnScore`（《雀魂》= 25000 vs 30000）；
+                        // ⚠ 场风上限是 `lastWind + 1`（东风战→南入、半庄→西入），**没有北入**（S-54）。
+                        if (RoundScoring.keepPlayingWest(rules, top, nw, lastWind())) {
                             roundWind = nw;
                             kyoku = nk;
                             dealer = nd;
@@ -1070,16 +1073,17 @@ public final class Table implements Runnable {
                 }
             }
         }
-        // 终局时供托中的立直棒归 1 位，保证点数守恒
+        // 终局时供托中的立直棒按 M.League 原文分给 1 位（并列则按相关者均分），保证点数守恒。
+        // ⚠ 能走到这里（`sticks > 0`）说明**最后一局是流局**：和了结束时和牌者已经把供託收走，
+        //   `res.sticksLeft` 是 0。所以这就是原文说的「**因流局**导致半庄结束时」那一支。
         if (sticks > 0) {
-            int top = 0;
-            for (int i = 1; i < 4; i++) {
-                if (scores[i] > scores[top]) {
-                    top = i;
+            int[] add = RoundScoring.endGameSticks(scores, sticks);
+            for (int i = 0; i < 4; i++) {
+                if (add[i] != 0) {
+                    scores[i] += add[i];
+                    seats[i].score = scores[i];
                 }
             }
-            scores[top] += sticks * 1000;
-            seats[top].score = scores[top];
             lastScores = scores.clone();
         }
         sendGameEnd(scores);

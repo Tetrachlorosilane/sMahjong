@@ -46,16 +46,33 @@ public final class Rules {
     public int[] uma = {15, 5, -5, -15};
     /**
      * 每巡基本时长（毫秒）。这段时间内出牌**不消耗**总额外时长。
+     *
+     * <p>默认 `20+5` = **额外 20s + 每巡 5s**：客户端大厅的默认值本来就是这一组，
+     * 而服务端字段原来写的是 `0+15`（固定 15s）—— 于是"机器人补位牌桌 / 脚本客户端 /
+     * 真人建房"三条路径的钟模型不一致（批次三统一到**较大**的一侧，见 AUDIT §1.10）。
+     * ⚠ 规格写作「额外+每巡」，**别把 `20+5` 读成"每巡 20s"**（见 PROTOCOL §5.1）。
      */
-    public int thinkingBaseMs = 15000;
+    public int thinkingBaseMs = 5000;
     /**
      * 总额外时长（毫秒）。超出每巡基本时长的部分从这里扣，扣减按 1 秒离散、
-     * 剩余量向上去整（即偏向玩家多给）。
+     * 剩余量向上去整（即偏向玩家多给）。**每小局重置**（`Table.playGame`）。
      */
-    public int thinkingBankMs = 0;
+    public int thinkingBankMs = 20000;
     /** 兼容旧字段：thinking_ms 等价于「固定思考时长」，即 base=thinking_ms、bank=0。 */
-    public int thinkingMs = 15000;
+    public int thinkingMs = 5000;
     public int minHan = 1;
+
+    /**
+     * **一位必要点数**（`docs/日本麻将.md` L143/L145/L157/L116）：决定
+     * ①「All Last 轮庄后要不要进延长战」②「All Last 庄家能不能和了止/听牌止」的点数门槛。
+     *
+     * <p>M.League **不使用**（= 0，打到南 4 局庄家轮庄为止）；《天凤》《雀魂》段位场 = **30000**。
+     * ⚠ 它与 {@link #returnScore}（返点 = **精算**基准）是两个概念 ——《雀魂》正是
+     * 「一位必要点数 30000 + 精算基准 25000」，所以不能拿 `returnScore` 当门槛
+     * （原来西入那一支就是这么写的，见 AUDIT S-66）。
+     * 0 = 不要求（任何分数都算达到）。
+     */
+    public int requiredPoints = 0;
 
     // ================================================================= M.League 差异
     // 依据 docs/日本麻将.md（2026-09-14 版，各节都补了《雀魂》《天凤》与 M.League 的差异说明）。
@@ -117,8 +134,8 @@ public final class Rules {
                 doubleYakuman = false; renhou = "off"; headBump = true; sanchaAbort = false;
                 fourRiichiAbort = false; fourKanAbort = false; fourWindAbort = false; kyuushuAbort = false;
                 nagashiMangan = false;
-                // 无击飞、无和了止、无西入（南 4 局庄家轮庄即终局）
-                tobi = false; agariyame = false; westExtension = false;
+                // 无击飞、无和了止、无西入（南 4 局庄家轮庄即终局）；**无一位必要点数**
+                tobi = false; agariyame = false; westExtension = false; requiredPoints = 0;
                 // 食い替え禁止、包牌（含四杠子；暗杠计入大三元/大四喜的个数判定）
                 kuikae = true; pao = true; paoFourKan = true; paoCoversAll = false;
                 // 25000 配给 / 30000 返还、马点 10-30 + 头名赏、同点平分加点
@@ -134,6 +151,9 @@ public final class Rules {
                 doubleYakuman = false; renhou = "off"; headBump = false; sanchaAbort = true;
                 fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
                 nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+                // 《天凤》：All Last 庄家**达到一位必要点数且为 1 位**时才和了止/听牌止
+                //（文档 L116），西入的门槛也是它（L145：达到 30000 即可结束）
+                requiredPoints = 30000;
                 // 包牌只到「大三元 / 大四喜」，但**包牌承担复合后的全部役满得点**
                 kuikae = true; pao = true; paoFourKan = false; paoCoversAll = true;
                 notenPenalty = 3000; startScore = 25000; returnScore = 30000;
@@ -146,10 +166,12 @@ public final class Rules {
                 doubleYakuman = true; renhou = "off"; headBump = false; sanchaAbort = false;
                 fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
                 nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+                // 《雀魂》四人段位场：**一位必要点数 = 30000**（文档 L157）
+                requiredPoints = 30000;
                 // 包牌：只到大三元 / 大四喜，且**只包被包的那一役**（与 M.League 同侧）
                 kuikae = true; pao = true; paoFourKan = false; paoCoversAll = false;
                 // 《雀魂》段位场：精算基准 = 配给原点 25000（**没有头名赏**），
-                // 与它的「一位必要点数 30000」是两个数；本项目只保留精算基准这一项。
+                // 与它的「一位必要点数 30000」是两个数 —— 现已拆成 `requiredPoints` 两个字段。
                 notenPenalty = 3000; startScore = 25000; returnScore = 25000;
                 uma = new int[]{15, 5, -5, -15}; tieSplitPoint = false;
                 kiriageMangan = false; kazoeYakuman = true; doubleWindPairFu = 4;
@@ -203,6 +225,7 @@ public final class Rules {
         }
         r.thinkingMs = r.thinkingBaseMs;
         r.minHan = Json.i(m, "min_han", r.minHan);
+        r.requiredPoints = Json.i(m, "required_points", r.requiredPoints);
         r.kiriageMangan = Json.bool(m, "kiriage_mangan", r.kiriageMangan);
         r.kazoeYakuman = Json.bool(m, "kazoe_yakuman", r.kazoeYakuman);
         r.doubleWindPairFu = Json.i(m, "double_wind_pair_fu", r.doubleWindPairFu);
@@ -252,6 +275,7 @@ public final class Rules {
         doubleWindPairFu = clamp(doubleWindPairFu, 0, 4);
         riichiMinScore = clamp(riichiMinScore, 0, 1000000);
         riichiMinTilesLeft = clamp(riichiMinTilesLeft, 0, 69);
+        requiredPoints = clamp(requiredPoints, 0, 1000000);
     }
 
     private static int clamp(int v, int lo, int hi) {
@@ -289,6 +313,7 @@ public final class Rules {
                 "thinking_bank_ms", thinkingBankMs,
                 "thinking_ms", thinkingBaseMs,   // 兼容旧客户端
                 "min_han", minHan,
+                "required_points", requiredPoints,
                 "kiriage_mangan", kiriageMangan,
                 "kazoe_yakuman", kazoeYakuman,
                 "double_wind_pair_fu", doubleWindPairFu,
