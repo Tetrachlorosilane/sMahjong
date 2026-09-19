@@ -2354,6 +2354,11 @@ public final class Round {
         }
         r.winner = winners.get(0);
         int sticksLeft = sticks;
+        // ⚠ 先把**所有**赢家结算完，再逐家发报文（见下面的 sendAgari 循环）。
+        //   `agari` 里带的是 `scores_after`，而边算边发的话第一条报文里的分数**还没有后面
+        //   几家的收支**（多家荣和时的"中途快照"，见 AUDIT S-53）：客户端按顺序处理、取最后
+        //   一条所以看不出来，但回放 / 重连若取中间那条就是错的账。
+        List<Object[]> settled = new ArrayList<>();      // {winner, HandScore, Payments.Result, pao}
         for (int i = 0; i < winners.size(); i++) {
             int w = winners.get(i);
             Evaluator.HandScore sc = checkWin(w, tileId, false, false, false, chankan, wall.atLastLiveTile());
@@ -2374,12 +2379,17 @@ public final class Round {
                                                    false, pao, paoBase);
             sticksLeft -= useSticks;
             applyDelta(r, pay.delta);
-            sendAgari(w, from, false, tileId, sc, pay, pao, riichiVoid);
+            settled.add(new Object[]{w, sc, pay, pao});
         }
         r.sticksLeft = Math.max(0, sticksLeft);
         r.dealerRenchan = RoundScoring.winBy(dealer, winners);
         for (int w : winners) {
             r.tenpai[w] = true;
+        }
+        // 分数到此已是最终值，再按"距放铳者由近到远"逐家发（顺序与旧实现一致）
+        for (Object[] s : settled) {
+            sendAgari((Integer) s[0], from, false, tileId, (Evaluator.HandScore) s[1],
+                    (Payments.Result) s[2], (Integer) s[3], riichiVoid);
         }
         return r;
     }

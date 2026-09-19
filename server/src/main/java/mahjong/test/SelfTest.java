@@ -1221,6 +1221,33 @@ public final class SelfTest {
         eq("多家荣和：立直棒全归最近那家（第二家不加）", sticks2[2], two[2]);
         eq("多家荣和：最近那家多拿的是全部供託", sticks2[1] - two[1], 2000);
         eq("单家荣和拿全部供託", sticks1[1] - one1[1], 2000);
+
+        // ---------- S-53：每条 agari 报文里的 `scores_after` 都必须是**最终**分数 ----------
+        // 旧实现边结算边发 → 多家荣和时先发的那条是"中途快照"（还没有后面几家的收支）。
+        List<Map<String, Object>> agariEvents = new ArrayList<>();
+        Table t53 = claimTable(ms);
+        t53.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                agariEvents.add(new HashMap<>(ev));
+            }
+        };
+        Round r53 = new Round(t53, 0, 1, honba, 0, new int[]{25000, 25000, 25000, 25000}, 0,
+                20260901L);
+        List<Integer> win53 = new ArrayList<>();
+        for (int s : new int[]{1, 2}) {
+            r53.hand[s].addAll(parse(new String[]{
+                    "2z2z2z1m1m1m2m2m2m3m3m3m5p",
+                    "3z3z3z4m4m4m5m5m5m6m6m6m5p"}[s - 1]));
+            win53.add(s);
+        }
+        int[] d53 = r53.debugRonDeltas(win53, 0, Tiles.id(Tiles.parseKind("5p"), 2));
+        check("两家都真有收支（否则下面那条断言是空转）", d53[1] > 0 && d53[2] > 0);
+        eq("两家荣和发出 2 条 agari 报文", agariEvents.size(), 2);
+        final String finalScores = Json.intList(r53.scores).toString();
+        for (int i = 0; i < agariEvents.size(); i++) {
+            eq("第 " + (i + 1) + " 条 agari 的 scores_after 就是最终分数（不是中途快照）",
+                    String.valueOf(agariEvents.get(i).get("scores_after")), finalScores);
+        }
     }
 
     /**
