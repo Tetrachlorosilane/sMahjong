@@ -795,13 +795,12 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `round` | map | `{bakaze, kyoku, honba, dealer, riichi_sticks}` |
 | `tiles_left` / `dead_wall_left` | int | 可摸余牌 / 岭上余牌 |
 | `total_discards` / `kan_count` / `any_call` | int / bool | 公开的巡目与局面量 |
-| `visible` | int[34] | **派生量** = 四家牌河 + 四家副露 + 宝牌指示牌（省得训练侧重算） |
+| `visible` | int[34] | **派生量** = 四家牌河 + 四家副露 + 宝牌指示牌（省得训练侧重算）；实现见 `rules.Visible` |
 | `haitei` / `houtei` / `rinshan` | bool | 海底 / 河底 / 岭上 |
 | `from` / `called_tile` / `win_note` | int / str? / str? | 鸣牌询问专用：谁打的、哪张、自己能听不能和的原因（`furiten`/`no_yaku`） |
 | `legal` | str[] | **本次全部合法动作**（动作空间的掩码来源，见 §8.3） |
 
 **绝不出现的字段**（与 §3.10 同一条纪律；进程内更要小心，因为 `Round` 是公开可读的）：
-
 - 别家手牌 `Round.hand[other]`；
 - 牌山顺序 `Round.wallOrder()` / `Wall.debugAllTiles()`；
 - 里宝指示牌 `Round.uraIndicators()`；
@@ -809,6 +808,19 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 
 > ⚠ 自家回合**不能**调 `Round.isFuriten()`：它内部会跑 34 次向听 DFS，而 14 张手牌的听牌集合
 > **恒为空**，所以那一刻它完全等价于 `furitenTemp || furitenPerm` —— 白花一次 DFS。
+
+**特征侧的现成判据**（都在 `server/.../rules/`，纯函数，不必经过 `Round`）：
+
+| 判据 | 给什么 |
+| --- | --- |
+| `Visible.counts / unseen / drawable` | 可见牌 / 剩余张数 / **可摸张数**（`4 − 可见 − 自己手里`） |
+| `HandEval.shanten / advanceKinds / advanceTiles` | 向听、进张**种类与枚数**（枚数按可见牌扣） |
+| `HandEval.waitShapes / of / afterDiscard` | 听牌形（两面/双碰/嵌张/边张/单骑）、"打某张之后"的整份快照 |
+| `Agari.waits` / `Evaluator.evaluate` | 听牌集合 / 给定和了牌的打点（含宝牌、赤宝、役满折算） |
+
+⚠ `HandEval.of` 至少要跑 1 + 34 次向听 DFS，听牌时还要逐张做和了形分解 —— 它是**离线/评估用**的，
+别塞进热路径。`Bot` 只用了其中更便宜的 `advanceKinds`，且抽成公共判据前后**行为逐字等价**
+（等价性钉在 `SelfTest.handEvalTests`）。
 
 ### 8.3 动作空间
 

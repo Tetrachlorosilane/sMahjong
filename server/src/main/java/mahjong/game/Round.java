@@ -62,6 +62,20 @@ public final class Round {
     public final int[] paoSeat = {-1, -1, -1, -1};
     public final boolean[] hadDiscardCalled = new boolean[4];
 
+    /**
+     * 每座位**曾经打出过**的牌种计数（34 维）—— 舍张振听的判据。
+     *
+     * <p>⚠ 它**不等于** {@link #discards}：被他家吃/碰/杠走的舍牌会从牌河里**移除**
+     * （鸣牌是"移动"不是"复制"，见 AGENTS §2.2 的 `called_index`），但按规则
+     * 「**舍张振听**的条件是当前所听的牌中至少有一种是自己曾经打出的牌，**包括听牌前打出的牌，
+     * 以及后来被他家吃、碰或杠走的舍牌**」（`docs/日本麻将.md` §振听）——
+     * 所以振听必须看这份"曾经打出过"的账，而不是牌河。
+     *
+     * <p>原来只看牌河，于是「打出去被人碰走的那张」事后能荣和回去（规则漏洞）。
+     * 回归：`SelfTest.furitenRuleTests`。
+     */
+    private final int[][] discardKindsEver = new int[4][Tiles.KIND_COUNT];
+
     public boolean anyCall;
     public int kanCount;
     public final int[] kanByPlayer = new int[4];
@@ -245,6 +259,11 @@ public final class Round {
                 type = "discard";
                 act = null;
             }
+            // 立直振听：**能给自摸却见逃**（走到这里就说明没有和）→ 本局之内不能再荣和。
+            //   只在立直家成立 —— 规则把"放弃自摸和"归在立直振听里（docs/日本麻将.md §振听）。
+            if (riichi[turn] && drawn >= 0 && hasOption(opts, "tsumo")) {
+                furitenPerm[turn] = true;
+            }
             if ("kyuushu".equals(type)) {
                 return abort("九种九牌");
             }
@@ -317,8 +336,7 @@ public final class Round {
             sortHands();
             final boolean sideways = declareRiichi || sidewaysPending[turn];
             sendDiscard(turn, discardId, tsumogiri, declareRiichi, sideways);
-            discards[turn].add(discardId);
-            noteDiscard(turn, declareRiichi);
+            recordDiscard(turn, discardId, declareRiichi);
             totalDiscards++;
             lastDiscardSeat = turn;
             lastDiscardTile = discardId;
@@ -433,6 +451,28 @@ public final class Round {
 
     /** 自测钩子：模拟一次打牌后的横置记录。 */
     public void debugNoteDiscard(int seat, boolean declareRiichi) {
+        noteDiscard(seat, declareRiichi);
+    }
+
+    /**
+     * 自测钩子：往牌河放一张牌（**走与生产完全同一条记账**：牌河 + "曾经打出过" + 横置）。
+     *
+     * <p>自测要构造"打出去又被鸣走"的局面，而生产路径的那三行代码埋在出牌循环里，
+     * 所以这里复用它 —— 两处各写一份的话，记账迟早会漂。
+     */
+    public void debugPushDiscard(int seat, String code, boolean declareRiichi) {
+        recordDiscard(seat, Tiles.id(Tiles.parseKind(code), 0), declareRiichi);
+    }
+
+    /** 自测钩子：完整模拟「牌河第 index 张被鸣走」（含移除 + 横置顺延）。 */
+    public void debugRemoveCalledFromRiver(int from, int index) {
+        removeCalledFromRiver(from, index);
+    }
+
+    /** 出牌的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置。 */
+    private void recordDiscard(int seat, int id, boolean declareRiichi) {
+        discards[seat].add(id);
+        discardKindsEver[seat][Tiles.kind(id)]++;
         noteDiscard(seat, declareRiichi);
     }
 
@@ -703,10 +743,19 @@ public final class Round {
         return c;
     }
 
+    /**
+     * 自己**曾经**打出的牌种集合 —— 舍张振听的判据。
+     *
+     * <p>⚠ 含**被他家吃/碰/杠走**的舍牌（它们已从 {@link #discards} 移除，见
+     * {@link #discardKindsEver}）。所以这个集合**不是**牌河的镜像：牌河用于显示与
+     * `called_index`，这个集合用于振听。
+     */
     public Set<Integer> ownDiscardKinds(int seat) {
         Set<Integer> s = new LinkedHashSet<>();
-        for (int id : discards[seat]) {
-            s.add(Tiles.kind(id));
+        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+            if (discardKindsEver[seat][k] > 0) {
+                s.add(k);
+            }
         }
         return s;
     }
@@ -1483,6 +1532,30 @@ public final class Round {
             //   awaitAction 当成答复 —— 玩家没动就被代打（见 Table.dropReplies）。
             if (cancelled != null) {
                 table.dropReplies(s, cancelled);
+            }
+        }
+
+        // 同巡振听 / 立直振听：**被给过荣和选项却没和**（含超时未答）= 见逃。
+        //   · 同巡振听：本巡之内不能再荣和，自家下一次摸牌时解除（见上面 `furitenTemp[turn] = false`）；
+        //   · 立直振听：立直状态下见逃，**持续到本局结束**（`furitenPerm`）。
+        //   （`docs/日本麻将.md` §振听。原来这两个标志**只有清除、从来没人置位** ——
+        //     于是"放过一张荣和牌之后马上又能荣和同一张"，整条见逃/振听博弈都不存在。）
+        for (int d = 1; d < 4; d++) {
+            final int s = (from + d) % 4;
+            final Set<String> types = askedTypes.get(s);
+            if (types == null || !types.contains("ron")) {
+                continue;                       // 本次没给过他荣和选项 → 谈不上见逃
+            }
+            final Map<String, Object> a = answers.get(s);
+            if (a != null && "ron".equals(Json.str(a, "type", ""))) {
+                continue;                       // 和了
+            }
+            if (isFuriten(s)) {
+                continue;                       // 本来就在振听（给了选项也和不成立），不重复记账
+            }
+            furitenTemp[s] = true;
+            if (riichi[s]) {
+                furitenPerm[s] = true;
             }
         }
 

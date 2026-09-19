@@ -77,6 +77,8 @@ public final class SelfTest {
         simulationTest();
         rinshanTests();
         kanLimitTests();
+        furitenRuleTests();
+        handEvalTests();
         trainingInterfaceTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
@@ -546,7 +548,9 @@ public final class SelfTest {
         r1.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p"));
         eq("听5p", r1.waitKinds(1), Arrays.asList(13));
         check("未见5p时非振听", !r1.isFuriten(1));
-        r1.discards[1].add(Tiles.id(13, 1));
+        // ⚠ 必须走**生产的记账**（`recordDiscard`）：舍张振听的判据是"曾经打出过的牌"，
+        //   而不是"现在牌河里有的牌" —— 直接往 `discards[1]` 里塞会绕过那份账。
+        r1.debugPushDiscard(1, "5p", false);
         check("舍张振听", r1.isFuriten(1));
 
         // 同巡振听
@@ -656,7 +660,7 @@ public final class SelfTest {
         mahjong.game.Round r4 = newRound();
         r4.hand[2].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p"));
         r4.riichi[2] = true;
-        r4.discards[2].add(Tiles.id(13, 1));
+        r4.debugPushDiscard(2, "5p", false);       // 走生产记账（曾经打出过，见 furitenRuleTests）
         java.util.List<String> c2 = r4.debugClaimOptionTypes(2, 1, Tiles.id(13, 1));
         check("振听时不下发 ron: " + c2, !c2.contains("ron"));
     }
@@ -2194,6 +2198,304 @@ public final class SelfTest {
         // 词汇表覆盖：整场模拟里出现过的每个役种名都必须能换成 ASCII 码
         // （漏登记 → codeOf 计一次 miss；这是"新增役种忘了登记"的主要兜底）
         eq("整场模拟里没有未登记的役种名（YakuCodes.misses）", YakuCodes.misses(), 0);
+    }
+
+    // ------------------------------------------------------------- 规则层评估判据
+
+    /** 把 {@code Bot} 原来那份私有进张实现抄进来对拍（行为等价的证据）。 */
+    private static int oldUkeire(int[] counts, int meldCount) {
+        int cur = Shanten.min(counts, meldCount);
+        if (cur <= 0) {
+            return 0;
+        }
+        int total = 0;
+        int[] c = counts.clone();
+        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+            if (c[k] >= 4) {
+                continue;
+            }
+            c[k]++;
+            int sh = Shanten.min(c, meldCount);
+            c[k]--;
+            if (sh < cur) {
+                total += 4 - c[k];
+            }
+        }
+        return total;
+    }
+
+    /**
+     * 规则层的**评估判据**（`rules/Visible` 与 `rules/HandEval`）。
+     *
+     * <p>它们是"给 AI 用"的观测量（可见牌统计、进张、听牌形），不参与任何规则判定。
+     * 三条要点：① 可见牌统计与手牌张数必须自洽；② 进张枚数与 `Bot` 原来那份私有实现**等价**
+     * （否则"把私有实现抽成公共判据"就悄悄改了教师的行为）；③ 听牌形要认得出两面/嵌张/边张/单骑/双碰。
+     */
+    private static void handEvalTests() {
+        // ---------- ① 可见牌统计
+        Table t = new Table("EVAL", "评估桌", Rules.defaults());
+        t.debugDeterministicSeed = true;
+        t.seedBase = 31L;
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+        }
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 818181L);
+        r.debugSetup();
+        int[] vis = mahjong.rules.Visible.counts(r.discards, r.melds, r.doraIndicators());
+        eq("可见牌统计：刚配牌时只有宝牌指示牌是可见的",
+                mahjong.rules.Visible.total(vis), r.doraIndicators().size());
+        int[] draw = mahjong.rules.Visible.drawable(vis, new int[Tiles.KIND_COUNT]);
+        int total = 0;
+        for (int v : draw) {
+            total += v;
+        }
+        eq("「可摸张数」= 4×34 减去已经看见的牌（配牌后只有宝牌指示牌）",
+                total, 136 - r.doraIndicators().size());
+
+        // ---------- ② 进张判据与旧私有实现等价（教师行为不变的证据）
+        // 手牌一律用 13 张（或 13−3×副露 张）：14 张的"向听"是另一回事，
+        // 拿 14 张去问"进张"会得到全 0（向听已经 <= 0），那是**测错了对象**。
+        String[] hands = {"1m1m1m2m2m2m3m3m3m5m7m9m2p", "1m1m1m2m2m2m5m7m9m2p"};
+        for (int meldCount = 0; meldCount < hands.length; meldCount++) {
+            int[] probe = counts(hands[meldCount]);
+            int[] kinds = mahjong.rules.HandEval.advanceKinds(probe, meldCount);
+            eq("进张枚数与旧实现等价（副露 " + meldCount + "）",
+                    mahjong.rules.HandEval.advanceTiles(kinds, probe, null),
+                    oldUkeire(probe, meldCount));
+            check("进张判据非空（副露 " + meldCount + "，实际 " + mahjong.rules.HandEval
+                    .advanceTypes(kinds) + " 种）",
+                    mahjong.rules.HandEval.advanceTypes(kinds) > 0);
+        }
+        // 已听牌时不谈"进张"（该看听牌表）
+        int[] tenpai13 = new int[Tiles.KIND_COUNT];
+        for (int id : parse("1m1m1m2m2m2m3m3m3m4m4m4m5p")) {
+            tenpai13[Tiles.kind(id)]++;
+        }
+        eq("已听牌时进张为空（向听不再下降）",
+                mahjong.rules.HandEval.advanceTypes(
+                        mahjong.rules.HandEval.advanceKinds(tenpai13, 0)), 0);
+        check("已听牌（向听 0）", mahjong.rules.HandEval.tenpai(tenpai13, 0));
+        eq("听牌表", mahjong.rules.HandEval.waits(tenpai13, 0).toString(), "[13]");
+
+        // ---------- ③ 听牌形：两面 / 嵌张 / 边张 / 单骑 / 双碰
+        eq("两面：23m 听 1m/4m",
+                shapeOf("1m1m1m2m2m2m3m3m3m2p3p5p5p", "1p", "4p"),
+                mahjong.rules.Agari.WAIT_RYANMEN);
+        eq("嵌张：13m 听 2m",
+                shapeOf("1m1m1m2m2m2m3m3m3m1p3p5p5p", "2p"),
+                mahjong.rules.Agari.WAIT_KANCHAN);
+        eq("边张：12m 听 3m",
+                shapeOf("1m1m1m2m2m2m3m3m3m1p2p5p5p", "3p"),
+                mahjong.rules.Agari.WAIT_PENCHAN);
+        eq("单骑：听雀头",
+                shapeOf("1m1m1m2m2m2m3m3m3m1p2p3p5p", "5p"),
+                mahjong.rules.Agari.WAIT_TANKI);
+        eq("双碰：11p+55p 听两张",
+                shapeOf("1m1m1m2m2m2m3m3m3m1p1p5p5p", "1p", "5p"),
+                mahjong.rules.Agari.WAIT_SHANPON);
+        check("良形只有两面",
+                mahjong.rules.HandEval.isGoodShape(mahjong.rules.Agari.WAIT_RYANMEN)
+                        && !mahjong.rules.HandEval.isGoodShape(mahjong.rules.Agari.WAIT_KANCHAN));
+        check("形的优劣序：两面 < 双碰 < 嵌张 < 边张 < 单骑",
+                mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_RYANMEN)
+                        < mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_SHANPON)
+                        && mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_SHANPON)
+                        < mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_KANCHAN)
+                        && mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_KANCHAN)
+                        < mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_PENCHAN)
+                        && mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_PENCHAN)
+                        < mahjong.rules.HandEval.shapeRank(mahjong.rules.Agari.WAIT_TANKI));
+
+        // ---------- ④ 快照：打一张之后听牌 / 枚数按可见牌扣减
+        // 打掉 9p 之后是 `111m 222m 333m 23p 55p` → 两面听 1p/4p
+        int[] c14 = counts("1m1m1m2m2m2m3m3m3m2p3p5p5p9p");
+        mahjong.rules.HandEval.Snapshot snap =
+                mahjong.rules.HandEval.afterDiscard(c14, List.of(), Tiles.parseKind("9p"), null);
+        check("打完一张后听牌：" + snap, snap.tenpai);
+        eq("听 1p/4p 两面（2 种）", snap.waitTypes, 2);
+        eq("良形种类 = 2", snap.goodWaitTypes, 2);
+        eq("看不见任何牌时两面共 8 枚", snap.goodWaitTiles, 8);
+        int[] vis2 = new int[Tiles.KIND_COUNT];
+        vis2[Tiles.parseKind("1p")] = 3;
+        vis2[Tiles.parseKind("4p")] = 1;
+        mahjong.rules.HandEval.Snapshot snap2 =
+                mahjong.rules.HandEval.afterDiscard(c14, List.of(), Tiles.parseKind("9p"), vis2);
+        eq("可见牌把枚数扣干净（1p 剩 1 张、4p 剩 3 张 → 4 枚）", snap2.goodWaitTiles, 4);
+    }
+
+    /** 造 13 张手牌，取指定听牌张的形；认不出返回 -1。 */
+    private static int shapeOf(String hand, String... waits) {
+        int[] c = counts(hand);
+        int[] shapes = mahjong.rules.HandEval.waitShapes(c, List.of());
+        int best = -1;
+        for (String w : waits) {
+            int k = Tiles.parseKind(w);
+            if (shapes[k] < 0) {
+                return -100 - k;      // 根本没听这张：返回一个明显不在取值域里的数
+            }
+            best = best < 0 ? shapes[k] : mahjong.rules.HandEval.betterShape(best, shapes[k]);
+        }
+        return best;
+    }
+
+    // ------------------------------------------------------------- 振听（规则）
+    /** 见逃策略：把「荣和」与「立直家的自摸」一律放过，其余交给内置机器人。 */
+    private static final class PassWinPolicy implements mahjong.ai.ActionPolicy {
+        /** {seat, kind, handKey, offeredRon, passedWin, furitenBefore, selfRiichi} */
+        final List<Object[]> trace = new ArrayList<>();
+
+        @Override
+        public mahjong.ai.Action choose(mahjong.ai.Decision d) {
+            final List<mahjong.ai.Action> legal = d.legal();
+            boolean offeredRon = false;
+            boolean offeredTsumo = false;
+            for (mahjong.ai.Action a : legal) {
+                offeredRon |= "ron".equals(a.type);
+                offeredTsumo |= "tsumo".equals(a.type);
+            }
+            // 荣和一律放过；立直家的自摸也放过（触发立直振听）
+            final boolean passRon = offeredRon;
+            final boolean passTsumo = offeredTsumo && d.obs.selfRiichi;
+            trace.add(new Object[]{d.obs.seat, d.kind,
+                    d.obs.roundWind + "-" + d.obs.kyoku + "-" + d.obs.honba,
+                    offeredRon, passRon || passTsumo, d.obs.furiten, d.obs.selfRiichi});
+            if (!passRon && !passTsumo) {
+                return mahjong.ai.Action.fromCmd(
+                        Bot.decide(d.round, d.obs.seat, d.kind, d.options, d.extra));
+            }
+            if (passRon) {
+                return mahjong.ai.Action.of("pass");
+            }
+            for (mahjong.ai.Action a : legal) {
+                if ("discard".equals(a.type)) {
+                    return a;
+                }
+            }
+            return legal.isEmpty() ? mahjong.ai.Action.of("pass") : legal.get(0);
+        }
+    }
+
+    /**
+     * 振听三条（`docs/日本麻将.md` §振听）—— 这三条原来**都不成立**：
+     * <ol>
+     *   <li><b>舍张振听</b>只看牌河，而被他家吃碰杠走的舍牌已从牌河移除 →
+     *       打出去被人碰走的听牌张事后能荣和回去；</li>
+     *   <li><b>同巡振听</b>（见逃一张荣和牌后本巡之内不能再荣和）—— `furitenTemp` **只有清除、
+     *       从来没人置位**；</li>
+     *   <li><b>立直振听</b>（立直后见逃，持续到本局结束）—— `furitenPerm` 同样从未置位。</li>
+     * </ol>
+     * 修法见 `Round.discardKindsEver` / `claimPhase` 的见逃记账 / 出牌段的立直振听记账。
+     */
+    private static void furitenRuleTests() {
+        // ---------- ① 舍张振听（含被他家鸣走的舍牌）
+        Table t = new Table("FURITEN", "振听桌", Rules.defaults());
+        t.debugDeterministicSeed = true;
+        t.seedBase = 99L;
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+        }
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 424242L);
+        r.debugSetup();
+        final int ich = Tiles.parseKind("1z");
+        r.hand[0].clear();
+        for (String c : new String[]{"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+                "1p", "2p", "3p", "1z"}) {
+            r.hand[0].add(Tiles.id(Tiles.parseKind(c), 0));
+        }
+        eq("构造：听 1z 单骑", r.waitKinds(0).toString(), "[" + ich + "]");
+        check("没打过听牌张时不振听", !r.isFuriten(0));
+        check("没打过的牌不进「曾经打出过」的账", !r.ownDiscardKinds(0).contains(ich));
+
+        r.debugPushDiscard(0, "1z", false);
+        eq("debugPushDiscard 走了生产的记账（牌河 +1）", r.discards[0].size(), 1);
+        check("舍张振听：河里打过的听牌张 → 振听", r.isFuriten(0));
+
+        r.debugRemoveCalledFromRiver(0, 0);
+        eq("被鸣走后牌河为空（客户端也会 removeAt）", r.discards[0].size(), 0);
+        check("舍张振听必须算上「被他家吃碰杠走的舍牌」", r.isFuriten(0));
+        check("…且这一条记在「曾经打出过」的账上（不是牌河）",
+                r.ownDiscardKinds(0).contains(ich));
+
+        // 规则明文：改变手牌后，若所听的牌都没被自己打出过，振听解除
+        r.hand[0].set(12, Tiles.id(Tiles.parseKind("2z"), 0));
+        eq("构造：改手牌后听 2z 单骑", r.waitKinds(0).toString(),
+                "[" + Tiles.parseKind("2z") + "]");
+        check("改手牌后（听的牌不是自己打过的）舍张振听解除", !r.isFuriten(0));
+
+        // ---------- ②③ 同巡振听 / 立直振听：整场里按不变式检查
+        // 单局一场、多种子扫，**凑够机会就提前收工**：见逃荣和很常见，"立直家摸到自己的
+        // 和了牌"却很稀有（要立直之后在剩余几巡里自摸到），跑满固定场次纯属浪费 L1 时间。
+        final int maxSeeds = 40;
+        int passRon = 0;
+        int passTsumo = 0;
+        int checked = 0;
+        int used = 0;
+        boolean invariantOk = true;
+        String bad = "";
+        for (int g = 0; g < maxSeeds; g++) {
+            used = g + 1;
+            Table tt = new Table("FUR" + g, "见逃桌", Rules.defaults());
+            tt.botDelayMs = 0;
+            tt.roundDelayMs = 0;
+            tt.debugDeterministicSeed = true;
+            tt.debugMaxHands = 1;
+            tt.seedBase = 5150L + g * 7919L;
+            PassWinPolicy pol = new PassWinPolicy();
+            for (int i = 0; i < 4; i++) {
+                tt.policy[i] = mahjong.ai.Policies.fromAction(pol);
+                tt.addBot(i);
+            }
+            tt.playGame();
+            // 逐座位走一遍：见逃 → 本巡之内必须一直振听；立直见逃 → 本局之内一直振听
+            for (int seat = 0; seat < 4; seat++) {
+                boolean pendingTemp = false;
+                boolean pendingPerm = false;
+                String handKey = "";
+                for (Object[] rec : pol.trace) {
+                    if (((Number) rec[0]).intValue() != seat) {
+                        continue;
+                    }
+                    String hand = String.valueOf(rec[2]);
+                    if (!hand.equals(handKey)) {
+                        handKey = hand;
+                        pendingTemp = false;
+                        pendingPerm = false;
+                    }
+                    boolean furiten = (Boolean) rec[5];
+                    boolean claim = "claim".equals(rec[1]);
+                    if (claim && (pendingTemp || pendingPerm) && !furiten) {
+                        invariantOk = false;
+                        bad = (pendingPerm ? "立直振听" : "同巡振听") + " 未生效 seed=" + g
+                                + " seat=" + seat + " hand=" + hand;
+                    }
+                    checked++;
+                    if (!claim) {
+                        pendingTemp = false;     // 自家摸牌 → 同巡振听解除
+                    }
+                    if ((Boolean) rec[4]) {
+                        if ((Boolean) rec[3]) {
+                            passRon++;
+                            pendingTemp = true;
+                            if ((Boolean) rec[6]) {
+                                pendingPerm = true;   // 立直家见逃荣和 → 立直振听
+                            }
+                        } else {
+                            passTsumo++;
+                            pendingPerm = true;       // 立直家见逃自摸 → 立直振听
+                        }
+                    }
+                }
+            }
+            if (passRon > 0 && passTsumo > 0 && checked >= 300) {
+                break;
+            }
+        }
+        System.out.println("  [覆盖] 振听不变式：" + used + " 场单局、" + checked + " 次询问，见逃荣和 "
+                + passRon + " 次、立直见逃自摸 " + passTsumo + " 次");
+        check("同巡/立直振听的不变式在整场里处处成立" + (bad.isEmpty() ? "" : "（" + bad + "）"),
+                invariantOk);
+        check("确实造出了「见逃荣和」的机会（否则上面那条是空转）", passRon > 0);
+        check("确实造出了「立直见逃自摸」的机会", passTsumo > 0);
     }
 
     // ------------------------------------------------------------- 训练接口

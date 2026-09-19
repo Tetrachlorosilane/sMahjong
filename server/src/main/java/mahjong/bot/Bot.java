@@ -10,6 +10,7 @@ import mahjong.core.Meld;
 import mahjong.core.Tiles;
 import mahjong.game.Round;
 import mahjong.rules.Agari;
+import mahjong.rules.HandEval;
 import mahjong.rules.Shanten;
 import mahjong.util.Json;
 
@@ -131,8 +132,14 @@ public final class Bot {
                 continue;
             }
             int[] counts = countsWithout(r, seat, id);
-            int sh = Shanten.min(counts, r.melds[seat].size());
-            int uk = sh <= 0 ? 0 : ukeire(counts, r.melds[seat].size(), sh);
+            final int meldCount = r.melds[seat].size();
+            int sh = Shanten.min(counts, meldCount);
+            // 进张枚数走规则层的公共判据（`HandEval`）。这里传 `null` 可见牌 = "什么也看不见"，
+            // 与原来那份私有实现**逐字等价**（`Σ 4 − 手里`），所以教师的行为一字不变；
+            // 想让它按实际可见牌算，是下一轮"加强 teacher"的事，不在规则层做。
+            // 等价性钉在 `SelfTest.handEvalTests`（把旧公式抄进断言里对拍）。
+            int uk = sh <= 0 ? 0
+                    : HandEval.advanceTiles(HandEval.advanceKinds(counts, meldCount), counts, null);
             if (sh < bestShanten || (sh == bestShanten && uk > bestUkeire)
                     || (sh == bestShanten && uk == bestUkeire && betterTieBreak(ts, bestTile))) {
                 bestShanten = sh;
@@ -183,23 +190,6 @@ public final class Bot {
             }
         }
         return n;
-    }
-
-    private static int ukeire(int[] counts, int meldCount, int curShanten) {
-        int total = 0;
-        int[] c = counts.clone();
-        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-            if (c[k] >= 4) {
-                continue;
-            }
-            c[k]++;
-            int sh = Shanten.min(c, meldCount);
-            c[k]--;
-            if (sh < curShanten) {
-                total += 4 - c[k];
-            }
-        }
-        return total;
     }
 
     private static int resolve(Round r, int seat, String s) {

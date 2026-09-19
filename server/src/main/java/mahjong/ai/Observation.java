@@ -7,6 +7,7 @@ import java.util.Map;
 import mahjong.core.Meld;
 import mahjong.core.Tiles;
 import mahjong.game.Round;
+import mahjong.rules.Visible;
 import mahjong.util.Json;
 
 /**
@@ -125,29 +126,26 @@ public final class Observation {
 
         this.melds = new ArrayList<>(4);
         this.discards = new ArrayList<>(4);
-        this.visible = new int[Tiles.KIND_COUNT];
         for (int s = 0; s < 4; s++) {
             List<Map<String, Object>> ms = new ArrayList<>();
             for (Meld m : r.melds[s]) {
                 ms.add(m.toJson());
-                for (int t : m.tiles) {
-                    this.visible[Tiles.kind(t)]++;
-                }
             }
             this.melds.add(ms);
             List<String> ds = new ArrayList<>();
             for (int id : r.discards[s]) {
                 ds.add(Tiles.toStr(id));
-                this.visible[Tiles.kind(id)]++;
             }
             this.discards.add(ds);
         }
         List<String> dora = new ArrayList<>();
         for (int k : r.doraIndicators()) {
             dora.add(Tiles.kindToStr(k));
-            this.visible[k]++;
         }
         this.doraIndicators = dora;
+        // 可见牌统计走规则层的**唯一**实现（`Visible`）—— 训练侧的危险度/进张枚数也用同一份，
+        // 各算一份迟早会漂。⚠ 里宝指示牌**不算**可见（`Visible` 只收宝牌指示牌）。
+        this.visible = Visible.counts(r.discards, r.melds, r.doraIndicators());
 
         this.riichi = r.riichi.clone();
         this.ippatsu = r.ippatsu.clone();

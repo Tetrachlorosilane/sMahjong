@@ -70,7 +70,7 @@
 | `dead_wall_left` | `draw` / `round_start` / `state` | 剩余**岭上**牌数。⚠ **每次摸牌都要带**：杠后那张取自王牌，`tiles_left` 在**岭上摸牌时不动**（开杠那一刻牌山末尾一张移进王牌才减 1），所以「岭上有没有被摸走」只能看它。一局 4 张：4→3→2→1。见 §6「王牌/岭上」与 PROTOCOL §3.4。 |
 | `drawn` | `round_start`（**仅庄家**） | 本巡「刚摸到的那张」的牌码（= 14 张里的第 14 张）。**必须有**：`hand` 是**已排序**下发的，位置推不出来，客户端只能猜 —— 猜错就是幽灵手牌（见 §2.3-11）。客户端摆摸牌位只认它；缺这个字段的老服务端会退回"最后一张是摸到的"（会认错）。 |
 
-### 2.3 十一条曾经踩过的坑（同类问题会再犯）
+### 2.3 十二条曾经踩过的坑（同类问题会再犯）
 
 1. **`riichi` 事件到达时，绝不能把"牌河最后一张"标成横置。**
    服务端顺序是**先广播 `riichi`、再广播 `discard`**，此刻牌河最后一张还是宣言牌**之前**那张，标它就等于一人牌河两张横置。
@@ -147,6 +147,22 @@
       否则扣暗牌里那一张、再把摸牌位的牌并入暗牌（顺序不能反，反了坏报文会让手牌涨到 14 张）。
     回归：`SelfTest.discardAlignTests`（逐条判据 + 庄家 `round_start` 必带 `drawn`）
     + `client --selftest` 的两组（`drawn` 点名 / 错配摸切按牌码对账）。
+
+12. **振听有三种，而且「自己曾经打出过的牌」≠「牌河」。**
+    一次审计里三条**全都不成立**（`furitenTemp`/`furitenPerm` 只有清除、从来没人置位；
+    舍张振听读的是 `discards[]`，而被他家吃碰杠走的牌**已经从牌河移除**）：
+    - **舍张振听**要算上**被他家吃碰杠走的舍牌**（`docs/日本麻将.md` §振听 明文："包括听牌前打出的牌，
+      以及后来被他家吃、碰或杠走的舍牌"）→ 单独记一份账 `Round.discardKindsEver[4][34]`，
+      出牌时在**唯一**的记账点 `Round.recordDiscard` 累加。
+      ⚠ `ownDiscardKinds` 只服务振听，**不是**牌河的镜像。
+    - **同巡振听**：被给了 `ron` 却没和（**含超时未答**）= 见逃 → 本巡之内不能再荣和，
+      自家下一次摸牌时解除。记账在 `claimPhase` 仲裁之后逐座位做。
+    - **立直振听**：立直状态下见逃荣和**或见逃自摸** → `furitenPerm`，持续到本局结束。
+    ⚠ 影响的不止服务端：**自检里两条老用例原本是"直接往 `discards[]` 里塞一张"来造振听的**
+    —— 那正好把 bug 当成了规格（`SelfTest.furitenTests` 的舍张/立直两条），
+    所以它们必须改成走 `debugPushDiscard`（= 生产的记账）。**测试里绕过记账点就是在给 bug 背书。**
+    已知偏差（无役见逃不触发同巡振听）与实现位置见 `docs/DESIGN.md`「振听：三种都要记」。
+    回归：`SelfTest.furitenRuleTests`（含"确实造出过见逃机会"的非空转断言）。
 
 ### 2.4 别做危险操作
 
@@ -343,6 +359,7 @@ mahjong/
 │     ├─ util/         Json（自写零依赖）、Log
 │     ├─ core/         Tiles Meld Rules Wall(牌山+王牌账)
 │     ├─ rules/        Shanten Agari Evaluator(役种+符+高点法) Payments
+│     │                 Visible(可见牌统计) HandEval(进张/听牌形 —— AI 用的评估判据，不参与判定)
 │     ├─ game/         Round(一局状态机) Table(房间/半庄/线程)
 │     │                 WinCheck/RoundOptions/RoundClaims/RoundScoring(纯判据，可单独单测)
 │     ├─ replay/       Replay Store Recorder（对局记录：录制 / 落盘 / 容量淘汰）
@@ -725,6 +742,8 @@ mahjong/
 | **同一种子两次跑出的轨迹不一样 / 配对评测结果飘** | ① `debugDeterministicSeed` 开了吗？② 策略实例跨局复用了吗（随机源/缓存带状态）—— 必须 `PolicyFactory` 每局新建；③ 是不是又有人用了 `Math.random()`（`Bot` 的九种九牌分支就踩过） |
 | **数据集校验报"观测里有未登记字段"** | 往 `Observation` 加了字段却没同步三处（`SelfTest` 白名单断言 / `selfplay-check.mjs` 的 `OBS_KEYS` / PROTOCOL §8.2）。**这是防泄漏的设计**，别把白名单放宽了事 |
 | **自对弈比预期慢很多** | 先用**批量**（几十场）量，别用几场判 —— JIT 预热会把头几场放大 2~3 倍。真慢就查观测里有没有调 `Round.isFuriten()` 这类会跑向听 DFS 的东西（见 §6.5） |
+| **放过一张荣和牌之后马上又能荣和同一张 / 立直见逃没有代价** | 振听三种有没有**真的记账**？`furitenTemp` / `furitenPerm` 若"只有清除、没人置位"，见逃与振听博弈就整个不存在。见 §2.3-12 与 `docs/DESIGN.md` 的振听表；回归 `SelfTest.furitenRuleTests` |
+| **打出去被碰走的听牌张，事后又能荣和回来** | 舍张振听读的是 `discards[]`，而被鸣走的牌已被 `removeCalledFromRiver` 移除。判据必须是"曾经打出过"（`discardKindsEver`），不是牌河。见 §2.3-12 |
 | 中文字画成空心方框 | 用了 `-platform offscreen`（该插件无字体库），换默认平台 |
 | 结算界面的牌面是文字不是牌图 | 内嵌字体没加载（查 exe 同级 `fonts/I.MahjongJP.otf`），或示意串含非法字元被校验挡下（见 §9） |
 | 素材是彩色、客户端却画成黑白线稿 | Illustrator 的 `<style>`+`class` 上色 Qt 不认 → 跑 `tools\inline-svg-style.ps1` 内联（见 §2.3-5） |
@@ -764,7 +783,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **642** 项（含训练接口不变式）、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
+**实测通过**：服务端自检 **676** 项（含训练接口不变式 + 振听三条）、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
 `discard-align-test` 与 `seat-swap-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`），
