@@ -351,6 +351,9 @@ public final class Round {
 
             // ---------- 鸣牌询问
             Claim cl = claimPhase(turn, discardId, declareRiichi);
+            if (cl != null && cl.abortReason != null) {
+                return abort(cl.abortReason);      // 三家和了：中途流局
+            }
             if (cl != null && cl.type == ClaimType.RON) {
                 return agariRon(cl.multiRon, turn, discardId);
             }
@@ -1423,6 +1426,15 @@ public final class Round {
          */
         List<String> wantTiles;
         List<Integer> multiRon;
+        /**
+         * 非空表示这次鸣牌阶段得出的结论是**中途流局**（目前只有「三家和了」）。
+         *
+         * <p>为什么不能直接在这里 {@code return abort(...)}：{@code abort()} 要组一条
+         * {@code ryuukyoku} 报文并回一个 {@code Result}，而 {@code claimPhase} 的返回类型是
+         * {@code Claim}。所以只把"结论"递回给调用方，由它走与其它中途流局同一条
+         * `abort()` 路径（本场 +1 / 庄家连庄 / 立直棒留至下一局全在那边）。
+         */
+        String abortReason;
     }
 
     private Claim claimPhase(int from, int tileId, boolean riichiDiscard) {
@@ -1619,8 +1631,19 @@ public final class Round {
             }
         }
         if (!ronSeats.isEmpty()) {
+            // ⚠ 顺序有意义：**头跳先归约**。头跳一旦成立，"三家同时荣和"这个前提就不存在了
+            //   （只认最近那家），所以两个开关同时打开时以头跳为准。三套预设互斥
+            //   （mleague：头跳；天凤：三家和了；雀魂：两个都没有），这条只在自定义规则下可见。
             if (rules.headBump && ronSeats.size() > 1) {
                 ronSeats = new ArrayList<>(ronSeats.subList(0, 1));
+            } else if (rules.sanchaAbort && ronSeats.size() >= 3) {
+                // 三家和了：三家**同时**荣和 → 流局（`docs/日本麻将.md` §头跳 L526-534；
+                //   《天凤》采用、《雀魂》没有这条、M.League 用头跳）。
+                //   中途流局不做不听罚符、庄家连庄、本场 +1、立直棒留至下一局
+                //   —— 全由 `abort()` 与 `RoundScoring.nextHonba` 负责，这里只递结论。
+                Claim c = new Claim();
+                c.abortReason = "三家和了";
+                return c;
             }
             Claim c = new Claim();
             c.type = ClaimType.RON;
@@ -2311,7 +2334,15 @@ public final class Round {
             int pao = paoSeat[w];
             int paoBase = paoBaseFor(w, sc);
             int useSticks = (i == 0) ? sticks : 0;
-            Payments.Result pay = Payments.compute(sc, w, from, dealer, honba, useSticks, false, pao, paoBase);
+            // ⚠ 供託与**本场加点**都只归 `winners.get(0)`，而它就是**离放铳者最近**的那家
+            //   （`claimPhase` 按 `(from + d) % 4`、d = 1..3 的顺序收集 `ronSeats`）。
+            //   文档 §和牌 L794：「《天凤》二家和了时，立直棒和本场加点均由距放铳者最近的
+            //   和牌者取得」。旧实现把立直棒只给第一家、**本场却给每一家** ——
+            //   双响 + n 本场时放铳者多付 300×n（总额仍守恒，所以只有"归属"错）。
+            //   （M.League 走头跳，压根到不了这里；《雀魂》文档未给另一套口径。）
+            int useHonba = (i == 0) ? honba : 0;
+            Payments.Result pay = Payments.compute(sc, w, from, dealer, useHonba, useSticks,
+                                                   false, pao, paoBase);
             sticksLeft -= useSticks;
             applyDelta(r, pay.delta);
             sendAgari(w, from, false, tileId, sc, pay, pao);
@@ -2451,6 +2482,46 @@ public final class Round {
     /** 自测钩子：直接跑一次荒牌流局结算（点亮 nagashiMangan 的实局路径）。 */
     public Result debugExhaustive() {
         return exhaustive();
+    }
+
+    /**
+     * 自测钩子：按**当前手牌**直接跑一次鸣牌仲裁，返回结论摘要。
+     *
+     * <p>为什么要这个钩子：多家荣和 / 头跳 / 三家和了只取决于"同时有几家能和这张"，
+     * 靠整场模拟随机撞出来既慢又不可复现（自检里也拿不到"三家同时听同一张"的牌）。
+     * 这里把结论压成一个字符串，测试只需摆好手牌再问一次：
+     * <ul>
+     *   <li>{@code "none"}：没人鸣；</li>
+     *   <li>{@code "abort:三家和了"}：判成中途流局；</li>
+     *   <li>{@code "ron:[1, 2]"}：荣和，方括号里是**按距放铳者由近到远**的赢家；</li>
+     *   <li>{@code "PON:2"} / {@code "CHI:1"} / {@code "KAN:3"}：其它鸣牌成立的座位。</li>
+     * </ul>
+     * 参与的座位必须都是机器人（`addBot`）——真人座位的答复来自网线，测试里喂不进去。
+     */
+    public String debugClaimOutcome(int from, int tileId) {
+        Claim c = claimPhase(from, tileId, false);
+        if (c == null) {
+            return "none";
+        }
+        if (c.abortReason != null) {
+            return "abort:" + c.abortReason;
+        }
+        if (c.type == ClaimType.RON) {
+            return "ron:" + c.multiRon;
+        }
+        return c.type + ":" + c.seat;
+    }
+
+    /**
+     * 自测钩子：直接跑一次荣和结算，返回四家的点数增减。
+     *
+     * <p>多家荣和时调用方按「距放铳者由近到远」传 {@code winners}
+     * （与 {@link #debugClaimOutcome} 返回的顺序一致）。整局的 `scores` 会被真的改动，
+     * 所以每条断言都用**新构造的 Round**。
+     */
+    public int[] debugRonDeltas(List<Integer> winners, int from, int tileId) {
+        Result r = agariRon(winners, from, tileId);
+        return r.delta;
     }
 
     private static int[] toIntArray(List<Integer> l) {

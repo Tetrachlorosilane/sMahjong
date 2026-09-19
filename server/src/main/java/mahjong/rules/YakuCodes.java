@@ -141,6 +141,7 @@ public final class YakuCodes {
         REASON.put("四风连打", "four_winds");
         REASON.put("四杠散了", "four_kans");
         REASON.put("四家立直", "four_riichi");
+        REASON.put("三家和了", "triple_ron");
     }
 
     private static int misses;

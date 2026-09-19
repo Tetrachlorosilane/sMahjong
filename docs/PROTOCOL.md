@@ -405,7 +405,7 @@
 ```
 
 `reason` 码表：`exhaustive`（荒牌流局）/ `nagashi`（流局满贯）/ `kyuushu`（九种九牌）/
-`four_winds`（四风连打）/ `four_kans`（四杠散了）/ `four_riichi`（四家立直）。
+`four_winds`（四风连打）/ `four_kans`（四杠散了）/ `four_riichi`（四家立直）/ `triple_ron`（三家和了）。
 `type` 字段保持原样（老客户端拿它做判据），**两者不一定相同**：`type` 是事件分类，`reason` 是具体原因。
 
 #### 局间等待

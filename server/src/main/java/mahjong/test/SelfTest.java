@@ -58,6 +58,7 @@ public final class SelfTest {
         roundOptionsTests();
         chiValidationTests();
         kuikaeTests();
+        multiRonTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -1157,6 +1158,143 @@ public final class SelfTest {
                 + "其中被服务端照打 " + honored[0] + " 次（必须为 0）");
         check("恶意食替被服务端拒绝（" + attempts[0] + " 次尝试 / " + honored[0] + " 次被照打）",
                 attempts[0] > 0 && honored[0] == 0);
+    }
+
+    // ------------------------------------------------- 多家荣和 / 头跳 / 三家和了
+
+    /**
+     * 一张舍张同时被多家荣和时的三条口径（`docs/日本麻将.md` §头跳 L232-236、§和牌 L794）：
+     * <ol>
+     *   <li>**头跳**：只认离放铳者最近的那家（M.League）；</li>
+     *   <li>**三家和了**：三家**同时**荣和 → 中途流局（《天凤》）；</li>
+     *   <li>**二家荣和成立**时（《雀魂》/《天凤》）：立直棒与**本场加点**只归最近那家。</li>
+     * </ol>
+     *
+     * <p>为什么必须**定向摆牌**：三家同时听同一张在随机模拟里几乎撞不到（撞到也不可复现），
+     * 而这条规则的三种结论全由"同时有几家能和"决定。所以这里直接摆三家
+     * 「役牌暗刻 + 单骑 5p」的听牌形，用 `debugClaimOutcome` 问一次仲裁结论 ——
+     * 三种预设 + 两个开关同时打开，一共五格真值表，逐格钉住。
+     */
+    private static void multiRonTests() {
+        eq("三家和了的流局原因码", YakuCodes.reasonOf("三家和了"), "triple_ron");
+
+        // 头跳（M.League）：三家都能荣和 → 只认最近的一家
+        eq("头跳（M.League）：三家荣和只认最近一家",
+                ronOutcome(preset("mleague"), true, true, true), "ron:[1]");
+        // 三家和了（天凤）：三家同时荣和 → 流局；二家荣和**不**流局
+        eq("三家和了（天凤）：三家同时荣和 → 流局",
+                ronOutcome(preset("tenhou"), true, true, true), "abort:三家和了");
+        eq("三家和对二家荣和不生效（天凤允许二家和了）",
+                ronOutcome(preset("tenhou"), true, true, false), "ron:[1, 2]");
+        eq("单家荣和照常（天凤）", ronOutcome(preset("tenhou"), true, false, false), "ron:[1]");
+        // 《雀魂》：既无头跳也无三家和了 → 三家全额结算
+        eq("《雀魂》：无头跳无三家和了 → 三家都成立",
+                ronOutcome(preset("majsoul"), true, true, true), "ron:[1, 2, 3]");
+        // 两个开关同时打开（自定义规则）时**头跳优先**：头跳一旦归约，"三家同时"就不存在了
+        Rules both = preset("majsoul");
+        both.headBump = true;
+        both.sanchaAbort = true;
+        eq("头跳与三家和了同时打开 → 头跳优先", ronOutcome(both, true, true, true), "ron:[1]");
+
+        // ---------- 供託与本场加点的归属（文档 §和牌 L794）----------
+        final int honba = 2;
+        final Rules ms = preset("majsoul");                 // 无头跳 → 二家都成立，才看得到归属
+        int[] two = ronDeltas(ms, honba, 0, true, true, false);
+        int[] one1 = ronDeltas(ms, honba, 0, true, false, false);
+        int[] one2 = ronDeltas(ms, honba, 0, false, true, false);
+        // 二家荣和时放铳者**只多付一次** 300×本场（旧实现每家各收一次 → 这里会是 0）
+        eq("多家荣和：放铳者只多付一次本场加点",
+                two[0] - (one1[0] + one2[0]), 300 * honba);
+        // 第二家收不到本场 —— 与"同一手牌在 0 本场时单独荣和"逐位相同；
+        // 反向对照：它若**单独**荣和（就是最近那家）则照收 300×本场，可见差别确实来自归属。
+        eq("多家荣和：第二家只拿基本点，不收本场（= 0 本场时的同一手）",
+                two[2], ronDeltas(ms, 0, 0, false, true, false)[2]);
+        eq("对照：同一手单独荣和（最近那家）时会收到本场", one2[2] - two[2], 300 * honba);
+        eq("多家荣和：最近那家照常收本场", two[1], one1[1]);
+        check("多家荣和结算仍然零和（无供託时）",
+                two[0] + two[1] + two[2] + two[3] == 0);
+
+        // 立直棒：两根都归最近那家，第二家一根不拿
+        int[] sticks2 = ronDeltas(ms, honba, 2, true, true, false);
+        int[] sticks1 = ronDeltas(ms, honba, 2, true, false, false);
+        eq("多家荣和：立直棒全归最近那家（第二家不加）", sticks2[2], two[2]);
+        eq("多家荣和：最近那家多拿的是全部供託", sticks2[1] - two[1], 2000);
+        eq("单家荣和拿全部供託", sticks1[1] - one1[1], 2000);
+    }
+
+    /**
+     * 摆好"哪几家单骑 5p"，问一次 5p 舍张的鸣牌仲裁结论。
+     *
+     * <p>三家的听牌形都是「本家自风的役牌暗刻 + 单骑 5p」（东1局：1=南 2=西 3=北），
+     * 所以三家都真有役；不需要荣和的那家只把末尾的 `5p` 换成 `9p`（改听 9p，和不了 5p），
+     * 于是"能不能荣和"只由参数决定，牌数也都在 4 张以内。
+     */
+    private static String ronOutcome(Rules rules, boolean w1, boolean w2, boolean w3) {
+        final String[] waits = {
+                "2z2z2z1m1m1m2m2m2m3m3m3m5p",
+                "3z3z3z4m4m4m5m5m5m6m6m6m5p",
+                "4z4z4z7m7m7m8m8m8m9m9m9m5p",
+        };
+        Table t = claimTable(rules);
+        Round r = newRoundLike(t);
+        final boolean[] want = {false, w1, w2, w3};
+        for (int s = 1; s <= 3; s++) {
+            String h = waits[s - 1];
+            r.hand[s].addAll(parse(want[s] ? h : h.substring(0, h.length() - 2) + "9p"));
+        }
+        return r.debugClaimOutcome(0, Tiles.id(Tiles.parseKind("5p"), 1));
+    }
+
+    /** 跑一次荣和结算，返回四家点数增减。{@code winners} 按"距放铳者由近到远"（= 座位 1→3）。 */
+    private static int[] ronDeltas(Rules rules, int honba, int sticks,
+                                   boolean w1, boolean w2, boolean w3) {
+        final String[] waits = {
+                "2z2z2z1m1m1m2m2m2m3m3m3m5p",
+                "3z3z3z4m4m4m5m5m5m6m6m6m5p",
+                "4z4z4z7m7m7m8m8m8m9m9m9m5p",
+        };
+        Table t = claimTable(rules);
+        Round r = new Round(t, 0, 1, honba, 0, new int[]{25000, 25000, 25000, 25000}, sticks,
+                20260901L);
+        final boolean[] want = {false, w1, w2, w3};
+        List<Integer> winners = new ArrayList<>();
+        for (int s = 1; s <= 3; s++) {
+            String h = waits[s - 1];
+            if (want[s]) {
+                r.hand[s].addAll(parse(h));
+                winners.add(s);
+            } else {
+                r.hand[s].addAll(parse(h.substring(0, h.length() - 2) + "9p"));
+            }
+        }
+        return r.debugRonDeltas(winners, 0, Tiles.id(Tiles.parseKind("5p"), 1));
+    }
+
+    /**
+     * 多家荣和用的牌桌：四家都是机器人 + 一条**只认荣和**的哑策略
+     * （其它一律 `pass`，保证结论只由"几家能荣和"决定）。
+     */
+    private static Table claimTable(Rules rules) {
+        Table t = new Table("MR", "多家荣和桌", rules);
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+            t.policy[i] = d -> {
+                for (Map<String, Object> o : d.options) {
+                    if ("ron".equals(o.get("type"))) {
+                        return Json.obj("type", "ron");
+                    }
+                }
+                return Json.obj("type", "pass");
+            };
+        }
+        return t;
+    }
+
+    /** 与 {@link #newRound} 同样的局面（座位 0 是庄），但用给定的牌桌。 */
+    private static Round newRoundLike(Table t) {
+        return new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 20260901L);
     }
 
     // ------------------------------------------------ 被取消询问的回包必须摘掉
