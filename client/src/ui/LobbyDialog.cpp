@@ -103,12 +103,24 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     m_bots = new QSpinBox(createBox);
     m_bots->setRange(0, 3);
     m_bots->setValue(0);
+    // 一位必要点数（`docs/日本麻将.md` L116/L143/L157）：0 = 不要求。
+    // 自选填写框 —— 切预设时填该预设的默认值（M.League 0 / 天凤·雀魂 30000），
+    // 玩家可以改成任意值；它决定 All Last 轮庄后是否进延长战、以及庄家能否和了止/听牌止。
+    m_requiredPoints = new QSpinBox(createBox);
+    m_requiredPoints->setRange(0, 1000000);
+    m_requiredPoints->setSingleStep(1000);
+    m_requiredPoints->setSpecialValueText(lang::t(QStringLiteral("ui.lobby.required_points_none")));
+    m_requiredPoints->setToolTip(lang::t(QStringLiteral("ui.lobby.required_points_hint")));
+    m_requiredPoints->setValue(lobbyrules::defaultRequiredPoints(m_preset->currentData().toString()));
+    connect(m_preset, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &LobbyDialog::onPresetChanged);
     m_createBtn = new QPushButton(lang::t("ui.lobby.create_room"), createBox);
     createForm->addRow(lang::t("ui.lobby.room_name"), m_roomName);
     createForm->addRow(lang::t("ui.lobby.preset"), m_preset);
     createForm->addRow(lang::t("ui.lobby.rules"), m_length);
     createForm->addRow(lang::t("ui.lobby.aka"), m_aka);
     createForm->addRow(lang::t("ui.lobby.clock"), m_think);
+    createForm->addRow(lang::t("ui.lobby.required_points"), m_requiredPoints);
     createForm->addRow(lang::t("ui.lobby.fill_bots"), m_bots);
     createForm->addRow(QString(), m_createBtn);
     root->addWidget(createBox);
@@ -230,6 +242,8 @@ void LobbyDialog::onCreateClicked()
     rules.insert(QStringLiteral("preset"), m_preset->currentData().toString());
     rules.insert(QStringLiteral("length"), m_length->currentData().toString());
     rules.insert(QStringLiteral("aka"), m_aka->currentData().toInt());
+    // 一位必要点数：0 = 不要求（房主自己填的值，覆盖预设）
+    rules.insert(QStringLiteral("required_points"), m_requiredPoints->value());
     // 思考时间：规格串「额外+每巡」→ "20+5" = base 5000ms / bank 20000ms
     const QStringList think = m_think->currentData().toString().split(QLatin1Char('+'));
     if (think.size() == 2) {
@@ -239,8 +253,18 @@ void LobbyDialog::onCreateClicked()
     emit createRoomRequested(m_roomName->text().trimmed(), rules, m_bots->value());
 }
 
-void LobbyDialog::onJoinClicked()
+int lobbyrules::defaultRequiredPoints(const QString& preset)
 {
+    // M.League 不使用一位必要点数（打到南 4 局庄家轮庄为止）；《天凤》《雀魂》段位场 = 30000
+    return preset == QLatin1String("mleague") ? 0 : 30000;
+}
+
+void LobbyDialog::onPresetChanged()
+{
+    m_requiredPoints->setValue(lobbyrules::defaultRequiredPoints(m_preset->currentData().toString()));
+}
+
+void LobbyDialog::onJoinClicked(){
     QString id = m_joinId->text().trimmed().toUpper();
     if (id.isEmpty())
         id = selectedRoomId();

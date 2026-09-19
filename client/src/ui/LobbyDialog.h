@@ -48,6 +48,8 @@ private:
     void onConnectClicked();
     void onCreateClicked();
     void onJoinClicked();
+    /** 切换预设时把「一位必要点数」的默认值填进输入框（玩家仍可改成任意值）。 */
+    void onPresetChanged();
     QString selectedRoomId() const;
 
     QLineEdit* m_host = nullptr;
@@ -66,9 +68,27 @@ private:
     QComboBox* m_length = nullptr;
     QComboBox* m_aka = nullptr;
     QComboBox* m_think = nullptr;   // 思考时间：每巡基本时长 + 总额外时长
+    QSpinBox* m_requiredPoints = nullptr;   // 一位必要点数（0 = 不要求）
     QSpinBox* m_bots = nullptr;
     QPushButton* m_createBtn = nullptr;
 
     QLineEdit* m_joinId = nullptr;
     QPushButton* m_joinBtn = nullptr;
 };
+
+/**
+ * 建房规则的**纯判据**（不依赖控件，方便自检直接钉住）。
+ *
+ * ⚠ 刻意做成**自由函数**而不是 `LobbyDialog` 的静态成员：带 `Q_OBJECT` 的类里放静态成员函数
+ * 会让 moc 生成的代码落到那个函数的上下文里（`'this' is unavailable for static member
+ * functions`，编译不过）。
+ */
+namespace lobbyrules {
+
+/**
+ * 预设对应的**一位必要点数**（0 = 不要求）：M.League 不要求、《天凤》《雀魂》= 30000
+ * （`docs/日本麻将.md` L116/L157）。界面上按它填默认值，玩家仍可改成任意值。
+ */
+int defaultRequiredPoints(const QString& preset);
+
+}  // namespace lobbyrules

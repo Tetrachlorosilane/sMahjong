@@ -1148,8 +1148,23 @@ int run(const QString& outDir)
             nullptr));
         checkEq(QString::number(mk.deadWallLeft()), QStringLiteral("1"),
                 QStringLiteral("重连全量同步带上岭上剩余数"));
-        // 燕返（S-48）：`agari` 带 `riichi_void` 时必须清掉那家的立直标记与那根供託。
-        // 客户端**只认服务端这个字段**，绝不自己推断"被荣和的这张是不是宣言牌"（AGENTS §2.1）；
+        // 一位必要点数（批次三）：建房对话框的输入框默认值必须跟预设走
+        //（M.League 不要求；《天凤》《雀魂》= 30000 —— `docs/日本麻将.md` L116/L157）。
+        // 0 在界面上显示成「不要求」而不是 0 点。
+        {
+            checkEq(QString::number(lobbyrules::defaultRequiredPoints(QStringLiteral("mleague"))),
+                    QStringLiteral("0"), QStringLiteral("一位必要点数：M.League 不要求"));
+            checkEq(QString::number(lobbyrules::defaultRequiredPoints(QStringLiteral("tenhou"))),
+                    QStringLiteral("30000"), QStringLiteral("一位必要点数：《天凤》= 30000"));
+            checkEq(QString::number(lobbyrules::defaultRequiredPoints(QStringLiteral("majsoul"))),
+                    QStringLiteral("30000"), QStringLiteral("一位必要点数：《雀魂》= 30000"));
+            check(!lang::t(QStringLiteral("ui.lobby.required_points")).isEmpty()
+                      && !lang::t(QStringLiteral("ui.lobby.required_points_none")).isEmpty()
+                      && !lang::t(QStringLiteral("ui.lobby.required_points_hint")).isEmpty(),
+                  QStringLiteral("一位必要点数的三条文案都在语言文件里"));
+        }
+
+        // 燕返（S-48）：`agari` 带 `riichi_void` 时必须清掉那家的立直标记与那根供託。        // 客户端**只认服务端这个字段**，绝不自己推断"被荣和的这张是不是宣言牌"（AGENTS §2.1）；
         // 分数以 `scores_after` 为准（退回的 1000 点已经算在里面）。
         {
             TableModel mt;
@@ -1466,6 +1481,50 @@ int run(const QString& outDir)
     }
 
     // ---------- 端到端接线：开关 → 策略 → ActionBar 组包 → sendCommand ----------
+    // ---------- 建房报文必须带上「一位必要点数」（批次三）----------
+    // 与上面那条同一个思路：**真的点那个按钮**，抓真正发出去的 `create_room` 报文 ——
+    // 只断言 `lobbyrules::defaultRequiredPoints()` 是测不出"字段有没有进报文"的。
+    {
+        MainWindow w;
+        QJsonObject createCmd;
+        w.setCommandTapForTest([&](const QJsonObject& o) {
+            if (o.value(QStringLiteral("cmd")).toString() == QLatin1String("create_room")) {
+                createCmd = o;
+            }
+        });
+        LobbyDialog* dlg = w.findChild<LobbyDialog*>();
+        check(dlg != nullptr, QStringLiteral("大厅对话框存在"));
+        QPushButton* createBtn = nullptr;
+        if (dlg) {
+            const QString label = lang::t(QStringLiteral("ui.lobby.create_room"));
+            for (QPushButton* b : dlg->findChildren<QPushButton*>()) {
+                if (b->text() == label) {
+                    createBtn = b;
+                    break;
+                }
+            }
+        }
+        check(createBtn != nullptr, QStringLiteral("找到大厅的「建房间」按钮"));
+        if (createBtn) {
+            // ⚠ 未连服务端时「建房间」按钮是**禁用**的，而 `QAbstractButton::click()` 对禁用按钮
+            //   是个空操作（点了也不发信号）—— 所以自检里必须先启用它，否则这条断言会
+            //   "看起来测了、其实什么都没发"（真连服务端的路径由 `--lobbytest` 覆盖）。
+            createBtn->setEnabled(true);
+            createBtn->click();
+            const QJsonObject rules = createCmd.value(QStringLiteral("rules")).toObject();
+            check(!createCmd.isEmpty() && rules.contains(QStringLiteral("required_points")),
+                  QStringLiteral("建房报文带上了 required_points"));
+            checkEq(QString::number(rules.value(QStringLiteral("required_points")).toInt()),
+                    QStringLiteral("0"),
+                    QStringLiteral("默认预设（M.League）的一位必要点数 = 0（不要求）"));
+            // 顺带钉住"默认思考时间 20+5"确实上到报文（服务端默认值也是这一组）
+            checkEq(QString::number(rules.value(QStringLiteral("thinking_base_ms")).toInt()),
+                    QStringLiteral("5000"), QStringLiteral("默认思考时间：每巡 5000ms"));
+            checkEq(QString::number(rules.value(QStringLiteral("thinking_bank_ms")).toInt()),
+                    QStringLiteral("20000"), QStringLiteral("默认思考时间：额外 20000ms"));
+        }
+    }
+
     // ---------- 回归：聊天「发送」按钮必须真的能发出去 ----------
     // 真踩过的坑：`onChatSend()` 用 `qobject_cast<QLineEdit*>(sender())` 反推输入框 ——
     // **按钮点击时 sender 是 QPushButton**，cast 得到 nullptr、函数直接 return，
@@ -2164,7 +2223,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("422"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("425"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2191,7 +2250,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("298"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("301"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()
