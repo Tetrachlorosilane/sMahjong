@@ -355,7 +355,8 @@ public final class Round {
                 return abort(cl.abortReason);      // 三家和了：中途流局
             }
             if (cl != null && cl.type == ClaimType.RON) {
-                return agariRon(cl.multiRon, turn, discardId);
+                // `declareRiichi` = 被荣和的这张就是**本次**宣言的立直牌 → 燕返（见 agariRon）
+                return agariRon(cl.multiRon, turn, discardId, false, declareRiichi);
             }
             if (cl == null) {
                 if (rules.fourRiichiAbort && riichi[0] && riichi[1] && riichi[2] && riichi[3]) {
@@ -1391,7 +1392,7 @@ public final class Round {
             }
         }
         if (!ron.isEmpty()) {
-            return agariRon(ron, seat, addId, true);
+            return agariRon(ron, seat, addId, true, false);   // 抢杠：不是燕返
         }
         revealKanDora();
         return null;
@@ -2311,10 +2312,17 @@ public final class Round {
     }
 
     private Result agariRon(List<Integer> winners, int from, int tileId) {
-        return agariRon(winners, from, tileId, false);
+        return agariRon(winners, from, tileId, false, false);
     }
 
-    private Result agariRon(List<Integer> winners, int from, int tileId, boolean chankan) {
+    /**
+     * 荣和结算。
+     *
+     * @param chankan       这张牌是不是**抢杠**的那张（加杠被荣和）
+     * @param riichiDiscard 这张牌是不是**首次放置的立直宣言牌**（燕返，见下）
+     */
+    private Result agariRon(List<Integer> winners, int from, int tileId,
+                            boolean chankan, boolean riichiDiscard) {
         Result r = new Result();
         r.agari = true;
         r.loser = from;
@@ -2322,6 +2330,27 @@ public final class Round {
         if (winners == null || winners.isEmpty()) {
             r.winner = -1;
             return r;
+        }
+        // ---------- 燕返：荣和的正是**首次放置的**立直宣言牌 → 立直不成立，1000 点退回
+        //
+        // `docs/日本麻将.md` §立直 L893：「《雀魂》中，立直宣言牌放铳（燕返）的情况下，
+        // 认为立直不成立，不加收 1000 点。《天凤》和 M.League 也采用相同的规定」。
+        // 旧实现是 `doRiichi()` 在宣言牌**落地之前**就扣掉 1000 并 `sticks++`，
+        // 随后 `agariRon` 把供託全给和牌者 —— 三套预设都错、每次宣言被荣和都触发。
+        //
+        // ⚠ 只对**首次放置**的宣言牌成立（同节 L1291-1293）：宣言牌被鸣走后横置会顺延到
+        //   该家下一张打出的牌，那张被荣和**不算**燕返。顺延牌对应的 `declareRiichi`
+        //   恒为 false（走的是 `sidewaysPending` 那条路），所以这里只看"本次出牌是不是宣言本身"。
+        int riichiVoid = -1;
+        if (riichiDiscard && riichi[from]) {
+            riichiVoid = from;
+            riichi[from] = false;
+            doubleRiichi[from] = false;
+            ippatsu[from] = false;
+            sticks = Math.max(0, sticks - 1);        // 那根立直棒退回去，别让和牌者白收
+            int[] refund = new int[4];
+            refund[from] = 1000;
+            applyDelta(r, refund);                   // 经 applyDelta：`r.delta` 与 `scores` 同一份账
         }
         r.winner = winners.get(0);
         int sticksLeft = sticks;
@@ -2345,7 +2374,7 @@ public final class Round {
                                                    false, pao, paoBase);
             sticksLeft -= useSticks;
             applyDelta(r, pay.delta);
-            sendAgari(w, from, false, tileId, sc, pay, pao);
+            sendAgari(w, from, false, tileId, sc, pay, pao, riichiVoid);
         }
         r.sticksLeft = Math.max(0, sticksLeft);
         r.dealerRenchan = RoundScoring.winBy(dealer, winners);
@@ -2364,6 +2393,16 @@ public final class Round {
 
     private void sendAgari(int winner, int from, boolean tsumo, int tileId,
                            Evaluator.HandScore sc, Payments.Result pay, int pao) {
+        sendAgari(winner, from, tsumo, tileId, sc, pay, pao, -1);
+    }
+
+    /**
+     * @param riichiVoid 燕返：这一家刚宣告的立直被判为**不成立**（{@code -1} = 无）。
+     *                   报文里带出去，客户端据此清掉那家的立直标记与那根供託 ——
+     *                   「立直成不成立」是规则判定，客户端不许自己推断（AGENTS §2.1）。
+     */
+    private void sendAgari(int winner, int from, boolean tsumo, int tileId,
+                           Evaluator.HandScore sc, Payments.Result pay, int pao, int riichiVoid) {
         boolean showUra = (riichi[winner] || doubleRiichi[winner]) && rules.ura;
         List<Object> yaku = new ArrayList<>();
         for (Evaluator.Yaku y : sc.yaku) {
@@ -2414,7 +2453,9 @@ public final class Round {
                 "base_points", sc.base,
                 "score_delta", intList(pay.delta),
                 "scores_after", intList(scores),
-                "pao", Json.obj("seat", pao));
+                "pao", Json.obj("seat", pao),
+                // 燕返（-1 = 无）：这一家刚宣告的立直不成立，客户端清掉它的立直标记与供託
+                "riichi_void", riichiVoid);
         table.broadcast(ev);
     }
 
@@ -2520,8 +2561,20 @@ public final class Round {
      * 所以每条断言都用**新构造的 Round**。
      */
     public int[] debugRonDeltas(List<Integer> winners, int from, int tileId) {
-        Result r = agariRon(winners, from, tileId);
-        return r.delta;
+        return debugRonDeltas(winners, from, tileId, false);
+    }
+
+    /** 同 {@link #debugRonDeltas(List, int, int)}，但可指定这张牌是不是立直宣言牌（燕返）。 */
+    public int[] debugRonDeltas(List<Integer> winners, int from, int tileId, boolean riichiDiscard) {
+        return agariRon(winners, from, tileId, false, riichiDiscard).delta;
+    }
+
+    /**
+     * 自测钩子：直接宣告立直 —— 走的是**生产的** {@link #doRiichi}（置位 + 扣 1000 +
+     * 供託 +1 + 广播），这样燕返那一侧测的就是真实账面，不是测试自己摆的状态。
+     */
+    public void debugDoRiichi(int seat, int discardTile) {
+        doRiichi(seat, discardTile);
     }
 
     private static int[] toIntArray(List<Integer> l) {

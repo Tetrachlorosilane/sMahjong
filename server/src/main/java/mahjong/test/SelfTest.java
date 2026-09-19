@@ -59,6 +59,7 @@ public final class SelfTest {
         chiValidationTests();
         kuikaeTests();
         multiRonTests();
+        tsubameTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -1295,6 +1296,70 @@ public final class SelfTest {
     /** 与 {@link #newRound} 同样的局面（座位 0 是庄），但用给定的牌桌。 */
     private static Round newRoundLike(Table t) {
         return new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 20260901L);
+    }
+
+    // ------------------------------------------------------------- 燕返（立直宣言牌放铳）
+
+    /**
+     * 燕返：荣和的正是**首次放置的立直宣言牌** → 立直不成立、那 1000 点退回
+     * （`docs/日本麻将.md` §立直 L893：「《雀魂》中，立直宣言牌放铳（燕返）的情况下，
+     * 认为立直不成立，不加收 1000 点。《天凤》和 M.League 也采用相同的规定」）。
+     *
+     * <p>旧实现是 `doRiichi()` 在宣言牌落地**之前**就扣 1000 并 `sticks++`，
+     * 随后 `agariRon` 把供託全给和牌者 —— 放铳者白扣、和牌者白收，每次宣言被荣和都触发。
+     *
+     * <p>这里的状态**由生产的 `doRiichi` 造**（不是测试自己摆的账面），
+     * 结算也走生产的 `agariRon`（经 `debugRonDeltas`），两侧都是真代码。
+     */
+    private static void tsubameTests() {
+        final int k5p = Tiles.parseKind("5p");
+        final int decl = Tiles.id(k5p, 3);          // 座位 1 手里那张 5p（宣言牌）
+
+        // ---------- ① 燕返：荣和的正是刚宣告的立直宣言牌 ----------
+        Round a = tsubameTable(0);
+        a.debugDoRiichi(1, decl);
+        eq("立直宣言后自家扣 1000", a.scores[1], 24000);
+        eq("立直宣言后供託 +1", a.sticks, 1);
+        int[] da = ronOn5p(a, true);
+        eq("燕返：立直被撤销", a.riichi[1], false);
+        eq("燕返：一発标志一并清掉", a.ippatsu[1], false);
+        eq("燕返：供託退回、不许带进下一局", a.sticks, 0);
+
+        // ---------- ② 对照：同一张牌、同一个和牌者，但**不是**宣言牌 → 立直照样成立 ----------
+        Round b = tsubameTable(0);
+        b.debugDoRiichi(1, Tiles.id(Tiles.parseKind("1m"), 3));   // 宣言的是 1m
+        int[] db = ronOn5p(b, false);
+        check("对照：荣和普通舍张时立直仍然成立", b.riichi[1]);
+        eq("对照：供託不退回", b.sticks, 1);
+        // 两条互为镜像的判据 —— 这就是"那 1000 点"的全部去向
+        eq("燕返让放铳者**少付 1000**", da[1] - db[1], 1000);
+        eq("燕返让和牌者**少收 1000**（那根立直棒不存在了）", da[2] - db[2], -1000);
+        eq("燕返后立直者比对照多 1000（差的就是退回来的供託）", a.scores[1] - b.scores[1], 1000);
+
+        // ---------- ③ 上一局留下的供託不动，只退本次宣言那一根 ----------
+        Round c = tsubameTable(1);                  // 构造给 1 根（= 上一局留下的），宣言再 +1 → 2
+        c.debugDoRiichi(1, decl);
+        eq("燕返前供託 = 2（上一局留下的 1 根 + 本次宣言的 1 根）", c.sticks, 2);
+        int[] dc = ronOn5p(c, true);
+        eq("燕返只退本次那一根（上一局留下的仍是供託）", c.sticks, 1);
+        eq("燕返退回的仍是 1000（与 ① 相同）", dc[1] - da[1], 0);
+        eq("燕返时和牌者照样收走留下的那根（+1000）", dc[2] - da[2], 1000);
+    }
+
+    /** 燕返用的局面：座位 1 = 立直宣言者，座位 2 = 单骑 5p 的荣和者（自风役牌）。 */
+    private static Round tsubameTable(int sticks) {
+        Table t = claimTable(Rules.defaults());
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, sticks,
+                20260901L);
+        r.hand[1].addAll(parse("1m1m1m2m2m2m3m3m3m4m4m4m5p"));
+        r.hand[2].addAll(parse("3z3z3z4m4m4m5m5m5m6m6m6m5p"));
+        return r;
+    }
+
+    /** 座位 2 荣和座位 1 打出的 5p；`riichiDiscard` = 这张是不是刚宣告的立直宣言牌。 */
+    private static int[] ronOn5p(Round r, boolean riichiDiscard) {
+        return r.debugRonDeltas(new ArrayList<>(Arrays.asList(2)), 1,
+                Tiles.id(Tiles.parseKind("5p"), 2), riichiDiscard);
     }
 
     // ------------------------------------------------ 被取消询问的回包必须摘掉

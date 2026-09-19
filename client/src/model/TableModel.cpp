@@ -758,6 +758,15 @@ void TableModel::applyEvent(const QJsonObject& ev)
     } else if (name == QLatin1String("agari")) {
         m_agari = ev;
         setScores(proto::intVector(ev.value(QStringLiteral("scores_after"))));
+        // 燕返：荣和的正是某家刚宣告的**首次**立直宣言牌 → 那家的立直不成立。
+        // 分数（退回的 1000 点）已经包含在 scores_after 里，这里只需清掉立直标记与那根供託。
+        // 「立直成不成立」是规则判定，客户端**只认这个字段**，绝不自己推断（AGENTS §2.1）。
+        // 旧服务端不发这个字段 → toInt(-1) 落到"不处理"，与新服务端混跑时行为不变。
+        const int riichiVoid = ev.value(QStringLiteral("riichi_void")).toInt(-1);
+        if (riichiVoid >= 0 && riichiVoid < 4) {
+            m_riichi[riichiVoid] = false;
+            m_riichiSticks = qMax(0, m_riichiSticks - 1);
+        }
         if (ev.contains(QStringLiteral("dora_indicators")))
             m_dora = proto::stringList(ev.value(QStringLiteral("dora_indicators")),
                                        proto::MaxDoraIndicators, "agari.dora_indicators");

@@ -1148,6 +1148,41 @@ int run(const QString& outDir)
             nullptr));
         checkEq(QString::number(mk.deadWallLeft()), QStringLiteral("1"),
                 QStringLiteral("重连全量同步带上岭上剩余数"));
+        // 燕返（S-48）：`agari` 带 `riichi_void` 时必须清掉那家的立直标记与那根供託。
+        // 客户端**只认服务端这个字段**，绝不自己推断"被荣和的这张是不是宣言牌"（AGENTS §2.1）；
+        // 分数以 `scores_after` 为准（退回的 1000 点已经算在里面）。
+        {
+            TableModel mt;
+            mt.applyEvent(proto::decodeLine(QByteArrayLiteral(
+                R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","2m","3m","4m","5m","6m","7m"],"dora_indicators":["5p"],"tiles_left":40,"dead_wall_left":4})"),
+                nullptr));
+            mt.applyEvent(proto::decodeLine(
+                QByteArrayLiteral(R"({"ev":"riichi","seat":1,"stick_index":0,"sticks":1,"scores":[25000,24000,25000,25000]})"),
+                nullptr));
+            check(mt.riichi(1) && mt.riichiSticks() == 1,
+                  QStringLiteral("立直宣言后：标记置位 + 供託 1 根"));
+            mt.applyEvent(proto::decodeLine(QByteArrayLiteral(
+                R"({"ev":"agari","winner":2,"from":1,"tsumo":false,"riichi_void":1,"scores_after":[25000,25000,28000,22000]})"),
+                nullptr));
+            check(!mt.riichi(1), QStringLiteral("燕返：agari 的 riichi_void 清掉那家的立直标记"));
+            checkEq(QString::number(mt.riichiSticks()), QStringLiteral("0"),
+                    QStringLiteral("燕返：那根供託退回，盘上不再画"));
+            checkEq(QString::number(mt.scores().value(1)), QStringLiteral("25000"),
+                    QStringLiteral("燕返：分数以 scores_after 为准（1000 点回来了）"));
+        }
+        // 反向对照：没有 `riichi_void`（普通舍张放铳 / 老服务端）时立直必须留着
+        {
+            TableModel mt;
+            mt.applyEvent(proto::decodeLine(
+                QByteArrayLiteral(R"({"ev":"riichi","seat":1,"stick_index":0,"sticks":1,"scores":[25000,24000,25000,25000]})"),
+                nullptr));
+            mt.applyEvent(proto::decodeLine(QByteArrayLiteral(
+                R"({"ev":"agari","winner":2,"from":1,"tsumo":false,"scores_after":[25000,24000,28000,23000]})"),
+                nullptr));
+            check(mt.riichi(1), QStringLiteral("对照：无 riichi_void 时立直仍然成立"));
+            checkEq(QString::number(mt.riichiSticks()), QStringLiteral("1"),
+                    QStringLiteral("对照：供託仍留在盘上"));
+        }
     }
 
     check(!model.discardSideways(0, 0), QStringLiteral("非宣言牌不横置"));
@@ -2129,7 +2164,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("421"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("422"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2152,8 +2187,8 @@ int run(const QString& outDir)
                 QStringLiteral("tile.* 条目数（37 种牌，赤五走 0m/0p/0s）"));
         checkEq(QString::number(family.value(QStringLiteral("limit"))), QStringLiteral("6"),
                 QStringLiteral("limit.* 条目数（满贯/跳满/倍满/三倍满/累计役满/役满）"));
-        checkEq(QString::number(family.value(QStringLiteral("reason"))), QStringLiteral("6"),
-                QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直）"));
+        checkEq(QString::number(family.value(QStringLiteral("reason"))), QStringLiteral("7"),
+                QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
         checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("298"),
