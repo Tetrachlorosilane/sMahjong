@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
+import mahjong.bot.Bot;
 import mahjong.core.Rules;
 import mahjong.replay.ReplayRecorder;
 import mahjong.replay.ReplayStore;
@@ -217,6 +218,23 @@ public final class Table implements Runnable {
     /** 房间内已无真人时由 Server 回收。 */
     public volatile Runnable onEmpty;
     private int lastScores[] = new int[4];
+    /**
+     * 最近一局的结算结果（训练接口 / 诊断用）。
+     *
+     * <p>只放在进程内，**没有**进报文：报文那侧已经有 {@code round_end} 的
+     * {@code agari/reason/renchan/scores}，而"谁和了、谁放铳、谁听牌"用于统计
+     * （和了率 / 放铳率 / 流局听牌率）时没必要广播给客户端。
+     */
+    public Round.Result lastResult;
+
+    /**
+     * 自测 / 训练：本场最多打几个小局（{@code 0} = 打完整场）。
+     *
+     * <p>两个用途：① 自检里"策略注入"那类用例只要跑几个小局就够，整场要 2~3 秒，
+     * 攒起来会把 L1 拖慢一倍；② 固定长度回合（fixed-horizon episode）在 RL 里很常用。
+     * 提前收尾是安全的：供托里的立直棒照样归 1 位，点数仍然守恒（见 {@code playGame} 末尾）。
+     */
+    public int debugMaxHands;
 
     public Table(String id, String name, Rules rules) {
         this.id = id;
@@ -302,6 +320,87 @@ public final class Table implements Runnable {
      * 「开满 4 次杠之后不许再下发 kan 选项」这条必须在这里才验证得到。
      */
     public java.util.function.BiConsumer<String, java.util.List<Map<String, Object>>> debugAskTap;
+
+    // ================================================================ 训练接口
+    //
+    // 这三样东西（策略注入 + 决策前/后钩子）是"机器学习训练"与服务端之间的**全部**接口，
+    // 都挂在唯一的决策漏斗 Table.decideBot 上。要点：
+    //   · 生产默认 policy[seat] == null → 内置牌效机器人，行为与改造前**逐字节相同**；
+    //   · 观测（Observation）**无论是否装钩子都会构造**，所以生产路径与训练路径走的是同一段代码
+    //     （否则"训练时好用、上线就不一样"这类问题永远查不出来）；
+    //   · 策略抛异常一律兜底回内置机器人（异常冒到牌桌线程会让整场半庄静默死亡，见 AGENTS §6.3）。
+
+    /**
+     * 按座位注入策略；{@code null} = 内置牌效机器人。
+     *
+     * <p>**只有 {@code seats[seat].bot} 为真的座位会走这里**：真人座位的决策从网线上来
+     * （{@code awaitAction}），不经过策略。所以注入了策略也必须把座位设成机器人
+     * （{@code addBot}），否则策略永远收不到询问。
+     */
+    public final mahjong.ai.Policy[] policy = new mahjong.ai.Policy[4];
+
+    /** 训练接口：每次决策**之前**（观测已构造）触发。 */
+    public java.util.function.Consumer<mahjong.ai.Decision> debugDecisionTap;
+
+    /** 训练接口：每次决策**之后**（含策略实际返回的回包）触发。 */
+    public java.util.function.BiConsumer<mahjong.ai.Decision, Map<String, Object>> debugChoiceTap;
+
+    /**
+     * 按工厂给四个座位装策略（自对弈入口）。
+     *
+     * @param f        每局一份实例的工厂，见 {@link mahjong.ai.PolicyFactory}
+     * @param gameSeed 本局种子（用来重建确定性的随机源）
+     */
+    public void installPolicies(mahjong.ai.PolicyFactory f, long gameSeed) {
+        for (int i = 0; i < 4; i++) {
+            policy[i] = f == null ? null : f.create(i, gameSeed);
+        }
+    }
+
+    /**
+     * 状态机 → 策略的**唯一**决策漏斗（自家回合与鸣牌段都汇到这里）。
+     *
+     * <p>返回值的形状与客户端回包一致；任何异常都兜底成内置机器人，绝不向上抛。
+     */
+    public Map<String, Object> decideBot(int seat, mahjong.ai.Decision d) {
+        if (debugDecisionTap != null) {
+            debugDecisionTap.accept(d);
+        }
+        mahjong.ai.Policy p = policy[seat];
+        Map<String, Object> cmd = null;
+        if (p != null) {
+            try {
+                cmd = p.decide(d);
+            } catch (RuntimeException e) {
+                Log.warn("策略异常，本手退回内置机器人：" + e);
+                cmd = null;
+            }
+        }
+        if (cmd == null) {
+            cmd = Bot.decide(d.round, seat, d.kind, d.options, d.extra);
+        }
+        if (debugChoiceTap != null) {
+            debugChoiceTap.accept(d, cmd);
+        }
+        return cmd;
+    }
+
+    /**
+     * 机器人专用随机源：**只用来打破平局**，不参与任何规则判定。
+     *
+     * <p>必须由 {@link #seedBase} 派生而不是 {@code Math.random()}：自测/自对弈把
+     * {@code seedBase} 写死并打开 {@link #debugDeterministicSeed} 时，整场（含机器人的随机选择）
+     * 必须完全可复现 —— 那是数据可复现与"配对同牌山评测"的前提。
+     * （{@code Bot} 的九种九牌分支原来用 {@code Math.random()}，就是靠这里修掉的。）
+     */
+    public java.util.Random botRng() {
+        if (botRng == null) {
+            botRng = new java.util.Random(seedBase * 0x2545F4914F6CDD1DL + 0x9E3779B9L);
+        }
+        return botRng;
+    }
+
+    private java.util.Random botRng;
 
     public void send(int seat, Map<String, Object> ev) {
         if (debugEventTap != null) {
@@ -866,7 +965,9 @@ public final class Table implements Runnable {
         broadcastRoom();
 
         boolean gameOver = false;
-        while (!stop && !gameOver) {
+        int handsPlayed = 0;
+        while (!stop && !gameOver && (debugMaxHands <= 0 || handsPlayed < debugMaxHands)) {
+            handsPlayed++;
             // 额外思考时长**每小局重置**（不是每半庄共用）：
             // 一局打完后，四家的总额外时长都回到 rules.thinkingBankMs。
             for (int i = 0; i < 4; i++) {
@@ -893,6 +994,9 @@ public final class Table implements Runnable {
                 seats[i].score = scores[i];
             }
             lastScores = scores.clone();
+            // 训练接口用：小局结算结果（和了者/放铳者/听牌/收支）留在桌上。
+            // 必须在广播 round_end **之前**赋值 —— 记录器是在 round_end 的钩子里读它的。
+            lastResult = res;
             broadcast(Json.obj(
                     "ev", "round_end",
                     "round", Json.obj(

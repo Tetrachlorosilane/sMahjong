@@ -77,6 +77,7 @@ public final class SelfTest {
         simulationTest();
         rinshanTests();
         kanLimitTests();
+        trainingInterfaceTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
         if (fail > 0) {
@@ -2195,7 +2196,273 @@ public final class SelfTest {
         eq("整场模拟里没有未登记的役种名（YakuCodes.misses）", YakuCodes.misses(), 0);
     }
 
+    // ------------------------------------------------------------- 训练接口
+
+    /** 探针对局的小局数（见 {@link #runProbe}：只需够短，不必整场）。 */
+    private static final int PROBE_HANDS = 4;
+
+    /** 一场探针对局的结果。 */
+    private static final class GameProbe {
+        final List<String> choices = new ArrayList<>();
+        final Map<String, Integer> kinds = new HashMap<>();
+        final List<Map<String, Object>> hands = new ArrayList<>();
+        final int[] finalScores = new int[4];
+
+        int sum() {
+            int s = 0;
+            for (int v : finalScores) {
+                s += v;
+            }
+            return s;
+        }
+    }
+
+    /**
+     * 用同一份策略跑几个小局，记录每次决策的(类型, 动作键)与终局分数。
+     *
+     * <p>只跑 {@link #PROBE_HANDS} 个小局：整场半庄要 2~3 秒，而这里要跑好几个（可复现、
+     * 注入生效、非法动作不打断），攒起来会把 L1 从 67 秒拖到近 90 秒。几个小局足够——
+     * 鸣牌询问每小局出现约 5 次，决策序列也足够长到能区分两个策略。
+     *
+     * @param policy 四家共用的策略；{@code null} = 内置牌效机器人
+     */
+    private static GameProbe runProbe(long seed, mahjong.ai.Policy policy) {
+        Table t = new Table("PROBE", "探针桌", Rules.defaults());
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        t.debugDeterministicSeed = true;
+        t.debugMaxHands = PROBE_HANDS;
+        t.seedBase = seed;
+        GameProbe p = new GameProbe();
+        for (int i = 0; i < 4; i++) {
+            t.policy[i] = policy;
+            t.addBot(i);
+        }
+        t.debugChoiceTap = (d, cmd) -> {
+            p.kinds.merge(d.kind, 1, Integer::sum);
+            mahjong.ai.Action a = mahjong.ai.Action.fromCmd(cmd);
+            p.choices.add(d.kind + "|" + (a == null ? "<非法回包>" : a.key()));
+        };
+        t.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "round_end".equals(Json.str(ev, "ev", ""))) {
+                p.hands.add(ev);
+            }
+        };
+        t.playGame();
+        for (int i = 0; i < 4; i++) {
+            p.finalScores[i] = t.seat(i).score;
+        }
+        return p;
+    }
+
+    /**
+     * 训练接口（{@code mahjong.ai} / {@code mahjong.train}）的不变式。
+     *
+     * <p>这一组的核心是**反作弊 + 可复现**两条：
+     * <ol>
+     *   <li><b>观测只含合法信息</b>：置换别家手牌 / 别家振听后观测必须逐字节不变，
+     *       同时公开信息（他家立直）变化必须被反映 —— 后者是**正向对照**，
+     *       否则"脏观测被冻住"也能让不变式通过（假绿）。</li>
+     *   <li><b>同种子可复现 + 策略注入真的生效</b>：同一种子两次的决策序列必须一致，
+     *       而换一个策略必须得到**不同**的决策序列（否则"注入"根本没接上）。</li>
+     * </ol>
+     * 以及策略的三种失败方式（非法动作 / 抛异常 / 返回 null）都不得打断对局。
+     */
+    private static void trainingInterfaceTests() {
+        // ---------- ① 动作空间：槽位 ↔ 牌码双射、键解析往返、回包形状
+        eq("固定动作头大小", mahjong.ai.Action.FIXED_ACTIONS, 79);
+        boolean slotsOk = true;
+        for (int slot = 0; slot < mahjong.ai.Action.TILE_SLOTS; slot++) {
+            String code = mahjong.ai.Action.tileCode(slot);
+            if (mahjong.ai.Action.tileIndex(code) != slot) {
+                slotsOk = false;
+            }
+        }
+        check("37 个牌码槽位往返一致", slotsOk);
+        check("赤五与普通五占不同槽位",
+                mahjong.ai.Action.tileIndex("0m") != mahjong.ai.Action.tileIndex("5m"));
+        eq("打牌头下标 9m", mahjong.ai.Action.discard("9m").index(), 8);
+        eq("立直头紧接打牌头", mahjong.ai.Action.riichi("9m").index(), 37 + 8);
+        eq("固定头最后一个槽是九种九牌", mahjong.ai.Action.of("kyuushu").index(), 78);
+        eq("吃/杠不在固定头里", mahjong.ai.Action.chi(List.of("1m", "2m")).index(), -1);
+        boolean parseOk = true;
+        for (String k : new String[]{"discard:5m", "discard:0p/tsumogiri", "riichi:1z", "tsumo",
+                "ron", "pon", "pass", "kyuushu", "kan:ankan:7z", "chi:1m+2m"}) {
+            mahjong.ai.Action a = mahjong.ai.Action.parse(k);
+            if (a == null || !k.equals(a.key())) {
+                parseOk = false;
+                failures.add("动作键解析往返失败: " + k);
+            }
+        }
+        check("动作键解析往返（含赤五/摸切/吃/杠）", parseOk);
+        // 从选项展开动作集：这是"合法动作 + 掩码"的唯一来源
+        List<Map<String, Object>> demoOpts = new ArrayList<>();
+        demoOpts.add(Json.obj("type", "discard", "tiles", Json.arr("1m", "9p")));
+        demoOpts.add(Json.obj("type", "riichi", "tiles", Json.arr("1m")));
+        demoOpts.add(Json.obj("type", "kan",
+                "kans", Json.arr(Json.obj("kind", "ankan", "tile", "7z"))));
+        demoOpts.add(Json.obj("type", "kyuushu"));
+        List<mahjong.ai.Action> expanded = mahjong.ai.Action.enumerate(demoOpts);
+        eq("选项展开数量（2 打牌 + 1 立直 + 1 杠 + 九种九牌）", expanded.size(), 5);
+        eq("选项展开保序", expanded.get(0).key(), "discard:1m");
+        eq("选项展开保序（末项）", expanded.get(4).key(), "kyuushu");
+        eq("吃回包原样两张", Json.write(mahjong.ai.Action.chi(List.of("2m", "3m")).toCmd()),
+                "{\"type\":\"chi\",\"tiles\":[\"2m\",\"3m\"]}");
+        eq("杠回包带 kind/tile", Json.write(mahjong.ai.Action.kan("daiminkan", "5s").toCmd()),
+                "{\"type\":\"kan\",\"kind\":\"daiminkan\",\"tile\":\"5s\"}");
+        eq("摸切只在声明时出现", Json.write(mahjong.ai.Action.discard("5m").toCmd()),
+                "{\"type\":\"discard\",\"tile\":\"5m\"}");
+
+        // ---------- ② 观测：字段白名单 + 反作弊不变式（含正向对照）
+        Table t = new Table("OBS", "观测桌", Rules.defaults());
+        t.debugDeterministicSeed = true;
+        t.seedBase = 4242L;
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+        }
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 1234567L);
+        r.debugSetup();
+        int drawn = r.debugOpeningTile();
+        List<Map<String, Object>> opts = r.debugTurnOptions(0, drawn);
+        check("自家回合选项里必有打牌", !mahjong.ai.Action.enumerate(opts).isEmpty());
+        mahjong.ai.Observation o1 =
+                mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null);
+        Map<String, Object> j1 = o1.toJson();
+        Set<String> want = new java.util.TreeSet<>(Arrays.asList("v", "seat", "kind", "hand",
+                "hand_red", "drawn", "player_draws", "menzen", "self_riichi", "furiten", "melds",
+                "discards", "dora_indicators", "riichi", "ippatsu", "scores", "round",
+                "tiles_left", "dead_wall_left", "total_discards", "kan_count", "any_call",
+                "visible", "haitei", "houtei", "rinshan", "from", "called_tile", "win_note",
+                "legal"));
+        eq("观测字段白名单（新增字段必须显式登记）", new java.util.TreeSet<>(j1.keySet()), want);
+
+        // 置换**全部隐藏信息**：别家手牌、别家门清标记、别家振听
+        for (int s = 1; s < 4; s++) {
+            r.hand[s].clear();
+            for (int i = 0; i < 13; i++) {
+                r.hand[s].add(Tiles.id(33 - (i % 34), i / 34));
+            }
+            r.menzen[s] = false;
+        }
+        r.furitenPerm[1] = true;
+        r.furitenTemp[2] = true;
+        mahjong.ai.Observation o2 =
+                mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null);
+        eq("置换别家隐藏信息后观测逐字节不变", Json.write(o2.toJson()), Json.write(j1));
+        // 正向对照：公开信息变化必须被反映（否则"不变"可能是观测整体失效的假绿）
+        r.riichi[1] = true;
+        check("公开信息（他家立直）变化必须反映到观测",
+                !Json.write(mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson())
+                        .equals(Json.write(j1)));
+        r.riichi[1] = false;
+        // 自家信息变化也必须反映（第二个正向对照）
+        r.furitenPerm[0] = true;
+        check("自家振听变化必须反映到观测",
+                !Json.write(mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson())
+                        .equals(Json.write(j1)));
+        r.furitenPerm[0] = false;
+
+        // ---------- ③ 策略适配器：合法动作原样下发，非法/异常/空一律退回内置机器人
+        mahjong.ai.Decision dec =
+                new mahjong.ai.Decision(o1, r, "turn", opts, null);
+        check("合法动作原样下发",
+                Json.write(mahjong.ai.Policies.fromAction(d -> d.legal().get(0)).decide(dec))
+                        .equals(Json.write(o1.legal.get(0).toCmd())));
+        mahjong.ai.Action notLegal = null;
+        for (int k = 0; k < Tiles.KIND_COUNT && notLegal == null; k++) {
+            mahjong.ai.Action cand = mahjong.ai.Action.discard(Tiles.kindToStr(k));
+            if (o1.indexOf(cand) < 0) {
+                notLegal = cand;
+            }
+        }
+        final mahjong.ai.Action bogus = notLegal;
+        eq("非法动作被挡下并退回内置机器人",
+                Json.write(mahjong.ai.Policies.fromAction(d -> bogus).decide(dec)),
+                Json.write(Bot.decide(r, 0, "turn", opts, null)));
+        eq("返回 null 也退回内置机器人",
+                Json.write(mahjong.ai.Policies.fromAction(d -> null).decide(dec)),
+                Json.write(Bot.decide(r, 0, "turn", opts, null)));
+        eq("策略抛异常也退回内置机器人",
+                Json.write(mahjong.ai.Policies.fromAction(d -> {
+                    throw new IllegalStateException("boom");
+                }).decide(dec)),
+                Json.write(Bot.decide(r, 0, "turn", opts, null)));
+
+        // ---------- ④ 策略注入真的生效 + 同种子可复现 + 鸣牌段也在漏斗里
+        GameProbe p1 = runProbe(777L, null);
+        GameProbe p2 = runProbe(777L, null);
+        eq("同种子两次的决策序列逐条一致", p1.choices, p2.choices);
+        eq("同种子两次的终局分数一致", Arrays.toString(p1.finalScores),
+                Arrays.toString(p2.finalScores));
+        eq("整场点数和守恒", p1.sum(), 100000);
+        check("漏斗在自家回合被调用", p1.kinds.getOrDefault("turn", 0) > 0);
+        // ⚠ 这条钉住一个真实的坑：鸣牌询问**不走 Round.ask()**，所以 debugAskTap 看不见它，
+        //   只有新漏斗（debugChoiceTap）两段都能看见。改回"只挂 askTap"就会红。
+        check("漏斗在鸣牌段也被调用（debugAskTap 看不见鸣牌）", p1.kinds.getOrDefault("claim", 0) > 0);
+        eq("鸣牌决策与自家回合决策都能被记录",
+                p1.choices.size(), p1.kinds.getOrDefault("turn", 0) + p1.kinds.getOrDefault("claim", 0));
+
+        GameProbe pLast = runProbe(777L, mahjong.ai.Policies.fromAction(
+                d -> d.legal().get(d.legal().size() - 1)));
+        check("注入的策略确实改变了行为（与内置机器人决策序列不同）",
+                !pLast.choices.equals(p1.choices));
+        eq("注入策略的终局也守恒", pLast.sum(), 100000);
+
+        // 三种失败方式在**漏斗层**验证（不必再打整场，省 L1 时间）：
+        // 策略抛异常 / 返回 null，都必须退回内置机器人，而不是把异常抛给牌桌线程。
+        Table funnel = new Table("FUNNEL", "漏斗桌", Rules.defaults());
+        mahjong.ai.Decision fdec = new mahjong.ai.Decision(o1, r, "turn", opts, null);
+        final String botCmd = Json.write(Bot.decide(r, 0, "turn", opts, null));
+        funnel.policy[0] = d -> {
+            throw new IllegalStateException("故意炸");
+        };
+        eq("漏斗兜底：策略抛异常 → 内置机器人", Json.write(funnel.decideBot(0, fdec)), botCmd);
+        funnel.policy[0] = d -> null;
+        eq("漏斗兜底：策略返回 null → 内置机器人", Json.write(funnel.decideBot(0, fdec)), botCmd);
+        funnel.policy[0] = null;
+        eq("未注入策略时就是内置机器人", Json.write(funnel.decideBot(0, fdec)), botCmd);
+        // 乱发动作类型的策略：状态的兜底（立直/杠不成立退回摸切、吃/碰校验）各有既有回归，
+        // 这里只钉住"**整场不会被打断**"这一条（异常冒到牌桌线程会让整场静默死亡）。
+        GameProbe pIllegal = runProbe(777L, d -> Json.obj("type", "chi",
+                "tiles", Json.arr("1m", "9m")));
+        eq("发非法动作的策略不会打断整场", pIllegal.sum(), 100000);
+
+        // ---------- ⑤ runner：种子可复现、顺位是排列、统计自洽
+        long base = 20260101L;
+        check("每场种子互不相同",
+                mahjong.train.SelfPlay.seedFor(base, 0) != mahjong.train.SelfPlay.seedFor(base, 1)
+                        && mahjong.train.SelfPlay.seedFor(base, 1)
+                           != mahjong.train.SelfPlay.seedFor(base, 2));
+        eq("同一场种子可复现", mahjong.train.SelfPlay.seedFor(base, 5),
+                mahjong.train.SelfPlay.seedFor(base, 5));
+        eq("顺位：同点按座次拆开",
+                Json.write(mahjong.train.SelfPlay.placementOf(
+                        new int[]{25000, 25000, 25000, 25000})), "[1,2,3,4]");
+        eq("顺位：按分数降序",
+                Json.write(mahjong.train.SelfPlay.placementOf(
+                        new int[]{10000, 30000, 30000, 20000})), "[4,1,2,3]");
+
+        mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+        cfg.games = 1;
+        cfg.workers = 1;
+        cfg.seedBase = base;
+        cfg.maxHands = PROBE_HANDS;
+        mahjong.train.SelfPlay.Summary sum = mahjong.train.SelfPlay.run(cfg);
+        eq("runner 跑了 1 场", sum.games, 1);
+        check("runner 打出了小局", sum.hands > 0);
+        check("runner 统计了决策数", sum.decisions > 0);
+        int placeSum = 0;
+        for (Object v : (List<?>) sum.perGame.get(0).get("placement")) {
+            placeSum += ((Number) v).intValue();
+        }
+        eq("每场顺位之和 = 1+2+3+4", placeSum, 10);
+        mahjong.train.SelfPlay.PolicyStat st = sum.byPolicy.get("teacher");
+        check("按策略聚合了逐手统计", st != null && st.seatHands == 4 * sum.hands);
+        check("和了率在 0..1 之间", st.winRate() >= 0 && st.winRate() <= 1);
+    }
+
     // ------------------------------------------------------------- 王牌 / 岭上
+
 
     /**
      * 岭上牌（杠后从王牌摸的那 4 张）在**报文层面**的账要算对。

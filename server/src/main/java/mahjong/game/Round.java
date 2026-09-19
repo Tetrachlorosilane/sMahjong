@@ -234,7 +234,7 @@ public final class Round {
                     turnExtra = Json.obj("win_note", why);
                 }
             }
-            Map<String, Object> act = ask(turn, "turn", opts, turnExtra);
+            Map<String, Object> act = ask(turn, "turn", opts, turnExtra, drawn, isRinshan);
             String type = act == null ? "discard" : Json.str(act, "type", "discard");
 
             if ("tsumo".equals(type) && drawn >= 0) {
@@ -633,6 +633,16 @@ public final class Round {
         return wall.uraIndicators();
     }
 
+    /**
+     * 牌山是否只剩最后一张（本巡即海底 / 本次舍张即河底）。
+     *
+     * <p>训练接口要用它区分海底摸月 / 河底捞鱼；它本来就是**公开信息**
+     * （余牌数通过 {@code draw}' 的 {@code tiles_left} 一直广播），所以暴露不泄漏任何东西。
+     */
+    public boolean atLastLiveTile() {
+        return wall.atLastLiveTile();
+    }
+
     public int tilesLeft() {
         return wall.tilesLeft();
     }
@@ -844,6 +854,22 @@ public final class Round {
             out.add(String.valueOf(o.get("type")));
         }
         return out;
+    }
+
+    /**
+     * 自测/训练钩子：返回自家回合的**完整选项**（不是只有类型）。
+     *
+     * <p>训练接口的信息集不变式要在"不真的打一局"的前提下验证观测（
+     * 见 {@code SelfTest.trainingInterfaceTests}），而观测是从 {@code options} 展开动作空间的
+     * —— 所以需要拿到真选项。它只是把私有生成器暴露出来，不做任何额外判定。
+     */
+    public List<Map<String, Object>> debugTurnOptions(int seat, int drawn) {
+        return turnOptions(seat, drawn, false);
+    }
+
+    /** 自测/训练钩子：返回鸣牌询问的完整选项。 */
+    public List<Map<String, Object>> debugClaimOptions(int seat, int from, int tileId) {
+        return claimOptions(seat, from, tileId);
     }
 
     private List<Map<String, Object>> turnOptions(int seat, int drawn, boolean rinshan) {
@@ -1085,7 +1111,7 @@ public final class Round {
      * 鸣牌询问不扣额外时长，用较短的固定窗口。
      */
     private Map<String, Object> ask(int seat, String kind, List<Map<String, Object>> options,
-                                    Map<String, Object> extra) {
+                                    Map<String, Object> extra, int drawn, boolean rinshan) {
         long id = ++askSeq;
         final boolean timed = "turn".equals(kind) && rules.thinkingBaseMs > 0;
         final int bank = timed ? Math.max(0, table.seat(seat).timeBankMs) : 0;
@@ -1107,14 +1133,18 @@ public final class Round {
         if (extra != null) {
             ev.putAll(extra);
         }
-        // 自检旁路：机器人座位的询问不走网络（下面直接 Bot.decide），只能在这里观察选项
+        // 自检旁路：机器人座位的询问不走网络（下面直接走策略），只能在这里观察选项
         if (table.debugAskTap != null) {
             table.debugAskTap.accept(kind, options);
         }
         final long askedAt = System.currentTimeMillis();
         if (table.seat(seat).bot) {
             sleepBot(seat);
-            return Bot.decide(this, seat, kind, options, ev);
+            // 训练接口：观测**无条件**构造（生产与训练共用同一段决策路径）
+            return table.decideBot(seat, new mahjong.ai.Decision(
+                    mahjong.ai.Observation.ofTurn(this, seat, options, drawn, rinshan,
+                            Json.str(ev, "win_note", null)),
+                    this, kind, options, ev));
         }
         table.send(seat, ev);
         // 只认本次询问真正给过的动作类型：被取消的鸣牌询问的迟到回包
@@ -1369,7 +1399,12 @@ public final class Round {
             askedBestRank.put(s, myBest);
             if (table.seat(s).bot) {
                 sleepBot(s);
-                Map<String, Object> a = Bot.decide(this, s, "claim", opts, extra);
+                // ⚠ 鸣牌段**不走 ask()**（它自己组询问、自己收尾），所以策略漏斗在这里是第二处入口；
+                //   任何埋点/记录都必须两处都挂（只挂 debugAskTap 会看不到鸣牌选项）。
+                Map<String, Object> a = table.decideBot(s, new mahjong.ai.Decision(
+                        mahjong.ai.Observation.ofClaim(this, s, opts, from,
+                                Tiles.toStr(tileId), Json.str(extra, "win_note", null)),
+                        this, "claim", opts, extra));
                 if (a != null) {
                     answers.put(s, a);
                     final int rank = realizableClaimRank(s, a, tileId);

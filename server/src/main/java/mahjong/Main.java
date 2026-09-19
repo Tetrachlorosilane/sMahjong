@@ -23,6 +23,17 @@ public final class Main {
         String replayDir = "replays";
         int replayMax = 50;
         long replayMaxMb = 96;
+        // ---- 训练接口（自对弈）：见 mahjong.train.SelfPlay
+        int selfplay = -1;
+        long selfplaySeed = 20260101L;
+        int selfplayWorkers = 0;
+        String selfplayPolicy = "teacher,teacher,teacher,teacher";
+        boolean selfplayRotate = false;
+        String selfplayOut = null;
+        int selfplaySample = 1;
+        boolean selfplayClaims = true;
+        int selfplayHands = 0;
+        String preset = null;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--port":
@@ -67,6 +78,53 @@ public final class Main {
                 case "--test":
                     selftest = true;
                     break;
+                case "--selfplay":
+                    // 训练接口：无网络自对弈 / 评测（4 个机器人座位，策略可注入）
+                    if (i + 1 < args.length) {
+                        selfplay = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--seed":
+                    if (i + 1 < args.length) {
+                        selfplaySeed = Long.parseLong(args[++i]);
+                    }
+                    break;
+                case "--workers":
+                    if (i + 1 < args.length) {
+                        selfplayWorkers = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--policy":
+                    if (i + 1 < args.length) {
+                        selfplayPolicy = args[++i];
+                    }
+                    break;
+                case "--rotate":
+                    selfplayRotate = true;
+                    break;
+                case "--out":
+                    if (i + 1 < args.length) {
+                        selfplayOut = args[++i];
+                    }
+                    break;
+                case "--sample":
+                    if (i + 1 < args.length) {
+                        selfplaySample = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--no-claims":
+                    selfplayClaims = false;
+                    break;
+                case "--hands":
+                    if (i + 1 < args.length) {
+                        selfplayHands = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--preset":
+                    if (i + 1 < args.length) {
+                        preset = args[++i];
+                    }
+                    break;
                 case "--help":
                 case "-h":
                     printHelp();
@@ -79,6 +137,38 @@ public final class Main {
         if (selftest) {
             int code = SelfTest.run();
             System.exit(code);
+        }
+        if (selfplay >= 0) {
+            // 自对弈**不装回放库**：训练局没必要占 replay 配额（ReplayStore.current() 为 null
+            // 时 Table 的录制开销为零）。
+            mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+            cfg.games = selfplay;
+            cfg.seedBase = selfplaySeed;
+            if (selfplayWorkers > 0) {
+                cfg.workers = selfplayWorkers;
+            }
+            cfg.seatPolicy = selfplayPolicy.split(",");
+            cfg.rotatePolicies = selfplayRotate;
+            cfg.outDir = selfplayOut;
+            cfg.sampleEvery = selfplaySample;
+            cfg.recordClaims = selfplayClaims;
+            cfg.maxHands = selfplayHands;
+            cfg.preset = preset;
+            Log.quiet = !Log.verbose;
+            mahjong.train.SelfPlay.Summary sum;
+            try {
+                sum = mahjong.train.SelfPlay.run(cfg);
+            } catch (RuntimeException e) {
+                Log.error("自对弈失败", e);
+                System.exit(2);
+                return;
+            }
+            System.out.print(mahjong.train.SelfPlay.format(sum));
+            mahjong.train.SelfPlay.writeSummary(sum, selfplayOut);
+            if (selfplayOut != null) {
+                System.out.println("轨迹目录：" + java.nio.file.Path.of(selfplayOut).toAbsolutePath());
+            }
+            System.exit(0);
         }
         ReplayStore.install(new ReplayStore(Path.of(replayDir), replayMax,
                 replayMaxMb * 1024 * 1024, replay));
@@ -106,5 +196,17 @@ public final class Main {
         System.out.println("  --fast             机器人不思考、局间不停顿（自动化测试用）");
         System.out.println("  --selftest         运行规则引擎自测后退出");
         System.out.println("  --help             显示帮助");
+        System.out.println();
+        System.out.println("训练接口（无网络自对弈 / 评测）：");
+        System.out.println("  --selfplay <n>     跑 n 场半庄（4 个机器人座位；不监听端口）");
+        System.out.println("  --seed <n>         基准种子（默认 20260101；同种子逐事件可复现）");
+        System.out.println("  --workers <k>      并行线程数（默认 = CPU 核数；不影响结果）");
+        System.out.println("  --policy a,b,c,d   四家策略：teacher|first|pass|random（默认全 teacher）");
+        System.out.println("  --rotate           按局轮转座位（评测用：每个策略把四个座位都坐一遍）");
+        System.out.println("  --out <dir>        轨迹输出（每场 g<序号>.jsonl + summary.json）");
+        System.out.println("  --sample <k>       每 k 次决策记 1 条（默认 1 = 全记）");
+        System.out.println("  --no-claims        不记录鸣牌决策");
+        System.out.println("  --hands <n>        每场最多打 n 个小局（0 = 完整半庄；冒烟测试用）");
+        System.out.println("  --preset <name>    规则预设：mleague|tenhou|majsoul|custom");
     }
 }

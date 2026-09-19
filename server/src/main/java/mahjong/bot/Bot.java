@@ -109,7 +109,10 @@ public final class Bot {
         Map<String, Object> kyuushu = find(options, "kyuushu");
         if (kyuushu != null) {
             int n = yaochuKinds(r, seat);
-            if (n >= 10 || (n == 9 && Math.random() < 0.5)) {
+            // ⚠ 这里原来是 `Math.random()`：自对弈数据与"配对同牌山评测"都要求同种子逐事件可复现，
+            //   而这条岔路一旦命中就会让同一副牌打出不同的结果（实测 8 个种子恰好都没触发九种九牌，
+            //   所以"看着可复现"—— 正是这种偶发才最毒）。随机源改由 Table 从 seedBase 派生。
+            if (n >= 10 || (n == 9 && r.table.botRng().nextDouble() < 0.5)) {
                 return Json.obj("type", "kyuushu");
             }
         }

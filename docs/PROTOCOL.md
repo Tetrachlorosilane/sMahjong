@@ -731,3 +731,161 @@ java -jar mahjong-server.jar [--port 10086] [--host 0.0.0.0] [--verbose]
 > 客户端收到 `error` 也不会去清询问栏 —— 服务端并没有重发 ask，清了只会让玩家点不动）。
 > 鸣牌段的现状不同：**类型不属于本次询问下发过的 `option.type` 的回包会被直接丢弃**
 > （这是识别「没有 `ask_id` 的废包」的唯一判据，见 §2.2 与 `AGENTS.md` §2.3-10）。
+
+## 8. 训练接口（离线自对弈 / 机器学习）
+
+这一节**不是网络协议**：它描述服务端为「训练一个基于机器学习的电脑玩家」暴露的进程内 API 与命令行，
+外加**产出的数据格式**（那部分是被离线消费的契约，所以必须写在这里）。
+
+训练侧有两种接法，各自的权威性来源不同：
+
+| 接法 | 信息集从哪来 | 服务端改动 | 适用 |
+| --- | --- | --- | --- |
+| **A. 外部进程当玩家** | 既有下行报文（§3.3 / §3.8 / §3.10）——**结构上不可能作弊** | **零** | 起步首选：Python/PyTorch 随便用；现成的 `--autoplay` 已证明「一个程序能当玩家打完整场」 |
+| **B. 进程内策略注入** | `mahjong.ai.Observation`（§8.2 的字段表） | `Table.policy[seat]` | 生产形态：无 socket 往返、仍是 `add_bot` 座位，回放/结算/对手侧全不用改 |
+
+⚠ **不要为了机器学习给服务端加第三方依赖**（Maven / ONNX / PyTorch）。B 形态的做法是：在外面训练，
+导出权重，用**纯 Java 手写前向**（输入维度见 §8.2，小网络足够）。`java -jar` 自包含是这个项目的硬约束。
+
+### 8.1 策略接缝
+
+状态机里只有两处会问「这一手怎么走」：自家摸打（`Round.ask`）与鸣牌段（`Round.claimPhase`）。
+两处**都**汇到唯一的漏斗：
+
+```java
+Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
+```
+
+- `Table.policy[seat] == null`（生产默认）→ 内置牌效机器人（`mahjong.bot.Bot`），
+  行为与引入注入功能之前**逐字节相同**。
+- 只有 `seats[seat].bot` 为真的座位会走这里；真人座位的动作从网线上来（`awaitAction`），不经过策略。
+- **任何异常都兜底**回内置机器人 —— 异常冒到牌桌线程会让整场半庄静默死亡（`AGENTS.md` §6.3）。
+- ⚠ 鸣牌段**不走** `Round.ask()`，所以 `Table.debugAskTap` 看不到鸣牌询问；
+  要看两段必须用 `debugChoiceTap`。
+
+三个接口，用途不同：
+
+| 接口 | 拿得到 `Round`？ | 用途 |
+| --- | --- | --- |
+| `Policy.decide(Decision)` | 是（`Decision.round`，**含全部隐藏信息**） | 内置 teacher、记录 / 调试 |
+| `ActionPolicy.choose(Decision)` | **否** | **训练侧一律实现这个**：结构上无法作弊 |
+| `PolicyFactory.create(seat, gameSeed)` | — | 每局一份实例（并行自对弈下「同种子可复现」的前提） |
+
+`Policies.fromAction(ActionPolicy)` 提供三道保护：动作不在本次 `legal` 里 / 返回 `null` / 抛异常，
+一律退回内置机器人。**只实现 `ActionPolicy` 就不可能让牌桌线程死掉。**
+
+### 8.2 观测（`Observation`，格式版本 `v: 1`）
+
+只含该座位**合法可见**的信息。字段表（`toJson()` 的输出，权威）：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `v` | int | 观测格式版本；字段增删要 +1（数据集靠它判兼容） |
+| `seat` / `kind` | int / str | 座位；`"turn"`（自家摸打）/ `"claim"`（别家舍张的鸣牌询问） |
+| `hand` | int[34] | 暗牌计数。**自家回合是 14 张**（含刚摸到的那张），鸣牌询问是 13 张 |
+| `hand_red` | bool[34] | 暗牌里是否持有该牌种的**赤五** |
+| `drawn` | str? | 刚摸到的牌码（`"0m"` = 赤五）；非自家回合为 `null` |
+| `player_draws` | int | 自己第几次摸牌（1 起） |
+| `menzen` / `self_riichi` / `furiten` | bool | **只看自己**；`furiten` 只可能是自己的（理由同 §3.10） |
+| `melds` | map[4][] | 四家副露（形状 = `Meld.toJson()`：`kind`/`tiles`/`from`/`called_tile`/`aka`） |
+| `discards` | str[4][] | 四家牌河；**被鸣走的那张已由服务端移除** |
+| `dora_indicators` | str[] | 宝牌指示牌（**里宝指示牌绝不出现**） |
+| `riichi` / `ippatsu` | bool[4] | 公开状态 |
+| `scores` | int[4] | 当前点数 |
+| `round` | map | `{bakaze, kyoku, honba, dealer, riichi_sticks}` |
+| `tiles_left` / `dead_wall_left` | int | 可摸余牌 / 岭上余牌 |
+| `total_discards` / `kan_count` / `any_call` | int / bool | 公开的巡目与局面量 |
+| `visible` | int[34] | **派生量** = 四家牌河 + 四家副露 + 宝牌指示牌（省得训练侧重算） |
+| `haitei` / `houtei` / `rinshan` | bool | 海底 / 河底 / 岭上 |
+| `from` / `called_tile` / `win_note` | int / str? / str? | 鸣牌询问专用：谁打的、哪张、自己能听不能和的原因（`furiten`/`no_yaku`） |
+| `legal` | str[] | **本次全部合法动作**（动作空间的掩码来源，见 §8.3） |
+
+**绝不出现的字段**（与 §3.10 同一条纪律；进程内更要小心，因为 `Round` 是公开可读的）：
+
+- 别家手牌 `Round.hand[other]`；
+- 牌山顺序 `Round.wallOrder()` / `Wall.debugAllTiles()`；
+- 里宝指示牌 `Round.uraIndicators()`；
+- 别家振听 `Round.furitenTemp[other]` / `furitenPerm[other]`（临时振听等价于「他听牌了」）。
+
+> ⚠ 自家回合**不能**调 `Round.isFuriten()`：它内部会跑 34 次向听 DFS，而 14 张手牌的听牌集合
+> **恒为空**，所以那一刻它完全等价于 `furitenTemp || furitenPerm` —— 白花一次 DFS。
+
+### 8.3 动作空间
+
+**动作 = `options` 展开出来的东西**（`Action.enumerate(options)`）。这是训练侧最大的便利：
+服务端已经算好了合法性，**不需要学「能不能这样打」，也不会发出非法动作**。
+
+动作键（稳定标识：数据集、外部训练器、断言都用它）：
+
+| 键 | 说明 |
+| --- | --- |
+| `discard:<码>` | 打牌。**只给牌码**：同码牌物理等价，服务端 `pickDiscardId` 按牌码取牌 |
+| `discard:<码>/tsumogiri` | 同上并声明摸切（可选；不声明即走纯牌码查找） |
+| `riichi:<码>` | 立直宣言（`<码>` 是宣言牌） |
+| `kan:ankan\|kakan\|daiminkan:<码>` | 杠 |
+| `chi:<码>+<码>` | 吃（两张按牌种升序） |
+| `tsumo` / `ron` / `pon` / `pass` / `kyuushu` | 无参数动作 |
+
+**固定头**（`Action.index()`，`Action.FIXED_ACTIONS = 79`）—— 喂给定长输出的网络用：
+
+| 下标 | 段 |
+| --- | --- |
+| `0..36` | 打牌（37 个槽：34 种牌 + 赤 `0m`/`0p`/`0s`） |
+| `37..73` | 立直宣言（同 37 个槽） |
+| `74` / `75` / `76` / `77` / `78` | `tsumo` / `ron` / `pon` / `pass` / `kyuushu` |
+
+`chi` 与 `kan` 是**参数化**的（一次询问里最多各几种），没有固定下标：做法是「按本次 `legal`
+枚举 + 掩码」，标识仍用动作键。牌码 → 槽位：34 种牌按 `kind` 排，赤五另占 `34`/`35`/`36`
+（`Action.tileIndex` / `Action.tileCode`）。
+
+### 8.4 自对弈 / 评测命令行
+
+```bash
+java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
+     --policy teacher,teacher,teacher,teacher --seed 20260101 --out data/run1
+```
+
+| 参数 | 含义 |
+| --- | --- |
+| `--selfplay <n>` | 跑 n 场半庄（**不监听端口**，4 个机器人座位） |
+| `--seed <n>` | 基准种子；第 g 场种子 = `SelfPlay.seedFor(seed, g)`（SplitMix，**与并行度无关**） |
+| `--workers <k>` | 并行线程数（默认 = CPU 核数；**不改变结果**） |
+| `--policy a,b,c,d` | 四家策略：`teacher`（内置机器人）/ `first` / `pass` / `random` |
+| `--rotate` | 按局轮转座位：同一批牌山下让每个策略把四个座位都坐一遍（**配对评测务必开**） |
+| `--out <dir>` | 轨迹输出（每场 `g<序号>.jsonl` + `summary.json`） |
+| `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
+| `--hands <n>` | 每场最多 n 个小局（0 = 完整半庄；冒烟测试用） |
+| `--preset <name>` | 规则预设：`mleague` / `tenhou` / `majsoul` / `custom` |
+
+**三条硬性质**（结果可信的前提）：① 同种子逐事件可复现（`debugDeterministicSeed` + 每局一份策略实例）；
+② `--rotate` 消掉座位运气；③ 桌面 `botDelay=0`/`roundDelay=0`，与生产节奏解耦。
+
+轨迹 JSONL，每行一个对象（`type` 区分）：
+
+| 行 | 内容 |
+| --- | --- |
+| `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, final_scores, placement}` |
+| `hand` | `{hand_no, hand, round, scores_after, delta, agari, abortive, reason, renchan, winner, loser, tsumo, nagashi, tenpai}` |
+| `game` | `{game, seed, policies, start_score, hands, decisions, sampled_every, final_scores, placement}` |
+
+- `chosen_index` = 该动作在本次 `legal` 里的下标 —— 直接就是「枚举 + 掩码」策略头的监督信号。
+- **奖励是事后回填的**：决策发生时还不知道这一手 / 这一场的结果，所以 `hand_delta`（本小局四家收支）、
+  `hand_winner`/`hand_loser`、`placement`（整场顺位）是在小局 / 整场结束时补进去的。
+- `placement` 恒为 `1..4` 的一个排列：**同点按座次先后**（M.League 起家优先）拆开 ——
+  否则「平均顺位」会被同点挤掉一个名次。
+- `summary.json` 含 `by_policy`（`avg_place` / `win_rate` / `deal_in_rate` / `avg_delta` / `avg_win_score`）
+  与 `per_game`（每场种子 + 四家顺位）—— 后者是配对显著性检验的输入。
+- 单核实测：**约 3.6 秒一场半庄**（约 13 小局 / 800 次决策）≈ 220 决策/秒；
+  训练接口本身的开销是 **1.0 µs/决策**（记录时 10.5 µs，主要花在 JSON 上）。
+
+### 8.5 数据集校验
+
+```bash
+node tools/selfplay-check.mjs <dir>
+```
+
+**独立实现**（不是把 Java 断言翻译一遍）逐行核对：观测字段白名单（防泄漏）、
+`chosen ∈ legal` 且 `chosen_index` 对得上、暗牌张数 = `13 − 3×副露 + (自家回合 ? 1 : 0)`、
+`visible` = 牌河 + 副露 + 宝牌、`hand_red` 与 `hand` 不矛盾、小局收支账（`scores_after` 链、
+`delta` 为 1000 的整数倍、和了者收支为正）、`placement` 与终局分数一致、
+`summary.json` 与逐场数据一致。退出码 0/1。

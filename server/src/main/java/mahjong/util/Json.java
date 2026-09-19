@@ -54,6 +54,20 @@ public final class Json {
         return l;
     }
 
+    /**
+     * {@code boolean[]} → JSON 数组。
+     *
+     * <p>必须走这一手：{@link #write(Object)} 只认 {@code int[]}，{@code boolean[]} 会落进
+     * 兜底分支被写成 {@code [Z@1a2b3c} 这种对象标识串（静默产出非法 JSON）。
+     */
+    public static List<Object> boolList(boolean[] a) {
+        List<Object> l = new ArrayList<>(a.length);
+        for (boolean v : a) {
+            l.add(v);
+        }
+        return l;
+    }
+
     // ---------------------------------------------------------------- 读取
 
     @SuppressWarnings("unchecked")

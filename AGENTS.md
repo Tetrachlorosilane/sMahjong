@@ -235,8 +235,12 @@ java -jar server\build\mahjong-server.jar --selftest
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
-立直条件、和牌选项下发、横置顺延、**杠后岭上摸牌的账**，以及 **3 次「4 机器人整场半庄」**的点数守恒。
-改了 `rules/` / `game/` 下任何东西都要重跑。
+立直条件、和牌选项下发、横置顺延、**杠后岭上摸牌的账**、**训练接口的全部不变式**（见 §6.5），
+以及 **3 次「4 机器人整场半庄」**的点数守恒。改了 `rules/` / `game/` 下任何东西都要重跑。
+
+> ⏱ 全量自检约 **75 秒**（597 项时是 67 秒）—— 慢的是里面那十来个"整场模拟"用例，不是断言数。
+> 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
+> 否则一个用例就是 2~3 秒。
 
 ### L2 客户端自检（秒级）
 
@@ -270,6 +274,7 @@ node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中�
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）
 node tools\check-i18n.mjs                                 # **静态**核对：服务端每个码都有客户端译文（不用起服务端）
+node tools\selfplay-check.mjs <轨迹目录>                    # 训练数据集校验（独立实现；不用起服务端；见 §6.5）
 node tools\i18n-scan.mjs --check                          # 界面文案必须都在语言文件里（源码里不留中文；见 §6）
 node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言文件一致（新增文案不漏 key）
 ```
@@ -342,7 +347,10 @@ mahjong/
 │     │                 WinCheck/RoundOptions/RoundClaims/RoundScoring(纯判据，可单独单测)
 │     ├─ replay/       Replay Store Recorder（对局记录：录制 / 落盘 / 容量淘汰）
 │     ├─ net/          Server Session
-│     ├─ bot/          Bot(牌效 AI，补位用)
+│     ├─ bot/          Bot(牌效 AI，补位用；同时是训练用的 teacher)
+│     ├─ ai/           ★ 训练接口：Policy/ActionPolicy/PolicyFactory(接缝) Observation(合法信息集)
+│     │                 Action(动作空间) Decision Policies(内置策略与适配器) —— 见 §6.5
+│     ├─ train/        ★ 自对弈：SelfPlay(并行/种子/统计) TraceRecorder(轨迹 JSONL)
 │     └─ test/         SelfTest ★ 改规则必须在这里加断言
 ├─ client/
 │  ├─ build.ps1
@@ -362,10 +370,11 @@ mahjong/
 │     └─ ui/               TileRenderer TableView ActionBar AutoBar LobbyDialog ResultDialog SettingsDialog MainWindow
 │                           ReplayWindow(回放) WallView(牌山 136 张)
 └─ tools/              联调与静态检查：e2e-test / timeout / clock / firstturn / riichi-stale /
-                       claim-priority / utf8 / check-i18n / i18n-scan / i18n-map + i18n-apply
-                       + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server / gen-tile-placeholders
-                       / inline-svg-style / dump-otf-features / gen-sfx + gen-sfx-qrc（见 §9.3）
-                       / package-release.ps1（发布打包，见 §9.5）
+                       claim-priority / discard-align / seat-swap / utf8 / replay-test /
+                       selfplay-check(训练数据集校验，见 §6.5) / check-i18n / i18n-scan / i18n-map
+                       + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server
+                       / gen-tile-placeholders / inline-svg-style / dump-otf-features
+                       / gen-sfx + gen-sfx-qrc（见 §9.3）/ package-release.ps1（发布打包，见 §9.5）
 ```
 
 ---
@@ -631,9 +640,9 @@ mahjong/
   - 回归：`SelfTest.rinshanTests`（岭上账）+ `SelfTest.kanLimitTests`（4 次上限 + 废杠不白拿）+
     `client --selftest` 的岭上组 + `node tools\mock-server.mjs <port> kan`（截图看「岭上 N」）+
     `node tools\e2e-test.mjs`（真 socket 的岭上账审计；脚本客户端会主动开杠以覆盖这条路径）。
-  - ⚠ 自检要看**选项**时得用 `Table.debugAskTap`：**机器人座位的询问不走网络**
-    （`Round.ask()` 直接调 `Bot.decide`），整场机器人模拟里一条 `ask` 报文都没有 ——
-    用 `debugEventTap` 抓 `ask` 会**静默空转**（这个坑真绊过一次）。
+  - ⚠ 自检要看**选项**时用 `Table.debugAskTap`（它挂在 `Round.ask()` 里）：**机器人座位的询问不走网络**，
+    整场机器人模拟里一条 `ask` 报文都没有 —— 用 `debugEventTap` 抓 `ask` 会**静默空转**（这个坑真绊过一次）。
+    ⚠ 但它**看不到鸣牌**（鸣牌段不走 `ask()`）；两段都要看就用 `Table.debugChoiceTap`（挂在决策漏斗上，见 §6.5）。
   - **四杠散了**（`Round.fourKanAbortNow()`）= 「本局杠数已 4 **且**不是同一人所开」。三种豁免
     （第 4 次杠后**岭上开花** / 被**抢杠** / 岭上牌**放铳**）由**和了路径先 `return`** 天然满足，
     所以判据只在"那张牌已经落地、且没人因它和牌"时被问到 —— **别把它提前到开杠那一刻**，
@@ -655,6 +664,39 @@ mahjong/
   + 等待室命令按 `Table.seatOfSession(this)` **反查**自己的真实座位，不信 `session.seat`。
   回归：`node tools\seat-swap-test.mjs`（换座/洗座后的准备落位 + 并发 churn 下的座位表排列不变式
   + 牌局中 take_seat 被忽略）。
+
+### 6.5 训练接口（机器学习 / 自对弈）
+
+**权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
+
+- **只有一个决策漏斗**：`Table.decideBot(seat, Decision)`。自家摸打（`Round.ask`）与鸣牌段
+  （`Round.claimPhase` 里那段 bot 分支）都汇到它，`Table.policy[seat] == null` 时走内置 `Bot`。
+  **不要**再往第三个地方直接调 `Bot.decide` —— 那样注入的策略就漏了一段。
+- ⚠ **鸣牌段不走 `Round.ask()`**（它自己组询问、自己收尾）。所以：
+  - `Table.debugAskTap` **看不到鸣牌**（它只挂在 `ask()` 里）。要看两段必须用 `debugChoiceTap`；
+    这个坑真绊过一次：探针第一次跑就报"鸣牌询问 0 次"，差点被当成"机器人不鸣牌"。
+  - 任何"每次询问都要做的事"（记录、埋点、统计）都得挂在漏斗上，别挂在 `ask()` 上。
+- **策略不许把异常抛给牌桌线程**：`decideBot` 必须兜底（异常 / 返回 `null` → 内置机器人）。
+  一局里异常冒到牌桌线程会让**整场半庄静默死亡**（连 `round_end` 都不发，见 §6.3）。
+- **训练侧只实现 `ActionPolicy`（拿不到 `Round`）**：`Round` 里能读到别家手牌、牌山顺序、
+  里宝指示牌 —— 进程内一不留神就训出**作弊**模型，而且训练与评测**同时**失效、还查不出来。
+  `Policies.fromAction` 还会把"不在本次 `legal` 里的动作"挡回内置机器人。
+- **观测只许含合法信息**，新增字段必须：① 确认它公开可见；② 加进 `Observation` 的字段白名单断言
+  （`SelfTest.trainingInterfaceTests`）**和** `tools/selfplay-check.mjs` 的 `OBS_KEYS`；
+  ③ 同步 PROTOCOL §8.2 的表。三处都改才算改完。
+  - ⚠ 自家回合**别调 `Round.isFuriten()`**：14 张手牌时它恒等于 `furitenTemp || furitenPerm`，
+    但内部会白跑 34 次向听 DFS（热路径）。
+- **可复现是硬要求**：自对弈/评测必须 `debugDeterministicSeed=true` + **每局一份策略实例**
+  （`PolicyFactory`）+ 每场种子**预先算好**（`SelfPlay.seedFor`）。策略实例跨局带状态
+  （随机源、缓存）会让同一 seed 不再产出同一轨迹，配对评测随之失效。
+- **奖励是事后回填的**：新加统计量时记住 `hand_delta`/`placement` 是在小局/整场结束时补的，
+  不是决策那一刻就有。`placement` 必须是 `1..4` 的排列（同点按座次拆开），否则"平均顺位"没有意义。
+- **不要给服务端加 ML 依赖**（Maven/ONNX/PyTorch）：训练在外面做，权重导进来用**纯 Java 手写前向**。
+- **改了产出格式就三处一起改**：`TraceRecorder` / `docs/PROTOCOL.md` §8.4 / `tools/selfplay-check.mjs`，
+  并重跑 `node tools\selfplay-check.mjs <dir>`（它会用独立实现核对；红证：把 `chosen` 改成非法动作、
+  删掉一个 `hand_delta`，都必须判 FAIL）。
+- 回归：`SelfTest.trainingInterfaceTests`（动作空间往返、观测反作弊不变式 + 正向对照、
+  策略三种失败方式兜底、同种子可复现、注入真的改变行为、runner 统计自洽）+ `tools\selfplay-check.mjs`。
 
 ---
 
@@ -678,6 +720,11 @@ mahjong/
 | 门前役全不生效 | `Round` 构造里 `menzen[i] = true` 还在吗？ |
 | 和了形误判 | 向听 DFS 的 `melds + partials < 4` 封顶还在吗？ |
 | 和牌按钮不出现 | 服务端 `debugTurnOptionTypes` / `debugClaimOptionTypes` 钩子查下发；客户端用 `--demo --no-answer` + 假服务端截图 |
+| **自对弈里"注入的策略根本没被调用"** | 座位是不是 `bot`？只有 `seats[seat].bot` 为真的座位才走 `Table.decideBot`（真人座位的动作从网线上来）。注入策略必须配 `addBot`（见 §6.5） |
+| **训练数据里鸣牌决策一条都没有** | 埋点挂在了 `Table.debugAskTap` 上 —— 它只覆盖自家回合，鸣牌段**不走** `Round.ask()`。改挂 `debugChoiceTap`（见 §6.5） |
+| **同一种子两次跑出的轨迹不一样 / 配对评测结果飘** | ① `debugDeterministicSeed` 开了吗？② 策略实例跨局复用了吗（随机源/缓存带状态）—— 必须 `PolicyFactory` 每局新建；③ 是不是又有人用了 `Math.random()`（`Bot` 的九种九牌分支就踩过） |
+| **数据集校验报"观测里有未登记字段"** | 往 `Observation` 加了字段却没同步三处（`SelfTest` 白名单断言 / `selfplay-check.mjs` 的 `OBS_KEYS` / PROTOCOL §8.2）。**这是防泄漏的设计**，别把白名单放宽了事 |
+| **自对弈比预期慢很多** | 先用**批量**（几十场）量，别用几场判 —— JIT 预热会把头几场放大 2~3 倍。真慢就查观测里有没有调 `Round.isFuriten()` 这类会跑向听 DFS 的东西（见 §6.5） |
 | 中文字画成空心方框 | 用了 `-platform offscreen`（该插件无字体库），换默认平台 |
 | 结算界面的牌面是文字不是牌图 | 内嵌字体没加载（查 exe 同级 `fonts/I.MahjongJP.otf`），或示意串含非法字元被校验挡下（见 §9） |
 | 素材是彩色、客户端却画成黑白线稿 | Illustrator 的 `<style>`+`class` 上色 Qt 不认 → 跑 `tools\inline-svg-style.ps1` 内联（见 §2.3-5） |
@@ -717,7 +764,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **597** 项、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
+**实测通过**：服务端自检 **642** 项（含训练接口不变式）、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
 `discard-align-test` 与 `seat-swap-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`），
