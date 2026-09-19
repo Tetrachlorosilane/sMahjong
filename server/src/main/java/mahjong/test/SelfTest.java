@@ -57,6 +57,7 @@ public final class SelfTest {
         winCheckTests();
         roundOptionsTests();
         chiValidationTests();
+        kuikaeTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -969,6 +970,193 @@ public final class SelfTest {
         int[] ids = r.debugPickChiTiles(1, m3, Arrays.asList("1m", "2m"));
         check("吃：取回的确实是手里那两张", ids != null && ids.length == 2
                 && Tiles.kind(ids[0]) == 0 && Tiles.kind(ids[1]) == 1);
+    }
+
+    // ------------------------------------------------------------- 食替（服务端权威）
+
+    /**
+     * 食替（`docs/日本麻将.md` §食替）：吃/碰之后不能马上打出
+     * 「所吃/所碰的那张」（**現物食替**）或「这副顺子里从手里拿出的那两张还能配成的
+     * **另一副**顺子的第三张」（**筋食替**）。
+     *
+     * <p>这里钉住两层，两层原来都漏：
+     * <ol>
+     *   <li><b>禁打集合本身</b>：旧实现只算「较大那张 +1」这一侧，而牌种数组是**升序**的，
+     *       于是「被吃的那张在顺子上边」（手牌 3m4m 吃 5m）永远漏判 2m；</li>
+     *   <li><b>服务端校验</b>：旧实现只在**下发的选项**里过滤，出牌段只查「在手里 /
+     *       立直只摸切」→ 一条手工报文就能食替（`PROTOCOL.md` §7 明文属非法动作）。</li>
+     * </ol>
+     */
+    private static void kuikaeTests() {
+        final int m1 = Tiles.parseKind("1m");
+        final int m2 = Tiles.parseKind("2m");
+        final int m3 = Tiles.parseKind("3m");
+        final int m4 = Tiles.parseKind("4m");
+        final int m5 = Tiles.parseKind("5m");
+        final int m6 = Tiles.parseKind("6m");
+        final int m7 = Tiles.parseKind("7m");
+        final int m8 = Tiles.parseKind("8m");
+        final int m9 = Tiles.parseKind("9m");
+
+        // ---------- ① 禁打集合的内容：两侧都要算（这一对是同一个集合，旧实现只对了一半）
+        Set<Integer> chiTop = RoundOptions.kuikaeForbidden(m5, m3, m4);   // 手牌 3m4m 吃 5m
+        check("吃 5m（3m4m）：現物 5m 禁打", chiTop.contains(m5));
+        check("吃 5m（3m4m）：筋 2m 禁打（旧实现漏判这一半）", chiTop.contains(m2));
+        eq("吃 5m（3m4m）：禁打集合恰好 {2m,5m}", new java.util.TreeSet<>(chiTop).toString(),
+                new java.util.TreeSet<>(Arrays.asList(m2, m5)).toString());
+
+        Set<Integer> chiBottom = RoundOptions.kuikaeForbidden(m2, m3, m4);  // 手牌 3m4m 吃 2m
+        eq("吃 2m（3m4m）：两侧对称，同样是 {2m,5m}",
+                new java.util.TreeSet<>(chiBottom).toString(),
+                new java.util.TreeSet<>(Arrays.asList(m2, m5)).toString());
+
+        // 坎张吃没有第二个完成形（唯一的另一张就是被吃的那张本身）
+        eq("坎张吃 5m（4m6m）：只禁現物 5m",
+                new java.util.TreeSet<>(RoundOptions.kuikaeForbidden(m5, m4, m6)).toString(),
+                new java.util.TreeSet<>(Arrays.asList(m5)).toString());
+        // 边张吃：向下补越界，向上补就是被吃的那张
+        eq("边张吃 3m（1m2m）：只禁現物 3m",
+                new java.util.TreeSet<>(RoundOptions.kuikaeForbidden(m3, m1, m2)).toString(),
+                new java.util.TreeSet<>(Arrays.asList(m3)).toString());
+        // ⚠ 花色边界：9m 的"向上补"是 1p 的牌种号，绝不能越过花色边界混进来
+        eq("边张吃 7m（8m9m）：不得把 1p 当成筋食替",
+                new java.util.TreeSet<>(RoundOptions.kuikaeForbidden(m7, m8, m9)).toString(),
+                new java.util.TreeSet<>(Arrays.asList(m7)).toString());
+        check("字牌（吃不到）不炸：只返回現物",
+                RoundOptions.kuikaeForbidden(Tiles.parseKind("1z"), m1, m2)
+                        .equals(new LinkedHashSet<>(Arrays.asList(Tiles.parseKind("1z")))));
+
+        // ---------- ② 出牌校验：服务端权威判据
+        List<Integer> hand = parse("2m3m4m5m6m7m8m1p2p3p4p5p6p");   // 13 张
+        int id2m = -1;
+        int id3m = -1;
+        int id5m = -1;
+        int id6m = -1;
+        for (int id : hand) {
+            if (Tiles.kind(id) == m2) {
+                id2m = id;
+            } else if (Tiles.kind(id) == m3) {
+                id3m = id;
+            } else if (Tiles.kind(id) == m5) {
+                id5m = id;
+            } else if (Tiles.kind(id) == m6) {
+                id6m = id;
+            }
+        }
+        Set<Integer> fb = RoundOptions.kuikaeForbidden(m5, m3, m4);   // {2m, 5m}
+        check("食替禁打：手里的 2m 被服务端拒绝",
+                !Round.discardAllowed(hand, false, -1, fb, true, id2m));
+        check("食替禁打：手里的 5m 被服务端拒绝",
+                !Round.discardAllowed(hand, false, -1, fb, true, id5m));
+        check("食替之外：手里的 3m 照常放行",
+                Round.discardAllowed(hand, false, -1, fb, true, id3m));
+        check("规则关掉食替禁止（kuikae=false）→ 同一张放行",
+                Round.discardAllowed(hand, false, -1, fb, false, id2m));
+        // 不在手里的牌（含 -1 "没解析出来"）一律拒绝
+        final int id9s = Tiles.id(Tiles.parseKind("9s"), 0);
+        check("不在手里的牌被拒（幽灵出牌）",
+                !hand.contains(id9s) && !Round.discardAllowed(hand, false, -1, Set.of(), true, id9s));
+        check("-1（牌码没解析出来）被拒",
+                !Round.discardAllowed(hand, false, -1, Set.of(), true, -1));
+        // 立直后只能摸切
+        check("立直后打手里别的牌被拒",
+                !Round.discardAllowed(hand, true, id6m, Set.of(), true, id3m));
+        check("立直后摸切放行", Round.discardAllowed(hand, true, id6m, Set.of(), true, id6m));
+
+        // ---------- ③ 同源性：下发选项 == 校验接受集合（同一把尺子）
+        boolean sameRuler = true;
+        final Set<Integer> none = Set.of();
+        final Set<Integer> only2m = Set.of(m2);
+        final Set<Integer> both = new LinkedHashSet<>(fb);
+        final Set<Integer> many = Set.of(m2, m3, m4, m5, m6, m7, m8);
+        for (Set<Integer> kinds : Arrays.asList(none, only2m, both, many)) {
+            Set<Integer> listed = new LinkedHashSet<>();
+            for (Object s : RoundOptions.discardChoices(hand, false, -1, kinds)) {
+                listed.add(Tiles.parseKind((String) s));
+            }
+            for (int id : hand) {
+                if (Round.discardAllowed(hand, false, -1, kinds, true, id)
+                        != listed.contains(Tiles.kind(id))) {
+                    sameRuler = false;
+                }
+            }
+        }
+        check("出牌校验与下发选项同源（4 种禁打集合 × 13 张手牌）", sameRuler);
+
+        // ---------- ④ 红证 / 非空转：**恶意策略**在真实对局里故意食替，服务端必须拒绝
+        // 策略只在"自家回合且手里确实有禁张"时出手（其余一律返回 null → 交给内置 teacher），
+        // 所以对局照常推进（teacher 本来就会吃碰），而每一次出手都是一条"手工报文"。
+        final int[] attempts = {0};
+        final int[] honored = {0};                 // 服务端照打出去的次数（必须为 0）
+        final Map<Integer, Integer> pendingCheat = new HashMap<>();
+        mahjong.ai.Policy evil = d -> {
+            if ("claim".equals(d.kind)) {
+                // 主动吃/碰：食替只可能出现在「鸣牌之后必须出牌」那一步，不主动鸣就永远造不出来。
+                // 其余（含荣和）一律 pass，保持对局干净。
+                for (Map<String, Object> o : d.options) {
+                    Object ty = o.get("type");
+                    if ("chi".equals(ty)) {
+                        List<Object> sets = Json.list(o, "sets");
+                        if (sets != null && !sets.isEmpty()) {
+                            return Json.obj("type", "chi", "tiles",
+                                    new ArrayList<>(Json.asArr(sets.get(0))));
+                        }
+                    } else if ("pon".equals(ty)) {
+                        return Json.obj("type", "pon");
+                    }
+                }
+                return Json.obj("type", "pass");
+            }
+            if (!"turn".equals(d.kind) || d.round.riichi[d.seat()]) {
+                return null;                       // 立直那一路只下发摸切那一张，不是食替判据
+            }
+            Set<Integer> listed = new LinkedHashSet<>();
+            for (Map<String, Object> o : d.options) {
+                if ("discard".equals(o.get("type"))) {
+                    for (String s : Json.strList(o, "tiles")) {
+                        listed.add(Tiles.parseKind(s));
+                    }
+                }
+            }
+            if (listed.isEmpty()) {
+                return null;                       // 全是禁张（极端牌型）：兜底那一侧另有断言
+            }
+            final List<Integer> h = d.round.hand[d.seat()];
+            for (int id : h) {
+                if (!listed.contains(Tiles.kind(id))) {
+                    attempts[0]++;
+                    pendingCheat.put(d.seat(), Tiles.kind(id));
+                    return Json.obj("type", "discard", "tile", Tiles.toStr(id), "tsumogiri", false);
+                }
+            }
+            return null;
+        };
+        for (long seed : new long[]{20260901L, 20260902L}) {
+            Table ct = new Table("CHEAT" + seed, "食替作弊桌", Rules.defaults());
+            ct.botDelayMs = 0;
+            ct.roundDelayMs = 0;
+            ct.debugDeterministicSeed = true;
+            ct.debugMaxHands = PROBE_HANDS;
+            ct.seedBase = seed;
+            for (int i = 0; i < 4; i++) {
+                ct.policy[i] = evil;
+                ct.addBot(i);
+            }
+            ct.debugEventTap = (recipient, ev) -> {
+                if (recipient != -1 || !"discard".equals(Json.str(ev, "ev", ""))) {
+                    return;
+                }
+                Integer cheat = pendingCheat.remove((Integer) Json.i(ev, "seat", -1));
+                if (cheat != null && Tiles.parseKind(Json.str(ev, "tile", "")) == cheat) {
+                    honored[0]++;                  // 服务端把禁张打出去了 —— 这就是 S-49 的红证
+                }
+            };
+            ct.playGame();
+        }
+        System.out.println("  [覆盖] 食替：恶意策略在真实对局里造出 " + attempts[0] + " 次食替机会，"
+                + "其中被服务端照打 " + honored[0] + " 次（必须为 0）");
+        check("恶意食替被服务端拒绝（" + attempts[0] + " 次尝试 / " + honored[0] + " 次被照打）",
+                attempts[0] > 0 && honored[0] == 0);
     }
 
     // ------------------------------------------------ 被取消询问的回包必须摘掉
@@ -3519,6 +3707,19 @@ public final class SelfTest {
         g2.hand[1].addAll(parse("5p5p5p2m3m4m6m7m8m9m1m1m1m3m"));
         java.util.List<String> c1 = g2.debugClaimOptionTypes(1, 3, Tiles.id(13, 1));
         check("手里 3 张 5p + 别人打 5p → 下发大明杠 kan 选项: " + c1, c1.contains("kan"));
+
+        // 海底那条线：摸到海底牌之后**不可以开杠**（`docs/日本麻将.md` §副露 L296）。
+        // 不挡的话可以「海底暗杠 → 摸岭上 → 岭上开花」绕开海底的限制，
+        // 而且岭上那张还会被 `atLastLiveTile()` 误判成海底摸月（牌山此时已经见底）。
+        mahjong.game.Round g5 = newRound();
+        g5.hand[1].addAll(parse("1m1m1m1m5p5p5p2m3m4m6m7m8m9m"));
+        check("牌山还有牌时下发 kan 选项", g5.debugTurnOptionTypes(1, Tiles.id(27, 1)).contains("kan"));
+        g5.debugDrainWallTo(0);
+        check("牌山见底（atLastLiveTile）", g5.atLastLiveTile());
+        check("摸到海底牌后 canKan 仍为真（闸门在选项层，按「海底」这一条单独判）", g5.canKan());
+        java.util.List<String> kk = g5.debugTurnOptionTypes(1, Tiles.id(27, 1));
+        check("摸到海底牌后**不再下发** kan 选项（暗杠/加杠都不行）: " + kk, !kk.contains("kan"));
+        check("海底仍然可以自摸/打牌（只是不能杠）", kk.contains("discard"));
 
         // ---------- ② 整场模拟：报文层面也不许越界 ----------
         List<String> violations = new ArrayList<>();

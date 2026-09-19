@@ -322,8 +322,11 @@ public final class Round {
                     final boolean wantTsumogiri = drawn >= 0 && Json.bool(act, "tsumogiri", false);
                     discardId = (act == null) ? -1
                                               : resolveDiscardId(act, turn, wantTsumogiri, drawn);
-                    if (discardId < 0 || !hand[turn].contains(discardId)
-                            || (drawn >= 0 && riichi[turn] && discardId != drawn)) {
+                    // ⚠ 选项列表**不是安全边界**：客户端可以发一条手工报文声称要打任意一张。
+                    //   所以服务端必须自己再判一次（在手里 / 立直后只摸切 / 未食替），
+                    //   不合法就退回默认摸切 —— 与「立直不成立」同一条兜底，绝不放行。
+                    if (!discardAllowed(hand[turn], riichi[turn], drawn,
+                                        forbiddenDiscard, rules.kuikae, discardId)) {
                         discardId = defaultDiscardId(turn, drawn);
                     }
                 }
@@ -949,8 +952,12 @@ public final class Round {
         }
         List<Object> kans = new ArrayList<>();
         int[] c = concealCounts(seat);
-        // 岭上牌只有 4 张，用完就不能再开杠（一局最多 4 次，见 canKan）
-        if (canKan()) {
+        // 岭上牌只有 4 张，用完就不能再开杠（一局最多 4 次，见 canKan）。
+        // ⚠ 还有一条：**摸到海底牌之后不能再开杠**（`docs/日本麻将.md` §副露 L296
+        //   「不可以吃、碰、杠河底牌，摸到海底牌后也不可以开杠」）——
+        //   否则可以靠"海底暗杠 → 摸岭上 → 岭上开花"绕开海底的限制，
+        //   还会把「一局 4 次杠」的账往后挪。河底牌那侧（大明杠）由鸣牌段自己挡。
+        if (canKan() && !haitei) {
             for (int k = 0; k < Tiles.KIND_COUNT; k++) {
                 if (c[k] == 4 && kanAllowedByRiichi(seat, k, drawn)) {
                     kans.add(Json.obj("kind", "ankan", "tile", Tiles.kindToStr(k)));
@@ -1050,6 +1057,36 @@ public final class Round {
             }
         }
         return true;
+    }
+
+    /**
+     * 出牌合法性的**服务端权威判据** —— 与 {@link RoundOptions#discardChoices} 下发的选项
+     * 是**同一把尺子**（下发的是它的子集；收包时再用它判一次）。
+     *
+     * <p>为什么必须再判一次：选项列表只是"给好客户端的提示"，**不是安全边界**。
+     * 一条手工报文（或改造过的客户端）可以声称要打任意一张牌；只查「在手里」的话，
+     * 「吃 3m 打 6m」「吃 3m 打现物 3m」「立直后打手里别的牌」全都能过，
+     * 而 `docs/PROTOCOL.md` §7 明文把「违反食替」列为非法动作、且非法动作不得改变状态。
+     *
+     * <p>抽成静态纯函数是为了让自检能**不构造牌桌**逐条断言，并且与
+     * {@code RoundOptions.discardChoices} 做"接受集合 == 下发集合"的同源性对照。
+     *
+     * @param hand      该家手牌（牌 id）
+     * @param riichi    该家是否已立直（立直后只允许摸切）
+     * @param drawn     本巡摸到的牌 id；{@code < 0} 表示本巡没摸牌（鸣牌之后）
+     * @param forbidden 禁打的**牌种**集合（食替，见 {@link RoundOptions#kuikaeForbidden}）
+     * @param kuikae    {@code rules.kuikae}：关掉食替禁止时该集合不生效
+     * @param id        客户端声称要打出的那张牌的 id
+     */
+    public static boolean discardAllowed(List<Integer> hand, boolean riichi, int drawn,
+                                         Set<Integer> forbidden, boolean kuikae, int id) {
+        if (id < 0 || !hand.contains(id)) {
+            return false;                       // 不在手里（含 -1 "没解析出来"）
+        }
+        if (riichi && drawn >= 0 && id != drawn) {
+            return false;                       // 立直后只能摸切（与旧判据一致）
+        }
+        return !(kuikae && forbidden.contains(Tiles.kind(id)));
     }
 
     /**
@@ -1899,39 +1936,16 @@ public final class Round {
                 sendMeld(seat, m, calledIndex);
                 removeCalledFromRiver(from, calledIndex);
                 if (rules.kuikae) {
-                    // ⚠ 这里参与运算的必须是**牌种 kind**，不是牌 id：`tiles[]` 里存的是 id，
+                    // ⚠ 参与运算的必须是**牌种 kind**，不是牌 id：`tiles[]` 里存的是 id，
                     //   而 `Tiles.suit()` 是按 kind 定义的（kind/9），`forbiddenDiscard` 也是按
                     //   kind 消费的（RoundOptions.discardChoices 里 `contains(Tiles.kind(id))`）。
                     //   以前直接拿 id 做减法和花色判断：`d = a - b` 变成了"两张牌的 copy 之差"，
                     //   于是禁打集合里混进 id、真正的筋替（kind 差 1/2）反而检测不出来，
                     //   下发的出牌选项既漏真禁张又多做无谓禁张（AUDIT F13）。
-                    forbiddenDiscard.add(kind);                  // 現物食替：刚吃的那张不能马上打
-                    final int[] kinds = {Tiles.kind(tiles[0]), Tiles.kind(tiles[1]), Tiles.kind(tiles[2])};
-                    for (int i = 0; i < 3; i++) {
-                        for (int j = i + 1; j < 3; j++) {
-                            if (kinds[i] == kind || kinds[j] == kind) {
-                                continue;                        // 只看"留在手里那两张"
-                            }
-                            int a = kinds[i];
-                            int b = kinds[j];
-                            if (a >= 27 || Tiles.suit(a) != Tiles.suit(b)) {
-                                continue;                        // 字牌不成顺
-                            }
-                            int d = a - b;
-                            int cand = -1;
-                            if (d == -1 || d == 1) {
-                                cand = (a < b) ? b + 1 : a + 1;
-                            } else if (d == -2) {
-                                cand = a + 1;
-                            } else if (d == 2) {
-                                cand = b + 1;
-                            }
-                            // 筋替：留下的这两张还能和 cand 配成一副顺子，所以 cand 也不能打
-                            if (cand >= 0 && cand < 27 && Tiles.suit(cand) == Tiles.suit(a)) {
-                                forbiddenDiscard.add(cand);
-                            }
-                        }
-                    }
+                    //   现在整份集合抽成纯函数 `RoundOptions.kuikaeForbidden`（可单测），
+                    //   并且修掉「被吃的那张在顺子上边」时漏判筋食替的那一半（AUDIT S-49）。
+                    forbiddenDiscard.addAll(RoundOptions.kuikaeForbidden(
+                            kind, Tiles.kind(cl.tiles[0]), Tiles.kind(cl.tiles[1])));
                 }
                 break;
             }

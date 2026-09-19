@@ -59,6 +59,62 @@ public final class RoundOptions {
     }
 
     /**
+     * 食替禁打集合：吃之后，**哪些牌种不能马上打出**（`docs/日本麻将.md` §食替）。
+     *
+     * <p>两类一起算：
+     * <ul>
+     *   <li><b>現物食替</b>：打出与所吃的那张**相同**的牌；</li>
+     *   <li><b>筋食替</b>：打出「所吃顺子另一边」的牌 —— 即这副顺子里**从他家手里拿出的那两张**
+     *       还能配成的**另一副**顺子的第三张。</li>
+     * </ul>
+     *
+     * <p>⚠ 旧实现（内联在 {@code Round.applyMeld} 里）只算了「较大那两张 +1」这一侧，
+     * 而 `kinds[]` 是**升序**的，于是「被吃的那张在顺子上边」时永远漏判：
+     * 手牌 3m4m 吃 5m（顺子 3-4-5）应禁 {5m, 2m}，旧实现只禁掉 5m（現物），2m 被放行；
+     * 而 3m4m 吃 2m 时却算得出来（禁 {2m, 5m}）—— 同一件事只对了一半，
+     * 而且下发选项与服务端校验共用这份集合，所以它同时是"界面漏变暗 + 服务端放行"。
+     *
+     * <p>坎张吃（如 4m6m 吃 5m）没有第二个完成形（唯一的另一张就是被吃的那张本身），
+     * 所以只有現物食替 —— 与常见规则一致。
+     *
+     * @param calledKind 被吃的那张的牌种
+     * @param k0         吃进这副顺子时**从手里拿出**的其中一张的牌种
+     * @param k1         另一张
+     * @return 禁打的牌种集合（至少含 {@code calledKind}）
+     */
+    public static Set<Integer> kuikaeForbidden(int calledKind, int k0, int k1) {
+        final Set<Integer> out = new LinkedHashSet<>();
+        out.add(calledKind);                         // 現物食替
+        if (calledKind >= 27 || k0 >= 27 || k1 >= 27) {
+            return out;                              // 字牌不成顺子（吃本来也不会用到字牌）
+        }
+        if (Tiles.suit(k0) != Tiles.suit(calledKind) || Tiles.suit(k1) != Tiles.suit(calledKind)) {
+            return out;
+        }
+        final int lo = Math.min(k0, k1);
+        final int hi = Math.max(k0, k1);
+        if (hi - lo != 1) {
+            // 坎张（差 2）：这两张唯一的完成形就是**被吃的那张本身** → 只有現物食替。
+            // 差 0（同种）或 >2（配不成顺子）正常吃不会出现。
+            return out;
+        }
+        final int base = Tiles.suit(lo) * 9;
+        // 连续搭子：这两张还能配成**两副**顺子（向下补 lo-1、向上补 hi+1），其中一副正是刚才吃的那副。
+        // 打出**另一副**的第三张 = 用手里那两张换个由头重排一次，鸣牌等于白鸣 —— 这正是禁止食替的理由，
+        // 而两侧都可能（吃 3m4m+2m 时是 5m、吃 3m4m+5m 时是 2m），不能只算一侧。
+        for (int cand : new int[]{lo - 1, hi + 1}) {
+            if (cand < base || cand > base + 8) {
+                continue;                            // 越过花色边界（1m 的向下补不存在）
+            }
+            if (cand == calledKind) {
+                continue;                            // 就是被吃的那张，已经在集合里
+            }
+            out.add(cand);
+        }
+        return out;
+    }
+
+    /**
      * 立直之后还能不能杠某一种牌。
      *
      * <p>规则：立直后杠牌不得改变听牌形。所以把这种牌的四张从暗牌里拿走
