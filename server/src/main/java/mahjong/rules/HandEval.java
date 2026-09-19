@@ -103,6 +103,40 @@ public final class HandEval {
         return Shanten.min(counts13, meldCount) <= 0;
     }
 
+    /**
+     * 手牌 + 副露里有多少张**宝牌**（按宝牌指示牌推；杠宝牌指示牌也在这份列表里）。
+     *
+     * <p>⛔ 宝牌**不是役**：它只加番，凑不齐役种照样不能和 —— 所以这个量只能用来
+     * **排序/取舍**（留宝牌还是留形状），绝不能拿去判"能不能和"。
+     * 赤宝牌与里宝牌要看具体牌 id，实局里由 {@link Evaluator} 在算分时一起收（见
+     * {@code Round.scoreIfWin}）。
+     */
+    public static int doraCount(int[] counts, List<Meld> melds, List<Integer> doraIndicators) {
+        if (doraIndicators == null || doraIndicators.isEmpty()) {
+            return 0;
+        }
+        int n = 0;
+        for (int ind : doraIndicators) {
+            final int dora = Tiles.doraFrom(ind);
+            if (dora < 0 || dora >= Tiles.KIND_COUNT) {
+                continue;
+            }
+            if (counts != null) {
+                n += counts[dora];
+            }
+            if (melds != null) {
+                for (Meld m : melds) {
+                    for (int t : m.tiles) {
+                        if (Tiles.kind(t) == dora) {
+                            n++;
+                        }
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
     // ------------------------------------------------------------------ 听牌形
 
     /**

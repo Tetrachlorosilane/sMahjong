@@ -2084,20 +2084,104 @@ public final class Round {
 
     private Evaluator.HandScore checkWin(int seat, int winTileId, boolean tsumo, boolean rinshan,
                                          boolean haitei, boolean chankan, boolean houtei) {
-        final int winKind = Tiles.kind(winTileId);
         final int[] c = winCounts(seat, winTileId, tsumo);
         if (c == null) {
             return null;
         }
+        final int aka = redCount(seat) + (!tsumo && Tiles.isRedId(winTileId) ? 1 : 0);
+        return scoreWith(seat, c, winTileId, tsumo, rinshan, haitei, chankan, houtei,
+                riichi[seat], true, aka);
+    }
+
+    /**
+     * 训练 / 评测用的**打点查询**：假设该家此刻和了 {@code winKind} 这张牌能得多少分。
+     *
+     * <p>与实局判定的区别只有一处：**不算里宝牌**。里宝只有和牌那一刻才翻开，
+     * 决策时（以及训练特征里）不可知 —— 把它算进去等于让 AI 看见未来。
+     * 赤宝牌与宝牌照常算（它们本来就公开）。
+     *
+     * <p>⚠ **张数契约**（与实局一致，张数不符返回 {@code null}，见 {@link WinCheck#counts}）：
+     * {@code tsumo=false} 时该家暗牌必须是 **13 张形态**（13−3×副露，和了牌**不在**手里），
+     * {@code tsumo=true} 时必须是 **14 张形态**（和了牌**已在**手里）。自家回合手上是 14 张，
+     * 想查"打掉某张之后荣和值多少"，用下面那个**指定暗牌**的重载（先减掉要打的那张）。
+     *
+     * @param assumeRiichi 是否按"已立直"计入立直这一役；传 {@code false} 可以问
+     *                     "这手**不立直**能不能和、值多少"（默听判断要用）
+     * @return 不能和（无役 / 番缚不够 / 牌型不成立 / 张数不对）返回 {@code null}
+     */
+    public Evaluator.HandScore scoreIfWin(int seat, int winKind, boolean tsumo, boolean assumeRiichi) {
+        if (seat < 0 || seat > 3) {
+            return null;
+        }
+        return scoreIfWin(seat, concealCounts(seat), winKind, tsumo, assumeRiichi, redCount(seat));
+    }
+
+    /** 同上，按**当前是否立直**（最常用的那一种）。 */
+    public Evaluator.HandScore scoreIfWin(int seat, int winKind, boolean tsumo) {
+        return scoreIfWin(seat, winKind, tsumo, riichi[seat]);
+    }
+
+    /**
+     * 打点查询的**指定暗牌**版本：不读牌桌上的手牌，直接对一份暗牌计数求值。
+     *
+     * <p>为什么要它：teacher 想比较"打这张还是那张值多少"，那几份暗牌**只存在于计算里**
+     * （手里是 14 张，"打掉某张之后"的 13 张从来没有真的被写回过牌桌）。
+     *
+     * @param concealed      暗牌计数（{@code tsumo=false} 时 13 张形态、{@code true} 时 14 张形态）
+     * @param akaInConcealed 这份暗牌 + 和了牌里有几张**赤五**（牌码在这一层已经丢了，
+     *                       所以由调用方给；保守起见可以传 0）。⚠ 副露里的赤五不用算，那是真实 id
+     */
+    public Evaluator.HandScore scoreIfWin(int seat, int[] concealed, int winKind, boolean tsumo,
+                                          boolean assumeRiichi, int akaInConcealed) {
+        if (seat < 0 || seat > 3 || winKind < 0 || winKind >= Tiles.KIND_COUNT
+                || concealed == null) {
+            return null;
+        }
+        // 假想和了牌一律按**非赤**（copy=3）：赤五的 +1 番取决于具体那张牌，
+        // "我要不要立直"这类取舍不该赌在赤牌上。
+        final int winTileId = Tiles.id(winKind, 3);
+        final int[] c = WinCheck.counts(concealed, melds[seat].size(), winTileId, tsumo);
+        if (c == null) {
+            return null;
+        }
+        return scoreWith(seat, c, winTileId, tsumo, false, false, false, false,
+                assumeRiichi, false, akaInConcealed);
+    }
+
+    /** 该家暗牌里有几张赤五。 */
+    private int redCount(int seat) {
+        int n = 0;
+        for (int id : hand[seat]) {
+            if (Tiles.isRedId(id)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * 打点计算的实际实现（实局判定与查询共用同一份上下文构造）。
+     *
+     * @param winCounts    已并入和了牌的暗牌计数（见 {@link WinCheck#counts}）
+     * @param assumeRiichi 立直/两立直/一发按此值填（{@code false} = 假设没立直）
+     * @param includeUra   是否计入里宝指示牌；**查询必须为 false**
+     * @param akaInConcealed 暗牌 + 和了牌里的赤五张数（{@code Evaluator} 靠牌 id 数赤宝，
+     *                       所以这里合成这么多张赤五 id 补进去；副露用真实 id）
+     */
+    private Evaluator.HandScore scoreWith(int seat, int[] winCounts, int winTileId, boolean tsumo,
+                                          boolean rinshan, boolean haitei, boolean chankan,
+                                          boolean houtei, boolean assumeRiichi, boolean includeUra,
+                                          int akaInConcealed) {
+        final int winKind = Tiles.kind(winTileId);
         WinContext ctx = new WinContext();
         ctx.rules = rules;
         ctx.seat = seat;
         ctx.dealerSeat = dealer;
         ctx.roundWind = 27 + roundWind;
         ctx.tsumo = tsumo;
-        ctx.riichi = riichi[seat] && !doubleRiichi[seat];
-        ctx.doubleRiichi = doubleRiichi[seat];
-        ctx.ippatsu = ippatsu[seat] && riichi[seat];
+        ctx.riichi = assumeRiichi && !doubleRiichi[seat];
+        ctx.doubleRiichi = assumeRiichi && doubleRiichi[seat];
+        ctx.ippatsu = assumeRiichi && ippatsu[seat] && riichi[seat];
         ctx.chankan = chankan;
         ctx.rinshan = rinshan;
         ctx.haitei = haitei && tsumo;
@@ -2111,11 +2195,29 @@ public final class Round {
         ctx.kanburi = !tsumo && chankanKoyaku;
         ctx.winKind = winKind;
         ctx.doraIndicators = doraIndicators();
-        ctx.uraIndicators = uraIndicators();
-        ctx.allTileIds = allTileIds(seat, winTileId, tsumo);
+        ctx.uraIndicators = includeUra ? uraIndicators() : List.of();
+        ctx.allTileIds = akaTiles(seat, winTileId, akaInConcealed);
         ctx.menzen = menzen[seat];
-        Evaluator.HandScore s = Evaluator.evaluate(ctx, c, melds[seat], winKind);
+        Evaluator.HandScore s = Evaluator.evaluate(ctx, winCounts, melds[seat], winKind);
         return s.valid ? s : null;
+    }
+
+    /** 给 {@code Evaluator} 数赤宝用的牌 id 列表：副露真实 id + 和了牌 + 合成的赤五。 */
+    private List<Integer> akaTiles(int seat, int winTileId, int akaInConcealed) {
+        List<Integer> ids = new ArrayList<>();
+        for (Meld m : melds[seat]) {
+            for (int t : m.tiles) {
+                ids.add(t);
+            }
+        }
+        if (winTileId >= 0) {
+            ids.add(winTileId);
+        }
+        for (int i = 0; i < akaInConcealed; i++) {
+            final int kind = i % 3 == 0 ? Tiles.AKA_M : (i % 3 == 1 ? Tiles.AKA_P : Tiles.AKA_S);
+            ids.add(Tiles.id(kind, 0));
+        }
+        return ids;
     }
 
     /** 上一张打出的牌是否是在他家开杠之后（杠振）。 */

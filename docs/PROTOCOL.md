@@ -816,11 +816,18 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `Visible.counts / unseen / drawable` | 可见牌 / 剩余张数 / **可摸张数**（`4 − 可见 − 自己手里`） |
 | `HandEval.shanten / advanceKinds / advanceTiles` | 向听、进张**种类与枚数**（枚数按可见牌扣） |
 | `HandEval.waitShapes / of / afterDiscard` | 听牌形（两面/双碰/嵌张/边张/单骑）、"打某张之后"的整份快照 |
+| `HandEval.doraCount` | 手牌+副露里的**宝牌**张数（⚠ 宝牌不是役，只能用于排序/取舍） |
+| `Danger.of / worst / worstAgainstRiichi` | 某张牌对某家（或对四家 / 只对立直家）的**危险度**：现物 → 筋/壁 → 无信息，带级别、分数与理由码 |
+| `Round.scoreIfWin(...)` | **打点查询**：假设和了某张能得多少番/点（⚠ **不算里宝** —— 里宝只有和牌才翻开；`assumeRiichi=false` 可问"不立直值多少"） |
 | `Agari.waits` / `Evaluator.evaluate` | 听牌集合 / 给定和了牌的打点（含宝牌、赤宝、役满折算） |
 
+⚠ `Round.scoreIfWin` 有**张数契约**（与实局一致，不符返回 `null`）：荣和要传 **13 张形态**的暗牌
+（和了牌不在手里），自摸要传 **14 张形态**。自家回合手上是 14 张，想查"打掉某张之后荣和值多少"，
+用那个**指定暗牌**的重载（先减掉要打的那张）。
+
 ⚠ `HandEval.of` 至少要跑 1 + 34 次向听 DFS，听牌时还要逐张做和了形分解 —— 它是**离线/评估用**的，
-别塞进热路径。`Bot` 只用了其中更便宜的 `advanceKinds`，且抽成公共判据前后**行为逐字等价**
-（等价性钉在 `SelfTest.handEvalTests`）。
+别塞进热路径。`Bot` 因此在 `chooseDiscard` 里**分两遍**：便宜的判据（向听/危险度/宝牌）先圈定
+"向听最小的那一组"，贵的评估只跑这一组。
 
 ### 8.3 动作空间
 

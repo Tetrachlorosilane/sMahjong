@@ -251,10 +251,12 @@ java -jar server\build\mahjong-server.jar --selftest
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
-立直条件、和牌选项下发、横置顺延、**杠后岭上摸牌的账**、**训练接口的全部不变式**（见 §6.5），
+立直条件、和牌选项下发、横置顺延、**杠后岭上摸牌的账**、**训练接口的全部不变式**（见 §6.5）、
+**teacher 的三层取舍**（牌效/押し引き/打点与役，见 §6.6），
 以及 **3 次「4 机器人整场半庄」**的点数守恒。改了 `rules/` / `game/` 下任何东西都要重跑。
 
-> ⏱ 全量自检约 **75 秒**（597 项时是 67 秒）—— 慢的是里面那十来个"整场模拟"用例，不是断言数。
+> ⏱ 全量自检约 **97 秒**（给 teacher 加上三层取舍之后；训练接口那轮是 75 秒，597 项时是 67 秒）
+> —— 慢的是里面那十来个"整场模拟"用例（teacher 变聪明了，每步算得更多），不是断言数。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
 > 否则一个用例就是 2~3 秒。
 
@@ -282,6 +284,7 @@ node tools\clock-test.mjs 127.0.0.1 10086                # 思考时间：基本
 node tools\firstturn-test.mjs 127.0.0.1 10086 3000       # 「每局第一巡」的实测等待 = 声明 deadline
 node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000     # 作废的立直不得替玩家打牌 + 重复包被丢弃
 node tools\claim-priority-test.mjs 127.0.0.1 10086 3000   # 鸣牌优先级：高优先级成立后不必等低优先级 + 废包不漏到下一巡
+                                                          # ⚠ 依赖发牌运气：取不到样本时**退出码 2**（不是失败），重跑即可
 node tools\discard-align-test.mjs 127.0.0.1 10086        # 出牌对齐（幽灵手牌）：庄家 round_start 必带 drawn +
                                                           # 「错报摸切也按牌码取牌」+「我报哪张就打哪张」不变式
 node tools\seat-swap-test.mjs 127.0.0.1 10086            # 换座/洗座：被换走那家的「准备」必须落在自己座位上 +
@@ -715,6 +718,30 @@ mahjong/
 - 回归：`SelfTest.trainingInterfaceTests`（动作空间往返、观测反作弊不变式 + 正向对照、
   策略三种失败方式兜底、同种子可复现、注入真的改变行为、runner 统计自洽）+ `tools\selfplay-check.mjs`。
 
+### 6.6 teacher（内置机器人）的三层取舍
+
+详细设计见 `docs/DESIGN.md`「teacher（内置机器人）的三层取舍」；这里只列改它时必须守的：
+
+- **改 teacher = 改训练标签**。行为克隆学的是它的行为：teacher 一改，**之前生成的数据集就作废**
+  （要重新 `--selfplay --out`）。所以改它的行为要单独说明，别混在"顺手重构"里。
+- **取舍判据必须是只吃公开信息的静态纯函数**（`Bot.chooseDiscard` / `hasYakuPlan` /
+  `shouldDeclareRiichi`，输入是 `Bot.HandState`）。理由：① 自检能**直接构造局面**断言取舍
+  （"有人立直时该打现物""无役的碰要放掉"），不必跑一整局碰运气；② `HandState.of` 是唯一读
+  `Round` 的入口，从类型上挡住"顺手读别家手牌"（回归：置换不变式）。
+- **弃和只看立直家**（`Danger.worstAgainstRiichi`）：没人立直的对手"手里是什么样"无从判断，
+  对四家取最坏会让每张牌一样危险、把现物的价值淹掉。进攻才用 `Danger.worst`。
+- **鸣牌前必须查役**（`hasYakuPlan`）：鸣牌打掉门清=打掉立直，鸣完无役这手永远和不了。
+  只认四种可靠计划：役牌 / 断幺九（食断规则下）/ 混一色·清一色 / 对对和；形状役故意不查。
+- **性能**：良形分类要对每个听牌张做一次和了形分解。`chooseDiscard` 因此**分两遍** ——
+  先用便宜的判据（向听/危险度/宝牌）圈定"向听最小的那一组"，贵的评估只跑这一组。
+  别把 `HandEval.of` 摊回每个候选（实测单核自对弈会从 4.96 秒/场涨到 6.2 秒/场）。
+- **非空转**：`Bot.debugFoldCount / debugDamaCount / debugNoYakuRefuseCount` 是**实战计数钩子**
+  （与 `RoundScoring.debugCallCounts()` 同一个套路）。新加一条取舍就加一个计数，并在
+  `SelfTest.teacherTests` 里断言它 > 0 —— 只测纯函数会出现"判据对、实战一次没走到"的假绿。
+- **`scoreIfWin` 的张数契约**：荣和要 13 张形态、自摸要 14 张形态。自家回合是 14 张，
+  要问"打掉某张之后值多少"就用**指定暗牌**的重载（`Round.scoreIfWin(seat, concealed, ...)`）。
+- teacher **从不开杠**（刻意简化，岭上路径靠 `Bot.debugAlwaysKan` 覆盖），"该不该开杠"还没做。
+
 ---
 
 ## 7. 常见症状 → 先查哪里
@@ -744,6 +771,10 @@ mahjong/
 | **自对弈比预期慢很多** | 先用**批量**（几十场）量，别用几场判 —— JIT 预热会把头几场放大 2~3 倍。真慢就查观测里有没有调 `Round.isFuriten()` 这类会跑向听 DFS 的东西（见 §6.5） |
 | **放过一张荣和牌之后马上又能荣和同一张 / 立直见逃没有代价** | 振听三种有没有**真的记账**？`furitenTemp` / `furitenPerm` 若"只有清除、没人置位"，见逃与振听博弈就整个不存在。见 §2.3-12 与 `docs/DESIGN.md` 的振听表；回归 `SelfTest.furitenRuleTests` |
 | **打出去被碰走的听牌张，事后又能荣和回来** | 舍张振听读的是 `discards[]`，而被鸣走的牌已被 `removeCalledFromRiver` 移除。判据必须是"曾经打出过"（`discardKindsEver`），不是牌河。见 §2.3-12 |
+| **机器人放铳率离谱 / 立直了还在打危险牌** | teacher 的弃和分支没接上：`Danger.worstAgainstRiichi`（**只看立直家**）有没有被 `chooseDiscard` 用？用 `Danger.worst`（对四家）会把现物的安全度淹掉。见 §6.6 |
+| **机器人鸣出一手永远和不了的牌** | `hasYakuPlan` 有没有在 pon/chi 前查？鸣牌打掉门清=打掉立直，鸣完无役就和不了。见 §6.6 |
+| **机器人无脑立直（明明已经満貫以上）** | `shouldDeclareRiichi` 的默听分支：用 `scoreIfWin(..., assumeRiichi=false)` 问"不立直值多少番"。⚠ 它的暗牌必须是**14 张形态**（自家回合），内部会减掉要打的那张 |
+| **`scoreIfWin` 总是返回 null** | 张数契约：荣和要 13 张形态、自摸要 14 张形态（`WinCheck.counts` 校验）。自家回合手上是 14 张，查"打完某张之后"要用**指定暗牌**的重载（`Round.scoreIfWin(seat, concealed, winKind, ...)`） |
 | 中文字画成空心方框 | 用了 `-platform offscreen`（该插件无字体库），换默认平台 |
 | 结算界面的牌面是文字不是牌图 | 内嵌字体没加载（查 exe 同级 `fonts/I.MahjongJP.otf`），或示意串含非法字元被校验挡下（见 §9） |
 | 素材是彩色、客户端却画成黑白线稿 | Illustrator 的 `<style>`+`class` 上色 Qt 不认 → 跑 `tools\inline-svg-style.ps1` 内联（见 §2.3-5） |
@@ -783,7 +814,7 @@ mahjong/
 
 ## 8. 当前状态与已知限制
 
-**实测通过**：服务端自检 **676** 项（含训练接口不变式 + 振听三条）、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
+**实测通过**：服务端自检 **709** 项（含训练接口不变式 + 振听三条 + teacher 取舍）、客户端自检 **672** 项、§4 的全部 L3 工具（含 `replay-test`、
 `discard-align-test` 与 `seat-swap-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`），

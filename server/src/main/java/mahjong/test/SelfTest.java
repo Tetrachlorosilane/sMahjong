@@ -79,6 +79,7 @@ public final class SelfTest {
         kanLimitTests();
         furitenRuleTests();
         handEvalTests();
+        teacherTests();
         trainingInterfaceTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
@@ -2496,6 +2497,239 @@ public final class SelfTest {
                 invariantOk);
         check("确实造出了「见逃荣和」的机会（否则上面那条是空转）", passRon > 0);
         check("确实造出了「立直见逃自摸」的机会", passTsumo > 0);
+    }
+
+    // ------------------------------------------------------------- 危险度 / teacher
+
+    /** 造一份「只有公开信息」的 teacher 视图，手牌用牌码串给。 */
+    private static Bot.HandState state(String hand14, int meldCount) {
+        Bot.HandState st = new Bot.HandState();
+        for (int id : parse(hand14)) {
+            st.counts[Tiles.kind(id)]++;
+        }
+        st.meldCount = meldCount;
+        st.kuitan = true;
+        st.seat = 0;
+        st.dealer = 0;
+        st.turn = 6;
+        return st;
+    }
+
+    /** 让某家河里有这些牌（现物/筋判据）。 */
+    private static void river(Bot.HandState st, int seat, String kinds) {
+        for (int id : parse(kinds)) {
+            st.rivers[seat][Tiles.kind(id)]++;
+        }
+    }
+
+    /**
+     * 危险度判据（`rules/Danger`）与 teacher 的三层取舍（牌效 / 押し引き / 打点与役）。
+     *
+     * <p>这组断言全是**纯函数对拍**：直接构造局面（{@link Bot.HandState}）问"该打哪张""能不能鸣"，
+     * 不跑整局 —— 否则只能靠运气等牌型出现。最后再用计数钩子确认这三条在**实局里真的被走到**
+     * （纯函数对拍 + 实战覆盖，两条一起才算接上）。
+     */
+    private static void teacherTests() {
+        // ---------- ① Danger：现物 / 筋 / 壁 / 立直
+        int[] vis = new int[Tiles.KIND_COUNT];
+        int[] riverM = new int[Tiles.KIND_COUNT];
+        riverM[Tiles.parseKind("3m")] = 1;
+        eq("现物 → SAFE",
+                mahjong.rules.Danger.of(Tiles.parseKind("3m"), vis, riverM, true, 6).level,
+                mahjong.rules.Danger.SAFE);
+        eq("现物的分数必须是 0（唯一硬保证）",
+                mahjong.rules.Danger.of(Tiles.parseKind("3m"), vis, riverM, true, 6).score, 0);
+        eq("筋：他打过 3m ⇒ 6m 相对安全（同花色 ±3）",
+                mahjong.rules.Danger.of(Tiles.parseKind("6m"), vis, riverM, true, 6).level,
+                mahjong.rules.Danger.RELATIVELY_SAFE);
+        eq("筋的理由码", mahjong.rules.Danger.of(Tiles.parseKind("6m"), vis, riverM, true, 6).code,
+                mahjong.rules.Danger.CODE_SUJI);
+        check("字牌没有筋", !mahjong.rules.Danger.isSuji(Tiles.parseKind("5z"), riverM));
+        check("±3 越界不算筋（1m 的 −3 不存在）",
+                !mahjong.rules.Danger.isSuji(Tiles.parseKind("1m"), riverM));
+        int[] visWall = new int[Tiles.KIND_COUNT];
+        visWall[Tiles.parseKind("7p")] = 3;
+        eq("壁：该牌种已见 3 张 ⇒ 相对安全",
+                mahjong.rules.Danger.of(Tiles.parseKind("7p"), visWall, riverM, true, 6).level,
+                mahjong.rules.Danger.RELATIVELY_SAFE);
+        eq("立直家 + 无筋无壁 ⇒ DANGEROUS",
+                mahjong.rules.Danger.of(Tiles.parseKind("4p"), vis, riverM, true, 6).level,
+                mahjong.rules.Danger.DANGEROUS);
+        eq("没人立直 + 无信息 ⇒ SUSPICIOUS",
+                mahjong.rules.Danger.of(Tiles.parseKind("4p"), vis, riverM, false, 6).level,
+                mahjong.rules.Danger.SUSPICIOUS);
+        check("巡目越深分数越高（级别不变）",
+                mahjong.rules.Danger.of(Tiles.parseKind("4p"), vis, riverM, true, 15).score
+                        > mahjong.rules.Danger.of(Tiles.parseKind("4p"), vis, riverM, true, 1).score);
+
+        // ---------- ② 押し引き：有人立直且自己还远 → 打现物；没人立直 → 打牌效
+        // 手牌（**必须正好 14 张**）：234m 234p + 55p + 6 张互不相连的浮牌 → 3 向听
+        final String hand = "2m3m4m2p3p4p5p5p1z2z3z4z1s4s";
+        Bot.HandState st = state(hand, 0);
+        st.rivers[2][Tiles.parseKind("4s")] = 1;         // 下家河里有 4s
+        List<Object> cands = new ArrayList<>();
+        for (int id : parse(hand)) {
+            String c = Tiles.kindToStr(Tiles.kind(id));
+            if (!cands.contains(c)) {
+                cands.add(c);
+            }
+        }
+        eq("自检前提：手牌正好 14 张", st.counts.length == Tiles.KIND_COUNT
+                ? mahjong.rules.Visible.total(st.counts) : -1, 14);
+        check("自检前提：3 向听（押し引き的弃和侧），实际 "
+                + mahjong.rules.HandEval.shanten(st.counts, 0),
+                mahjong.rules.HandEval.shanten(st.counts, 0) >= 2);
+        final String offensive = Bot.chooseDiscard(st, cands);
+        st.riichi[2] = true;                             // 下家立直
+        final String defensive = Bot.chooseDiscard(st, cands);
+        check("没人立直时不为了安全扔掉 4s（实际打 " + offensive + "）", !"4s".equals(offensive));
+        eq("有人立直且自己还远 → 打现物 4s（贝塔弃和）", defensive, "4s");
+
+        // ---------- ③ 打点：同等效率时留宝牌
+        // 宝牌指示牌 7z(中) → 宝牌是 5z(白)；1z 与 5z 的效率完全相同，只有"留不留宝牌"不同
+        final String hand2 = "2m3m4m5m6m7m2p3p4p5p5p1z5z9s";
+        Bot.HandState st2 = state(hand2, 0);
+        st2.doraIndicators = List.of(Tiles.parseKind("7z"));
+        List<Object> cands2 = new ArrayList<>();
+        for (int id : parse(hand2)) {
+            String c = Tiles.kindToStr(Tiles.kind(id));
+            if (!cands2.contains(c)) {
+                cands2.add(c);
+            }
+        }
+        eq("自检前提：7z 指示牌 ⇒ 宝牌是 5z", Tiles.doraFrom(Tiles.parseKind("7z")),
+                Tiles.parseKind("5z"));
+        eq("1z 与 5z 效率相同时留下宝牌（打 1z）", Bot.chooseDiscard(st2, cands2), "1z");
+        eq("宝牌计数：手里那张 5z", mahjong.rules.HandEval.doraCount(
+                st2.counts, List.of(), st2.doraIndicators), 1);
+
+        // ---------- ④ 鸣き役：鸣完还有没有役
+        Bot.HandState yaku = state("2m3m4m5m6m7m2p3p4p5p5p1z2z3z4z1s4s", 0);
+        check("碰白（三元牌）→ 有役", Bot.hasYakuPlan(yaku, yaku.counts.clone(),
+                new Meld(Meld.Kind.PON,
+                        new int[]{Tiles.id(Tiles.parseKind("5z"), 1),
+                                  Tiles.id(Tiles.parseKind("5z"), 2),
+                                  Tiles.id(Tiles.parseKind("5z"), 3)},
+                        -1, Tiles.id(Tiles.parseKind("5z"), 0))));
+        check("碰东（自风/场风）→ 有役", Bot.isYakuhai(yaku, Tiles.parseKind("1z")));
+        check("碰南（不是自风也不是场风）→ 不是役牌",
+                !Bot.isYakuhai(yaku, Tiles.parseKind("2z")));
+        // 断幺九：全是中张 + 食断成立 → 有役；带一张幺九 → 没役
+        Bot.HandState simples = state("2m3m4m5m6m7m2p3p4p5p5p2s3s4s5s6s7s", 0);
+        check("全中张 + 食断 → 碰 2s 有役", Bot.hasYakuPlan(simples, simples.counts.clone(),
+                new Meld(Meld.Kind.PON,
+                        new int[]{Tiles.id(Tiles.parseKind("2s"), 1),
+                                  Tiles.id(Tiles.parseKind("2s"), 2),
+                                  Tiles.id(Tiles.parseKind("2s"), 3)},
+                        -1, Tiles.id(Tiles.parseKind("2s"), 0))));
+        Bot.HandState withTerminal = state("2m3m4m5m6m7m2p3p4p1p1p2s3s4s5s6s7s", 0);
+        check("手里有 1p → 断幺不成立、碰 2s 无役（" + "被放掉）",
+                !Bot.hasYakuPlan(withTerminal, withTerminal.counts.clone(),
+                        new Meld(Meld.Kind.PON,
+                                new int[]{Tiles.id(Tiles.parseKind("2s"), 1),
+                                          Tiles.id(Tiles.parseKind("2s"), 2),
+                                          Tiles.id(Tiles.parseKind("2s"), 3)},
+                                -1, Tiles.id(Tiles.parseKind("2s"), 0))));
+        Bot.HandState noKuitan = state("2m3m4m5m6m7m2p3p4p5p5p2s3s4s5s6s7s", 0);
+        noKuitan.kuitan = false;
+        check("食断关闭时同样的牌没有役（取舍随规则走）",
+                !Bot.hasYakuPlan(noKuitan, noKuitan.counts.clone(),
+                        new Meld(Meld.Kind.PON,
+                                new int[]{Tiles.id(Tiles.parseKind("2s"), 1),
+                                          Tiles.id(Tiles.parseKind("2s"), 2),
+                                          Tiles.id(Tiles.parseKind("2s"), 3)},
+                                -1, Tiles.id(Tiles.parseKind("2s"), 0))));
+        // 混一色：全是万子 + 字牌
+        Bot.HandState flush = state("1m1m2m3m4m5m6m7m8m9m9m1z2z3z", 0);
+        check("全万子 + 字牌 → 混一色计划成立", Bot.hasYakuPlan(flush, flush.counts.clone(),
+                new Meld(Meld.Kind.PON,
+                        new int[]{Tiles.id(Tiles.parseKind("1z"), 1),
+                                  Tiles.id(Tiles.parseKind("1z"), 2),
+                                  Tiles.id(Tiles.parseKind("1z"), 3)},
+                        -1, Tiles.id(Tiles.parseKind("1z"), 0))));
+
+        // ---------- ⑤ 立直 vs 默听（用真牌桌问打点，因为要跑 Evaluator）
+        // ⚠ 自家回合的手牌是 **14 张**：多带一张 9s 当"要打掉的那张"，判据内部会把它减掉
+        // 清一色门清两面听（123m 456m 789m 11m 23m 听 1m/4m）+ 9s：不立直也有 6 番以上 → 默听
+        Round rBig = newRound();
+        rBig.hand[1].addAll(parse("1m2m3m4m5m6m7m8m9m1m1m2m3m9s"));
+        // `scoreIfWin` 的张数契约：荣和要传 **13 张形态**（和了牌不在手里）→ 另起一张桌子
+        Round rBig13 = newRound();
+        rBig13.hand[1].addAll(parse("1m2m3m4m5m6m7m8m9m1m1m2m3m"));
+        int[] bigAfter = rBig13.concealCounts(1);
+        check("自检前提：打掉 9s 后是听牌", mahjong.rules.HandEval.tenpai(bigAfter, 0));
+        int bigHan = 0;
+        for (int wk : Agari.waits(bigAfter, 0)) {
+            mahjong.rules.Evaluator.HandScore s = rBig13.scoreIfWin(1, wk, false, false);
+            bigHan = Math.max(bigHan, s == null ? 0 : s.totalHan());
+        }
+        check("自检前提：不立直也有 ≥4 番（实际 " + bigHan + " 番）", bigHan >= 4);
+        Bot.HandState bigState = Bot.HandState.of(rBig, 1);
+        check("不立直也有 ≥4 番 → 默听", !Bot.shouldDeclareRiichi(rBig, 1, bigState, "9s"));
+        // 只有平和+断幺的普通手（2 番）：不立直不够大 → 立直
+        // ⚠ 别用带 123m456m789m 的牌型：那是**一気通貫**（+2 番），会不小心变成 4 番
+        Round rSmall = newRound();
+        rSmall.hand[1].addAll(parse("2m3m4m5m6m7m2p3p4p5p5p6p7p9s"));
+        Round rSmall13 = newRound();
+        rSmall13.hand[1].addAll(parse("2m3m4m5m6m7m2p3p4p5p5p6p7p"));
+        int[] smallAfter = rSmall13.concealCounts(1);
+        check("自检前提：普通手打掉 9s 后是听牌",
+                mahjong.rules.HandEval.tenpai(smallAfter, 0));
+        int smallHan = 0;
+        for (int wk : Agari.waits(smallAfter, 0)) {
+            mahjong.rules.Evaluator.HandScore s = rSmall13.scoreIfWin(1, wk, false, false);
+            smallHan = Math.max(smallHan, s == null ? 0 : s.totalHan());
+        }
+        check("自检前提：不立直只有小牌（实际 " + smallHan + " 番）", smallHan > 0 && smallHan < 4);
+        Bot.HandState smallState = Bot.HandState.of(rSmall, 1);
+        check("不立直只有小牌 → 立直", Bot.shouldDeclareRiichi(rSmall, 1, smallState, "9s"));
+
+        // ---------- ⑥ HandState 只读公开信息（置换不变式，与观测同一条纪律）
+        Round r = newRound();
+        r.debugSetup();
+        Bot.HandState a = Bot.HandState.of(r, 0);
+        for (int s = 1; s < 4; s++) {
+            r.hand[s].clear();
+            for (int i = 0; i < 13; i++) {
+                r.hand[s].add(Tiles.id((i * 7 + 3) % 34, i / 34));
+            }
+            r.furitenPerm[s] = true;
+        }
+        Bot.HandState b = Bot.HandState.of(r, 0);
+        eq("置换别家手牌后 teacher 视图不变", json(a), json(b));
+
+        // ---------- ⑦ 实战覆盖：三条取舍必须真的被走到过（否则上面全是死代码）
+        Bot.debugResetCounts();
+        for (int g = 0; g < 3; g++) {
+            Table tt = new Table("TCH" + g, "teacher桌", Rules.defaults());
+            tt.botDelayMs = 0;
+            tt.roundDelayMs = 0;
+            tt.debugDeterministicSeed = true;
+            tt.debugMaxHands = 2;
+            tt.seedBase = 90210L + g * 7919L;
+            for (int i = 0; i < 4; i++) {
+                tt.addBot(i);
+            }
+            tt.playGame();
+        }
+        System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount + " 次、默听 "
+                + Bot.debugDamaCount + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次");
+        check("实局里走过「有人立直 → 弃和」这条", Bot.debugFoldCount > 0);
+        check("实局里走过「鸣完没役 → 放掉」这条", Bot.debugNoYakuRefuseCount > 0);
+    }
+
+    /** teacher 视图的稳定文本表示（置换不变式对比用）。 */
+    private static String json(Bot.HandState st) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(Arrays.toString(st.counts)).append('|').append(st.meldCount).append('|');
+        sb.append(Arrays.toString(st.visible)).append('|');
+        for (int[] rv : st.rivers) {
+            sb.append(Arrays.toString(rv)).append(',');
+        }
+        sb.append(Arrays.toString(st.riichi)).append('|').append(st.seat).append('|')
+                .append(st.dealer).append('|').append(st.roundWind).append('|').append(st.turn)
+                .append('|').append(st.doraIndicators).append('|').append(st.kuitan);
+        return sb.toString();
     }
 
     // ------------------------------------------------------------- 训练接口
