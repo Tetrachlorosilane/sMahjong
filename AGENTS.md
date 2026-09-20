@@ -255,13 +255,13 @@ java -jar server\build\mahjong-server.jar --selftest
 **teacher 的三层取舍**（牌效/押し引き/打点与役，见 §6.6），
 以及 **3 次「4 机器人整场半庄」**的点数守恒。改了 `rules/` / `game/` 下任何东西都要重跑。
 
-> ⏱ 全量自检约 **110 秒**（批次一之后；teacher 三层取舍那轮 97 秒，训练接口那轮 75 秒，597 项时 67 秒）
+> ⏱ 全量自检约 **115 秒**（审计三轮之后 944 项；批次一之后是 110 秒 / 894 项）
 > —— 慢的是里面那十来个"整场模拟"用例（teacher 变聪明了，每步算得更多），不是断言数。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
-> 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：`SelfTest` 里那几组
-> 直接摆手牌 + 用现成的钩子问结论（`Round.debugClaimOutcome` 问鸣牌仲裁、
-> `debugRonDeltas` 跑荣和结算、`debugDoRiichi` 走生产的立直宣告、`debugDrainWallTo`
-> 推进牌山、`debugPushDiscard` 走生产记账）—— 三条预定路线都比"多跑几百场碰运气"可靠。
+> 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：直接摆手牌 + 用现成的钩子问结论
+> （`Round.debugClaimOutcome` 问鸣牌仲裁、`debugRonDeltas` 跑荣和结算、`debugTurnKan` 跑
+> 暗杠/加杠（**抢杠那条路只有这个钩子测得到**）、`debugDoRiichi` 走生产的立直宣告、
+> `debugDrainWallTo` 推进牌山、`debugPushDiscard` 走生产记账）—— 比"多跑几百场碰运气"可靠得多。
 
 ### L2 客户端自检（秒级）
 

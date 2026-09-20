@@ -306,12 +306,37 @@ public final class RoundScoring {
             return add;
         }
         final int n = tied.size();
-        final int unit = (total / n / 100) * 100;   // 每家先拿 100 点的整数倍（向下取整）
+        final int[] sr = splitRemainder(total, n, 100);   // 立直棒以 100 点为单位拆
         for (int s : tied) {
-            add[s] = unit;
+            add[s] = sr[0];
         }
-        add[tied.get(0)] += total - unit * n;       // 尾数（< n×100）全归更接近起家者
+        add[tied.get(0)] += sr[1];                        // 尾数（< n×100）全归更接近起家者
         return add;
+    }
+
+    /**
+     * 「**尾数归更接近起家者**」的通用拆分（`docs/DESIGN.md`「终局与精算」）：把 {@code total}
+     * 等分给 {@code n} 家、每份以 {@code unit} 为单位**向下取整**，余数**全给第一家** ——
+     * 调用方保证"第一家 = 更接近起家那家"（{@code settle} 的区间首名 / {@code endGameSticks}
+     * 的座次最小者）。
+     *
+     * <p>抽出来是因为这条规则**两处都要用、而单位不同**，各写一份必然漂移：
+     * <ul>
+     *   <li>{@link #settle}：顺位点以 **0.1 分**为单位（= 界面显示精度，`unit = 1`）；</li>
+     *   <li>{@link #endGameSticks}：立直棒以 **100 点**为单位（原文 1000 → 400/300/300，`unit = 100`）。</li>
+     * </ul>
+     *
+     * <p>⚠ 必须用 `Math.floorDiv` 而不是 `/`：顺位点可能是**负**的（末位），
+     * 向下取整才能保证"余数非负、且 `each × n + rest` 恒等于原值"。
+     *
+     * @param total 总量（以**最小单位**计：分 → 0.1 分；点 → 点）
+     * @param n     分几家
+     * @param unit  一个份额单位（0.1 分 / 100 点）
+     * @return {@code {each, rest}}：每家先拿 {@code each}，第一家再加 {@code rest}
+     */
+    static int[] splitRemainder(int total, int n, int unit) {
+        final int each = Math.floorDiv(total, n * unit) * unit;
+        return new int[]{each, total - each * n};
     }
 
     /**
@@ -416,11 +441,10 @@ public final class RoundScoring {
      */
     private static void splitPoint(double[] out, int i, int j, double total) {
         final int n = j - i + 1;
-        final int tenths = (int) Math.round(total * 10);      // 换成 0.1 分单位
-        final int each = Math.floorDiv(tenths, n);
+        final int[] sr = splitRemainder((int) Math.round(total * 10), n, 1);   // 0.1 分单位
         for (int k = i; k <= j; k++) {
-            out[k] = each / 10.0;
+            out[k] = sr[0] / 10.0;
         }
-        out[i] += (tenths - each * n) / 10.0;                 // 尾数全给更接近起家者
+        out[i] += sr[1] / 10.0;                                               // 尾数归更接近起家者
     }
 }
