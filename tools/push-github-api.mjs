@@ -15,6 +15,7 @@
 //   node tools/push-github-api.mjs --manifest .qt/push-manifest.json [--dry-run]
 //
 // token 来源（按优先级，均不会被打印到输出里）：
+//   --token <值>  →  $GITHUB_TOKEN  →  $GH_TOKEN
 //
 // 完整性保证：每个文件上传后都会核对返回的 blob SHA 与本地 git 索引里的 SHA 一致
 //   （Git blob SHA = sha1("blob <字节数>\0" + 内容)，是确定性的），
