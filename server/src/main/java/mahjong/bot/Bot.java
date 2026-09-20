@@ -22,27 +22,25 @@ import mahjong.util.Json;
  * <p>它同时是训练用的 <b>teacher</b>（行为克隆的标签来源），所以这里的每一处取舍都会
  * 直接决定"学出来的策略长什么样" —— 一个只会"向听优先"的 teacher 教不出会防守的学生。
  *
- * <h2>决策的三层</h2>
+ * <h2>决策的四层</h2>
  * <ol>
  *   <li><b>牌效</b>（{@link HandEval}）：向听 → 进张**枚数按实际可见牌扣**（{@link Visible}）
  *       → 听牌时优先良形（两面）；</li>
  *   <li><b>押し引き</b>（{@link Danger}）：有人立直且自己离和了还远 → 弃和，
  *       在一张不后退的候选里挑**最安全**的（现物 → 筋/壁 → 无信息）；</li>
  *   <li><b>打点与役</b>（{@code Round.scoreIfWin}）：同效率时留宝牌；立直还是ダマテン
- *       按"不立直能值多少"决定；鸣牌前先确认鸣完**还有役**。</li>
+ *       按"不立直能值多少"决定；鸣牌前先确认鸣完**还有役**；</li>
+ *   <li><b>开杠</b>（{@link #shouldKan}）：暗杠/加杠要**不丢听牌、不后退**，加杠还要过危险度
+ *       （会被抢杠 = 直接放铳），弃和中与"第 4 个杠会四杠散了"时一律不开；
+ *       大明杠与碰同一把尺子（有役计划 + 向听真的变好）。</li>
  * </ol>
  *
  * <h2>可测性</h2>
- * 上面三层判据都写成**只吃公开信息**的静态纯函数（{@link #chooseDiscard}、
- * {@link #hasYakuPlan}、{@link #shouldDeclareRiichi}），{@link HandState} 是那份公开信息。
- * 于是自检可以**直接构造局面**断言取舍（"有人立直时该打现物""无役的碰要放掉"），
+ * 上面四层判据都写成**只吃公开信息**的静态纯函数（{@link #chooseDiscard}、
+ * {@link #hasYakuPlan}、{@link #shouldDeclareRiichi}、{@link #shouldKan}），{@link HandState} 是那份公开信息。
+ * 于是自检可以**直接构造局面**断言取舍（"有人立直时该打现物""无役的碰要放掉""暗杠拆搭子就不开"），
  * 而不必去跑一整局碰运气；{@link HandState#of} 是唯一读 {@code Round} 的地方，
  * 它也**只读公开字段**（回归：{@code SelfTest.teacherTests} 的置换不变式）。
- *
- * <h2>刻意保留的简化</h2>
- * 机器人**从不开杠**（大明杠"简化：不开"，出牌段不看 {@code kan} 选项）——
- * 这条被自检依赖：岭上那条路径靠 {@link #debugAlwaysKan} 强制覆盖。
- * 因此"该不该开杠"不在本轮 teacher 的取舍范围内。
  */
 public final class Bot {
 
@@ -52,19 +50,34 @@ public final class Bot {
     /**
      * 自检用：teacher 各条取舍**实际被走过**的次数。
      *
-     * <p>为什么要有这个：这三条（弃和 / 默听 / 因为无役而放掉鸣牌）都是"写了判据但可能根本没接上"
-     * 的高危改动 —— 只测纯函数会出现"判据对、实战一次没走到"的假绿。
+     * <p>为什么要有这个：这几条（弃和 / 默听 / 因为无役而放掉鸣牌 / 开杠与各种"不开"）
+     * 都是"写了判据但可能根本没接上"的高危改动 —— 只测纯函数会出现"判据对、实战一次没走到"的假绿。
      * 与 {@code RoundScoring.debugCallCounts()} 同一个套路：实局里计数，自检断言非零。
      */
     public static long debugFoldCount;
     public static long debugDamaCount;
     /** 因为"鸣完没役"而放掉的鸣牌次数。 */
     public static long debugNoYakuRefuseCount;
+    /** 真的开了杠的次数（暗杠 / 加杠 / 大明杠）。 */
+    public static long debugKanCount;
+    /** 因为"杠完会丢听牌 / 向听倒退"而放掉的杠。 */
+    public static long debugKanRefuseWait;
+    /** 因为"正在弃和"而放掉的杠。 */
+    public static long debugKanRefusePressure;
+    /** 因为"第 4 个杠会把本局打散（四杠散了）"而放掉的杠。 */
+    public static long debugKanRefuseFourKan;
+    /** 因为"这张牌对他家太危险（加杠会被抢杠）"而放掉的**加杠**。 */
+    public static long debugKanRefuseDanger;
 
     public static void debugResetCounts() {
         debugFoldCount = 0;
         debugDamaCount = 0;
         debugNoYakuRefuseCount = 0;
+        debugKanCount = 0;
+        debugKanRefuseWait = 0;
+        debugKanRefusePressure = 0;
+        debugKanRefuseFourKan = 0;
+        debugKanRefuseDanger = 0;
     }
 
     /**
@@ -117,6 +130,10 @@ public final class Bot {
         public List<Integer> doraIndicators = List.of();
         /** 自家暗牌里有几张**赤五**（打点查询要它 —— `Evaluator` 靠牌 id 数赤宝）。 */
         public int akaInHand;
+        /** 本局**全场**已经开过的杠数（副露是公开信息，所以这是公开的）。 */
+        public int kanCount;
+        /** 规则开关：四杠散了会不会强制流局（决定"第 4 个杠"值不值得开）。 */
+        public boolean fourKanAbort;
 
         /** 从牌桌取公开信息。**只读自家手牌与公开字段**（回归：置换不变式见 SelfTest）。 */
         public static HandState of(Round r, int seat) {
@@ -139,7 +156,21 @@ public final class Bot {
             st.roundWind = r.roundWind;
             st.turn = r.totalDiscards / 4;
             st.doraIndicators = List.copyOf(r.doraIndicators());
+            st.kanCount = r.kanCount;
+            st.fourKanAbort = r.rules.fourKanAbort;
             return st;
+        }
+
+        /** 自家已经开过的杠数（暗杠 / 加杠 / 大明杠）—— 判"四杠散了会不会被自己打散"。 */
+        public int myKans() {
+            int n = 0;
+            for (Meld m : melds) {
+                if (m.kind == Meld.Kind.ANKAN || m.kind == Meld.Kind.KAKAN
+                        || m.kind == Meld.Kind.DAIMINKAN) {
+                    n++;
+                }
+            }
+            return n;
         }
 
         public int kindCount(int kind) {
@@ -209,10 +240,12 @@ public final class Bot {
         if (tsumo != null) {
             return Json.obj("type", "tsumo");
         }
-        // 自检专用：一有机会就开杠（正常对局里机器人**从不**开杠，见 debugAlwaysKan）
-        Map<String, Object> debugKan = debugAlwaysKan ? find(options, "kan") : null;
-        if (debugKan != null) {
-            Map<String, Object> pick = firstKan(debugKan);
+        // 公开信息视图：杠与打牌都要用，先算一次（它只读公开字段，见 HandState.of）
+        final HandState st = HandState.of(r, seat);
+        // 开杠（暗杠/加杠）：判据见 shouldKan —— 不丢听牌、不后退、危险/弃和/四杠散了都不开
+        Map<String, Object> kanOpt = find(options, "kan");
+        if (kanOpt != null) {
+            Map<String, Object> pick = pickKan(st, kanOpt);
             if (pick != null) {
                 return pick;
             }
@@ -230,7 +263,6 @@ public final class Bot {
         if (candidates == null || candidates.isEmpty()) {
             return Json.obj("type", "pass");
         }
-        final HandState st = HandState.of(r, seat);
         final String bestTile = chooseDiscard(st, candidates);
         if (bestTile == null) {
             return Json.obj("type", "discard", "tile", candidates.get(0));
@@ -454,7 +486,7 @@ public final class Bot {
         if (find(options, "ron") != null) {
             return Json.obj("type", "ron");
         }
-        // 自检专用：能大明杠就杠（正常对局里机器人不开杠，见 debugAlwaysKan）
+        // 自检专用：能大明杠就杠（平时按下面的判据走，见 shouldKan / hasYakuPlan）
         if (debugAlwaysKan && find(options, "kan") != null) {
             return Json.obj("type", "kan");
         }
@@ -466,6 +498,29 @@ public final class Bot {
         }
         // 有人立直时，除非鸣完立刻是"役牌"这种硬役，否则不跟着上 —— 鸣牌会把牌打薄、还失去门清
         final boolean underPressure = st.opponentRiichiCount() >= 1;
+
+        // 大明杠：手里已有 3 张，所以它**不像碰那样能改善向听**（暗刻本来就按面子算）。
+        // 取舍因此落在别处：暗刻的符、三暗刻/四暗刻、门清（立直/平和）都比"杠宝牌 + 少一张牌山"值钱，
+        // 而杠宝牌是**对四家都翻开**的。所以本作口径：**门清手不大明杠**（宁可漏掉一些其实有利的），
+        // 已经鸣过牌的手门清早就断了 → 只要还有役、不违两条硬闸门、向听不倒退就杠。
+        Map<String, Object> kan = find(options, "kan");
+        if (kan != null && st.counts[kind] >= 3) {
+            int[] c = st.counts.clone();
+            c[kind] -= 3;
+            Meld meld = new Meld(Meld.Kind.DAIMINKAN,
+                    new int[]{Tiles.id(kind, 1), Tiles.id(kind, 2), Tiles.id(kind, 3), Tiles.id(kind, 0)},
+                    -1, Tiles.id(kind, 0));
+            final boolean open = st.meldCount > 0;
+            final boolean yaku = hasYakuPlan(st, c, meld);
+            final boolean noRegress = HandEval.shanten(c, st.meldCount + 1) <= cur;
+            if (open && !yaku) {
+                debugNoYakuRefuseCount++;
+            }
+            if (open && yaku && noRegress && !kanGuardRefuse(st)) {
+                debugKanCount++;
+                return firstKan(kan);
+            }
+        }
 
         Map<String, Object> pon = find(options, "pon");
         if (pon != null && st.counts[kind] >= 2) {
@@ -592,9 +647,11 @@ public final class Bot {
      */
     public static boolean hasYakuPlan(HandState st, int[] afterCall, Meld meld) {
         final int calledKind = Tiles.kind(meld.calledId);
-        final boolean isPon = meld.kind == Meld.Kind.PON;
+        // 碰 / 大明杠 / 加杠 / 暗杠都是"刻子级"的面子；只有吃不是。
+        // ⚠ 原来写的是 `kind == PON`：大明杠走这条判据时**役牌那一支会静默失效**。
+        final boolean isTriplet = meld.kind != Meld.Kind.CHI;
         // ① 役牌：碰役牌立刻成刻；或者暗牌里已有役牌的暗刻
-        if (isPon && isYakuhai(st, calledKind)) {
+        if (isTriplet && isYakuhai(st, calledKind)) {
             return true;
         }
         for (int k = 27; k < Tiles.KIND_COUNT; k++) {
@@ -611,7 +668,7 @@ public final class Bot {
             return true;
         }
         // ④ 对对和：手上全是碰/杠，且暗牌里还有两组"刻子或对子"可用
-        if (isPon) {
+        if (isTriplet) {
             boolean allTriplets = true;
             for (Meld m : st.melds) {
                 if (m.kind == Meld.Kind.CHI) {
@@ -710,6 +767,103 @@ public final class Bot {
         cmd.put("tile", debugKanTileOverride != null ? debugKanTileOverride
                                                     : String.valueOf(m.get("tile")));
         return cmd;
+    }
+
+    /**
+     * 从下发的杠选项里挑一个**该开**的（自家回合：暗杠 / 加杠）；都不该开返回 {@code null}。
+     *
+     * <p>顺序按服务端给的列表（暗杠在前、加杠在后，见 `Round.turnOptions`）——
+     * 先来的先判，判据本身与顺序无关。
+     */
+    private static Map<String, Object> pickKan(HandState st, Map<String, Object> kanOption) {
+        if (debugAlwaysKan) {
+            return firstKan(kanOption);          // 自检专用：强制开杠（岭上那条路径）
+        }
+        List<Object> kans = Json.list(kanOption, "kans");
+        if (kans == null) {
+            return null;
+        }
+        for (Object o : kans) {
+            if (!(o instanceof Map)) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> m = (Map<String, Object>) o;
+            final String kindStr = String.valueOf(m.get("kind"));
+            final String tileStr = String.valueOf(m.get("tile"));
+            final int kind = Tiles.parseKind(tileStr);
+            if (kind < 0 || !shouldKan(st, kindStr, kind)) {
+                continue;
+            }
+            return Json.obj("type", "kan", "kind", kindStr, "tile", tileStr);
+        }
+        return null;
+    }
+
+    /**
+     * **该不该开这个杠**（暗杠 / 加杠）—— teacher 的第四条取舍，公开信息纯函数。
+     *
+     * <p>四道闸门，任何一条不过就不开（顺序：先"无论如何都不开"，再看代价）：
+     * <ol>
+     *   <li><b>弃和中不开</b>：有人立直且自己 ≥2 向听时本来就在弃和 —— 开杠等于给全场翻杠宝牌、
+     *       还多摸一张未知牌，与弃和的目的相反；</li>
+     *   <li><b>别把本局打散</b>：`four_kan_abort` 规则下，本局已有 3 个杠、且**不全是自己开的**
+     *       时第 4 个杠会触发**四杠散了**（强制流局）—— 白白扔掉一手能和的牌；</li>
+     *   <li><b>加杠先看会不会被抢</b>：加杠的那张牌对他家是**无筋中张**（`Danger.DANGEROUS`）时，
+     *       被抢杠就是直接放铳 —— 不开（现物/筋壁照开，因为抢杠的前提是"他正好听这张"）；</li>
+     *   <li><b>杠完不能丢听牌、也不能倒退</b>：把 4 张（加杠 1 张）拿走、面子数 +1 之后，
+     *       向听数不能变大。这一条同时挡住两类坏杠：拆掉听牌的形、
+     *       以及把七对子的两对拆没（`Shanten.min` 含七对子/国士，所以口径一致）。</li>
+     * </ol>
+     *
+     * <p>⚠ 这个函数**不看**"杠宝牌会便宜别人"这种全局权衡，也不看一发/里宝期望 ——
+     * 那属于押し引き数值化，档 B 的事（`docs/DESIGN.md`「teacher」）。
+     *
+     * @param kanKind {@code "ankan"} / {@code "kakan"}（服务端下发的 kind 原样传进来）
+     */
+    public static boolean shouldKan(HandState st, String kanKind, int kind) {
+        if (st == null || kind < 0 || Tiles.KIND_COUNT <= kind) {
+            return false;
+        }
+        final boolean kakan = !"ankan".equals(kanKind);
+        final int cur = HandEval.shanten(st.counts, st.meldCount);
+        if (st.opponentRiichi() && cur >= 2) {
+            debugKanRefusePressure++;
+            return false;
+        }
+        if (st.fourKanAbort && st.kanCount == 3 && st.myKans() < st.kanCount) {
+            debugKanRefuseFourKan++;
+            return false;
+        }
+        if (kakan) {
+            Danger.Report d = Danger.worst(kind, st.visible, st.rivers, st.riichi, st.turn, st.seat);
+            if (d.level >= Danger.DANGEROUS) {
+                debugKanRefuseDanger++;
+                return false;
+            }
+        }
+        int[] after = st.counts.clone();
+        after[kind] -= Math.min(kakan ? 1 : 4, after[kind]);
+        final int afterMelds = kakan ? st.meldCount : st.meldCount + 1;
+        if (HandEval.shanten(after, afterMelds) > cur) {
+            debugKanRefuseWait++;
+            return false;
+        }
+        debugKanCount++;
+        return true;
+    }
+
+    /** 两条"无论如何都别开"的闸门（弃和中 / 第 4 个杠会四杠散了）—— 大明杠也用同一把尺子。 */
+    private static boolean kanGuardRefuse(HandState st) {
+        if (st.opponentRiichi() && HandEval.shanten(st.counts, st.meldCount) >= 2) {
+            debugKanRefusePressure++;
+            return true;
+        }
+        if (st.fourKanAbort && st.kanCount == 3 && st.myKans() < st.kanCount) {
+            debugKanRefuseFourKan++;
+            return true;
+        }
+        return false;
     }
 
     private static Map<String, Object> find(List<Map<String, Object>> options, String type) {

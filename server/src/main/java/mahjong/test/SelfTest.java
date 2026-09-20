@@ -3944,6 +3944,23 @@ public final class SelfTest {
         }
     }
 
+    /** 从手牌里拿走 {@code n} 张 {@code kind}（造"杠完之后"的暗牌计数）。 */
+    private static int[] minus(int[] counts, int kind, int n) {
+        int[] c = counts.clone();
+        c[kind] = Math.max(0, c[kind] - n);
+        return c;
+    }
+
+    /** 选项列表里有没有这一种（服务端下发的 `type`）。 */
+    private static Map<String, Object> findType(List<Map<String, Object>> options, String type) {
+        for (Map<String, Object> o : options) {
+            if (type.equals(o.get("type"))) {
+                return o;
+            }
+        }
+        return null;
+    }
+
     /**
      * 危险度判据（`rules/Danger`）与 teacher 的三层取舍（牌效 / 押し引き / 打点与役）。
      *
@@ -4120,14 +4137,114 @@ public final class SelfTest {
         Bot.HandState b = Bot.HandState.of(r, 0);
         eq("置换别家手牌后 teacher 视图不变", json(a), json(b));
 
-        // ---------- ⑦ 实战覆盖：三条取舍必须真的被走到过（否则上面全是死代码）
+        // ---------- ⑦ 开杠取舍（teacher 的第四条，纯函数对拍）
+        // 判据是"杠完不能丢听牌 / 不能倒退"（这里用向听数一把尺子），加杠多看一步危险度。
+        final int k3m = Tiles.parseKind("3m");
+        Bot.debugResetCounts();
+        // (a) 已听牌（333m + 456m + 789m + 11s + 99s 听 9s），暗杠 3m 之后**还是听 9s** → 开
+        Bot.HandState kanOk = state("3m3m3m3m4m5m6m7m8m9m1s1s9s9s", 0);
+        eq("自检前提：这一手已听牌", mahjong.rules.HandEval.shanten(kanOk.counts, 0), 0);
+        eq("自检前提：杠完还是听牌（" + mahjong.rules.HandEval.shanten(minus(kanOk.counts, k3m, 4), 1)
+                        + " 向听）",
+                mahjong.rules.HandEval.shanten(minus(kanOk.counts, k3m, 4), 1), 0);
+        check("暗杠不破坏听牌 → 开", Bot.shouldKan(kanOk, "ankan", k3m));
+        // (b) 七对子：4 张 1m 其实是**两对**，杠掉两对就从听牌倒退 → 不开
+        Bot.HandState chiitoi = state("1m1m1m1m3m3m5m5m7m7m9m9m1p2p", 0);
+        final int beforeC = mahjong.rules.HandEval.shanten(chiitoi.counts, 0);
+        final int afterC = mahjong.rules.HandEval.shanten(
+                minus(chiitoi.counts, Tiles.parseKind("1m"), 4), 1);
+        check("暗杠会拆掉七对子的两对（" + beforeC + " → " + afterC + " 向听）→ 不开",
+                afterC > beforeC && !Bot.shouldKan(chiitoi, "ankan", Tiles.parseKind("1m")));
+        eq("这条闸门的计数被走到", Bot.debugKanRefuseWait > 0, true);
+        // (c) 弃和中不开：同一个杠，没人立直照开、有人立直且自己还远就不开
+        Bot.HandState fold = state("3m3m3m3m1p3p5p7p9p1s3s5s7s9s", 0);
+        final int foldSh = mahjong.rules.HandEval.shanten(fold.counts, 0);
+        check("自检前提：这一手还在 2 向听以上（" + foldSh + "）", foldSh >= 2);
+        check("没人立直 → 这个杠照开（闸门是弃和，不是杠本身）",
+                Bot.shouldKan(fold, "ankan", k3m));
+        fold.riichi[2] = true;
+        check("有人立直 + 自己还远（弃和中）→ 不开", !Bot.shouldKan(fold, "ankan", k3m));
+        eq("这条闸门的计数被走到", Bot.debugKanRefusePressure > 0, true);
+        // (d) 第 4 个杠会四杠散了：本局已有 3 个杠、不全是自己开的 → 不开；自己开满 → 开
+        final Meld ownKan = new Meld(Meld.Kind.ANKAN, new int[]{0, 1, 2, 3}, 1, 0);
+        Bot.HandState four = state("3m3m3m3m9s", 3);
+        four.melds = List.of(ownKan, ownKan, ownKan);
+        four.kanCount = 3;
+        four.fourKanAbort = true;
+        check("自己一个人开满 3 个杠 → 第 4 个成立四杠子，开", Bot.shouldKan(four, "ankan", k3m));
+        Bot.HandState shared = state("3m3m3m3m9s", 3);
+        shared.melds = List.of(ownKan, ownKan);
+        shared.kanCount = 3;                       // 第 3 个是别人开的
+        shared.fourKanAbort = true;
+        check("本局杠数 3 且不全是自己开的 → 第 4 个会强制流局，不开",
+                !Bot.shouldKan(shared, "ankan", k3m));
+        eq("这条闸门的计数被走到", Bot.debugKanRefuseFourKan > 0, true);
+        Bot.HandState sharedMl = state("3m3m3m3m9s", 3);
+        sharedMl.melds = List.of(ownKan, ownKan);
+        sharedMl.kanCount = 3;
+        sharedMl.fourKanAbort = false;             // M.League 不采用四杠散了
+        check("M.League（不采用四杠散了）→ 照开（取舍随规则走）",
+                Bot.shouldKan(sharedMl, "ankan", k3m));
+        // (e) 加杠先看会不会被抢：那张牌对**立直家**是无筋中张就不加，是现物就加
+        Bot.HandState kakan = state("3m4m5m6m7m8m9m1s1s9s9s", 1);
+        kakan.melds = List.of(new Meld(Meld.Kind.PON,
+                new int[]{Tiles.id(k3m, 1), Tiles.id(k3m, 2), Tiles.id(k3m, 3)}, -1, Tiles.id(k3m, 0)));
+        kakan.riichi[2] = true;
+        eq("自检前提：3m 对这家是无筋中张（" + mahjong.rules.Danger.worst(
+                k3m, kakan.visible, kakan.rivers, kakan.riichi, kakan.turn, kakan.seat) + "）",
+                mahjong.rules.Danger.worst(k3m, kakan.visible, kakan.rivers, kakan.riichi,
+                        kakan.turn, kakan.seat).level, mahjong.rules.Danger.DANGEROUS);
+        check("加杠的牌对他是无筋中张（会被抢杠）→ 不加", !Bot.shouldKan(kakan, "kakan", k3m));
+        eq("这条闸门的计数被走到", Bot.debugKanRefuseDanger > 0, true);
+        river(kakan, 2, "3m");                     // 他打过 3m ⇒ 现物
+        check("同一张牌成了他的现物 → 加杠照开", Bot.shouldKan(kakan, "kakan", k3m));
+        check("三种拒开的计数互不串味（危险 + 现物这条不再算危险）",
+                Bot.debugKanRefuseDanger == 1);
+
+        // ---------- ⑧ 大明杠：**门清手不杠**、已经鸣过牌的手才杠（走服务端真的下发的选项）
+        final int k5z = Tiles.parseKind("5z");
+        // 已鸣过牌（吃过 123m）+ 手里 3 张白 → 役牌 + 向听不倒退 → 杠
+        Round k1 = newRound();
+        k1.melds[1].add(chi("1m", "2m", "3m"));
+        k1.hand[1].addAll(parse("5z5z5z4m5m6m1p1p3p4p"));
+        List<Map<String, Object>> k1opts = k1.debugClaimOptions(1, 0, Tiles.id(k5z, 1));
+        check("自检前提：服务端下发了大明杠选项", findType(k1opts, "kan") != null);
+        Map<String, Object> k1d = Bot.decide(k1, 1, "claim", k1opts, Json.obj("tile", "5z"));
+        eq("已鸣过牌 + 役牌白 → 大明杠", k1d.get("type"), "kan");
+        // 对照一：同样 3 张白、但**门清**（没鸣过牌）→ 不杠（暗刻的符/三暗刻/立直更值钱）
+        Round k2 = newRound();
+        k2.hand[1].addAll(parse("5z5z5z4m5m6m1p1p3p4p7m8m9m"));
+        List<Map<String, Object>> k2opts = k2.debugClaimOptions(1, 0, Tiles.id(k5z, 1));
+        check("自检前提：门清手也拿到了大明杠选项", findType(k2opts, "kan") != null);
+        Map<String, Object> k2d = Bot.decide(k2, 1, "claim", k2opts, Json.obj("tile", "5z"));
+        eq("门清时的大明杠 → 不杠（口径：宁可漏掉一些其实有利的）", k2d.get("type"), "pass");
+        // 对照二：已鸣过牌但**没有役计划**（2s 不是役牌，手里有 1p 也不是断幺）→ 不杠
+        Round k3 = newRound();
+        k3.melds[1].add(chi("1m", "2m", "3m"));
+        k3.hand[1].addAll(parse("2s2s2s4m5m6m1p1p3p4p"));
+        List<Map<String, Object>> k3opts = k3.debugClaimOptions(1, 0, Tiles.id(Tiles.parseKind("2s"), 1));
+        check("自检前提：服务端也下发了大明杠选项", findType(k3opts, "kan") != null);
+        Map<String, Object> k3d = Bot.decide(k3, 1, "claim", k3opts, Json.obj("tile", "2s"));
+        eq("已鸣牌但鸣完没役 → 不杠", k3d.get("type"), "pass");
+
+        // ---------- ⑨ 出牌段实局路径：真有 4 张 → 服务端下发暗杠选项 → 机器人真的杠
+        Bot.debugResetCounts();
+        Round kt = newRound();
+        kt.hand[1].addAll(parse("3m3m3m3m4m5m6m7m8m9m1s1s9s9s"));
+        List<Map<String, Object>> topts = kt.debugTurnOptions(1, Tiles.id(k3m, 3));
+        check("自检前提：出牌段下发了暗杠选项", findType(topts, "kan") != null);
+        Map<String, Object> kdec = Bot.decide(kt, 1, "turn", topts, null);
+        eq("走生产的选项列表 → 机器人真的杠了", kdec.get("type"), "kan");
+        eq("开杠计数 +1", Bot.debugKanCount, 1L);
+
+        // ---------- ⑩ 实战覆盖：真取舍必须真的被走到过（否则上面全是死代码）
         Bot.debugResetCounts();
         for (int g = 0; g < 3; g++) {
             Table tt = new Table("TCH" + g, "teacher桌", Rules.defaults());
             tt.botDelayMs = 0;
             tt.roundDelayMs = 0;
             tt.debugDeterministicSeed = true;
-            tt.debugMaxHands = 2;
+            tt.debugMaxHands = 4;              // 4 小局 × 3 场 ≈ 12 局：够让"自然开杠"真的出现
             tt.seedBase = 90210L + g * 7919L;
             for (int i = 0; i < 4; i++) {
                 tt.addBot(i);
@@ -4135,9 +4252,13 @@ public final class SelfTest {
             tt.playGame();
         }
         System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount + " 次、默听 "
-                + Bot.debugDamaCount + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次");
+                + Bot.debugDamaCount + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次、"
+                + "开杠 " + Bot.debugKanCount + " 次（因丢听牌放掉 " + Bot.debugKanRefuseWait
+                + "、弃和 " + Bot.debugKanRefusePressure + "、四杠散了 " + Bot.debugKanRefuseFourKan
+                + "、危险 " + Bot.debugKanRefuseDanger + "）");
         check("实局里走过「有人立直 → 弃和」这条", Bot.debugFoldCount > 0);
         check("实局里走过「鸣完没役 → 放掉」这条", Bot.debugNoYakuRefuseCount > 0);
+        check("实局里**自然开过杠**（不是靠 debugAlwaysKan 才开）", Bot.debugKanCount > 0);
     }
 
     /** teacher 视图的稳定文本表示（置换不变式对比用）。 */
@@ -4150,7 +4271,8 @@ public final class SelfTest {
         }
         sb.append(Arrays.toString(st.riichi)).append('|').append(st.seat).append('|')
                 .append(st.dealer).append('|').append(st.roundWind).append('|').append(st.turn)
-                .append('|').append(st.doraIndicators).append('|').append(st.kuitan);
+                .append('|').append(st.doraIndicators).append('|').append(st.kuitan)
+                .append('|').append(st.kanCount).append('|').append(st.fourKanAbort);
         return sb.toString();
     }
 
