@@ -1501,8 +1501,10 @@ public final class SelfTest {
         eq("一位必要点数也被钳制", crazy.requiredPoints, 1000000);
 
         // ---------- ⑤ 实局路径（非空转）：1 小局就以**流局**结束、桌上留着 1 根立直棒 ----------
-        // 种子 19 是**实测定出来的**（4 机器人、debugMaxHands=1、确定性种子）：那一局以荒牌流局
-        // 结束，三家并列 1 位、桌上 1 根立直棒 → 正是"流局结束 + 并列 1 位"那一支。
+        // 种子 55 是**实测扫出来的**（4 机器人、debugMaxHands=1、确定性种子）：那一局以荒牌流局
+        // 结束、桌上留着 2 根立直棒、1 位独占 → 正好走"余棒全归 1 位"那一支。
+        // ⚠ 换 teacher 的行为（比如开了杠、改了押し引き）会让这条种子换结果 —— 那时重新扫一个
+        //   （临时探针：跑 seeds，看 `round_end.round.riichi_sticks`），别把断言改松。
         // 最后一条 round_end 的分数就是**分配余棒之前**的分数，两者之差 = 本次分掉的余棒。
         RoundScoring.debugResetCounts();
         Table et = new Table("ENDSTICK", "终局余棒桌", Rules.defaults());
@@ -1510,7 +1512,7 @@ public final class SelfTest {
         et.roundDelayMs = 0;
         et.debugDeterministicSeed = true;
         et.debugMaxHands = 1;
-        et.seedBase = 19;
+        et.seedBase = 55;
         final List<Integer> beforeSticks = new ArrayList<>();
         final int[] sticksOnTable = {0};
         et.debugEventTap = (recipient, ev) -> {
@@ -1529,7 +1531,7 @@ public final class SelfTest {
         check("终局余棒分配在实局路径上被调用（不是死代码）：" + RoundScoring.debugCallCounts(),
                 RoundScoring.debugCallCounts().contains("endSticks=1"));
         eq("实局：最后一条 round_end 带回了分配前的分数", beforeSticks.size(), 4);
-        eq("实局：这一局桌上正好 3 根立直棒（三家立直后荒牌流局）", sticksOnTable[0], 3);
+        eq("实局：这一局桌上留下 2 根立直棒（两家立直后荒牌流局）", sticksOnTable[0], 2);
         int totalAfter = 0;
         int diffSum = 0;
         final List<Integer> diff = new ArrayList<>();
@@ -1541,12 +1543,10 @@ public final class SelfTest {
         }
         eq("实局：余棒分配后总分守恒", totalAfter, 100000);
         eq("实局：分掉的余棒总量 = 桌上根数 × 1000", diffSum, sticksOnTable[0] * 1000);
-        List<Integer> sortedDiff = new ArrayList<>(diff);
-        sortedDiff.sort(java.util.Comparator.reverseOrder());
-        // 3 根 / 3 家并列 1 位：3000 能被 3 整除到 100 点 → 每家 1000（没有尾数）。
-        // ⚠ 尾数那一支（1 根 → 400/300/300、2 根 → 800/600/600）在 ①② 里逐字钉着。
-        eq("实局：3 根余棒 / 3 家并列 → 每家 1000", sortedDiff.toString(),
-                Arrays.asList(1000, 1000, 1000, 0).toString());
+        // 1 位独占（种子 55 的分数是 26000/25000/22000/25000）→ 余棒全归他。
+        // ⚠ 并列 1 位 / 尾数归"更接近起家者"那些分支在 ①② 里逐字钉着（判据层）。
+        eq("实局：2 根余棒 / 1 位独占 → 全归 1 位", diff.toString(),
+                Arrays.asList(2000, 0, 0, 0).toString());
         // 同一份"分配前分数 + 根数"喂给判据，必须逐位一致（证明实局确实走的是它）
         int[] before = new int[4];
         for (int i = 0; i < 4; i++) {
@@ -3934,6 +3934,8 @@ public final class SelfTest {
         st.seat = 0;
         st.dealer = 0;
         st.turn = 6;
+        // 押し引き的期望值要知道"自己还能摸几巡"：自检给一个中局的典型值（真局由 HandState.of 填）
+        st.tilesLeft = 70;
         return st;
     }
 
@@ -3949,6 +3951,18 @@ public final class SelfTest {
         int[] c = counts.clone();
         c[kind] = Math.max(0, c[kind] - n);
         return c;
+    }
+
+    /** 选项列表里有哪些 `type`（失败信息里打出来，省得靠猜）。 */
+    private static String optionTypes(List<Map<String, Object>> options) {
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, Object> o : options) {
+            if (sb.length() > 0) {
+                sb.append('/');
+            }
+            sb.append(o.get("type"));
+        }
+        return sb.toString();
     }
 
     /** 选项列表里有没有这一种（服务端下发的 `type`）。 */
@@ -4237,7 +4251,148 @@ public final class SelfTest {
         eq("走生产的选项列表 → 机器人真的杠了", kdec.get("type"), "kan");
         eq("开杠计数 +1", Bot.debugKanCount, 1L);
 
-        // ---------- ⑩ 实战覆盖：真取舍必须真的被走到过（否则上面全是死代码）
+        // ---------- ⑩ 打点粗估（档 B：押し引き与副露取舍共用的一把尺子）
+        Bot.debugResetCounts();
+        // 门清听牌（无役无宝）→ 只算"会立直"那 1 番
+        Bot.HandState plain = state("2m3m4m5m6m7m2p3p4p5p5p6p7p9s", 0);
+        eq("门清未立直 → 粗估只算立直 1 番", Bot.estimatedHan(plain, plain.counts, plain.melds), 1);
+        // 宝牌与赤五都算进去
+        Bot.HandState dora = state("2m3m4m5m6m7m2p3p4p5p5p6p7p9s", 0);
+        dora.doraIndicators = List.of(Tiles.parseKind("1m"));       // 宝牌 = 2m（手里 1 张）
+        eq("宝牌按牌种数进粗估", Bot.estimatedHan(dora, dora.counts, dora.melds), 2);
+        dora.akaInHand = 1;
+        eq("赤五也进粗估（它在牌 id 里，不在牌种计数里）",
+                Bot.estimatedHan(dora, dora.counts, dora.melds), 3);
+        // 役牌刻（两种可以复合）；⚠ 别用手牌凑成"单花色 + 字牌"，那会白算成混一色
+        Bot.HandState yaku2 = state("5z5z5z6z6z6z2m3m4m2p3p4p5s", 0);
+        eq("役牌刻每种 1 番、可复合（白 + 發 = 2 番）+ 立直 1 番",
+                Bot.estimatedHan(yaku2, yaku2.counts, yaku2.melds), 3);
+        // 断幺（食断）与混一色（门清 3 / 副露 2）
+        Bot.HandState hanSimples = state("2m3m4m5m6m7m2p3p4p5p5p6p7p8p", 0);
+        eq("断幺九（食断成立）= 立直 1 + 断幺 1",
+                Bot.estimatedHan(hanSimples, hanSimples.counts, hanSimples.melds), 2);
+        hanSimples.kuitan = false;
+        eq("食断关掉就不算断幺", Bot.estimatedHan(hanSimples, hanSimples.counts, hanSimples.melds), 1);
+        Bot.HandState hanFlush = state("1m2m3m4m5m6m7m8m9m1m2m3m5m", 0);
+        eq("清一色门清 = 立直 1 + 清一色 6",
+                Bot.estimatedHan(hanFlush, hanFlush.counts, hanFlush.melds), 7);
+        List<Meld> chiMeld = List.of(chi("1m", "2m", "3m"));
+        eq("同样的牌副露了 → 清一色降一番、且没有立直 1 番",
+                Bot.estimatedHan(hanFlush, hanFlush.counts, chiMeld), 5);
+        // 副露手没有立直那一项
+        Bot.HandState opened = state("5z5z5z2m3m4m2p3p4p5s5s6s", 0);
+        eq("副露手不白算立直 1 番", Bot.estimatedHan(opened, opened.counts, chiMeld), 1);
+        // 对对和的粗判：要"一张单张都没有"，否则（顺子苗头的手）会虚高
+        Bot.HandState toitoi = state("5z5z5z2m2m2m3p3p3p7s7s7s9s", 0);
+        eq("对对和（全刻子 + 一张单张）不该被算成对对和（单张 → 只算役牌 + 立直）",
+                Bot.estimatedHan(toitoi, toitoi.counts, toitoi.melds), 2);
+        Bot.HandState toitoi2 = state("5z5z5z2m2m2m3p3p3p7s7s7s", 0);
+        eq("纯刻子 + 对子形状 → 役牌 1 + 对对和 2 + 立直 1",
+                Bot.estimatedHan(toitoi2, toitoi2.counts, toitoi2.melds), 4);
+        // 番数 → 点数的粗表
+        eq("1 番 ≈ 1000 点", Bot.hanToPoints(1), 1000);
+        eq("3 番 ≈ 3900 点", Bot.hanToPoints(3), 3900);
+        eq("4 番 ≈ 7700 点", Bot.hanToPoints(4), 7700);
+        eq("5 番 = 满贯 8000 点", Bot.hanToPoints(5), 8000);
+        eq("8 番 = 倍满 16000 点", Bot.hanToPoints(8), 16000);
+        eq("13 番 = 累计役满 32000 点", Bot.hanToPoints(13), 32000);
+        eq("没有役 = 0 点", Bot.hanToPoints(0), 0);
+
+        // ---------- ⑪ 押し引き：期望值，不是"2 向听以下一律弃和"的开关
+        eq("枚数 0（没得摸）→ 和了概率 0", Bot.winProbability(0, 70, 17, 1), 0.0);
+        check("枚数越多和了概率越大",
+                Bot.winProbability(8, 70, 17, 1) > Bot.winProbability(4, 70, 17, 1));
+        check("巡目越长和了概率越大",
+                Bot.winProbability(4, 70, 17, 1) > Bot.winProbability(4, 70, 5, 1));
+        check("还差得越远和了概率越小（向听惩罚）",
+                Bot.winProbability(8, 70, 17, 1) > Bot.winProbability(8, 70, 17, 3));
+        check("和了概率被夹在 0.9 以内", Bot.winProbability(30, 70, 17, 1) <= 0.9);
+        eq("现物的放铳概率 = 0（危险度 0 分是硬保证）", Bot.dealProbability(0), 0.0);
+        check("危险度越高放铳概率越大",
+                Bot.dealProbability(65) > Bot.dealProbability(30));
+        check("放铳概率也被夹住（<= 0.30）", Bot.dealProbability(100) <= 0.30);
+        check("满贯听牌对危险牌 → 期望为正（推）",
+                Bot.shouldPush(Bot.winProbability(6, 70, 17, 1), Bot.hanToPoints(5),
+                        Bot.dealProbability(65)));
+        check("1 番愚形对无筋中张 → 期望为负（撤）",
+                !Bot.shouldPush(Bot.winProbability(2, 70, 17, 1), Bot.hanToPoints(1),
+                        Bot.dealProbability(65)));
+        check("同样 1 番愚形、但有现物可打（放铳概率 0）→ 推（边打边看）",
+                Bot.shouldPush(Bot.winProbability(2, 70, 17, 1), Bot.hanToPoints(1),
+                        Bot.dealProbability(0)));
+
+        // ---------- ⑫ 押し引き实局路径：同一个手牌，换打点/残牌就换结论
+        //    3 向听的烂牌 + 下家立直（河里有 4s）→ 弃和打现物（旧断言走同一条路，理由已换成期望值）
+        final String far = "2m3m4m2p3p4p5p5p1z2z3z4z1s4s";
+        Bot.HandState farSt = state(far, 0);
+        farSt.rivers[2][Tiles.parseKind("4s")] = 1;
+        List<Object> farCands = new ArrayList<>();
+        for (int id : parse(far)) {
+            String c = Tiles.kindToStr(Tiles.kind(id));
+            if (!farCands.contains(c)) {
+                farCands.add(c);
+            }
+        }
+        final String farPush = Bot.chooseDiscard(farSt, farCands);      // 没人立直
+        farSt.riichi[2] = true;
+        eq("有人立直 + 远手小牌 → 弃和打现物 4s", Bot.chooseDiscard(farSt, farCands), "4s");
+        check("没人立直时不会为了安全扔掉 4s（实际打 " + farPush + "）", !"4s".equals(farPush));
+        // 同一手牌把残牌改少（终盘）→ 仍然弃和；反过来"打点抬高"才该推
+        Bot.HandState rich = state(far, 0);
+        rich.riichi[2] = true;
+        rich.rivers[2][Tiles.parseKind("4s")] = 1;
+        rich.doraIndicators = List.of(Tiles.parseKind("1m"), Tiles.parseKind("2m"),
+                Tiles.parseKind("3m"), Tiles.parseKind("4m"));         // 一堆宝牌
+        rich.akaInHand = 1;
+        check("自检前提：这一手被宝牌抬到" + Bot.estimatedHan(rich, rich.counts, rich.melds)
+                        + " 番（够大了）",
+                Bot.estimatedHan(rich, rich.counts, rich.melds) >= 4);
+        final String richPick = Bot.chooseDiscard(rich, farCands);
+        check("同样形状但打点够大 → 期望转正、不再无脑弃和（实际打 " + richPick + "）",
+                Bot.debugPushCount > 0);
+
+        // ---------- ⑬ 副露打分（档 B）：门清鸣牌要么直接听牌、要么至少 2 番
+        Bot.debugResetCounts();
+        // 门清 + 白对子 → 碰完只到 1 向听（不是听牌）→ 只有役牌白 1 番，不值 → 放掉
+        final String menzenHand = "5z5z1m2m3m4m1p3p5p7p9p1s9s";
+        Bot.HandState menzen = state(menzenHand, 0);
+        Meld ponHaku = new Meld(Meld.Kind.PON,
+                new int[]{Tiles.id(Tiles.parseKind("5z"), 1), Tiles.id(Tiles.parseKind("5z"), 2),
+                          Tiles.id(Tiles.parseKind("5z"), 3)}, -1, Tiles.id(Tiles.parseKind("5z"), 0));
+        int[] afterPon = menzen.counts.clone();
+        afterPon[Tiles.parseKind("5z")] -= 2;
+        eq("自检前提：碰完还是 2 向听（不是听牌）",
+                Bot.bestShantenAfterCall(afterPon, 1, 13 - 3 * 0 - 1), 2);
+        eq("自检前提：这一手粗估只有役牌那 1 番",
+                Bot.estimatedHan(menzen, afterPon, List.of(ponHaku)), 1);
+        check("门清 + 碰完 1 番又没听 → 不值，不鸣",
+                !Bot.callWorthForMenzen(menzen, afterPon, ponHaku));
+        Bot.HandState menzenDora = state(menzenHand, 0);
+        menzenDora.doraIndicators = List.of(Tiles.parseKind("7z"));    // 中 ⇒ 宝牌 = 白（那副面子）
+        eq("自检前提：有宝牌后粗估够 2 番",
+                Bot.estimatedHan(menzenDora, afterPon, List.of(ponHaku)), 4);
+        check("同一手有宝牌 → 够 2 番，鸣", Bot.callWorthForMenzen(menzenDora, afterPon, ponHaku));
+
+        // 走真实的鸣牌询问：只有"打点够"的那一手才碰
+        // ⚠ 宝牌是**发牌决定**的，所以这里把指示牌钉死（先"没有宝牌"，再"5z 是宝牌"），
+        //   否则同一手牌撞上发牌运气就会翻结论（`Round.debugSetDora`）。
+        Round c1 = newRound();
+        c1.hand[1].addAll(parse(menzenHand));
+        c1.debugSetDora(List.of());
+        List<Map<String, Object>> c1opts = c1.debugClaimOptions(1, 0, Tiles.id(Tiles.parseKind("5z"), 1));
+        check("自检前提：服务端下发了碰的选项", findType(c1opts, "pon") != null);
+        Map<String, Object> c1d = Bot.decide(c1, 1, "claim", c1opts, Json.obj("tile", "5z"));
+        eq("门清 + 1 番 + 没听 → 不碰（档 B 的副露打分）", c1d.get("type"), "pass");
+        eq("这条闸门的计数被走到", Bot.debugCallValueRefuseCount > 0, true);
+        // 对照：同一手牌 + 中（7z）是指示牌 ⇒ 白是宝牌（那副面子 3 张）→ 够 2 番，碰
+        Round c2 = newRound();
+        c2.hand[1].addAll(parse(menzenHand));
+        c2.debugSetDora(List.of(Tiles.parseKind("7z")));
+        List<Map<String, Object>> c2opts = c2.debugClaimOptions(1, 0, Tiles.id(Tiles.parseKind("5z"), 1));
+        Map<String, Object> c2d = Bot.decide(c2, 1, "claim", c2opts, Json.obj("tile", "5z"));
+        eq("加上宝牌（粗估 4 番）→ 同一手牌就碰", c2d.get("type"), "pon");
+
+        // ---------- ⑭ 实战覆盖：真取舍必须真的被走到过（否则上面全是死代码）
         Bot.debugResetCounts();
         for (int g = 0; g < 3; g++) {
             Table tt = new Table("TCH" + g, "teacher桌", Rules.defaults());
@@ -4251,13 +4406,17 @@ public final class SelfTest {
             }
             tt.playGame();
         }
-        System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount + " 次、默听 "
-                + Bot.debugDamaCount + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次、"
+        System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount + " 次、推进 "
+                + Bot.debugPushCount + " 次、默听 " + Bot.debugDamaCount
+                + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次、因「鸣了不值」放掉 "
+                + Bot.debugCallValueRefuseCount + " 次、"
                 + "开杠 " + Bot.debugKanCount + " 次（因丢听牌放掉 " + Bot.debugKanRefuseWait
                 + "、弃和 " + Bot.debugKanRefusePressure + "、四杠散了 " + Bot.debugKanRefuseFourKan
                 + "、危险 " + Bot.debugKanRefuseDanger + "）");
         check("实局里走过「有人立直 → 弃和」这条", Bot.debugFoldCount > 0);
+        check("实局里走过「期望值为正 → 推进」这条", Bot.debugPushCount > 0);
         check("实局里走过「鸣完没役 → 放掉」这条", Bot.debugNoYakuRefuseCount > 0);
+        check("实局里走过「门清鸣了不值 → 放掉」这条", Bot.debugCallValueRefuseCount > 0);
         check("实局里**自然开过杠**（不是靠 debugAlwaysKan 才开）", Bot.debugKanCount > 0);
     }
 

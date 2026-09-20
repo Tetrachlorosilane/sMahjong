@@ -68,6 +68,10 @@ public final class Bot {
     public static long debugKanRefuseFourKan;
     /** 因为"这张牌对他家太危险（加杠会被抢杠）"而放掉的**加杠**。 */
     public static long debugKanRefuseDanger;
+    /** 因为"门清鸣了不值（不听牌又不到 2 番）"而放掉的副露。 */
+    public static long debugCallValueRefuseCount;
+    /** 押し引き判定为**推进**（期望值为正）的次数。 */
+    public static long debugPushCount;
 
     public static void debugResetCounts() {
         debugFoldCount = 0;
@@ -78,6 +82,8 @@ public final class Bot {
         debugKanRefusePressure = 0;
         debugKanRefuseFourKan = 0;
         debugKanRefuseDanger = 0;
+        debugCallValueRefuseCount = 0;
+        debugPushCount = 0;
     }
 
     /**
@@ -134,6 +140,8 @@ public final class Bot {
         public int kanCount;
         /** 规则开关：四杠散了会不会强制流局（决定"第 4 个杠"值不值得开）。 */
         public boolean fourKanAbort;
+        /** 牌山剩余可摸张数（押し引き的期望值要知道"自己还能摸几巡"）。 */
+        public int tilesLeft;
 
         /** 从牌桌取公开信息。**只读自家手牌与公开字段**（回归：置换不变式见 SelfTest）。 */
         public static HandState of(Round r, int seat) {
@@ -158,6 +166,7 @@ public final class Bot {
             st.doraIndicators = List.copyOf(r.doraIndicators());
             st.kanCount = r.kanCount;
             st.fourKanAbort = r.rules.fourKanAbort;
+            st.tilesLeft = r.tilesLeft();
             return st;
         }
 
@@ -322,21 +331,23 @@ public final class Bot {
      * <p>顺序：
      * <ol>
      *   <li>候选按**向听**分组，只看最好的那一组；</li>
-     *   <li>**押し引き**：有人立直且自己还在 2 向听以上 → 弃和：
-     *       在"不增加向听"的候选里选危险度最低的；若全都会后退，就直接选最安全的
-     *       （此时牌效已不重要，先别放铳）；</li>
      *   <li>进攻：听牌候选取 (良形枚数, 总枚数, 宝牌数, 危险度)；未听牌取 (进张枚数, 宝牌数, 危险度)。
-     *       ⚠ 危险度**排在最后**：没人立直时牌效优先（这是刻意的，别把顺序调过来）。</li>
+     *       ⚠ 危险度**排在最后**：没人立直时牌效优先（这是刻意的，别把顺序调过来）；</li>
+     *   <li>**押し引き**（有人立直时）：拿"进攻最好的那张"的**期望值**做判断 ——
+     *       `P(和了)×和了点 − P(放铳)×平均放铳失点`。期望为正就推；为负才改弃和
+     *       （弃和＝在"不后退"的一组里挑最安全的，只看**立直家**的现物/筋）。
+     *       这才是"打点高就推、远手小牌就撤"的连续判断，而不是"2 向听以下一律弃和"的开关。</li>
      * </ol>
      *
      * @return 牌码；{@code null} = 没有可用候选
      */
     public static String chooseDiscard(HandState st, List<Object> candidates) {
-        final boolean folding = st.opponentRiichi() && HandEval.shanten(st.counts, st.meldCount) >= 2;
         // ① 便宜的一遍：向听（1 次 DFS）+ 危险度 + 宝牌。
         //    `HandEval.of` 里有 34 次 DFS，听牌时还要对每个听牌张做一次和了形分解 ——
         //    为 14 张候选各跑一遍会把整场自对弈拖慢 1.7 倍（实测 3.6 → 6.2 秒/场）。
         //    所以先只用便宜的判据圈定"向听最小的那一组"，贵的评估只跑这一组。
+        //    ⚠ 危险度这里**一律按进攻口径**（四家取最坏）：押し引き要先知道"我打算打的那张有多危险"；
+        //    真决定弃和时再按**立直家**口径重算（见 ③）—— 两处口径不同是刻意的，见 Danger 的注释。
         final int n = candidates.size();
         final String[] codes = new String[n];
         final int[] kinds = new int[n];
@@ -354,11 +365,8 @@ public final class Bot {
             int[] after = st.counts.clone();
             after[kind]--;
             final int sh = HandEval.shanten(after, st.meldCount);
-            // 弃和时只看**立直家**的危险度（见 Danger.worstAgainstRiichi 的注释）；
-            // 进攻时对四家取最坏（任何一家都可能已经听牌）。
-            final Danger.Report danger = folding
-                    ? Danger.worstAgainstRiichi(kind, st.visible, st.rivers, st.riichi, st.turn, st.seat)
-                    : Danger.worst(kind, st.visible, st.rivers, st.riichi, st.turn, st.seat);
+            final Danger.Report danger =
+                    Danger.worst(kind, st.visible, st.rivers, st.riichi, st.turn, st.seat);
             codes[used] = code;
             kinds[used] = kind;
             shantens[used] = sh;
@@ -373,22 +381,19 @@ public final class Bot {
         String bestTile = null;
         double bestScore = Double.NEGATIVE_INFINITY;
         int bestDanger = Integer.MAX_VALUE;
+        int[] bestAfter = null;
+        HandEval.Snapshot bestSnap = null;
         for (int i = 0; i < used; i++) {
             if (shantens[i] != minSh) {
                 continue;
             }
             int[] after = st.counts.clone();
             after[kinds[i]]--;
-            double score;
-            if (folding) {
-                score = -dangers[i];                 // 弃和：唯一目标是安全
-            } else {
-                HandEval.Snapshot snap = HandEval.of(after, st.melds, st.visible);
-                score = snap.tenpai
-                        ? 200 + snap.goodWaitTiles * 4.0 + snap.waitTiles + doras[i] * 3.0
-                        : snap.advanceTiles + doras[i] * 3.0;
-                score -= dangers[i] * 0.05;          // 同效率时略偏好安全牌
-            }
+            HandEval.Snapshot snap = HandEval.of(after, st.melds, st.visible);
+            double score = snap.tenpai
+                    ? 200 + snap.goodWaitTiles * 4.0 + snap.waitTiles + doras[i] * 3.0
+                    : snap.advanceTiles + doras[i] * 3.0;
+            score -= dangers[i] * 0.05;              // 同效率时略偏好安全牌
             final boolean better = bestTile == null
                     || score > bestScore + 1e-9
                     || (Math.abs(score - bestScore) <= 1e-9 && dangers[i] < bestDanger)
@@ -398,12 +403,53 @@ public final class Bot {
                 bestTile = codes[i];
                 bestScore = score;
                 bestDanger = dangers[i];
+                bestAfter = after;
+                bestSnap = snap;
             }
         }
-        if (bestTile != null && folding) {
-            debugFoldCount++;
+        if (bestTile == null) {
+            return null;
+        }
+        // ③ 押し引き（只在有人立直时才谈）：期望值为负 → 弃和，改成挑"对立直家"最安全的
+        if (st.opponentRiichi()) {
+            final int needTiles = bestSnap != null && bestSnap.tenpai
+                    ? bestSnap.waitTiles : (bestSnap == null ? 0 : bestSnap.advanceTiles);
+            final int turnsLeft = Math.max(1, st.tilesLeft / 4);
+            final double winP = winProbability(needTiles, st.tilesLeft, turnsLeft, minSh + 1);
+            final int winPts = hanToPoints(estimatedHan(st, bestAfter, st.melds));
+            if (shouldPush(winP, winPts, dealProbability(bestDanger))) {
+                debugPushCount++;
+            } else {
+                debugFoldCount++;
+                return safestAgainstRiichi(st, codes, kinds, shantens, minSh, used);
+            }
         }
         return bestTile;
+    }
+
+    /**
+     * 弃和时打哪张：在"不增加向听"的一组里挑对**立直家**最安全的（现物 → 筋/壁 → 无信息）。
+     *
+     * <p>⚠ 只看立直家的危险度（`Danger.worstAgainstRiichi`）：没人立直的对手"手里是什么样"
+     * 无从判断，把四家算进来会让每张牌一样危险、把现物的价值淹掉（见 `Danger` 的注释）。
+     */
+    private static String safestAgainstRiichi(HandState st, String[] codes, int[] kinds,
+                                              int[] shantens, int minSh, int used) {
+        String best = null;
+        int bestDanger = Integer.MAX_VALUE;
+        for (int i = 0; i < used; i++) {
+            if (shantens[i] != minSh) {
+                continue;
+            }
+            final int d = Danger.worstAgainstRiichi(kinds[i], st.visible, st.rivers, st.riichi,
+                    st.turn, st.seat).score;
+            if (best == null || d < bestDanger
+                    || (d == bestDanger && betterTieBreak(codes[i], best))) {
+                best = codes[i];
+                bestDanger = d;
+            }
+        }
+        return best;
     }
 
     private static boolean betterTieBreak(String a, String b) {
@@ -411,6 +457,217 @@ public final class Bot {
             return true;
         }
         return isolateScore(b) < isolateScore(a);
+    }
+
+    // ================================================================= 打点粗估 / 押し引き
+
+    /** 放铳的**平均失点**（本作口径；只在期望值比较里用，不影响任何规则判定）。 */
+    public static final int AVG_DEAL_POINTS = 5200;
+
+    /**
+     * 打点**粗估**（番数）—— 押し引き与副露取舍要的是"量级对不对"，不是精确番数。
+     *
+     * <p>为什么不直接用 {@code Round.scoreIfWin}：① 它要在"假设已经鸣牌"的前提下重算
+     * （真实的 `melds[seat]` / `menzen[seat]` 都还没变，照抄会白算平和/门清符/一杯口 ——
+     * 两把尺子）；② 押し引き是**每巡**都要做的判断，一次 Evaluator 太贵。所以这里只用
+     * 公开信息数形状：
+     * <ul>
+     *   <li>宝牌（含自己手里的赤五）；</li>
+     *   <li>立直（门清且还没立直时 +1：本作策略默认会立直）；</li>
+     *   <li>役牌刻（三元牌/场风/自风，每种 1 番，可以复合）；</li>
+     *   <li>断幺九（只在食断规则下）；</li>
+     *   <li>混一色 / 清一色（按含不含字牌分，副露降一番）；</li>
+     *   <li>对对和（没有吃、且暗牌里至少两组对子/刻子）。</li>
+     * </ul>
+     * ⚠ 精确番数仍然只在两处用真货：立直/默听（`shouldDeclareRiichi` 用 `scoreIfWin`）
+     * 与训练侧的观测 —— 这里只服务"值不值得"这种粗判断。
+     */
+    public static int estimatedHan(HandState st, int[] counts, List<Meld> melds) {
+        final int[] c = counts == null ? new int[Tiles.KIND_COUNT] : counts;
+        final List<Meld> ms = melds == null ? List.of() : melds;
+        final boolean open = !ms.isEmpty();
+        int han = HandEval.doraCount(c, ms, st.doraIndicators) + st.akaInHand;
+        if (!open && !st.selfRiichi) {
+            han += 1;                                   // 立直
+        }
+        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
+            if (isYakuhai(st, k) && hasTriplet(c, ms, k)) {
+                han += 1;
+            }
+        }
+        if (st.kuitan && allSimplesOf(c, ms)) {
+            han += 1;
+        }
+        if (singleSuitOf(c, ms) >= 0) {
+            han += hasHonor(c, ms) ? (open ? 2 : 3) : (open ? 5 : 6);
+        }
+        if (noChi(ms)) {
+            // 对对和的**粗判**：没有吃、且暗牌里一张"单张"都没有（全是刻子/对子）。
+            // ⚠ 宁可漏算：真实的对对和途中多半还留着搭子的残张，那种形状这里不认
+            //   （认了会把"混一色 + 顺子苗头"的手白算成对对和 —— 试过，虚高得很离谱）。
+            int pairs = 0;
+            boolean single = false;
+            for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+                if (c[k] == 1) {
+                    single = true;
+                } else if (c[k] >= 2) {
+                    pairs++;
+                }
+            }
+            if (!single && pairs >= 2) {
+                han += 2;                               // 对对和
+            }
+        }
+        return han;
+    }
+
+    /** 番数 → 闲家荣和的实收点数（粗表：够期望值用；庄家/自摸的差别不在这里体现）。 */
+    public static int hanToPoints(int han) {
+        if (han >= 13) {
+            return 32000;
+        }
+        if (han >= 11) {
+            return 24000;
+        }
+        if (han >= 8) {
+            return 16000;
+        }
+        if (han >= 6) {
+            return 12000;
+        }
+        if (han >= 5) {
+            return 8000;
+        }
+        if (han >= 4) {
+            return 7700;
+        }
+        if (han >= 3) {
+            return 3900;
+        }
+        if (han >= 2) {
+            return 2000;
+        }
+        return han >= 1 ? 1000 : 0;
+    }
+
+    /**
+     * 和了概率的**粗模型**：先按"每巡命中率 = 想要的牌 / 牌山剩余"算"这么多巡里至少命中一次"，
+     * 再按**还差几步**（向听 + 1）打个折 —— 远手推不动，就是靠这一步。
+     *
+     * @param needTiles  想要的牌的张数（听牌 = 听牌枚数；未听牌 = 进张枚数）
+     * @param tilesLeft  牌山剩余可摸张数
+     * @param turnsLeft  **自己**还能摸几巡（≈ 牌山剩余 / 4）
+     * @param steps      还差几步到和了（听牌 = 1、1 向听 = 2 …）
+     */
+    public static double winProbability(int needTiles, int tilesLeft, int turnsLeft, int steps) {
+        if (needTiles <= 0 || tilesLeft <= 0 || turnsLeft <= 0 || steps <= 0) {
+            return 0;
+        }
+        final double perTurn = Math.min(0.5, (double) needTiles / tilesLeft);
+        final double p = (1 - Math.pow(1 - perTurn, turnsLeft)) / steps;
+        return Math.max(0, Math.min(0.9, p));
+    }
+
+    /**
+     * 放铳概率的**粗模型**：由 {@link Danger} 的 0..100 分数线性映射到 0..0.30。
+     *
+     * <p>现物 → 0（危险度 0 分是硬保证）；筋/壁 ≈ 0.04；无信息 ≈ 0.09；
+     * 立直家的无筋中张 ≈ 0.20 起（巡目越深分越高）。
+     */
+    public static double dealProbability(int dangerScore) {
+        return Math.min(0.30, Math.max(0, dangerScore) / 100.0 * 0.30);
+    }
+
+    /** 押し引き的期望值（点）：`P(和了)×和了点 − P(放铳)×平均放铳失点`。正 = 值得推。 */
+    public static double pushEv(double winProb, int winPoints, double dealProb) {
+        return winProb * winPoints - dealProb * AVG_DEAL_POINTS;
+    }
+
+    /** 这一手推不推（期望值为正才推）。弃和按 0 处理：弃和之后仍有被自摸/罚符的小额支出。 */
+    public static boolean shouldPush(double winProb, int winPoints, double dealProb) {
+        return pushEv(winProb, winPoints, dealProb) > 0;
+    }
+
+    private static boolean hasTriplet(int[] counts, List<Meld> melds, int kind) {
+        if (counts[kind] >= 3) {
+            return true;
+        }
+        for (Meld m : melds) {
+            if (!m.isRun() && m.baseKind() == kind) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasHonor(int[] counts, List<Meld> melds) {
+        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
+            if (counts[k] > 0) {
+                return true;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                if (Tiles.kind(t) >= 27) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean noChi(List<Meld> melds) {
+        for (Meld m : melds) {
+            if (m.kind == Meld.Kind.CHI) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 暗牌 + 副露**全是中张（2..8）**—— 断幺九的前提（对任意"假设的"手牌都能问）。 */
+    private static boolean allSimplesOf(int[] counts, List<Meld> melds) {
+        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+            if (counts[k] > 0 && !Tiles.isSimple(k)) {
+                return false;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                if (!Tiles.isSimple(Tiles.kind(t))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** 暗牌 + 副露只占**一种花色**（可含字牌）时返回该花色，否则 -1。 */
+    private static int singleSuitOf(int[] counts, List<Meld> melds) {
+        int suit = -1;
+        for (int k = 0; k < 27; k++) {
+            if (counts[k] > 0) {
+                int s = Tiles.suit(k);
+                if (suit >= 0 && s != suit) {
+                    return -1;
+                }
+                suit = s;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                int k = Tiles.kind(t);
+                if (k >= 27) {
+                    continue;
+                }
+                int s = Tiles.suit(k);
+                if (suit >= 0 && s != suit) {
+                    return -1;
+                }
+                suit = s;
+            }
+        }
+        return suit;
     }
 
     /** 越"孤立"的牌越优先打出。 */
@@ -498,6 +755,8 @@ public final class Bot {
         }
         // 有人立直时，除非鸣完立刻是"役牌"这种硬役，否则不跟着上 —— 鸣牌会把牌打薄、还失去门清
         final boolean underPressure = st.opponentRiichiCount() >= 1;
+        // 门清 vs 已经鸣过牌：门清鸣牌的代价（放弃立直/门清）要算进价值比较，见 callWorthForMenzen
+        final boolean menzenBefore = st.meldCount == 0;
 
         // 大明杠：手里已有 3 张，所以它**不像碰那样能改善向听**（暗刻本来就按面子算）。
         // 取舍因此落在别处：暗刻的符、三暗刻/四暗刻、门清（立直/平和）都比"杠宝牌 + 少一张牌山"值钱，
@@ -535,7 +794,11 @@ public final class Bot {
                 debugNoYakuRefuseCount++;
             }
             if (better && yaku && !(underPressure && !isYakuhai(st, kind))) {
-                return Json.obj("type", "pon");
+                if (menzenBefore && !callWorthForMenzen(st, c, meld)) {
+                    debugCallValueRefuseCount++;         // 门清 + 鸣了不值 → 不鸣
+                } else {
+                    return Json.obj("type", "pon");
+                }
             }
         }
         Map<String, Object> chi = find(options, "chi");
@@ -577,6 +840,10 @@ public final class Bot {
                         debugNoYakuRefuseCount++;       // 鸣完没役 → 这手吃下去也永远和不了
                         continue;
                     }
+                    if (menzenBefore && !callWorthForMenzen(st, c, meld)) {
+                        debugCallValueRefuseCount++;     // 门清 + 吃下去不值 → 不吃
+                        continue;
+                    }
                     if (underPressure) {
                         continue;                       // 有人立直时不跟着吃
                     }
@@ -596,8 +863,33 @@ public final class Bot {
         return bestShantenAfterCall(afterCall, st.meldCount + 1, 13 - 3 * st.meldCount - 1) < cur;
     }
 
-    /** 鸣牌后（多一张牌待打）能达到的最好向听。 */
-    private static int bestShantenAfterCall(int[] countsAfterCall, int meldCount, int handSize) {
+    /**
+     * **门清手值不值得副露** —— 档 B 的"副露打分"（粗估，只用公开信息）。
+     *
+     * <p>门清鸣牌的代价是**放弃立直**（+1 番 + 里宝期望 + 门清荣和符，加起来约 1 番多），
+     * 所以只在这两种情况鸣：
+     * <ol>
+     *   <li>这一鸣**直接把向听打到 0（听牌）** —— 速度换得值；</li>
+     *   <li>鸣完这手**至少 2 番** —— 有得赚。</li>
+     * </ol>
+     * 两条都不满足就不鸣（留着门清做立直）。⚠ 已经鸣过牌的手门清早就断了，不适用这条 ——
+     * 那种情况只要"还有役 + 向听改善"就继续鸣（`decideClaim` 里的原判据）。
+     */
+    public static boolean callWorthForMenzen(HandState st, int[] afterCall, Meld meld) {
+        if (bestShantenAfterCall(afterCall, st.meldCount + 1, 13 - 3 * st.meldCount - 1) == 0) {
+            return true;                                 // 鸣完直接听牌
+        }
+        List<Meld> ms = new ArrayList<>(st.melds);
+        ms.add(meld);
+        return estimatedHan(st, afterCall, ms) >= 2;
+    }
+
+    /**
+     * 鸣牌后（暗牌 {@code countsAfterCall}，还要再打一张）能达到的最好向听。
+     *
+     * <p>公开给自检：副露取舍（"值不值得鸣"）与"鸣完有没有改善"共用它，判据错了整条路都错。
+     */
+    public static int bestShantenAfterCall(int[] countsAfterCall, int meldCount, int handSize) {
         int extra = handSize - (13 - 3 * meldCount);
         int best = 99;
         if (extra <= 0) {
@@ -690,65 +982,18 @@ public final class Bot {
         return false;
     }
 
-    /** 暗牌 + 副露全是中张（2..8）—— 断幺九的前提。 */
+    /** 暗牌 + 副露全是中张（2..8）—— 断幺九的前提（把"这次要鸣的面子"也算进去）。 */
     private static boolean allSimples(HandState st, int[] afterCall, Meld meld) {
-        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-            if (afterCall[k] > 0 && !Tiles.isSimple(k)) {
-                return false;
-            }
-        }
-        for (Meld m : st.melds) {
-            for (int t : m.tiles) {
-                if (!Tiles.isSimple(Tiles.kind(t))) {
-                    return false;
-                }
-            }
-        }
-        for (int t : meld.tiles) {
-            if (!Tiles.isSimple(Tiles.kind(t))) {
-                return false;
-            }
-        }
-        return true;
+        List<Meld> ms = new ArrayList<>(st.melds);
+        ms.add(meld);
+        return allSimplesOf(afterCall, ms);
     }
 
     /** 暗牌 + 副露只占一种花色（外加字牌）—— 混一色/清一色的前提。 */
     private static boolean singleSuit(HandState st, int[] afterCall, Meld meld) {
-        int suit = -1;
-        for (int k = 0; k < 27; k++) {
-            if (afterCall[k] > 0) {
-                int s = Tiles.suit(k);
-                if (suit >= 0 && s != suit) {
-                    return false;
-                }
-                suit = s;
-            }
-        }
-        for (Meld m : st.melds) {
-            for (int t : m.tiles) {
-                int k = Tiles.kind(t);
-                if (k >= 27) {
-                    continue;
-                }
-                int s = Tiles.suit(k);
-                if (suit >= 0 && s != suit) {
-                    return false;
-                }
-                suit = s;
-            }
-        }
-        for (int t : meld.tiles) {
-            int k = Tiles.kind(t);
-            if (k >= 27) {
-                continue;
-            }
-            int s = Tiles.suit(k);
-            if (suit >= 0 && s != suit) {
-                return false;
-            }
-            suit = s;
-        }
-        return true;                     // 全是字牌也算（字一色 / 混一色达成）
+        List<Meld> ms = new ArrayList<>(st.melds);
+        ms.add(meld);
+        return singleSuitOf(afterCall, ms) >= 0;
     }
 
     private static Map<String, Object> firstKan(Map<String, Object> kanOption) {

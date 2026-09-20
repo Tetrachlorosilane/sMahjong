@@ -709,8 +709,23 @@ public final class Round {
         return l;
     }
 
+    /**
+     * 自测 / 训练钩子：把宝牌指示牌**钉死**成指定的牌种（{@code null} = 用牌山真实的那些）。
+     *
+     * <p>为什么要它：teacher 有两条取舍要吃打点（押し引き的期望值、副露前的价值粗估），
+     * 而"宝牌是多少"是**发牌决定的** —— 想让"同一手牌 + 有宝牌 / 没宝牌"成为一个对照实验，
+     * 就只能把指示牌钉住，否则断言会跟着发牌运气飘（试过：同一手牌恰好撞上宝牌就红）。
+     * 它只影响 {@link #doraIndicators()} 的**读**，不碰牌山、不影响任何规则判定。
+     */
+    private List<Integer> debugDoraOverride;
+
+    /** 见 {@link #debugDoraOverride}；传空表 = 这一局没有宝牌。 */
+    public void debugSetDora(List<Integer> kinds) {
+        this.debugDoraOverride = kinds == null ? null : List.copyOf(kinds);
+    }
+
     public List<Integer> doraIndicators() {
-        return wall.doraIndicators();
+        return debugDoraOverride != null ? debugDoraOverride : wall.doraIndicators();
     }
 
     public List<Integer> uraIndicators() {
