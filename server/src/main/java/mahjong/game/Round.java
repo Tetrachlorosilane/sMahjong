@@ -1341,6 +1341,18 @@ public final class Round {
             if (!kanAllowedByRiichi(seat, kind, drawn)) {
                 return null;
             }
+            // **国士抢暗杠**（《雀魂》，`docs/日本麻将.md` §抢杠 L957：「《雀魂》中，国士无双
+            // 可以抢暗杠。《天凤》和 M.League 不允许」）。
+            //
+            // ⚠ 判在**杠成立之前**：被抢时这次杠整个不成立 —— 那 4 张仍在杠主手里、
+            //   不翻杠宝牌、不打断一发（`clearIppatsu()` 在下面）、`kanCount` 也不 +1，
+            //   本局直接以荣和收局（与加杠被抢杠走同一套结算）。
+            if (rules.kokushiAnkan) {
+                List<Integer> rob = chankanRon(seat, picked.get(0), true);
+                if (!rob.isEmpty()) {
+                    return agariRon(rob, seat, picked.get(0), true, false);
+                }
+            }
             int[] tiles = new int[4];
             for (int i = 0; i < 4; i++) {
                 tiles[i] = picked.get(i);
@@ -1388,27 +1400,50 @@ public final class Round {
         // ⚠ 而**一发**也必须等到"杠真的成立"再打断：文档 §一发 L901「吃、碰、杠（包括暗杠）
         //   都会打断一发。**抢杠发生在加杠成立之前，可以与一发复合**」——
         //   旧实现先 `clearIppatsu()` 再判抢杠，于是抢杠白丢一发（少 1 番；AUDIT S-57①）。
-        List<Integer> ron = new ArrayList<>();
-        for (int d = 1; d < 4; d++) {
-            int s = (seat + d) % 4;
-            if (isFuriten(s)) {
-                continue;
-            }
-            Evaluator.HandScore sc = checkWin(s, addId, false, false, false, true, false);
-            if (sc != null) {
-                ron.add(s);
-            }
-        }
+        List<Integer> ron = chankanRon(seat, addId, false);
         if (!ron.isEmpty()) {
-            // 多家抢杠同样受**头跳**约束（文档 §头跳：头跳 / 多家和了同样适用于抢杠；AUDIT S-57②）
-            if (rules.headBump && ron.size() > 1) {
-                ron = new ArrayList<>(ron.subList(0, 1));
-            }
             return agariRon(ron, seat, addId, true, false);   // 抢杠：不是燕返
         }
         clearIppatsu();                  // 杠真的成立了，这才打断一发
         revealKanDora();
         return null;
+    }
+
+    /**
+     * 抢杠的荣和者（按「距杠主由近到远」，含振听过滤）；加杠与暗杠两条路共用。
+     *
+     * @param kokushiOnly 暗杠时**只认国士无双**（《雀魂》的国士抢暗杠）：
+     *                    别的听牌即使能荣和这张牌也不能抢暗杠 —— 那 4 张在杠主手里，
+     *                    「等着那张」是合法局面，口子只开给国士。
+     */
+    private List<Integer> chankanRon(int kanSeat, int tileId, boolean kokushiOnly) {
+        List<Integer> ron = new ArrayList<>();
+        for (int d = 1; d < 4; d++) {
+            int s = (kanSeat + d) % 4;
+            if (isFuriten(s)) {
+                continue;
+            }
+            Evaluator.HandScore sc = checkWin(s, tileId, false, false, false, true, false);
+            if (sc == null || (kokushiOnly && !isKokushiScore(sc))) {
+                continue;
+            }
+            ron.add(s);
+        }
+        // 多家抢杠同样受**头跳**约束（文档 §头跳：头跳 / 多家和了同样适用于抢杠；AUDIT S-57②）
+        if (rules.headBump && ron.size() > 1) {
+            return new ArrayList<>(ron.subList(0, 1));
+        }
+        return ron;
+    }
+
+    /**
+     * 这一手是不是**国士无双**（含十三面）。
+     *
+     * <p>判据取 {@code Agari} 拆出来的和了型，而不是役种名 —— 役种名会随规则改名
+     * （不加倍役满时十三面仍叫十三面，见 `Evaluator`），牌型不会。
+     */
+    private static boolean isKokushiScore(Evaluator.HandScore sc) {
+        return sc.form != null && sc.form.type == Agari.TYPE_KOKUSHI;
     }
 
     private void clearIppatsu() {

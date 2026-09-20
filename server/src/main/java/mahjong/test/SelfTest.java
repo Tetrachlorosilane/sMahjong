@@ -1728,6 +1728,119 @@ public final class SelfTest {
         mahjong.game.Round.Result msCkr = msCk.debugTurnKan(0, "kakan", "5p");
         check("多家抢杠：《雀魂》无头跳 → 两家都成立",
                 msCkr != null && msCkr.agari && msAgari.size() == 2);
+
+        // ---------- 《雀魂》特有：**国士无双可以抢暗杠**（文档 §抢杠 L957）----------
+        //
+        // 判在"杠成立之前"：被抢时这次杠**整个不成立** —— 那 4 张仍在杠主手里、不翻杠宝牌、
+        // 不打断一发、`kanCount` 不 +1，本局直接以荣和收局。所以除了"谁赢了多少"，
+        // 下面还要把杠主那一侧的状态一起钉住（这正是"抢走了杠"与"杠成立后被和"的区别）。
+        List<Map<String, Object>> kaAgari = new ArrayList<>();
+        Round kaMs = kokushiAnkanRound(preset("majsoul"));
+        kaMs.riichi[1] = true;
+        kaMs.ippatsu[1] = true;                  // 立直 + 一发：杠没成立就不该被打断（同 S-57①）
+        kaMs.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                kaAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result kaR = kaMs.debugTurnKan(0, "ankan", "1z");
+        check("《雀魂》：国士无双抢暗杠成立", kaR != null && kaR.agari && kaR.winner == 1);
+        eq("国士抢暗杠发出一条 agari 报文", kaAgari.size(), 1);
+        check("抢下来的是国士无双: " + (kaAgari.isEmpty() ? "<无报文>" : agariCodes(kaAgari.get(0))),
+                !kaAgari.isEmpty() && agariCodes(kaAgari.get(0)).contains("kokushi"));
+        check("被抢时**暗杠不成立**：没记进副露", kaMs.melds[0].isEmpty());
+        eq("被抢时 `kanCount` 不 +1（那次杠没发生）", kaMs.kanCount, 0);
+        eq("被抢时那 4 张仍在杠主手里（没被挪走）", kaMs.hand[0].size(), 14);
+        check("被抢时**不打断一发**（与 S-57① 同一条理由）", kaMs.ippatsu[1]);
+        check("被抢时不算「鸣牌」（人和等门前役的前提不变）", !kaMs.anyCall);
+        eq("国士无双 1 倍役满：放铳的庄家付 32000", kaR == null ? 0 : -kaR.delta[0], 32000);
+        eq("和牌者收 32000", kaR == null ? 0 : kaR.delta[1], 32000);
+
+        // 对照一：《天凤》/ M.League 不允许 → 暗杠照常成立（那 4 张真的被挪进副露）
+        Round kaTh = kokushiAnkanRound(preset("tenhou"));
+        mahjong.game.Round.Result kaThR = kaTh.debugTurnKan(0, "ankan", "1z");
+        check("《天凤》不允许国士抢暗杠 → 暗杠照常成立", kaThR == null);
+        eq("《天凤》：暗杠记进副露", kaTh.melds[0].size(), 1);
+        eq("《天凤》：杠主手里少 4 张", kaTh.hand[0].size(), 10);
+        eq("《天凤》：`kanCount` +1", kaTh.kanCount, 1);
+        check("三套预设里只有《雀魂》打开这条", preset("majsoul").kokushiAnkan
+                && !preset("tenhou").kokushiAnkan && !preset("mleague").kokushiAnkan);
+
+        // 对照二：口子**只开给国士** —— 同样听 1z 的普通手（对对和 + 役牌）抢不了暗杠
+        Round kaOther = kokushiAnkanRound(preset("majsoul"));
+        kaOther.hand[1].clear();
+        kaOther.hand[1].addAll(parse("2z2z2z3z3z3z4z4z4z5z5z5z1z"));
+        check("口子只开给国士：听同一张的普通手抢不了暗杠",
+                kaOther.debugTurnKan(0, "ankan", "1z") == null && kaOther.melds[0].size() == 1);
+
+        // 对照三：振听的国士也抢不了（抢暗杠是一次荣和，荣和的前提照旧）
+        Round kaFuriten = kokushiAnkanRound(preset("majsoul"));
+        kaFuriten.furitenPerm[1] = true;
+        check("振听的国士抢不了暗杠",
+                kaFuriten.debugTurnKan(0, "ankan", "1z") == null && kaFuriten.melds[0].size() == 1);
+
+        // 对照四：抢暗杠走的是**荣和**那条路 → 人和（文档 §人和 L1375「在国士无双抢暗杠时
+        // 人和也成立」）与国士复合 = 2 倍役满。人和在三套预设里都是 off，这里显式打开。
+        Rules kaRenhou = preset("majsoul");
+        kaRenhou.renhou = "yakuman";
+        List<Map<String, Object>> krAgari = new ArrayList<>();
+        Round kaRr = kokushiAnkanRound(kaRenhou);
+        kaRr.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                krAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result kaRrR = kaRr.debugTurnKan(0, "ankan", "1z");
+        check("国士抢暗杠时**人和也成立**（原文点名的那一条）: "
+                        + (krAgari.isEmpty() ? "<无报文>" : agariCodes(krAgari.get(0))),
+                !krAgari.isEmpty() && agariCodes(krAgari.get(0)).contains("renhou"));
+        eq("国士无双 + 人和 = 2 倍役满", kaRrR == null ? -1 : -kaRrR.delta[0], 64000);
+        Rules kaRenhouOff = preset("tenhou");     // 不允许抢暗杠 + 人和开着
+        kaRenhouOff.renhou = "yakuman";
+        Round kaRrOff = kokushiAnkanRound(kaRenhouOff);
+        check("对照：不允许抢暗杠时，人和不可能以这条路径成立",
+                kaRrOff.debugTurnKan(0, "ankan", "1z") == null && kaRrOff.melds[0].size() == 1);
+
+        // 对照五：多家抢暗杠与加杠共用**同一把尺子**（`rules.headBump`）——
+        // 《雀魂》本身无头跳，所以两家国士都成立；把开关打开就只认最近那家。
+        // （三套预设里 headBump 与 kokushiAnkan 没有同时为真的组合，只能自己拼一套。）
+        Rules kaBump = preset("majsoul");
+        kaBump.headBump = true;
+        List<Map<String, Object>> kbAgari = new ArrayList<>();
+        Round kaB = kokushiAnkanRound(kaBump);
+        kaB.hand[2].addAll(parse("9m9m1p9p1s9s2z3z4z5z6z7z1m"));   // 另一家也单骑 1z
+        kaB.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                kbAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result kaBR = kaB.debugTurnKan(0, "ankan", "1z");
+        check("多家抢暗杠：开了头跳就只认最近那家",
+                kaBR != null && kaBR.winner == 1 && kbAgari.size() == 1);
+        List<Map<String, Object>> kb2Agari = new ArrayList<>();
+        Round kaB2 = kokushiAnkanRound(preset("majsoul"));        // 无头跳
+        kaB2.hand[2].addAll(parse("9m9m1p9p1s9s2z3z4z5z6z7z1m"));
+        kaB2.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                kb2Agari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result kaB2R = kaB2.debugTurnKan(0, "ankan", "1z");
+        check("多家抢暗杠：《雀魂》无头跳 → 两家国士都成立",
+                kaB2R != null && kb2Agari.size() == 2);
+    }
+
+    /**
+     * 国士抢暗杠用的局面：座位 0（庄）手里 4 张 1z 准备暗杠，座位 1 国士单骑 1z。
+     *
+     * <p>摆牌而不是等发牌：这条规则要"杠主手里正好 4 张 + 他家正好听那一张"，概率极低。
+     * 座位 1 那 12 种幺九 + 1m 雀头 = 13 张，和了 1z 即 13 种 + 一对 → 国士无双。
+     */
+    private static Round kokushiAnkanRound(Rules rules) {
+        Round r = newRound(rules);
+        r.hand[0].addAll(parse("1z1z1z1z1m2m3m4m5m6m7m8m9m9p"));   // 14 张，含 4 张 1z
+        r.hand[1].addAll(parse("1m1m9m1p9p1s9s2z3z4z5z6z7z"));
+        return r;
     }
 
     /** 一条 `agari` 报文里的役种码（用 `,` 连起来，便于 `contains` 判据）。 */
@@ -1842,6 +1955,13 @@ public final class SelfTest {
         eq("M.League 赤宝牌 3 张", ml.aka, 3);
         check("M.League 立直放宽 + 摸海底禁立直 + 暗杠保面子",
                 ml.riichiMinScore == 0 && ml.riichiMinTilesLeft == 0 && ml.riichiNoHaitei && ml.ankanKeepsShape);
+        // ── 新取舍项的报文面（`fromJson` / `toJson` 是同一对，名字写错就是静默失效）
+        check("《雀魂》国士抢暗杠的预设值：只有它打开",
+                ms.kokushiAnkan && !ml.kokushiAnkan && !th.kokushiAnkan);
+        check("报文单项可覆盖预设（两个方向）",
+                Rules.fromJson(Json.obj("preset", "tenhou", "kokushi_ankan", true)).kokushiAnkan
+                        && !Rules.fromJson(Json.obj("preset", "majsoul", "kokushi_ankan", false)).kokushiAnkan);
+        check("toJson 带出这个字段", Boolean.TRUE.equals(ms.toJson().get("kokushi_ankan")));
 
         // ── 预设先铺、单字段再覆盖（协议里的 rules 就是这么用的）
         Map<String, Object> m = new java.util.LinkedHashMap<>();

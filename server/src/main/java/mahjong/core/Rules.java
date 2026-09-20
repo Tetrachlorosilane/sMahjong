@@ -118,6 +118,15 @@ public final class Rules {
      */
     public boolean kokushiTenhou13 = false;
     /**
+     * **国士无双可以抢暗杠**（`docs/日本麻将.md` L957）。
+     *
+     * <p>**《雀魂》采用**；《天凤》和 M.League 不允许（它们只有加杠能被抢）。
+     * ⚠ 能被抢的**只有国士无双** —— 别的听牌照样抢不了暗杠（那 4 张在杠主手里，
+     * 「听那张」本身是合法局面，但规则只给国士开这个口子）；
+     * 而且被抢时**这次杠不成立**（不翻杠宝牌、不打断一发、`kanCount` 不 +1）。
+     */
+    public boolean kokushiAnkan = false;
+    /**
      * 包牌承担**全部**役满得点（《天凤》）而不是只包「被包的那一役」的基本点
      * （《雀魂》/ M.League —— 复合了别的役满时，别的役满仍由放铳者照常支付）。
      */
@@ -179,6 +188,8 @@ public final class Rules {
                 requiredPoints = 30000;
                 // 《雀魂》特有：**天和时国士无双视作国士无双十三面**（文档 L1149）
                 kokushiTenhou13 = true;
+                // 《雀魂》特有：**国士无双可以抢暗杠**（文档 L957）；《天凤》/ M.League 不允许
+                kokushiAnkan = true;
                 // 包牌：只到大三元 / 大四喜，且**只包被包的那一役**（与 M.League 同侧）
                 kuikae = true; pao = true; paoFourKan = false; paoCoversAll = false;
                 // 《雀魂》段位场：精算基准 = 配给原点 25000（**没有头名赏**），
@@ -238,6 +249,7 @@ public final class Rules {
         r.minHan = Json.i(m, "min_han", r.minHan);
         r.requiredPoints = Json.i(m, "required_points", r.requiredPoints);
         r.kokushiTenhou13 = Json.bool(m, "kokushi_tenhou_13", r.kokushiTenhou13);
+        r.kokushiAnkan = Json.bool(m, "kokushi_ankan", r.kokushiAnkan);
         r.kiriageMangan = Json.bool(m, "kiriage_mangan", r.kiriageMangan);
         r.kazoeYakuman = Json.bool(m, "kazoe_yakuman", r.kazoeYakuman);
         r.doubleWindPairFu = Json.i(m, "double_wind_pair_fu", r.doubleWindPairFu);
@@ -327,6 +339,7 @@ public final class Rules {
                 "min_han", minHan,
                 "required_points", requiredPoints,
                 "kokushi_tenhou_13", kokushiTenhou13,
+                "kokushi_ankan", kokushiAnkan,
                 "kiriage_mangan", kiriageMangan,
                 "kazoe_yakuman", kazoeYakuman,
                 "double_wind_pair_fu", doubleWindPairFu,
