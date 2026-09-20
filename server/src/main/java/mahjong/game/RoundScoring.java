@@ -70,10 +70,16 @@ public final class RoundScoring {
         return winners != null && winners.contains(dealer);
     }
 
-    /** 流局满贯：成立者里含庄家就连庄。 */
-    public static boolean nagashiBy(int dealer, Collection<Integer> nagashi) {
-        callsRenchan++;
-        return nagashi != null && nagashi.contains(dealer);
+    /**
+     * 流局满贯的连庄判据：**庄家是否听牌**（`docs/日本麻将.md` §流局满贯 L1139：
+     * 「《天凤》中自己可以鸣牌，成立后按满贯结算，**庄家是否连庄仍按是否听牌判断**」）。
+     *
+     * <p>⚠ 旧实现用的是"成立者里有没有庄家"（`nagashi.contains(dealer)`）—— 那与原文不符，
+     * 而且当时那条自检断言**把现行为写成了规格**，所以改行为时要连断言一起改（AUDIT S-55）。
+     * 判据与荒牌流局完全一致，所以这里直接复用 {@link #exhaustiveBy} 的语义。
+     */
+    public static boolean nagashiBy(int dealer, boolean[] tenpai) {
+        return exhaustiveBy(dealer, tenpai);
     }
 
     /** 荒牌流局：**庄家听牌**才连庄（不听则轮庄）。 */
@@ -309,11 +315,17 @@ public final class RoundScoring {
     }
 
     /**
-     * 一局的最终精算结果（按**座位**索引）。
+     * 一局的最终精算结果。
      *
-     * <p>`order[i]` = 第 i 名（0 起）的座位；`rank[seat]` = 该座位名次（0 = 1 位）；
-     * `point` = 精算点数；`uma` / `oka` = 该座位实际拿到的马点与头名赏
-     * （同点平分时会与 `rules.uma` 不同，所以要回传而不是让调用方再算一遍）。
+     * <p>⚠ **`order` / `rank` 按座位索引，而 `uma` / `oka` / `point` 的"名次意义"不同**：
+     * <ul>
+     *   <li>{@code order[i]} = 第 i 名（0 起）的**座位**；{@code rank[seat]} = 该座位的名次；</li>
+     *   <li>{@code uma[i]} / {@code oka[i]} = **名次 i** 实际拿到的马点与头名赏
+     *       （同点拆分时会与 {@code rules.uma} 不同，所以要回传而不是让调用方再算一遍）；
+     *       ⚠ 它们**不是按座位**索引的 —— 这一段 javadoc 原来写成"按座位索引"，是 AUDIT S-64
+     *       记下的坑（今天不误算，但 `st.uma[seat]` 是个陷阱）；</li>
+     *   <li>{@code point[seat]} 才是按**座位**索引的精算点数。</li>
+     * </ul>
      */
     public static final class Settlement {
         public final int[] order = new int[4];
@@ -330,8 +342,11 @@ public final class RoundScoring {
      * (30000−25000)×4/1000 = **20**（所以 1 位常合并写成 +50 = +30 马点 +20 头名赏）；
      * 配给原点与返点相同时（《雀魂》段位场）不存在头名赏。
      *
-     * <p>同点时：`rules.tieSplitPoint`（M.League）**平分对应名次的马点与头名赏**；
-     * 否则按起家座次先后来定名次（《天凤》）。
+     * <p>同点时：`rules.tieSplitPoint`（M.League）**拆分对应名次的马点与头名赏**，
+     * 且按原文「3 人同分时的**尾数**，由更接近起家的一方获得更多点数」——
+     * 以 **0.1 分**（界面显示精度）为单位拆分、尾数全给该区间里**更接近起家**的那家；
+     * 并列的几家**同顺位**（`rank` 取该区间的首名），只有顺位点有多寡。
+     * 不开 `tieSplitPoint` 时（《天凤》《雀魂》）按起家座次先后来定名次（严格 1/2/3/4 位）。
      *
      * <p>例子见 `docs/日本麻将.md` §精算点数：同样是 53600/28600/20000/−2200，
      * M.League 得 +73.6 / +8.6 / −20 / −62.2，《雀魂》得 +43.6 / +8.6 / −10 / −42.2。
@@ -340,7 +355,8 @@ public final class RoundScoring {
         Settlement st = new Settlement();
         Integer[] idx = {0, 1, 2, 3};
         // 分数降序；同点按座次 —— 本服务端 seat 0 = 起家（東1局の親），
-        // 所以「座次升序」就是《天凤》的「按起家座次先后定名次」。
+        // 所以「座次升序」就是《天凤》的「按起家座次先后定名次」，
+        // 也是 M.League「更接近起家的一方」的判据（同一把尺子，见 endGameSticks）。
         java.util.Arrays.sort(idx, (a, b) -> scores[a] != scores[b] ? scores[b] - scores[a] : a - b);
         for (int i = 0; i < 4; i++) {
             st.order[i] = idx[i];
@@ -364,9 +380,10 @@ public final class RoundScoring {
                         u += rules.uma[k];
                         o += (k == 0) ? oka : 0;
                     }
+                    splitPoint(st.uma, i, j, u);
+                    splitPoint(st.oka, i, j, o);
                     for (int k = i; k <= j; k++) {
-                        st.uma[k] = u / (j - i + 1);
-                        st.oka[k] = o / (j - i + 1);
+                        st.rank[idx[k]] = i;         // 并列的几家**同顺位**（只有顺位点不同）
                     }
                 }
                 i = j + 1;
@@ -377,5 +394,33 @@ public final class RoundScoring {
             st.point[s] = (scores[s] - rules.returnScore) / 1000.0 + st.uma[i] + st.oka[i];
         }
         return st;
+    }
+
+    /**
+     * 把一段顺位点（马点或头名赏）拆给同分的 `[i..j]` 几家：**0.1 分**为单位向下取整，
+     * 尾数全给**更接近起家**的那家（`out[i]` —— 调用方的 `idx` 已按"分数降序、同分座次升序"
+     * 排好，所以区间首名就是更接近起家者）。
+     *
+     * <p>原文（M.League，见 `docs/DESIGN.md`「终局与精算」）：
+     * 「半庄结束时若出现同分，则拆分顺位点。3 人同分时的**尾数**，由更接近起家的一方获得更多点数」
+     * 「他们三人仍然**同顺位**，由更接近起家的一方获得更多顺位点」。
+     * 旧实现是无条件平分（`u / n`），于是《雀魂》那类"头名赏除不尽"的场合会冒出 6.667 这种数。
+     *
+     * <p>⚠ 用 `Math.floorDiv` 而不是 `/`：顺位点可以是**负**的（3/4 位），
+     * 向下取整才能保证"尾数非负、且一定分得刚好分完"（`each × n + rest ≡ 原值`）。
+     *
+     * @param out   长度 4 的马点/头名赏数组（**会被修改**），下标 = 名次
+     * @param i     同分区间起点（名次）
+     * @param j     同分区间终点（名次）
+     * @param total 该区间待拆的总量（分）
+     */
+    private static void splitPoint(double[] out, int i, int j, double total) {
+        final int n = j - i + 1;
+        final int tenths = (int) Math.round(total * 10);      // 换成 0.1 分单位
+        final int each = Math.floorDiv(tenths, n);
+        for (int k = i; k <= j; k++) {
+            out[k] = each / 10.0;
+        }
+        out[i] += (tenths - each * n) / 10.0;                 // 尾数全给更接近起家者
     }
 }

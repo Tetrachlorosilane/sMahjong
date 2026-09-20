@@ -625,6 +625,9 @@ M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文�
   "west_extension": false,   // 西入
   "kuikae": true,            // 禁止食替
   "pao": true,               // 包牌
+  "koyaku": false,           // **古役**开关：燕返 / 杠振 / 十二落抬 / 五门齐 / 三连刻 / 一色三顺 /
+                             //   人和 / 大车轮 / 大七星 / 石上三年 / 一筒摸月 / 九筒捞鱼
+                             //   （三套预设都是 false；打开后按 `docs/日本麻将.md` §古役 计番）
   "pao_four_kan": true,      // 四杠子包牌（只有 M.League 有）
   "pao_covers_all": false,   // 包牌是否承担"复合后的全部役满得点"（《天凤》= true；
                              //   M.League/《雀魂》只包被包的那一役）

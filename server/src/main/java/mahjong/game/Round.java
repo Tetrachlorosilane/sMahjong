@@ -217,9 +217,10 @@ public final class Round {
                     // 这里只把它当作「本次摸到的牌」交给后续判定。
                     drawn = openingTile;
                 } else if (isRinshan) {
-                    if (wall.rinshanLeft() <= 0) {
-                        return abort("四杠散了");
-                    }
+                    // ⚠ 这里原来是「岭上余 0 → abort("四杠散了")」—— 那是**死代码且理由码不对**：
+                    //   能不能摸岭上由 `canKan()` 的四个闸门先判（rinshanLeft>0 && kanCount<4），
+                    //   真到了四杠散了也是"杠之后那张牌落地且没人和"时判（见 fourKanAbortNow），
+                    //   跟"岭上没了"不是一回事。留着它只会让后来人以为还有第二条流局判据（AUDIT S-58）。
                     drawn = wall.drawRinshan();
                 } else {
                     if (wall.tilesLeft() <= 0) {
@@ -358,6 +359,14 @@ public final class Round {
                 // `declareRiichi` = 被荣和的这张就是**本次**宣言的立直牌 → 燕返（见 agariRon）
                 return agariRon(cl.multiRon, turn, discardId, false, declareRiichi);
             }
+            // 四杠散了：**成立即流局**，而且必须在"鸣牌落地"**之前**判
+            //（旧实现把它放在 `cl == null` 分支里 → 第 4 次杠的岭上舍张被吃/碰时会先把
+            //  鸣牌广播 + 移牌落地、再流局，客户端/回放看到的是"碰完立刻流局"；AUDIT S-58）。
+            // 三种豁免（第 4 次杠后岭上开花 / 被抢杠 / 岭上牌放铳）由**和了路径先 return** 天然满足，
+            // 所以这里只可能落在"那张牌已经落地、且没人因它和"的时候 —— 见 fourKanAbortNow()。
+            if (fourKanAbortNow()) {
+                return abort("四杠散了");
+            }
             if (cl == null) {
                 if (rules.fourRiichiAbort && riichi[0] && riichi[1] && riichi[2] && riichi[3]) {
                     return abort("四家立直");
@@ -371,9 +380,6 @@ public final class Round {
                             && Tiles.kind(discards[3].get(0)) == k0) {
                         return abort("四风连打");
                     }
-                }
-                if (fourKanAbortNow()) {
-                    return abort("四杠散了");
                 }
             }
 
@@ -1375,11 +1381,13 @@ public final class Round {
         kanByPlayer[seat]++;
         wall.onKan();
         kanJustHappened = true;
-        clearIppatsu();
         sendMeld(seat, m, -1);
         // 抢杠：**先判抢杠，杠成立之后才翻杠宝牌**。
         // ⚠ 顺序反了会算错分：被抢杠时这次杠并没有成立，对应的宝牌指示牌不能翻开
         //   （docs/日本麻将.md §宝牌：加杠被抢和时，这次杠的宝牌指示牌不翻开）。
+        // ⚠ 而**一发**也必须等到"杠真的成立"再打断：文档 §一发 L901「吃、碰、杠（包括暗杠）
+        //   都会打断一发。**抢杠发生在加杠成立之前，可以与一发复合**」——
+        //   旧实现先 `clearIppatsu()` 再判抢杠，于是抢杠白丢一发（少 1 番；AUDIT S-57①）。
         List<Integer> ron = new ArrayList<>();
         for (int d = 1; d < 4; d++) {
             int s = (seat + d) % 4;
@@ -1392,8 +1400,13 @@ public final class Round {
             }
         }
         if (!ron.isEmpty()) {
+            // 多家抢杠同样受**头跳**约束（文档 §头跳：头跳 / 多家和了同样适用于抢杠；AUDIT S-57②）
+            if (rules.headBump && ron.size() > 1) {
+                ron = new ArrayList<>(ron.subList(0, 1));
+            }
             return agariRon(ron, seat, addId, true, false);   // 抢杠：不是燕返
         }
+        clearIppatsu();                  // 杠真的成立了，这才打断一发
         revealKanDora();
         return null;
     }
@@ -2501,7 +2514,7 @@ public final class Round {
                 applyDelta(r, d);
             }
             r.sticksLeft = nagashi.isEmpty() ? sticks : 0;
-            r.dealerRenchan = RoundScoring.nagashiBy(dealer, nagashi);
+            r.dealerRenchan = RoundScoring.nagashiBy(dealer, tenpai);
             table.broadcast(Json.obj(
                     "ev", "ryuukyoku",
                     "type", "exhaustive",
@@ -2561,6 +2574,18 @@ public final class Round {
             return "ron:" + c.multiRon;
         }
         return c.type + ":" + c.seat;
+    }
+
+    /**
+     * 自测钩子：直接跑一次自家回合的暗杠 / 加杠（**含抢杠判定**）。
+     *
+     * <p>抢杠那条路只有"手里有第 4 张 + 有人正好听那张"才会走到，靠整场模拟撞太慢；
+     * 这里把 {@code turnKan} 暴露出来，测试摆好牌就能问。返回非 {@code null} 表示本局以抢杠结束。
+     *
+     * @param kindStr {@code "ankan"} / {@code "kakan"}
+     */
+    public Result debugTurnKan(int seat, String kindStr, String tileStr) {
+        return turnKan(seat, Json.obj("kind", kindStr, "tile", tileStr), -1);
     }
 
     /**

@@ -61,6 +61,7 @@ public final class SelfTest {
         multiRonTests();
         tsubameTests();
         endGameTests();
+        koyakuAndChankanTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -1555,6 +1556,184 @@ public final class SelfTest {
                 Json.intList(RoundScoring.endGameSticks(before, sticksOnTable[0])).toString());
     }
 
+    // ---------------------------------------- 古役 / 役满复合 / 抢杠（下一轮审计）
+
+    /**
+     * 下一轮审计里的四项（AUDIT S-57 / S-59 / S-60 / S-61）。都只在 `rules.koyaku` 打开时可见
+     * （抢杠除外，它是一般役），所以每条断言都**显式打开古役**再验。
+     */
+    private static void koyakuAndChankanTests() {
+        final Rules koy = preset("mleague");
+        koy.koyaku = true;
+        final Rules koyD = preset("majsoul");          // doubleYakuman = true
+        koyD.koyaku = true;
+        final int k5p = Tiles.parseKind("5p");
+
+        // ---------- S-59：不同役满可以复合 → 天和 / 地和 + 国士十三面 = 2 倍 ----------
+        final String kokushi14 = "1m9m1p9p1s9s1z1z2z3z4z5z6z7z";
+        Evaluator.HandScore kTenhou = evalKoyaku(kokushi14, new ArrayList<>(), "1z", true, koy, "tenhou");
+        check("国士十三面成立", hasYaku(kTenhou, "国士无双十三面"));
+        check("天和与国士**复合**（旧实现白丢天和）", hasYaku(kTenhou, "天和"));
+        eq("天和 + 国士十三面 = 2 倍役满", kTenhou.yakuman, 2);
+        Evaluator.HandScore kChiihou = evalKoyaku(kokushi14, new ArrayList<>(), "1z", false, koy, "chiihou");
+        check("地和与国士复合", hasYaku(kChiihou, "地和"));
+        eq("地和 + 国士十三面 = 2 倍役满", kChiihou.yakuman, 2);
+        // 对照：没有天和/地和的同一手牌仍然只 1 倍（证明上面多出来的那 1 倍来自复合）
+        eq("同一手牌无天和/地和 → 只 1 倍",
+                evalKoyaku(kokushi14, new ArrayList<>(), "1z", true, koy, "").yakuman, 1);
+
+        // ---------- S-60①：一色三顺**副露也成立**（副露减一番）----------
+        List<Meld> issMelds = new ArrayList<>();
+        issMelds.add(chi("2m", "3m", "4m"));
+        Evaluator.HandScore issOpen = evalKoyaku("2m3m4m2m3m4m6m7m8m8s8s", issMelds, "4m", false, koy, "");
+        check("一色三顺：副露型也成立（旧实现整块在 menzen 里 → 永远拿不到）",
+                hasYaku(issOpen, "一色三顺"));
+        eq("一色三顺：副露减一番 → 2 番", reportedHan(issOpen, "一色三顺"), 2);
+        check("一色三顺成立时不计一杯口（上位替代）", !hasYaku(issOpen, "一杯口"));
+        Evaluator.HandScore issMenzen = evalKoyaku("2m3m4m2m3m4m2m3m4m6m7m8m8s8s", new ArrayList<>(),
+                "8s", false, koy, "");
+        // 门前时同一手牌还能读成「三连刻 + 三暗刻」= 4 番 > 一色三顺 3 番 ——
+        // 文档 §古役 明确要求**门前时用高点法取高者**，所以这里不该出现一色三顺。
+        check("门前同一手牌由高点法取更高的一套（三连刻 + 三暗刻 > 一色三顺）",
+                hasYaku(issMenzen, "三连刻") && !hasYaku(issMenzen, "一色三顺"));
+        eq("门前那套里的三连刻 2 番", reportedHan(issMenzen, "三连刻"), 2);
+
+        // ---------- S-60②：十二落抬含**明杠**、不含**暗杠** ----------
+        List<Meld> fourOpen = new ArrayList<>();
+        fourOpen.add(chi("1m", "2m", "3m"));
+        fourOpen.add(chi("4m", "5m", "6m"));
+        fourOpen.add(pon("7z"));
+        fourOpen.add(kan("daiminkan", "9s"));           // 明杠 → 算
+        check("十二落抬：4 副明面子（含明杠）单骑 → 成立",
+                hasYaku(evalKoyaku("5s5s", fourOpen, "5s", false, koy, ""), "十二落抬"));
+        List<Meld> withAnkan = new ArrayList<>(fourOpen);
+        withAnkan.set(3, kan("ankan", "9s"));           // 换成暗杠 → 不算
+        check("十二落抬：含**暗杠** → 不成立",
+                !hasYaku(evalKoyaku("5s5s", withAnkan, "5s", false, koy, ""), "十二落抬"));
+
+        // ---------- S-61①：一筒摸月 / 九筒捞鱼**取代**海底摸月 / 河底捞鱼 ----------
+        List<Meld> twoChi = new ArrayList<>();
+        twoChi.add(chi("2m", "3m", "4m"));
+        twoChi.add(chi("5m", "6m", "7m"));
+        Evaluator.HandScore iipin = evalKoyaku("2p3p4p5p6p7p1p1p", twoChi, "1p", true, koy, "haitei");
+        check("一筒摸月成立", hasYaku(iipin, "一筒摸月"));
+        check("一筒摸月**取代**海底摸月（旧实现两者都加 → 6 番跳满）",
+                !hasYaku(iipin, "海底摸月"));
+        eq("一筒摸月这一手只有它一个役 → 5 番", iipin.han, 5);
+        eq("原文「实际上计 5 番，故为满贯」", iipin.base, 2000);
+        Rules noKoy = preset("mleague");
+        Evaluator.HandScore haiteiOnly = evalKoyaku("2p3p4p5p6p7p1p1p", twoChi, "1p", true, noKoy, "haitei");
+        check("关掉古役 → 只有海底摸月 1 番",
+                hasYaku(haiteiOnly, "海底摸月") && !hasYaku(haiteiOnly, "一筒摸月"));
+        Evaluator.HandScore chuupin = evalKoyaku("2p3p4p5p6p7p9p9p", twoChi, "9p", false, koy, "houtei");
+        check("九筒捞鱼取代河底捞鱼",
+                hasYaku(chuupin, "九筒捞鱼") && !hasYaku(chuupin, "河底捞鱼"));
+        eq("九筒捞鱼也是 5 番", reportedHan(chuupin, "九筒捞鱼"), 5);
+
+        // ---------- S-61②：大七星**取代**字一色（不是叠加成 3 倍）----------
+        final String daichi14 = "1z1z2z2z3z3z4z4z5z5z6z6z7z7z";
+        Evaluator.HandScore daichi = evalKoyaku(daichi14, new ArrayList<>(), "7z", false, koyD, "");
+        check("大七星成立", hasYaku(daichi, "大七星"));
+        check("大七星取代字一色（旧实现两者都加 → 3 倍役满）", !hasYaku(daichi, "字一色"));
+        eq("大七星（加倍役满规则）= 2 倍役满", daichi.yakuman, 2);
+        Rules noKoy2 = preset("majsoul");
+        Evaluator.HandScore ziisou = evalKoyaku(daichi14, new ArrayList<>(), "7z", false, noKoy2, "");
+        check("关掉古役 → 只成立字一色（1 倍）",
+                hasYaku(ziisou, "字一色") && !hasYaku(ziisou, "大七星"));
+        eq("字一色 1 倍役满", ziisou.yakuman, 1);
+
+        // ---------- S-57①：抢杠发生在加杠成立之前，**可以与一发复合** ----------
+        List<Map<String, Object>> ckAgari = new ArrayList<>();
+        Round ck = newRound();
+        ck.melds[0].add(pon("5p"));                              // 座位 0 碰过 5p
+        ck.hand[0].add(Tiles.id(k5p, 3));                        // 手里第 4 张 → 加杠
+        ck.hand[1].addAll(parse("1m2m3m4m5m6m7m8m9m1p2p3p5p"));  // 立直听 5p（4 顺子 + 5p 单骑）
+        ck.riichi[1] = true;
+        ck.ippatsu[1] = true;
+        ck.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                ckAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result ckr = ck.debugTurnKan(0, "kakan", "5p");
+        check("抢杠成立（加杠被荣和）", ckr != null && ckr.agari && ckr.winner == 1);
+        eq("抢杠发出一条 agari 报文", ckAgari.size(), 1);
+        check("抢杠与一发**复合**（旧实现先 clearIppatsu → 白丢 1 番）："
+                        + (ckAgari.isEmpty() ? "<无报文>" : agariCodes(ckAgari.get(0))),
+                !ckAgari.isEmpty() && agariCodes(ckAgari.get(0)).contains("ippatsu"));
+
+        // ---------- S-57②：多家抢杠同样受**头跳**约束 ----------
+        List<Map<String, Object>> mlAgari = new ArrayList<>();
+        Round mlCk = newRound(preset("mleague"));                // headBump = true
+        mlCk.melds[0].add(pon("5p"));
+        mlCk.hand[0].add(Tiles.id(k5p, 3));
+        mlCk.hand[1].addAll(parse("2z2z2z1m1m1m2m2m2m3m3m3m5p")); // 南（役牌）
+        mlCk.hand[2].addAll(parse("3z3z3z4m4m4m5m5m5m6m6m6m5p")); // 西（役牌）
+        mlCk.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                mlAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result mlCkr = mlCk.debugTurnKan(0, "kakan", "5p");
+        check("多家抢杠：头跳只认最近那家（旧实现两家都结算）",
+                mlCkr != null && mlCkr.agari && mlAgari.size() == 1 && mlCkr.winner == 1);
+        // 《雀魂》无头跳 → 两家都能抢杠
+        List<Map<String, Object>> msAgari = new ArrayList<>();
+        Round msCk = newRound(preset("majsoul"));
+        msCk.melds[0].add(pon("5p"));
+        msCk.hand[0].add(Tiles.id(k5p, 3));
+        msCk.hand[1].addAll(parse("2z2z2z1m1m1m2m2m2m3m3m3m5p"));
+        msCk.hand[2].addAll(parse("3z3z3z4m4m4m5m5m5m6m6m6m5p"));
+        msCk.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                msAgari.add(new HashMap<>(ev));
+            }
+        };
+        mahjong.game.Round.Result msCkr = msCk.debugTurnKan(0, "kakan", "5p");
+        check("多家抢杠：《雀魂》无头跳 → 两家都成立",
+                msCkr != null && msCkr.agari && msAgari.size() == 2);
+    }
+
+    /** 一条 `agari` 报文里的役种码（用 `,` 连起来，便于 `contains` 判据）。 */
+    private static String agariCodes(Map<String, Object> ev) {
+        StringBuilder sb = new StringBuilder();
+        for (Object o : Json.list(ev, "yaku")) {
+            Map<String, Object> y = Json.asObj(o);
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(Json.str(y, "code", "?"));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 古役 / 役满复合用的评价：与 `evalCtx` 同一套构造，额外给出**副露**与
+     * 海底 / 河底 / 天和 / 地和这些"偶然役"开关（`flags` 里出现哪个词就开哪个）。
+     *
+     * @param melds 空 = 门前（`ctx.menzen = true`）
+     */
+    private static Evaluator.HandScore evalKoyaku(String hand, List<Meld> melds, String win,
+                                                  boolean tsumo, Rules rules, String flags) {
+        int[] c = counts(hand);
+        WinContext ctx = new WinContext();
+        ctx.rules = rules;
+        ctx.seat = 1;
+        ctx.dealerSeat = 0;
+        ctx.roundWind = 27;
+        ctx.tsumo = tsumo;
+        ctx.menzen = melds.isEmpty();
+        ctx.winKind = Tiles.parseKind(win);
+        ctx.doraIndicators = new ArrayList<>();
+        ctx.uraIndicators = new ArrayList<>();
+        ctx.allTileIds = parse(hand);
+        ctx.haitei = flags.contains("haitei");
+        ctx.houtei = flags.contains("houtei");
+        ctx.tenhou = flags.contains("tenhou");
+        ctx.chiihou = flags.contains("chiihou");
+        return Evaluator.evaluate(ctx, c, melds, ctx.winKind);
+    }
+
     // ------------------------------------------------ 被取消询问的回包必须摘掉
     // ------------------------------------------------ 四杠散了 / 赤宝牌张数
     /**
@@ -1686,7 +1865,7 @@ public final class SelfTest {
         eq("《雀魂》精算 4 位", round1(msS.point[3]), -42.2);
         eq("《雀魂》无头名赏", round1(msS.oka[0]), 0.0);
 
-        // ── 同点：M.League 平分对应名次的马点与头名赏；《天凤》按起家座次定名次
+        // ── 同点：M.League 拆分对应名次的马点与头名赏，且**尾数归更接近起家者**、并列的**同顺位**
         int[] tie = {30000, 30000, 25000, 15000};
         RoundScoring.Settlement tieMl = RoundScoring.settle(tie, ml);
         eq("M.League 同点：1 位马点平分 (30+10)/2", round1(tieMl.uma[0]), 20.0);
@@ -1694,10 +1873,57 @@ public final class SelfTest {
         eq("M.League 同点：两个头名同分", round1(tieMl.point[0]), 30.0);
         eq("M.League 同点：另一个头名同分", round1(tieMl.point[1]), 30.0);
         eq("M.League 同点：4 位照自己那套马点", round1(tieMl.point[3]), -45.0);
+        // 2 人同分 → **同顺位**（1 位），两人的名次号一样
+        eq("M.League 同点：两家的名次都是 1 位", tieMl.rank[0] + "/" + tieMl.rank[1], "0/0");
+        eq("M.League 同点：第 3 家是 3 位", tieMl.rank[2], 2);
         RoundScoring.Settlement tieTh = RoundScoring.settle(tie, th);
         eq("《天凤》同点：座次靠前者吃掉 1 位加点", round1(tieTh.point[0]), 40.0);
         eq("《天凤》同点：另一家只是 2 位", round1(tieTh.point[1]), 10.0);
         eq("《天凤》同点：4 位照自己那套马点", round1(tieTh.point[3]), -35.0);
+        eq("《天凤》同点：名次严格 1/2（同分也按起家座次拆开）",
+                tieTh.rank[0] + "/" + tieTh.rank[1], "0/1");
+
+        // ── 3 人同分：**尾数归更接近起家者**（M.League 原文）──────────────
+        // 马点 30+10−10 = 30 → 10.0/10.0/10.0（正好整除，没有尾数）；
+        // 头名赏 20+0+0 = 20 → 20/3 = 6.66… → 以 **0.1 分**为单位拆：
+        //   6.6/6.6/6.6 + 尾数 0.2 全给**更接近起家**的那家 → 6.8/6.6/6.6。
+        int[] tie3 = {30000, 30000, 30000, 10000};
+        RoundScoring.Settlement t3 = RoundScoring.settle(tie3, ml);
+        eq("3 人同分：马点平分 (30+10−10)/3 = 10", round1(t3.uma[0]), 10.0);
+        eq("3 人同分：头名赏尾数归更接近起家者 → 6.8", round1(t3.oka[0]), 6.8);
+        eq("3 人同分：第二家 6.6", round1(t3.oka[1]), 6.6);
+        eq("3 人同分：第三家 6.6", round1(t3.oka[2]), 6.6);
+        eq("3 人同分：三家的头名赏总额没变（还是 20）",
+                round1(t3.oka[0] + t3.oka[1] + t3.oka[2]), 20.0);
+        eq("3 人同分：精算点数也按同一顺序（16.8 / 16.6 / 16.6）",
+                round1(t3.point[0]) + "/" + round1(t3.point[1]) + "/" + round1(t3.point[2]),
+                "16.8/16.6/16.6");
+        eq("3 人同分：三人**同顺位**（都是 1 位）",
+                t3.rank[0] + "/" + t3.rank[1] + "/" + t3.rank[2], "0/0/0");
+        eq("3 人同分：第 4 家 4 位", t3.rank[3], 3);
+        // 尾数判据不依赖"座次 0 一定并列"：让 1/2/3 号座并列 1 位（座次 0 垫底）。
+        // ⚠ `Settlement.uma/oka` 是**按名次**索引的（不是按座位 —— AUDIT S-64 把这条 javadoc
+        //   记成过"按座位"），所以这里看 `oka[0..2]`；要看"哪一家"用 `order[名次]`。
+        int[] tie123 = {10000, 30000, 30000, 30000};
+        RoundScoring.Settlement t123 = RoundScoring.settle(tie123, ml);
+        eq("3 人并列 1 位：名次 0 是座次 1（更接近起家）", t123.order[0], 1);
+        eq("尾数给更接近起家的那家 → 名次 0 拿 6.8", round1(t123.oka[0]), 6.8);
+        eq("并列的另两家各 6.6", round1(t123.oka[1]) + "/" + round1(t123.oka[2]), "6.6/6.6");
+        eq("垫底的座次 0（名次 3）不拿头名赏", round1(t123.oka[3]), 0.0);
+        // 负数（3/4 位）也要"尾数归更接近起家者、总额一分不差"：座次 1/2/3 并列末三位时
+        // 马点 = 10 + (−10) + (−31) = −31 → −31/3 = −10.33… → 以 0.1 分为单位：
+        //   −10.4 / −10.4 / −10.4，尾数 +0.2 给更接近起家者 → −10.2 / −10.4 / −10.4。
+        Rules odd = preset("mleague");
+        odd.uma = new int[]{30, 10, -10, -31};
+        int[] tieLow = {30000, 10000, 10000, 10000};
+        RoundScoring.Settlement tlow = RoundScoring.settle(tieLow, odd);
+        eq("负数顺位点：更接近起家者拿得更多（−10.2 而非 −10.4）", round1(tlow.uma[1]), -10.2);
+        eq("负数顺位点：另两家各 −10.4",
+                round1(tlow.uma[2]) + "/" + round1(tlow.uma[3]), "-10.4/-10.4");
+        eq("负数顺位点：总额仍是 −31（一分不差）",
+                round1(tlow.uma[1] + tlow.uma[2] + tlow.uma[3]), -31.0);
+        eq("负数顺位点：并列三家同顺位（名次 1）",
+                tlow.rank[1] + "/" + tlow.rank[2] + "/" + tlow.rank[3], "1/1/1");
 
         // ── 立直后暗杠：M.League 追加「面子构成不变」（用文档那 4 个例子里可判定的 2 个）
         //   ① 8p 与顺子无关（同花色 ±2 内没有牌）→ 两种规则都可以
@@ -2451,9 +2677,16 @@ public final class SelfTest {
         check("多家和了不含庄家 → 轮庄",
                 !RoundScoring.winBy(1, Arrays.asList(3, 2)));
 
-        // 流局满贯：成立者含庄家才连庄
-        check("流局满贯含庄家 → 连庄", RoundScoring.nagashiBy(0, Arrays.asList(0)));
-        check("流局满贯不含庄家 → 轮庄", !RoundScoring.nagashiBy(0, Arrays.asList(1, 3)));
+        // 流局满贯的连庄：**按庄家是否听牌**（文档 L1139），不是"成立者里有没有庄家"。
+        // ⚠ 这两条断言原来是按错的行为写的（`nagashiBy(dealer, 成立者列表)`），
+        //   AUDIT S-55 修行为时一并改过来 —— 这正是"断言把 bug 写成规格"的又一例。
+        boolean[] ngTp = {true, false, false, false};
+        boolean[] ngNoten = {false, true, true, true};
+        check("流局满贯：庄家成立且听牌 → 连庄", RoundScoring.nagashiBy(0, ngTp));
+        check("流局满贯：庄家成立但**不听** → 轮庄（旧实现会连庄）",
+                !RoundScoring.nagashiBy(0, ngNoten));
+        check("流局满贯：庄家没成立但听牌 → 照样连庄（旧实现会轮庄）",
+                RoundScoring.nagashiBy(0, new boolean[]{true, false, false, false}));
 
         // 荒牌流局：庄家听牌才连庄
         boolean[] tp = {true, false, false, false};

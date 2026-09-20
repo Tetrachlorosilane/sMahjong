@@ -163,6 +163,18 @@ public final class Evaluator {
 
         // ---------------- 役满判定
         List<Yaku> yk = new ArrayList<>();
+        // 天和 / 地和 / 人和 是**独立的役满**，与手牌形无关 —— 所以「国士 + 天和」是
+        // **2 倍役满**（文档 §役满 L1239「不同的役满仍可以复合」）。
+        // ⚠ 旧实现把它们写在 `else`（非国士）分支里，于是天和国士**白丢一个役满**（AUDIT S-59）。
+        if (ctx.tenhou) {
+            yk.add(Yaku.yakuman("天和", 1));
+        }
+        if (ctx.chiihou) {
+            yk.add(Yaku.yakuman("地和", 1));
+        }
+        if (ctx.renhou && "yakuman".equals(r.renhou)) {
+            yk.add(Yaku.yakuman("人和", 1));
+        }
         if (f.type == Agari.TYPE_KOKUSHI) {
             // 「13 面」是一个**独立的役**（高目取代国士无双），加不加倍是取值问题：
             // 《雀魂》计 2 倍，《天凤》与 M.League 计 1 倍（docs/日本麻将.md §两倍役满）。
@@ -174,15 +186,6 @@ public final class Evaluator {
                 yk.add(Yaku.yakuman("国士无双", 1));
             }
         } else {
-            if (ctx.tenhou) {
-                yk.add(Yaku.yakuman("天和", 1));
-            }
-            if (ctx.chiihou) {
-                yk.add(Yaku.yakuman("地和", 1));
-            }
-            if (ctx.renhou && "yakuman".equals(r.renhou)) {
-                yk.add(Yaku.yakuman("人和", 1));
-            }
             int windTriplets = 0;
             int dragonTriplets = 0;
             int quads = 0;
@@ -219,7 +222,11 @@ public final class Evaluator {
             } else if (windTriplets == 3 && f.pair >= 0 && Tiles.isWind(f.pair)) {
                 yk.add(Yaku.yakuman("小四喜", 1));
             }
-            if (allHonor) {
+            // 大七星（古役）= **只有字牌的七对子**（文档 §两倍役满）：「在不承认古役的规则下
+            // 只成立字一色，为役满」→ 成立时**取代**字一色，不再叠加
+            //（旧实现两者都加 → 3 倍役满，与原文的"两倍役满"矛盾，AUDIT S-61）。
+            final boolean daichishin = r.koyaku && f.type == Agari.TYPE_CHIITOITSU && allHonor;
+            if (allHonor && !daichishin) {
                 yk.add(Yaku.yakuman("字一色", 1));
             }
             if (allGreen) {
@@ -318,10 +325,18 @@ public final class Evaluator {
         if (ctx.rinshan) {
             ys.add(Yaku.normal("岭上开花", 1));
         }
-        if (ctx.haitei && ctx.tsumo) {
+        // 一筒摸月 / 九筒捞鱼 是**海底摸月 / 河底捞鱼 的同一次和牌加上特定牌**（文档 §古役：
+        // 「指海底摸月时海底牌为 1p」「指河底捞鱼时河底牌为 9p」），原文明确
+        // 「一筒摸月、九筒捞鱼**实际上计 5 番**，故为满贯」—— 所以它们**取代**那 1 番，
+        // 不是叠加（叠加会变成 6 番跳满，与"5 番满贯"矛盾，AUDIT S-61）。
+        final boolean iipin = r.koyaku && ctx.haitei && ctx.tsumo
+                && ctx.winKind == Tiles.parseKind("1p");
+        final boolean chuupin = r.koyaku && ctx.houtei && !ctx.tsumo
+                && ctx.winKind == Tiles.parseKind("9p");
+        if (ctx.haitei && ctx.tsumo && !iipin) {
             ys.add(Yaku.normal("海底摸月", 1));
         }
-        if (ctx.houtei && !ctx.tsumo) {
+        if (ctx.houtei && !ctx.tsumo && !chuupin) {
             ys.add(Yaku.normal("河底捞鱼", 1));
         }
         if (r.koyaku) {
@@ -391,8 +406,9 @@ public final class Evaluator {
                 && f.waitType == Agari.WAIT_RYANMEN) {
             ys.add(Yaku.normal("平和", 1));
         }
-        // 一杯口 / 二杯口 / 一色三顺
-        if (menzen && f.type == Agari.TYPE_STANDARD) {
+        // 一杯口 / 二杯口（**门前役**）与一色三顺（**副露也成立**：文档 §古役「副露减一番」，
+        // 即 3−kuisagari = 2 番；旧实现整块包在 `menzen` 里 → 副露型永远拿不到，AUDIT S-60）
+        if (f.type == Agari.TYPE_STANDARD) {
             Map<Integer, Integer> runGroups = new HashMap<>();
             for (int[] rr : runList) {
                 int key = rr[0] * 10 + rr[1];
@@ -409,10 +425,11 @@ public final class Evaluator {
                 }
             }
             if (r.koyaku && triple) {
+                // 一色三顺是一杯口的上位替代（成立时不计一杯口 / 二杯口）
                 ys.add(Yaku.normal("一色三顺", 3 - kuisagari));
-            } else if (dupGroups >= 2) {
+            } else if (menzen && dupGroups >= 2) {
                 ys.add(Yaku.normal("二杯口", 3));
-            } else if (dupGroups == 1) {
+            } else if (menzen && dupGroups == 1) {
                 ys.add(Yaku.normal("一杯口", 1));
             }
         }
@@ -517,7 +534,12 @@ public final class Evaluator {
             }
             boolean allOpenRuns = true;
             for (int i = 0; i < f.nSets; i++) {
-                if (!f.setFromMeld[i] || f.setType[i] == Agari.SET_QUAD) {
+                // 十二落抬：4 副**明**面子 —— 顺子 / 明刻 / **明杠**都算，**暗杠不算**
+                //（文档 §古役：「已经副露了 4 个顺子或明刻子（**包括明杠子，不包括暗杠子**）」）。
+                // `setFromMeld` = 来自副露，`setConcealed` = 该面子是暗的（暗刻 / 暗杠）
+                // →「来自副露**且**是明的」正好把暗杠排除、把大明杠放行。
+                // 旧实现用 `setType == QUAD` 一律排除 → 明杠被误判（AUDIT S-60）。
+                if (!f.setFromMeld[i] || f.setConcealed[i]) {
                     allOpenRuns = false;
                     break;
                 }
@@ -525,10 +547,10 @@ public final class Evaluator {
             if (allOpenRuns && f.nSets == 4 && f.winSet < 0) {
                 ys.add(Yaku.normal("十二落抬", 1));
             }
-            if (ctx.haitei && ctx.winKind == Tiles.parseKind("1p")) {
+            if (iipin) {
                 ys.add(Yaku.normal("一筒摸月", 5));
             }
-            if (ctx.houtei && ctx.winKind == Tiles.parseKind("9p")) {
+            if (chuupin) {
                 ys.add(Yaku.normal("九筒捞鱼", 5));
             }
         }

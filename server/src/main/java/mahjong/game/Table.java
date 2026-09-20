@@ -1132,7 +1132,10 @@ public final class Table implements Runnable {
                     "score", scores[s],
                     "uma", Math.round(st.uma[i] * 10) / 10.0,
                     "oka", Math.round(st.oka[i] * 10) / 10.0,
-                    "rank", i + 1,
+                    // ⚠ 用 `st.rank`（= M.League 同分时并列那几家**同顺位**）而不是下标 i：
+                    //   同一名次号出现两次是对的（原文「他们三人仍然同顺位」），
+                    //   开不开 `tie_split_point` 由 `settle` 决定（《天凤》仍是严格 1/2/3/4）。
+                    "rank", st.rank[s] + 1,
                     "point", Math.round(st.point[s] * 10) / 10.0));
         }
         List<Object> ranking = new ArrayList<>();
