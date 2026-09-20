@@ -357,13 +357,17 @@
  "limit":"mangan","base_points":2000,
  "score_delta":[8000,-2000,-2000,-2000],
  "scores_after":[33000,23000,23000,23000],
- "pao":{"seat":-1},
+ "pao":{"seat":-1,"seats":[]},
  "riichi_void":-1,
  "ura_revealed":true}
 ```
 
 - `from = -1` 表示自摸。`limit` ∈ `{"", "mangan","haneman","baiman","sanbaiman","kazoe_yakuman","yakuman"}`
   （空串表示普通点数；役满不区分倍数，倍数看 `yakuman` 字段 —— 所以 `两倍役满` 也发 `"yakuman"`）。
+- **`pao`**（包牌）：`seats` 是**全部**包牌责任者，按责任副露成立的先后（无包牌 = `[]`）；
+  `seat` 是其中的**第一位**（无包牌 = `-1`）。⚠ **一手牌可以有两位责任者**
+  （大三元由 A 的舍张鸣成、四杠子由 B 的舍张大明杠完成），所以权威读法是 `seats`，
+  `seat` 只是给老客户端留的兼容字段。判据与分摊见 `docs/DESIGN.md`「包牌」。
 - **`riichi_void`**（燕返）：这一家刚宣告的立直被判为**不成立**（`-1` = 无），
   客户端据此**清掉那一家的立直标记与一根供託**；退回的 1000 点已经算在 `scores_after` 里。
   判据是「荣和的正是**首次放置**的立直宣言牌」（`docs/日本麻将.md` §立直 L893 / L1291-1293：

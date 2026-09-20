@@ -1,5 +1,7 @@
 package mahjong.rules;
 
+import java.util.List;
+
 /** 授受点数计算。 */
 public final class Payments {
 
@@ -24,6 +26,35 @@ public final class Payments {
     }
 
     /**
+     * 一条**包牌责任**（责任支付）：座位 {@code seat} 包了某一役满，承担基本点 {@code base}。
+     *
+     * <p>为什么是**列表**而不是单个座位：一手牌可以同时成立两个**各有责任者**的役满
+     * （大三元由 A 的舍张鸣成、四杠子由 B 的舍张大明杠完成），这时两人各自承担自己
+     * 造成的那一役（AUDIT S-52；口径与理由见 `docs/DESIGN.md`「包牌」）。
+     * 同一个座位出现在多条里也是合法的（两张舍张各包一个役满），摊派时**按座位累加**。
+     *
+     * <p>列表长度是**有限**的：能被包的役满只有大三元 / 大四喜 / 四杠子三种，
+     * 所以一手牌至多 3 条（实际上至多 2 条 —— 大三元与大四喜要 7 个面子，不可能共存）。
+     */
+    public static final class Pao {
+        public final int seat;
+        public final int base;
+
+        public Pao(int seat, int base) {
+            this.seat = seat;
+            this.base = base;
+        }
+
+        @Override
+        public String toString() {
+            return "pao(" + seat + "," + base + ")";
+        }
+    }
+
+    /** 没有包牌：传它比传 {@code null} 明确（`compute` 也容忍 {@code null}，当空表处理）。 */
+    public static final List<Pao> NO_PAO = List.of();
+
+    /**
      * 计算授受点数。
      *
      * @param score   和牌评价
@@ -33,80 +64,87 @@ public final class Payments {
      * @param honba   本场数
      * @param sticks  立直棒数量
      * @param tsumo   是否自摸
-     * @param paoSeat 包牌者座位（-1 表示无）
-     * @param paoBase 被包牌役满部分的基本点（0 表示全部由 paoSeat 承担外的常规处理）
+     * @param paos    包牌责任列表（空 = 没有包牌；传 {@link #NO_PAO}，也容忍 {@code null}）：
+     *                每条 = (责任者, 该责任者承担的基本点)。空基本点的条目会被忽略，
+     *                责任者是和牌者本人的条目也会被忽略（防御性）。
      */
     public static Result compute(Evaluator.HandScore score, int winner, int loser, int dealer,
-                                 int honba, int sticks, boolean tsumo, int paoSeat, int paoBase) {
+                                 int honba, int sticks, boolean tsumo, List<Pao> paos) {
         Result res = new Result();
-        int totalBase = score.base;
-        if (paoSeat >= 0) {
-            paoBase = Math.min(paoBase, totalBase);
-        } else {
-            paoBase = 0;
+        final int totalBase = score.base;
+        // 归并成"每个包牌者一共包了多少基本点"：同一家可以包两个役满（两张舍张各包一个），
+        // 摊派时就是他那一份之和 —— 与"合成一条"必须**逐位相同**。
+        // `left` 是分给包牌者之后剩下的基本点（≈ 手牌基本点 − Σ 被包役满），
+        // 顺带做了夹取：正常构造下 Σ 被包役满 ≤ 手牌基本点，不为真时按登记顺序削到 0。
+        final int[] paoOf = new int[4];
+        int left = totalBase;
+        if (paos != null) {
+            for (Pao p : paos) {
+                if (p == null || p.seat < 0 || p.seat == winner || p.base <= 0) {
+                    continue;
+                }
+                final int take = Math.min(p.base, left);
+                paoOf[p.seat] += take;
+                left -= take;
+            }
         }
-        int restBase = totalBase - paoBase;
+        final int restBase = left;
+        // 责任者的**出场顺序**（按列表，去重）：本场棒的余数给靠前那位（见下面的注释）
+        final int[] payers = new int[4];
+        int payerCount = 0;
+        for (Pao p : (paos == null ? List.<Pao>of() : paos)) {
+            if (p == null || p.seat < 0 || p.seat == winner || paoOf[p.seat] <= 0) {
+                continue;
+            }
+            boolean seen = false;
+            for (int i = 0; i < payerCount; i++) {
+                if (payers[i] == p.seat) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                payers[payerCount++] = p.seat;
+            }
+        }
         boolean winnerDealer = winner == dealer;
 
         if (tsumo) {
-            // 每个非和牌者的基准份额
+            // 每个非和牌者的基准份额（只含**未被包**的那部分基本点）
             for (int s = 0; s < 4; s++) {
                 if (s == winner) {
                     continue;
                 }
-                boolean isDealerPayer = s == dealer;
-                int mult = isDealerPayer ? 2 : 1;
-                if (winnerDealer) {
-                    mult = 2;
-                }
-                res.delta[s] -= ceil100(mult * restBase);
+                res.delta[s] -= ceil100(tsumoMult(winnerDealer, s, dealer) * restBase);
             }
-            if (paoSeat >= 0 && paoBase > 0) {
-                int paoAmount = 0;
+            // 被包的那一役：由责任者**全额**承担（三家份额都算在他头上），
+            // 所以他还照付自己那份 restBase（下面这轮只加不减之前那轮）
+            for (int i = 0; i < payerCount; i++) {
+                int amount = 0;
                 for (int s = 0; s < 4; s++) {
                     if (s == winner) {
                         continue;
                     }
-                    int mult = winnerDealer ? 2 : (s == dealer ? 2 : 1);
-                    paoAmount += ceil100(mult * paoBase);
+                    amount += ceil100(tsumoMult(winnerDealer, s, dealer) * paoOf[payers[i]]);
                 }
-                res.delta[paoSeat] -= paoAmount;
-            }
-            // 本场棒
-            int honbaPer = 100 * honba;
-            for (int s = 0; s < 4; s++) {
-                if (s != winner) {
-                    res.delta[s] -= honbaPer;
-                }
-            }
-            if (paoSeat >= 0 && honba > 0) {
-                // 包牌者承担全部本场棒：把别人付的还给别人
-                for (int s = 0; s < 4; s++) {
-                    if (s != winner && s != paoSeat) {
-                        res.delta[s] += honbaPer;
-                        res.delta[paoSeat] -= honbaPer;
-                    }
-                }
+                res.delta[payers[i]] -= amount;
             }
         } else {
             int mult = winnerDealer ? 6 : 4;
-            int rest = ceil100(mult * restBase);
-            res.delta[loser] -= rest;
-            if (paoSeat >= 0 && paoBase > 0) {
-                int paoTotal = ceil100(mult * paoBase);
+            res.delta[loser] -= ceil100(mult * restBase);
+            for (int i = 0; i < payerCount; i++) {
+                int paoTotal = ceil100(mult * paoOf[payers[i]]);
                 int half = (paoTotal / 2 / 100) * 100;
-                if (paoSeat == loser) {
+                if (payers[i] == loser) {
                     // 包牌者即放铳者：全额
                     res.delta[loser] -= paoTotal;
                 } else {
-                    res.delta[paoSeat] -= half;
+                    res.delta[payers[i]] -= half;
                     res.delta[loser] -= paoTotal - half;
                 }
             }
-            int honbaPay = 300 * honba;
-            int honbaPayer = (paoSeat >= 0) ? paoSeat : loser;
-            res.delta[honbaPayer] -= honbaPay;
         }
+        honba(res, winner, loser, honba, tsumo, payers, payerCount);
 
         int gain = 0;
         for (int s = 0; s < 4; s++) {
@@ -120,6 +158,56 @@ public final class Payments {
         res.delta[winner] += res.riichiTaken;
         res.winnerGain = gain + res.riichiTaken;
         return res;
+    }
+
+    /** 自摸时该付款者的份额倍数：庄家 2、闲家 1；和牌者是庄家时三家都 2。 */
+    private static int tsumoMult(boolean winnerDealer, int payer, int dealer) {
+        if (winnerDealer) {
+            return 2;
+        }
+        return payer == dealer ? 2 : 1;
+    }
+
+    /**
+     * 本场棒。
+     *
+     * <p>`docs/日本麻将.md` §包牌 L802：「触发包牌规则时，**包牌者需要支付所有的本场棒**
+     * （而不是放铳者）」—— 常规是自摸三家各 100/本场（合计 300）、荣和放铳者 300/本场，
+     * 包牌时这 300/本场**整体**改由包牌者出（和牌者的收入不变，只有"谁出"变了）。
+     *
+     * <p>多个包牌者时按 **100 点为单位**平摊，余数给**列表里靠前**的那位（先成立的责任者）——
+     * 本场棒是 100 的整数倍，而 300 除以 2 不是 100 的倍数，所以必须定一个归属；
+     * 这里与「余数归先成立的责任者」保持同一把尺子。
+     */
+    private static void honba(Result res, int winner, int loser, int honba, boolean tsumo,
+                              int[] payers, int payerCount) {
+        if (honba <= 0) {
+            return;
+        }
+        final int honbaPer = 100 * honba;
+        if (payerCount == 0) {
+            if (tsumo) {
+                for (int s = 0; s < 4; s++) {
+                    if (s != winner) {
+                        res.delta[s] -= honbaPer;
+                    }
+                }
+            } else {
+                res.delta[loser] -= 3 * honbaPer;
+            }
+            return;
+        }
+        int total = 3 * honbaPer;
+        int each = (total / payerCount / 100) * 100;
+        int rem = total - each * payerCount;          // 100 的整数倍
+        for (int i = 0; i < payerCount; i++) {
+            int share = each;
+            if (rem >= 100) {
+                share += 100;
+                rem -= 100;
+            }
+            res.delta[payers[i]] -= share;
+        }
     }
 
     /**

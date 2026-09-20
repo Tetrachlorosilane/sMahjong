@@ -59,7 +59,37 @@ public final class Round {
     public final boolean[] furitenPerm = new boolean[4];
     public final int[] playerDraws = new int[4];
     public final int[] discardsSinceRiichi = new int[4];
-    public final int[] paoSeat = {-1, -1, -1, -1};
+    /**
+     * 一条**包牌责任**：`payer` 打出的牌让本家确定了 `yaku` 这一役满。
+     *
+     * <p>存的是**役种名**而不是"花了多少点"：同一个役的倍数取决于和牌那一刻的规则
+     * （大四喜在《雀魂》是 2 倍、M.League 1 倍），到算分时再按 {@code HandScore} 折算。
+     */
+    public static final class Pao {
+        public final int payer;
+        public final String yaku;
+
+        public Pao(int payer, String yaku) {
+            this.payer = payer;
+            this.yaku = yaku;
+        }
+
+        @Override
+        public String toString() {
+            return yaku + "@" + payer;
+        }
+    }
+
+    /**
+     * 每个座位的**包牌责任列表**（按副露成立的先后）。
+     *
+     * <p>⚠ 这里原来是一个单槽 `int[4] paoSeat`，装不下"两个役满分别由两人包"：
+     * 大三元由 A 的舍张鸣成、四杠子由 B 的舍张大明杠完成时，单槽只会留下**最后那一个**，
+     * 于是把两份责任都算到最后一家头上（AUDIT S-52）。列表是**有限**的 ——
+     * 能被包的役满只有大三元 / 大四喜 / 四杠子三种，实际至多 2 条
+     * （大三元与大四喜要 7 个面子，不可能共存）。
+     */
+    public final List<Pao>[] pao = new List[4];
     public final boolean[] hadDiscardCalled = new boolean[4];
 
     /**
@@ -129,6 +159,7 @@ public final class Round {
             hand[i] = new ArrayList<>();
             melds[i] = new ArrayList<>();
             discards[i] = new ArrayList<>();
+            pao[i] = new ArrayList<>();
             menzen[i] = true;
         }
     }
@@ -2132,12 +2163,12 @@ public final class Round {
         //   大四喜的包牌时，也计入已经公开的暗杠」——已经暗杠的三元牌/风牌算进个数，
         //   但暗杠本身不是"他家的舍牌"，所以它不会成为包牌者（`from < 0` 直接返回）。
         if (Tiles.isDragon(m.baseKind()) && dragons == 3) {
-            paoSeat[seat] = from;
+            addPao(seat, from, "大三元");
         }
         if (Tiles.isWind(m.baseKind()) && winds == 4) {
-            paoSeat[seat] = from;
+            addPao(seat, from, "大四喜");
         }
-        // 四杠子包牌：**只有 M.League** 有，且必须是"由他家的舍牌大明杠完成第 4 个杠"。
+        // 四杠子包牌：**只有 M.League** 有，且必须是"由他家的舍张大明杠完成第 4 个杠"。
         // 所以判据是「这一次副露本身是大明杠」+「含它正好 4 个杠子」。
         if (rules.paoFourKan && m.kind == Meld.Kind.DAIMINKAN) {
             int kans = 0;
@@ -2148,9 +2179,51 @@ public final class Round {
                 }
             }
             if (kans >= 4) {
-                paoSeat[seat] = from;
+                addPao(seat, from, "四杠子");
             }
         }
+    }
+
+    /**
+     * 登记一条包牌责任（**同一个役只登记一次**）。
+     *
+     * <p>幂等是必须的：`updatePao` 的判据是"**此刻**三元/风牌副露数 == 3/4**且**这次
+     * 副露本身是那种牌"，而**加杠**会让计数停在 3/4 —— 真实路径里加杠走 `turnKan`
+     * 不经过这里，但自测钩子与将来的入口不该能重复登记。
+     */
+    private void addPao(int seat, int payer, String yaku) {
+        for (Pao p : pao[seat]) {
+            if (p.yaku.equals(yaku)) {
+                return;
+            }
+        }
+        pao[seat].add(new Pao(payer, yaku));
+    }
+
+    /** 该座位**已登记的包牌责任者**（按成立先后，去重）—— 报文里的 `pao.seats`。 */
+    public List<Integer> paoSeatsOf(int seat) {
+        List<Integer> out = new ArrayList<>();
+        for (Pao p : pao[seat]) {
+            if (!out.contains(p.payer)) {
+                out.add(p.payer);
+            }
+        }
+        return out;
+    }
+
+    /** 第一位包牌者（-1 = 无）—— 报文里的 `pao.seat`（兼容旧客户端）与旧读法。 */
+    public int paoSeatOf(int seat) {
+        List<Integer> all = paoSeatsOf(seat);
+        return all.isEmpty() ? -1 : all.get(0);
+    }
+
+    /** 该座位的包牌责任清单（形如 {@code "大三元@2"}）—— 自检与日志用。 */
+    public List<String> paoDebugLines(int seat) {
+        List<String> out = new ArrayList<>();
+        for (Pao p : pao[seat]) {
+            out.add(p.toString());
+        }
+        return out;
     }
 
     // ================================================================= 和了
@@ -2322,20 +2395,41 @@ public final class Round {
         return ids;
     }
 
-    private int paoBaseFor(int seat, Evaluator.HandScore sc) {
-        if (paoSeat[seat] < 0 || !rules.pao) {
-            return 0;
+    /**
+     * 本手牌里各包牌者各承担多少基本点（结算列表）。
+     *
+     * <p>《天凤》的 `paoCoversAll` 是"包牌涉及**复合后的全部役满得点**"；《雀魂》/ M.League
+     * 只包被包的那一役（`docs/日本麻将.md` §包牌 L812-824）。**多个责任者**时本作口径：
+     * 退回"各包各的" —— 见下面的注释。
+     */
+    private List<Payments.Pao> paoPaysFor(int seat, Evaluator.HandScore sc) {
+        List<Payments.Pao> out = new ArrayList<>();
+        if (!rules.pao || sc == null || pao[seat].isEmpty()) {
+            return out;
         }
-        // 《天凤》：包牌涉及**复合后的全部役满得点**；《雀魂》/ M.League 只包被包的那一役
-        // （docs/日本麻将.md §包牌：M.League「只涉及被包的役满部分」，《天凤》「全部」；
-        //   雀魂的例子也是"只包大四喜部分"，所以它与 M.League 同侧）。
-        if (rules.paoCoversAll) {
-            return Math.max(0, sc.base);
+        // 《天凤》：包牌涉及**复合后的全部役满得点**（包牌者全额承担，其他人一分不付）。
+        // ⚠ 这条只在**一位**责任者时才有意义：有两个责任者时"整手牌"不可能同时归两个人
+        //   —— 那样和牌者会收双份、授受不再守恒。此时退回"各包各的"（每人只为自己造成的
+        //   那一役负责）。这个组合在三套预设里都到不了（《天凤》没有四杠子包牌、
+        //   大三元与大四喜不可能共存），只有自定义规则会碰到，所以口径写在这里与 DESIGN。
+        if (rules.paoCoversAll && paoSeatsOf(seat).size() == 1) {
+            out.add(new Payments.Pao(pao[seat].get(0).payer, Math.max(0, sc.base)));
+            return out;
         }
+        for (Pao p : pao[seat]) {
+            int base = yakumanBaseOf(sc, p.yaku);
+            if (base > 0) {
+                out.add(new Payments.Pao(p.payer, base));
+            }
+        }
+        return out;
+    }
+
+    /** 这一手成立 `yaku` 这一役满时它是多少基本点（0 = 这一手没有这个役满）。 */
+    private static int yakumanBaseOf(Evaluator.HandScore sc, String yaku) {
         int base = 0;
         for (Evaluator.Yaku y : sc.yaku) {
-            if (y.yakuman > 0 && ("大三元".equals(y.name) || "大四喜".equals(y.name)
-                    || "四杠子".equals(y.name))) {
+            if (y.yakuman > 0 && yaku.equals(y.name)) {
                 base += 8000 * y.yakuman;
             }
         }
@@ -2348,14 +2442,13 @@ public final class Round {
         r.winner = seat;
         r.loser = -1;
         r.tsumo = true;
-        int pao = paoSeat[seat];
-        int paoBase = paoBaseFor(seat, sc);
-        Payments.Result pay = Payments.compute(sc, seat, -1, dealer, honba, sticks, true, pao, paoBase);
+        List<Payments.Pao> paos = paoPaysFor(seat, sc);
+        Payments.Result pay = Payments.compute(sc, seat, -1, dealer, honba, sticks, true, paos);
         applyDelta(r, pay.delta);
         r.sticksLeft = 0;
         r.dealerRenchan = RoundScoring.winBy(dealer, seat);
         r.tenpai[seat] = true;
-        sendAgari(seat, -1, true, tileId, sc, pay, pao);
+        sendAgari(seat, -1, true, tileId, sc, pay, paoSeatsOf(seat));
         return r;
     }
 
@@ -2406,15 +2499,15 @@ public final class Round {
         //   `agari` 里带的是 `scores_after`，而边算边发的话第一条报文里的分数**还没有后面
         //   几家的收支**（多家荣和时的"中途快照"，见 AUDIT S-53）：客户端按顺序处理、取最后
         //   一条所以看不出来，但回放 / 重连若取中间那条就是错的账。
-        List<Object[]> settled = new ArrayList<>();      // {winner, HandScore, Payments.Result, pao}
+        List<Object[]> settled = new ArrayList<>();      // {winner, HandScore, Payments.Result, pao seats}
         for (int i = 0; i < winners.size(); i++) {
             int w = winners.get(i);
             Evaluator.HandScore sc = checkWin(w, tileId, false, false, false, chankan, wall.atLastLiveTile());
             if (sc == null) {
                 continue;
             }
-            int pao = paoSeat[w];
-            int paoBase = paoBaseFor(w, sc);
+            List<Integer> paoSeats = paoSeatsOf(w);
+            List<Payments.Pao> paos = paoPaysFor(w, sc);
             int useSticks = (i == 0) ? sticks : 0;
             // ⚠ 供託与**本场加点**都只归 `winners.get(0)`，而它就是**离放铳者最近**的那家
             //   （`claimPhase` 按 `(from + d) % 4`、d = 1..3 的顺序收集 `ronSeats`）。
@@ -2424,10 +2517,10 @@ public final class Round {
             //   （M.League 走头跳，压根到不了这里；《雀魂》文档未给另一套口径。）
             int useHonba = (i == 0) ? honba : 0;
             Payments.Result pay = Payments.compute(sc, w, from, dealer, useHonba, useSticks,
-                                                   false, pao, paoBase);
+                                                   false, paos);
             sticksLeft -= useSticks;
             applyDelta(r, pay.delta);
-            settled.add(new Object[]{w, sc, pay, pao});
+            settled.add(new Object[]{w, sc, pay, paoSeats});
         }
         r.sticksLeft = Math.max(0, sticksLeft);
         r.dealerRenchan = RoundScoring.winBy(dealer, winners);
@@ -2436,8 +2529,10 @@ public final class Round {
         }
         // 分数到此已是最终值，再按"距放铳者由近到远"逐家发（顺序与旧实现一致）
         for (Object[] s : settled) {
+            @SuppressWarnings("unchecked")
+            List<Integer> seats = (List<Integer>) s[3];
             sendAgari((Integer) s[0], from, false, tileId, (Evaluator.HandScore) s[1],
-                    (Payments.Result) s[2], (Integer) s[3], riichiVoid);
+                    (Payments.Result) s[2], seats, riichiVoid);
         }
         return r;
     }
@@ -2450,17 +2545,20 @@ public final class Round {
     }
 
     private void sendAgari(int winner, int from, boolean tsumo, int tileId,
-                           Evaluator.HandScore sc, Payments.Result pay, int pao) {
+                           Evaluator.HandScore sc, Payments.Result pay, List<Integer> pao) {
         sendAgari(winner, from, tsumo, tileId, sc, pay, pao, -1);
     }
 
     /**
+     * @param pao        包牌责任者（可能不止一个，见 {@link #pao}）：报文里
+     *                   `pao.seat` = 第一位（兼容旧客户端）、`pao.seats` = 全部。
      * @param riichiVoid 燕返：这一家刚宣告的立直被判为**不成立**（{@code -1} = 无）。
      *                   报文里带出去，客户端据此清掉那家的立直标记与那根供託 ——
      *                   「立直成不成立」是规则判定，客户端不许自己推断（AGENTS §2.1）。
      */
     private void sendAgari(int winner, int from, boolean tsumo, int tileId,
-                           Evaluator.HandScore sc, Payments.Result pay, int pao, int riichiVoid) {
+                           Evaluator.HandScore sc, Payments.Result pay, List<Integer> pao,
+                           int riichiVoid) {
         boolean showUra = (riichi[winner] || doubleRiichi[winner]) && rules.ura;
         List<Object> yaku = new ArrayList<>();
         for (Evaluator.Yaku y : sc.yaku) {
@@ -2511,7 +2609,11 @@ public final class Round {
                 "base_points", sc.base,
                 "score_delta", intList(pay.delta),
                 "scores_after", intList(scores),
-                "pao", Json.obj("seat", pao),
+                // 包牌责任者：`seat` = 第一位（**兼容旧客户端**的老字段）、`seats` = 全部，
+                // 按责任成立先后。一手牌可以由两人各包一个役满（AUDIT S-52），
+                // 老字段装不下，所以权威读法是 `seats`（无包牌 = 空数组）。
+                "pao", Json.obj("seat", pao.isEmpty() ? -1 : pao.get(0),
+                        "seats", new ArrayList<Object>(pao)),
                 // 燕返（-1 = 无）：这一家刚宣告的立直不成立，客户端清掉它的立直标记与供託
                 "riichi_void", riichiVoid);
         table.broadcast(ev);

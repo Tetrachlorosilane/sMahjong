@@ -2869,7 +2869,7 @@ int run(const QString& outDir)
                                R"("yaku":%1,"han":%2,"fu":%3,"dora":0,"aka":0,"ura":0,)"
                                R"("yakuman":%4,"limit":"%5","base_points":8000,)"
                                R"("score_delta":[8000,-2000,-2000,-2000],)"
-                               R"("scores_after":[33000,23000,23000,23000],"pao":{"seat":-1}})")
+                               R"("scores_after":[33000,23000,23000,23000],"pao":{"seat":-1,"seats":[]}})")
                     .arg(yakuJson).arg(han).arg(fu).arg(yakuman)
                     .arg(limit).toUtf8(),
                 nullptr);

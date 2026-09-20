@@ -2124,14 +2124,15 @@ public final class SelfTest {
         Meld chuun = new Meld(Meld.Kind.PON, new int[]{132, 133, 134}, 2, 132);            // 中中中（碰 2 家）
         pd.melds[1].add(chuun);
         pd.debugUpdatePao(1, 2, chuun);
-        eq("大三元含暗杠：第 3 个三元副露那家包牌", pd.paoSeat[1], 2);
+        eq("大三元含暗杠：第 3 个三元副露那家包牌", pd.paoSeatOf(1), 2);
+        eq("责任清单带上役种（谁包了哪个役）", pd.paoDebugLines(1).toString(), "[大三元@2]");
         mahjong.game.Round pdSelf = newRound(ml);
         pdSelf.melds[1].add(new Meld(Meld.Kind.PON, new int[]{124, 125, 126}, 0, 124));
         pdSelf.melds[1].add(new Meld(Meld.Kind.PON, new int[]{132, 133, 134}, 2, 132));
         Meld hatsu = new Meld(Meld.Kind.ANKAN, new int[]{128, 129, 130, 131}, 1, 128);
         pdSelf.melds[1].add(hatsu);
         pdSelf.debugUpdatePao(1, -1, hatsu);
-        eq("暗杠凑齐第 3 个三元牌 → 没人包牌（from = -1）", pdSelf.paoSeat[1], -1);
+        eq("暗杠凑齐第 3 个三元牌 → 没人包牌（from = -1）", pdSelf.paoSeatOf(1), -1);
 
         // ── 包牌二：四杠子包牌**只有 M.League**，且必须是"他家的舍张 → 大明杠完成第 4 个杠"
         Meld kan1 = new Meld(Meld.Kind.ANKAN, new int[]{0, 1, 2, 3}, 1, 0);
@@ -2144,14 +2145,14 @@ public final class SelfTest {
         pk.melds[1].add(kan3);
         pk.melds[1].add(kan4);
         pk.debugUpdatePao(1, 2, kan4);
-        eq("M.League 四杠子：大明杠完成第 4 个杠 → 那家包牌", pk.paoSeat[1], 2);
+        eq("M.League 四杠子：大明杠完成第 4 个杠 → 那家包牌", pk.paoSeatOf(1), 2);
         mahjong.game.Round pkTh = newRound(th);
         pkTh.melds[1].add(kan1);
         pkTh.melds[1].add(kan2);
         pkTh.melds[1].add(kan3);
         pkTh.melds[1].add(kan4);
         pkTh.debugUpdatePao(1, 2, kan4);
-        eq("《天凤》没有四杠子包牌", pkTh.paoSeat[1], -1);
+        eq("《天凤》没有四杠子包牌", pkTh.paoSeatOf(1), -1);
         // 加杠完成第 4 个杠不算（不是"他家的舍张"）
         Meld kan4k = new Meld(Meld.Kind.KAKAN, new int[]{12, 13, 14, 15}, 2, 12);
         mahjong.game.Round pkK = newRound(ml);
@@ -2160,7 +2161,7 @@ public final class SelfTest {
         pkK.melds[1].add(kan3);
         pkK.melds[1].add(kan4k);
         pkK.debugUpdatePao(1, 2, kan4k);
-        eq("加杠完成第 4 个杠不触发包牌", pkK.paoSeat[1], -1);
+        eq("加杠完成第 4 个杠不触发包牌", pkK.paoSeatOf(1), -1);
 
         // ── 包牌三：包"被包的那一役"还是包"全部役满"（大四喜 1 倍 + 字一色 1 倍，庄家 A 荣和 C）
         //   文档 §包牌 的 M.League 例子：B 包大四喜 → B 付 24000、C 付 72000（合计 96000）
@@ -2169,13 +2170,126 @@ public final class SelfTest {
         fourBig.yakuman = 2;
         fourBig.base = 16000;
         fourBig.valid = true;
-        Payments.Result ronMl = Payments.compute(fourBig, 0, 2, 0, 0, 0, false, 3, 8000);
+        Payments.Result ronMl = Payments.compute(fourBig, 0, 2, 0, 0, 0, false,
+                List.of(new Payments.Pao(3, 8000)));
         eq("M.League 包牌只包被包役满：包牌者付一半 24000", -ronMl.delta[3], 24000);
         eq("M.League 包牌只包被包役满：放铳者付其余 72000", -ronMl.delta[2], 72000);
         eq("M.League 包牌：和牌者收满 96000", ronMl.delta[0], 96000);
-        Payments.Result ronTh = Payments.compute(fourBig, 0, 2, 0, 0, 0, false, 3, 16000);
+        Payments.Result ronTh = Payments.compute(fourBig, 0, 2, 0, 0, 0, false,
+                List.of(new Payments.Pao(3, 16000)));
         eq("《天凤》包牌承担全部役满：包牌者付一半 48000", -ronTh.delta[3], 48000);
         eq("《天凤》包牌承担全部役满：放铳者也付一半 48000", -ronTh.delta[2], 48000);
+
+        // ── 包牌四（AUDIT S-52）：**两个役满各有责任者** ────────────────────────
+        //   文档 §包牌 L798 的判据是**按役种**各定一个"导致这一役的最后一次副露"的玩家，
+        //   所以大三元由 3 包、四杠子由 2 包时，两人**各自承担自己造成的那一役**。
+        //   旧实现是单槽 `paoSeat[4]`：只留得下最后登记的那一家 → 两份责任全算到他头上。
+        //   这里用的是一手能真正成立的牌：白白白白 + 中中中中 + 發發發發 + 1m1m1m1m
+        //   （三个三元牌杠 + 第四个杠 = 大三元 + 四杠子 = 2 倍役满，闲家荣和共 64000）。
+        mahjong.game.Round tp = doublePaoRound(ml);
+        eq("双包牌：登记了**两条**责任（谁包了哪个役，按成立先后）",
+                tp.paoDebugLines(1).toString(), "[大三元@3, 四杠子@2]");
+        eq("自检前提：责任者列表 = [3, 2]", tp.paoSeatsOf(1).toString(), "[3, 2]");
+        eq("自检前提：对外只报第一位的兼容字段", tp.paoSeatOf(1), 3);
+        List<Map<String, Object>> tpAgari = new ArrayList<>();
+        tp.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1 && "agari".equals(Json.str(ev, "ev", ""))) {
+                tpAgari.add(new HashMap<>(ev));
+            }
+        };
+        int[] tpd = tp.debugRonDeltas(List.of(1), 0, Tiles.id(Tiles.parseKind("9s"), 1));
+        check("自检前提：这一手确实是**大三元 + 四杠子**（2 倍役满）",
+                !tpAgari.isEmpty() && Json.i(tpAgari.get(0), "yakuman", 0) == 2
+                        && agariCodes(tpAgari.get(0)).contains("daisangen")
+                        && agariCodes(tpAgari.get(0)).contains("suukantsu"));
+        eq("双包牌荣和：责任者 3（大三元）付一半 16000", -tpd[3], 16000);
+        eq("双包牌荣和：责任者 2（四杠子）付一半 16000", -tpd[2], 16000);
+        eq("双包牌荣和：放铳者付两份的另一半 32000", -tpd[0], 32000);
+        eq("双包牌荣和：和牌者收满 2 倍役满 = 64000", tpd[1], 64000);
+        eq("双包牌荣和：授受守恒", tpd[0] + tpd[1] + tpd[2] + tpd[3], 0);
+        // ⚠ 这条就是 S-52 的红线：旧单槽实现里 `-tpd[3]` 恒为 0（责任者 3 被漏掉）
+        check("两位责任者**都**被收到钱（旧单槽会漏掉先登记的那位）",
+                tpd[3] != 0 && tpd[2] != 0);
+        // 报文：老字段 `seat` = 第一位，权威读法是新增的 `seats`
+        Map<String, Object> tpPao = tpAgari.isEmpty() ? null : Json.map(tpAgari.get(0), "pao");
+        eq("报文 pao.seat = 第一位责任者（兼容老客户端）", Json.i(tpPao, "seat", -9), 3);
+        eq("报文 pao.seats = 全部责任者",
+                String.valueOf(Json.list(tpPao, "seats")), "[3, 2]");
+
+        // 《天凤》的 `paoCoversAll`（包牌涉及**复合后的全部役满得点**）只在**一位**责任者时
+        // 成立：两位责任者时退回"各包各的" —— 否则"整手牌"要付两遍、和牌者收双份。
+        // 三套预设都到不了这个组合（《天凤》没有四杠子包牌、大三元与大四喜不可能共存），
+        // 所以显式拼一套"天凤 + 四杠子包牌"来钉这条口径。
+        Rules thPao = preset("tenhou");
+        thPao.paoFourKan = true;
+        mahjong.game.Round tpTh = doublePaoRound(thPao);
+        int[] tpdTh = tpTh.debugRonDeltas(List.of(1), 0, Tiles.id(Tiles.parseKind("9s"), 1));
+        eq("《天凤》+ 双责任者：退回各包各的（责任者 3 付 16000）", -tpdTh[3], 16000);
+        eq("《天凤》+ 双责任者：责任者 2 同样 16000", -tpdTh[2], 16000);
+        eq("《天凤》+ 双责任者：和牌者收的仍是 64000（不是双份）", tpdTh[1], 64000);
+
+        // 对照：**一位**责任者时 `paoCoversAll` 照旧把"复合后的全部得点"都算在他头上 ——
+        // 用文档 §包牌 L816-824 的那一手（大四喜 + 字一色，只有 2 包大四喜）逐位比对。
+        mahjong.game.Round thOne = bigFourRound(preset("tenhou"));       // paoCoversAll = true
+        int[] thd = thOne.debugRonDeltas(List.of(1), 0, Tiles.id(Tiles.parseKind("7z"), 1));
+        eq("《天凤》单责任者：整手牌都归他（与放铳者各半 32000）", -thd[2], 32000);
+        eq("《天凤》单责任者：放铳者付另一半 32000", -thd[0], 32000);
+        mahjong.game.Round mlOne = bigFourRound(ml);                     // paoCoversAll = false
+        int[] mld = mlOne.debugRonDeltas(List.of(1), 0, Tiles.id(Tiles.parseKind("7z"), 1));
+        eq("M.League 单责任者：只包大四喜那一役（责任者付它的一半 16000）", -mld[2], 16000);
+        eq("M.League 单责任者：放铳者付另一半 + 字一色 48000", -mld[0], 48000);
+        eq("两条口径下和牌者收的一样（包牌只改「谁付」）", mld[1], thd[1]);
+    }
+
+    /**
+     * 摆出文档 §包牌 L816 的那一手：座位 1 = 東東東 + 南南南 + 西西西 + 北北北 + 中中（雀头）。
+     *
+     * <p>北是碰了**座位 2** 打出的舍张 → 座位 2 包牌大四喜，**只有一位**责任者
+     * （与 {@link #doublePaoRound} 的"两位责任者"正好是两条口径的分界）。
+     * 这一手同时是字一色，所以 M.League 只包大四喜那 8000、字一色照常三家分摊。
+     */
+    private static Round bigFourRound(Rules rules) {
+        Round r = newRound(rules);
+        Meld east = new Meld(Meld.Kind.PON, new int[]{108, 109, 110}, 0, 108);    // 東東東（碰 0 家）
+        Meld south = new Meld(Meld.Kind.PON, new int[]{112, 113, 114}, 2, 112);   // 南南南（碰 2 家）
+        Meld west = new Meld(Meld.Kind.PON, new int[]{116, 117, 118}, 3, 116);    // 西西西（碰 3 家）
+        Meld north = new Meld(Meld.Kind.PON, new int[]{120, 121, 122}, 2, 120);   // 北北北（碰 2 家）
+        r.hand[1].addAll(parse("7z"));
+        r.melds[1].add(east);
+        r.debugUpdatePao(1, 0, east);
+        r.melds[1].add(south);
+        r.debugUpdatePao(1, 2, south);
+        r.melds[1].add(west);
+        r.debugUpdatePao(1, 3, west);
+        r.melds[1].add(north);
+        r.debugUpdatePao(1, 2, north);                                            // 第 4 个风牌 → 包大四喜
+        return r;
+    }
+
+    /**
+     * 摆出"**两个役满各有责任者**"的局面（AUDIT S-52）：座位 1 手里
+     * 白白白白（大明杠 2 家）+ 中中中中（自家暗杠）+ 發發發發（大明杠 3 家）+ 1m1m1m1m（大明杠 2 家）
+     * —— 三个三元牌杠 + 第四个杠 = **大三元 + 四杠子**，责任者分别是 3（大三元）与 2（四杠子）。
+     *
+     * <p>顺序按生产路径来：**先把副露加进 `melds` 再判包牌**（`updatePao` 要数到含它自己的个数）。
+     * 座位 1 的暗牌只留 9s 一张（4 副露 = 12 张，13 张形态只剩 1 张），和了另一张 9s 作雀头。
+     */
+    private static Round doublePaoRound(Rules rules) {
+        Round r = newRound(rules);
+        Meld haku = new Meld(Meld.Kind.DAIMINKAN, new int[]{124, 125, 126, 127}, 2, 124);
+        Meld chun = new Meld(Meld.Kind.ANKAN, new int[]{132, 133, 134, 135}, -1, 132);
+        Meld hatsu = new Meld(Meld.Kind.DAIMINKAN, new int[]{128, 129, 130, 131}, 3, 128);
+        Meld man1 = new Meld(Meld.Kind.DAIMINKAN, new int[]{0, 1, 2, 3}, 2, 0);
+        r.hand[1].addAll(parse("9s"));
+        r.melds[1].add(haku);
+        r.debugUpdatePao(1, 2, haku);          // 三元第 1 个（不构成包牌）
+        r.melds[1].add(chun);
+        r.debugUpdatePao(1, -1, chun);         // 自家暗杠：算个数、不成为责任者
+        r.melds[1].add(hatsu);
+        r.debugUpdatePao(1, 3, hatsu);         // 三元第 3 个 → **大三元由 3 包**
+        r.melds[1].add(man1);
+        r.debugUpdatePao(1, 2, man1);          // 第 4 个杠是大明杠 → **四杠子由 2 包**
+        return r;
     }
 
     /** 精算点数只到 0.1，比较时先四舍五入到 1 位小数（浮点直接比会因 1e-16 误报）。 */
@@ -2971,19 +3085,19 @@ public final class SelfTest {
     }
 
     private static int ron(int han, int fu, int winner, int dealer) {
-        return -Payments.compute(fake(han, fu), winner, (winner + 1) % 4, dealer, 0, 0, false, -1, 0)
+        return -Payments.compute(fake(han, fu), winner, (winner + 1) % 4, dealer, 0, 0, false, Payments.NO_PAO)
                 .delta[(winner + 1) % 4];
     }
 
     /** 闲家自摸的「庄付/闲付」两个金额（绝对值），形如 {@code "2000/1000"} 便于逐格比对。 */
     private static String tsumoNon(int han, int fu) {
-        Payments.Result p = Payments.compute(fake(han, fu), 1, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p = Payments.compute(fake(han, fu), 1, -1, 0, 0, 0, true, Payments.NO_PAO);
         return (-p.delta[0]) + "/" + (-p.delta[2]);
     }
 
     /** 庄家自摸的「每家付」金额。 */
     private static int tsumoDealer(int han, int fu) {
-        Payments.Result p = Payments.compute(fake(han, fu), 0, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p = Payments.compute(fake(han, fu), 0, -1, 0, 0, 0, true, Payments.NO_PAO);
         return -p.delta[1];
     }
 
@@ -3130,20 +3244,20 @@ public final class SelfTest {
         eq("庄13番累计役满", ron(13, 30, 0, 0), 48000);
 
         // 自摸
-        Payments.Result p1 = Payments.compute(fake(3, 40), 1, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p1 = Payments.compute(fake(3, 40), 1, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("闲3番40符自摸(闲)", -p1.delta[2], 1300);
         eq("闲3番40符自摸(庄)", -p1.delta[0], 2600);
-        Payments.Result p2 = Payments.compute(fake(2, 20), 1, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p2 = Payments.compute(fake(2, 20), 1, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("闲2番20符自摸(闲)", -p2.delta[2], 400);
         eq("闲2番20符自摸(庄)", -p2.delta[0], 700);
-        Payments.Result p3 = Payments.compute(fake(2, 20), 0, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p3 = Payments.compute(fake(2, 20), 0, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("庄2番20符自摸", -p3.delta[1], 700);
-        Payments.Result p4 = Payments.compute(fake(4, 30), 0, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p4 = Payments.compute(fake(4, 30), 0, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("庄4番30符自摸", -p4.delta[1], 3900);
-        Payments.Result p5 = Payments.compute(fake(5, 30), 1, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p5 = Payments.compute(fake(5, 30), 1, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("闲满贯自摸(闲)", -p5.delta[2], 2000);
         eq("闲满贯自摸(庄)", -p5.delta[0], 4000);
-        Payments.Result p6 = Payments.compute(fake(13, 30), 0, -1, 0, 0, 0, true, -1, 0);
+        Payments.Result p6 = Payments.compute(fake(13, 30), 0, -1, 0, 0, 0, true, Payments.NO_PAO);
         eq("庄役满自摸", -p6.delta[1], 16000);
 
         // ---------- 自摸逐格（原来只有 6 格，实战最常见的 1〜3 番 30〜50 符反而没测）
@@ -3233,7 +3347,7 @@ public final class SelfTest {
                 for (int f : new int[]{25, 30, 40, 70}) {
                     for (boolean t : new boolean[]{true, false}) {
                         Payments.Result r = Payments.compute(fake(Math.max(1, h), f), i, (i + 1) % 4,
-                                i, 0, 0, t, -1, 0);
+                                i, 0, 0, t, Payments.NO_PAO);
                         int sum = 0;
                         for (int d : r.delta) {
                             sum += d;
@@ -3305,14 +3419,14 @@ public final class SelfTest {
 
     private static void paymentTests() {
         // 本场棒
-        Payments.Result r1 = Payments.compute(fake(1, 30), 1, 2, 0, 2, 0, false, -1, 0);
+        Payments.Result r1 = Payments.compute(fake(1, 30), 1, 2, 0, 2, 0, false, Payments.NO_PAO);
         eq("2本场荣和支付", -r1.delta[2], 1000 + 600);
         eq("2本场荣和收入", r1.delta[1], 1600);
         // 立直棒
-        Payments.Result r2 = Payments.compute(fake(1, 30), 1, 2, 0, 0, 3, false, -1, 0);
+        Payments.Result r2 = Payments.compute(fake(1, 30), 1, 2, 0, 0, 3, false, Payments.NO_PAO);
         eq("3根立直棒", r2.delta[1], 1000 + 3000);
         // 自摸本场
-        Payments.Result r3 = Payments.compute(fake(2, 30), 1, -1, 0, 1, 0, true, -1, 0);
+        Payments.Result r3 = Payments.compute(fake(2, 30), 1, -1, 0, 1, 0, true, Payments.NO_PAO);
         int sum = -r3.delta[2] - r3.delta[3] - r3.delta[0];
         int expect = 500 + 100 + 1000 + 100 + 500 + 100;
         eq("1本场自摸总收入", sum, expect);
@@ -3333,20 +3447,65 @@ public final class SelfTest {
         ys.yakuman = 1;
         ys.base = 8000;
         ys.valid = true;
-        Payments.Result r4 = Payments.compute(ys, 1, -1, 0, 0, 0, true, 3, 8000);
+        Payments.Result r4 = Payments.compute(ys, 1, -1, 0, 0, 0, true,
+                List.of(new Payments.Pao(3, 8000)));
         eq("包牌自摸：包牌者付全额(闲)", -r4.delta[3], 8000 + 16000 + 8000);
         eq("包牌自摸：他家不付", -r4.delta[2], 0);
-        Payments.Result r5 = Payments.compute(ys, 1, 2, 0, 0, 0, false, 3, 8000);
+        Payments.Result r5 = Payments.compute(ys, 1, 2, 0, 0, 0, false,
+                List.of(new Payments.Pao(3, 8000)));
         eq("包牌荣和：包牌者一半", -r5.delta[3], 16000);
         eq("包牌荣和：放铳者一半", -r5.delta[2], 16000);
         // 包牌 + 本场：**本场棒全部由包牌者出**（原来这条路径零断言，见审计 S-72）
-        Payments.Result r6 = Payments.compute(ys, 1, 2, 0, 2, 0, false, 3, 8000);
+        Payments.Result r6 = Payments.compute(ys, 1, 2, 0, 2, 0, false,
+                List.of(new Payments.Pao(3, 8000)));
         eq("包牌荣和 + 2 本场：放铳者仍只付一半", -r6.delta[2], 16000);
         eq("包牌荣和 + 2 本场：包牌者付另一半 + 全部本场棒", -r6.delta[3], 16000 + 600);
         eq("包牌荣和 + 2 本场：和牌者全额收", r6.delta[1], 32600);
-        Payments.Result r7 = Payments.compute(ys, 1, -1, 0, 1, 0, true, 3, 8000);
+        Payments.Result r7 = Payments.compute(ys, 1, -1, 0, 1, 0, true,
+                List.of(new Payments.Pao(3, 8000)));
         eq("包牌自摸 + 1 本场：包牌者付全额 + 全部本场（3×100）", -r7.delta[3], 32000 + 300);
         eq("包牌自摸 + 1 本场：闲家一分不付", r7.delta[2], 0);
+
+        // ── 双包牌：两个役满**各有责任者**（AUDIT S-52）────────────────────────
+        //   两位责任者各承担**自己造成的那一役**（`docs/DESIGN.md`「包牌」的口径）：
+        //   荣和时各付自己那份的一半、放铳者付两份的另一半；自摸时各付自己那份的全额。
+        Evaluator.HandScore two = new Evaluator.HandScore();      // 大三元 + 四杠子 = 2 倍役满
+        two.yakuman = 2;
+        two.base = 16000;
+        two.valid = true;
+        List<Payments.Pao> both = List.of(new Payments.Pao(3, 8000), new Payments.Pao(2, 8000));
+        Payments.Result d1 = Payments.compute(two, 1, 0, 0, 0, 0, false, both);
+        eq("双包牌荣和：责任者 3 付自己那一役的一半 16000", -d1.delta[3], 16000);
+        eq("双包牌荣和：责任者 2 付自己那一役的一半 16000", -d1.delta[2], 16000);
+        eq("双包牌荣和：放铳者付两份的另一半 32000", -d1.delta[0], 32000);
+        eq("双包牌荣和：和牌者收满 2 倍役满 = 64000", d1.delta[1], 64000);
+        eq("双包牌荣和：授受守恒", d1.delta[0] + d1.delta[1] + d1.delta[2] + d1.delta[3], 0);
+        // 对照：旧单槽的实现把两份责任都归到**最后登记**的那家（2）头上 —— 差额就是 S-52
+        Payments.Result one = Payments.compute(two, 1, 0, 0, 0, 0, false,
+                List.of(new Payments.Pao(2, 16000)));
+        eq("对照：单槽（两份全算到最后一家）责任者 3 一分不付", -one.delta[3], 0);
+        eq("对照：单槽下最后那家要多付 16000", -one.delta[2] - (-d1.delta[2]), 16000);
+        eq("对照：和牌者收的钱一分不差（错的是「谁付」，不是「收多少」）", one.delta[1], d1.delta[1]);
+        // 自摸：责任者各自**全额**承担自己那一役（三家份额都算他头上），和牌者收满不变
+        Payments.Result j2 = Payments.compute(two, 1, -1, 0, 0, 0, true, both);
+        eq("双包牌自摸：责任者 3 付大三元全额（庄 2 + 闲 1 + 闲 1）= 32000", -j2.delta[3], 32000);
+        eq("双包牌自摸：责任者 2 同样 32000", -j2.delta[2], 32000);
+        eq("双包牌自摸：和牌者收满 64000", j2.delta[1], 64000);
+        // 同一家包两个役满：两条记录必须**按座位累加**（≡ 合成一条）
+        Payments.Result j3 = Payments.compute(two, 1, 0, 0, 0, 0, false,
+                List.of(new Payments.Pao(2, 8000), new Payments.Pao(2, 8000)));
+        eq("同一人包两个役满 ≡ 合并成一条：他付两份的一半 32000", -j3.delta[2], 32000);
+        eq("同一人包两个役满 ≡ 合并成一条：放铳者付另一半 32000（与分成两条时相同）",
+                -j3.delta[0], -d1.delta[0]);
+        eq("同一人包两个役满 ≡ 合并成一条：和牌者收的一样", j3.delta[1], d1.delta[1]);
+        // 本场棒：多责任者时 300/本场 由他们**整体**承担（L802），按 100 点平摊，
+        // 余数给**先成立**的那位（本作口径，见 Payments.honba 的注释）
+        Payments.Result j4 = Payments.compute(two, 1, 0, 0, 1, 0, false, both);
+        eq("双包牌 + 1 本场：先成立的出 200、后一位出 100，放铳者不出本场棒",
+                (-j4.delta[3]) + "/" + (-j4.delta[2]) + "/" + (-j4.delta[0]),
+                "16200/16100/32000");
+        eq("双包牌 + 1 本场：和牌者收满 手牌 + 本场", j4.delta[1], 64000 + 300);
+        eq("双包牌 + 1 本场：授受守恒", j4.delta[0] + j4.delta[1] + j4.delta[2] + j4.delta[3], 0);
     }
 
     /**
