@@ -109,6 +109,15 @@ public final class Rules {
      */
     public boolean paoFourKan = false;
     /**
+     * **天和时如果成立国士无双，视作成立国士无双十三面**（`docs/日本麻将.md` L1149）。
+     *
+     * <p>**《雀魂》采用**；《天凤》与 M.League 不采用（那时天和国士就是"国士无双 + 天和"两个役满复合）。
+     * ⚠ 只有**天和**（庄家第一巡自摸）算，**地和不算**（原文只写天和）；
+     * 而且只在牌型本来就是国士无双（**非**十三面听）时把它"升级"为十三面 ——
+     * 十三面本身就是十三面，不会重复计。
+     */
+    public boolean kokushiTenhou13 = false;
+    /**
      * 包牌承担**全部**役满得点（《天凤》）而不是只包「被包的那一役」的基本点
      * （《雀魂》/ M.League —— 复合了别的役满时，别的役满仍由放铳者照常支付）。
      */
@@ -168,6 +177,8 @@ public final class Rules {
                 nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
                 // 《雀魂》四人段位场：**一位必要点数 = 30000**（文档 L157）
                 requiredPoints = 30000;
+                // 《雀魂》特有：**天和时国士无双视作国士无双十三面**（文档 L1149）
+                kokushiTenhou13 = true;
                 // 包牌：只到大三元 / 大四喜，且**只包被包的那一役**（与 M.League 同侧）
                 kuikae = true; pao = true; paoFourKan = false; paoCoversAll = false;
                 // 《雀魂》段位场：精算基准 = 配给原点 25000（**没有头名赏**），
@@ -226,6 +237,7 @@ public final class Rules {
         r.thinkingMs = r.thinkingBaseMs;
         r.minHan = Json.i(m, "min_han", r.minHan);
         r.requiredPoints = Json.i(m, "required_points", r.requiredPoints);
+        r.kokushiTenhou13 = Json.bool(m, "kokushi_tenhou_13", r.kokushiTenhou13);
         r.kiriageMangan = Json.bool(m, "kiriage_mangan", r.kiriageMangan);
         r.kazoeYakuman = Json.bool(m, "kazoe_yakuman", r.kazoeYakuman);
         r.doubleWindPairFu = Json.i(m, "double_wind_pair_fu", r.doubleWindPairFu);
@@ -314,6 +326,7 @@ public final class Rules {
                 "thinking_ms", thinkingBaseMs,   // 兼容旧客户端
                 "min_han", minHan,
                 "required_points", requiredPoints,
+                "kokushi_tenhou_13", kokushiTenhou13,
                 "kiriage_mangan", kiriageMangan,
                 "kazoe_yakuman", kazoeYakuman,
                 "double_wind_pair_fu", doubleWindPairFu,

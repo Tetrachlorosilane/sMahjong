@@ -1582,6 +1582,42 @@ public final class SelfTest {
         eq("同一手牌无天和/地和 → 只 1 倍",
                 evalKoyaku(kokushi14, new ArrayList<>(), "1z", true, koy, "").yakuman, 1);
 
+        // ---------- 《雀魂》特有：天和时国士无双视作国士无双十三面（文档 L1149）----------
+        // 同一手牌（13 种幺九 + 1z 一对）换一个和了牌就换了听牌形：
+        //   · 和 1z → 和牌前 13 张含全部 13 种 → **十三面听**；
+        //   · 和 7z → 和牌前手里只有 12 种（1z 是雀头）→ **国士无双**（单骑）。
+        final String kokushi14b = "1m9m1p9p1s9s1z1z2z3z4z5z6z7z";
+        final Rules msK = preset("majsoul");             // kokushiTenhou13 = true, doubleYakuman = true
+        final Rules thK = preset("tenhou");              // 同为两倍役满规则，但**没有**这条
+        Evaluator.HandScore msSingle = evalKoyaku(kokushi14b, new ArrayList<>(), "7z", true, msK, "tenhou");
+        check("《雀魂》天和 + 国士无双 → 视作**国士无双十三面**",
+                hasYaku(msSingle, "国士无双十三面") && !hasYaku(msSingle, "国士无双"));
+        // 升级后这一手 = 十三面 2 倍 + 天和 1 倍 = **3 倍**（不同役满可以复合，S-59）
+        eq("《雀魂》：十三面 2 倍（不再是国士无双 1 倍）", reportedHan(msSingle, "国士无双十三面"), 26);
+        eq("《雀魂》：天和照旧复合", reportedHan(msSingle, "天和"), 13);
+        eq("《雀魂》：合计 3 倍役满", msSingle.yakuman, 3);
+        // 对照一：《天凤》同一条规则集里没有这一条 → 还是国士无双（1 倍 + 天和 1 倍 = 2 倍）
+        Evaluator.HandScore thSingle = evalKoyaku(kokushi14b, new ArrayList<>(), "7z", true, thK, "tenhou");
+        check("《天凤》同样的牌 → 仍是国士无双（不升级）",
+                hasYaku(thSingle, "国士无双") && !hasYaku(thSingle, "国士无双十三面"));
+        eq("《天凤》：合计 2 倍役满（国士无双 1 + 天和 1）", thSingle.yakuman, 2);
+        // 对照二：只有**天和**算，**地和**不算（原文只写天和）——
+        // 同一手牌、同一个《雀魂》规则集，只把"天和"换成"地和"，就差这一级
+        Evaluator.HandScore msChiihou = evalKoyaku(kokushi14b, new ArrayList<>(), "7z", false, msK, "chiihou");
+        check("《雀魂》**地**和 + 国士无双 → **不**升级（原文只说天和）",
+                hasYaku(msChiihou, "国士无双") && !hasYaku(msChiihou, "国士无双十三面"));
+        eq("《雀魂》地和那一手 = 2 倍（国士无双 1 + 地和 1）", msChiihou.yakuman, 2);
+        // 对照三：本来就是十三面听时不会重复计（还是一个役种）
+        Evaluator.HandScore msAlready = evalKoyaku(kokushi14b, new ArrayList<>(), "1z", true, msK, "tenhou");
+        eq("本来就是十三面 → 仍然只报一个役满役",
+                (hasYaku(msAlready, "国士无双十三面") ? 1 : 0) + (hasYaku(msAlready, "国士无双") ? 1 : 0), 1);
+        eq("本来就是十三面 → 3 倍（十三面 2 + 天和 1，与升级后相同）", msAlready.yakuman, 3);
+        // 对照四：M.League 预设也不采用这条
+        check("M.League 预设不采用（= false）", !preset("mleague").kokushiTenhou13);
+        check("三套预设里只有《雀魂》打开", preset("majsoul").kokushiTenhou13
+                && !preset("tenhou").kokushiTenhou13 && !preset("mleague").kokushiTenhou13);
+
+
         // ---------- S-60①：一色三顺**副露也成立**（副露减一番）----------
         List<Meld> issMelds = new ArrayList<>();
         issMelds.add(chi("2m", "3m", "4m"));

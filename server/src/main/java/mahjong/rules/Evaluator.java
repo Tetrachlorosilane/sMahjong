@@ -180,7 +180,13 @@ public final class Evaluator {
             // 《雀魂》计 2 倍，《天凤》与 M.League 计 1 倍（docs/日本麻将.md §两倍役满）。
             // ⚠ 不能在不加倍时把它改名成「国士无双」—— 那是把"值"的取舍写成了"役种"的取舍，
             // 玩家和牌界面会看不到自己做出的是十三面。
-            if (f.kokushi13) {
+            //
+            // ⚠ 还有一条**规则口径**：`docs/日本麻将.md` L1149「《雀魂》中，**天和**时如果成立
+            //   国士无双，视作成立国士无双十三面」→ "是不是十三面"不能只看牌型
+            //   （`f.kokushi13` = 和牌前那 13 张含全部幺九种），还要看 `rules.kokushiTenhou13` + 天和。
+            //   只有天和算（地和不算），本来就是十三面时也不会重复计。
+            final boolean thirteen = f.kokushi13 || (r.kokushiTenhou13 && ctx.tenhou);
+            if (thirteen) {
                 yk.add(Yaku.yakuman("国士无双十三面", r.doubleYakuman ? 2 : 1));
             } else {
                 yk.add(Yaku.yakuman("国士无双", 1));
