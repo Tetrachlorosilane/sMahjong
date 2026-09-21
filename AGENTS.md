@@ -295,6 +295,9 @@ node tools\seat-swap-test.mjs 127.0.0.1 10086            # 换座/洗座：被�
 node tools\spectate-test.mjs 127.0.0.1 10086            # 观战（对局中入局）：spectate + 公开快照（seat=-1/带 dealer、
                                                           # drawn_seat/不带暗牌与振听）+ 持续收到公开事件 + action 被拒
                                                           # ⚠ 依赖"对局进行中"的时机：拿不到样本时退出码 2（不是失败）
+                                                          # ⚠ 跑满约 1~2 分钟：它要等一小局打完。跨局快照那条**分两段等**
+                                                          #   （小局结束后 ~15s 才开下一局 = roundDelayMs 10s + 等 confirm 5s），
+                                                          #   用一个窗口同时等这两件事会假红
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）

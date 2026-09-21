@@ -191,13 +191,23 @@ async function main() {
   check(viewer.public.every((e) => e.seat === undefined || e.seat >= 0),
     '公开事件里的 seat 都是真实座位（观战者不伪装成某一家）')
   // 新一局也要有公开快照（否则观战者的牌桌停在上一局的残局）
+  //
+  // ⚠ **分两段等**，不能用一个窗口同时等「小局结束」和「新快照」：
+  //   小局结束之后服务端还要走「`sleepMs(roundDelayMs)`（默认 **10s**，让结算弹窗读得完）
+  //   + `awaitRoundConfirm()`（最多 **5s** 等 confirm）」才开下一局 —— 也就是说下一局的快照
+  //   最早也在 `round_end` 之后 ~15s 才发。实测就是 **+15138ms**。
+  //   所以只要小局在第 45 秒之后结束，旧写法那个 60s 窗口就必然来不及（**假红**，
+  //   实测踩过一次 19/20，唯一那条红就是它）。
   const statesBefore = viewer.states
-  const sawNewRound = await waitFor(
-    () => viewer.public.some((e) => e.ev === 'round_end') && viewer.states > statesBefore,
+  const sawRoundEnd = await waitFor(
+    () => viewer.public.some((e) => e.ev === 'round_end'),
     60000,
     200)
-  if (viewer.public.some((e) => e.ev === 'round_end')) {
-    check(sawNewRound, '小局结束后观战者收到新一局的公开快照（跨局不残局）')
+  if (sawRoundEnd) {
+    const tEnd = Date.now()
+    const gotSnapshot = await waitFor(() => viewer.states > statesBefore, 20000, 200)
+    check(gotSnapshot,
+      `小局结束后观战者收到新一局的公开快照（跨局不残局；小局结束后 +${Date.now() - tEnd}ms 拿到）`)
   } else {
     console.log('[i] 60 秒内没走完一小局，跳过"跨局快照"这一条')
   }
