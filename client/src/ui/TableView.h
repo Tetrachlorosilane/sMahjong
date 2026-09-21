@@ -147,6 +147,16 @@ public:
     qreal plateReserve() const;
 
     /**
+     * 自检用：某一家的名牌矩形（**屏幕坐标**，与绘制读的同一份 `m_layout.m_frames[pos].plate`）。
+     *
+     * <p>2026-09 的用户口径：「ID 框从左下移动到右下，即顺时针旋转变换一位」。
+     */
+    QRectF plateRectForTest(int pos) const { return m_layout.m_frames[pos].plate; }
+
+    /** 自检用：跑一次 `computeLayout()`（自检里没有 paintEvent 触发它）。 */
+    void updateLayoutForTest() { computeLayout(); }
+
+    /**
      * 自检用：`computeLayout()` 之后宝牌指示牌栏的屏幕矩形。
      * 一局最多 5 张指示牌（宝牌 1 + 四个杠各 1），它必须容得下 5 张。
      */
@@ -205,6 +215,25 @@ public:
 
     /** 自检用：某家副露带整块的右端（行末）。 */
     qreal meldRightForTest(int pos) const;
+
+    /**
+     * 自检用：某家第 {@code meldIndex} 副副露里第 {@code tileIndex} 张的矩形（**局部坐标**）。
+     *
+     * <p>与绘制**共用** `meldSlotRects()` 同一份几何 —— 2026-09 的报障是
+     * 「副露里横置的那张居中、应该与另两张底部齐平」，这条断言直接比较底边。
+     */
+    QRectF meldSlotRectForTest(int pos, int meldIndex, int tileIndex) const;
+
+    /**
+     * 副露每一格的矩形（局部坐标）——**绘制与自检的唯一几何来源**。
+     *
+     * @param disp   显示顺序的牌码（被鸣的那张已被移到 `rotIdx`）
+     * @param rotIdx 横置那张在 `disp` 里的下标
+     * @param left   本副露的左端（局部 u）
+     * @param my     这一行的顶边（局部 v；副露与手牌行**下沿对齐**）
+     */
+    QVector<QRectF> meldSlotRects(const QStringList& disp, const Meld& m, int rotIdx,
+                                  qreal left, qreal my, qreal hgap) const;
 
     /**
      * 自检用：某家「手牌 + 摸牌槽」整块（**不含副露**）的屏幕矩形。

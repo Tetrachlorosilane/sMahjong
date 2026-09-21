@@ -292,6 +292,9 @@ node tools\discard-align-test.mjs 127.0.0.1 10086        # 出牌对齐（幽灵
                                                           # 「错报摸切也按牌码取牌」+「我报哪张就打哪张」不变式
 node tools\seat-swap-test.mjs 127.0.0.1 10086            # 换座/洗座：被换走那家的「准备」必须落在自己座位上 +
                                                           # 并发 churn 下座位表恒为四家的排列 + 局中 take_seat 被忽略
+node tools\spectate-test.mjs 127.0.0.1 10086            # 观战（对局中入局）：spectate + 公开快照（seat=-1/带 dealer、
+                                                          # drawn_seat/不带暗牌与振听）+ 持续收到公开事件 + action 被拒
+                                                          # ⚠ 依赖"对局进行中"的时机：拿不到样本时退出码 2（不是失败）
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）
@@ -527,7 +530,24 @@ mahjong/
   所以界限用 `max(cw,ch)/2 + kGap`（**不是 min** —— 盘做成宽扁形后用 min 会平白再压小一轮）；
   最坏一行的算法同前（横置牌 + 5×普通牌 + 5×间距）。这条钳制现在只是**兜底**：
   正常尺寸下按上面的反推，牌河能拿到标称大小。
-- **`paintEvent` 必须先 `computeLayout()` 再 `paintBackground()`**：写反了第一帧用上一轮尺寸（改风盘尺寸会闪一帧）。
+- **副露的几何只有一份**（`TableView::meldSlotRects()`）：**绘制与自检共用**它
+  （`meldSlotRectForTest`）。两条用户口径：
+  - **三张牌底部齐平**：横置那张（宽 = 牌河牌高、高 = 牌河牌宽）的顶边是
+    `my + (riverH − riverW)`，**不是** `(riverH − riverW)/2` —— 后者让它"浮"在副露中间。
+    ⚠ **牌河里的横置牌不改**：那是网格里的一格（`paintRiver` 里按高度居中，注释写明了原因）。
+  - 加杠第 4 张**叠在第 1 格**（不占新槽位），宽度按三格算。
+- **名牌（ID 框）四角轮转一位**（`TableLayout::computeLayout()`，2026-09 用户口径）：
+  自家在**右下**，其余三家跟着转一格（下家→右上、对家→左上、上家→左下）。
+  ⚠ 四个角**必须各占一个**：只挪自家会与下家的名牌重叠。角落预留 `plateReserve` 在
+  **同一端**，所以名牌挪到哪、牌河/副露就在哪让开（自检断言四家名牌互不重叠 + 各自象限）。
+- **音效是"池子 + allowOverlap"，不是"一个对象反复 stop+play"**（`model/Sound.cpp`）：
+  每个音效 3 个 `QSoundEffect`，优先用**空闲**实例（绝大多数情况**根本不需要 stop**）；
+  `allowOverlap=false`（摸牌那条路）时**整个音效还在响就跳过**。
+  ⚠ 报障「只有第一小局有音效」的现场实测是：客户端**每局都在播**（10 局 80 次 play，
+  Qt 侧 status=Ready、`isPlaying()=1`），所以剩下最可疑的就是旧实现那条
+  `stop()+play()` 热路径（而且它**忽略了 `allowOverlap` 参数**——调用方明确要求"别叠"）。
+  排查工具：`MAHJONG_SFX_TRACE=1` 跑一局，stderr 会打出每个音效的
+  开关/可用/音量/池子状态/`play()` 之后是否真的 playing。
 - **「手牌 + 摸牌」块的边界避让：一次算完 + 右移封顶**（同一个坑踩了三次，别简化）：
   - `layoutHand()` 里只允许**一个** `over`，且必须先取 `max`（①副露 ②角落名牌）再让 ③行首角落让步。
     分成两段钳制时，后一段会算出**负的 over**，`handLeft -= over` 等于把整块往右推，把前一段让出的空间又吃回去。
@@ -855,13 +875,17 @@ mahjong/
 | **一条报文就把整桌打崩 / 四家挂着不动** | 有异常冒到牌桌线程：`Table.playGame` 的兜底要**广播终局**；`pickChiTiles` 是否校验 `want` 恰好两张（见 §6） |
 | **点数凭空生灭 / 不听罚符对不上** | 罚符收付不能各自向下取整：`Payments.notenPenalty` 必须"收方定额、付方凑齐"（`SelfTest.notenPenaltyTests` 覆盖 16 种组合） |
 | **某家"没动就被代打"**（尤其发生在刚有人鸣牌/有人的鸣牌询问被取消之后） | 废包漏进了队列：① 取消询问时有没有 `table.dropReplies(seat, cancelledAskId)`？② `awaitAction` / claimPhase 有没有校验「`type` 属于本次询问的选项」？见 §2.3-10 与 §2.2 的 `ask_id` 行。⚠ 只做 `cancelAsk` 不摘队列是**不够**的 |
+| **对局中入局的人进了"未定义的观战状态"**（看到一张空牌桌 / 以为自己是东家却没手牌） | `spectate` 事件在客户端**没有分支**、而 `state.seat = -1` 被 `qBound` 夹成座位 0。修法与语义见 §6.2/PROTOCOL §3.9：`TableModel::spectating()` + 四家一律牌背 + 视角可切；服务端另补公开快照与 `draw` 公开版（`Table.sendSpectators`）。定性：`node tools\spectate-test.mjs <host> <port>` |
+| **鸣牌时看不出/选不了用赤五还是普通五** | `pon`/`kan(daiminkan)` 的选项必须带 `tiles`（赤五 `0p`），默认取法**普通牌优先**（`Round.pickAuto`）。见 PROTOCOL §3.6 与 `SelfTest.meldAkaPickTests` |
+| **只有第一小局有音效** | 先跑 `MAHJONG_SFX_TRACE=1 client --demo ...` 看 stderr：每一条都会打出开关/可用/音量/池子状态/`play()` 后是否 playing。客户端实测**每局都在播**，所以重点查旧实现那条 `stop()+play()`（已改成实例池 + `allowOverlap`），见 §6.2 |
+| **副露里横置的那张"浮"在中间** | 横置牌顶边必须是 `my + (riverH − riverW)`（底部与另两张齐平），见 §6.2 与 `TableView::meldSlotRects` |
+| **名牌（ID 框）位置不对** | 四角**轮转一位**：自家右下、下家右上、对家左上、上家左下，见 §6.2 与 `TableLayout::computeLayout` |
 
 ---
 
-## 8. 当前状态与已知限制
-
-**实测通过**：服务端自检 **1149** 项（含训练接口不变式 + 振听三条 + teacher 的五层取舍（牌效 / 押し引き期望值 + 顺位门槛 /
-打点与役 / 开杠 / 副露打分，外加终局见逃与对手模型）+ 批次一的口径修复 + 《雀魂》的国士抢暗杠 / 天和国士 + 包牌多责任者列表）、客户端自检 **688** 项、§4 的全部 L3 工具（含 `replay-test`、
+**实测通过**：服务端自检 **1166** 项（含训练接口不变式 + 振听三条 + teacher 的五层取舍（牌效 / 押し引き期望值 + 顺位门槛 /
+打点与役 / 开杠 / 副露打分，外加终局见逃与对手模型）+ 批次一的口径修复 + 《雀魂》的国士抢暗杠 / 天和国士 + 包牌多责任者列表 +
+副露赤宝选择与观战快照的公开字段）、客户端自检 **740** 项、§4 的全部 L3 工具（含 `replay-test`、
 `discard-align-test` 与 `seat-swap-test`），外加 Qt 客户端↔Java 服务端真机对局（含 GUI 实拍）。L1 里另有三组"跑整场/整表"的账：
 **杠后岭上摸牌**（`rinshanTests`）、**一局最多 4 次杠 + 废杠不白拿岭上**（`kanLimitTests`）
 与**开局前自选/随机座位**（`seatSwapTests`）；**出牌对齐**另有 `discardAlignTests`（判据逐条 + 庄家 `drawn`），

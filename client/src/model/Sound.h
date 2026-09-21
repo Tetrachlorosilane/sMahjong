@@ -18,10 +18,17 @@
 //
 // ## 播放后端（按构建能力分层，缺哪层都不会编不过）
 //
-//   ① `MAHJONG_HAVE_MULTIMEDIA=1`（本机 Qt 装了 Multimedia）→ `QSoundEffect`：
+//   ① `MAHJONG_HAVE_MULTIMEDIA=1`（本机 Qt 装了 Multimedia）→ `QSoundEffect` 池：
 //      低延迟、可叠放、支持循环与音量，且**不需要 FFmpeg 那 20MB**（WAV 解码器内置）。
 //   ② 否则 Windows → `winmm` 的 `PlaySound(SND_MEMORY|SND_ASYNC)`：零依赖、系统自带。
 //   ③ 其余情况 → 静默（`available()` 返回 false，界面上的音效开关置灰）。
+//
+// ⚠ **每个音效是一个小池子（`kPoolPerSound` 个 `QSoundEffect`），不再"一个对象反复
+//   stop()+play()"**：报障「只有第一小局有声音」的现场实测是——客户端**每局都在调 play()**
+//   （10 局 80 次，Qt 侧 status=Ready、play() 后 isPlaying()=1），所以触发链没问题；
+//   剩下的可疑点就是同一个 `QSoundEffect` 被反复 stop/play 之后**声卡侧不再出声**
+//   （Qt 不会报错，`isPlaying()` 照样是 true）。池子让"上一次还没放完"时换一个空闲实例，
+//   绝大多数情况下**根本不需要 stop**；`allowOverlap=false` 时才真的跳过（见下）。
 //
 // 音效**只影响听感**，任何失败都不该影响对局 —— 所有接口都不抛异常、不阻塞。
 
@@ -29,6 +36,8 @@
 #include <QHash>
 #include <QObject>
 #include <QString>
+#include <QUrl>
+#include <QVector>
 
 class QSoundEffect;
 class QTimer;
@@ -81,8 +90,10 @@ public:
     /**
      * 播一个音效；名字见 `sound::name::*`。
      *
-     * @param allowOverlap 允许叠放（同一个音效上次还没放完就再触发时）。默认允许：
-     *        连续摸牌 / 连续鸣牌都要每次出声，被"正在播"挡掉会显得丢音。
+     * @param allowOverlap 同一个音效**上一次还在响**时怎么办：
+     *        - `true`（默认）：换池子里另一个空闲实例**叠放**（连续鸣牌/立直要每次都出声）；
+     *        - `false`：这次**跳过**（摸牌音效用它 —— 每巡都响会很吵，而且旧实现
+     *          「停掉再从头放」正是把声卡搞哑的那条路径）。
      */
     void play(const QString& sfx, bool allowOverlap = true);
 
@@ -108,6 +119,20 @@ public:
     bool effectReadyForTest(const QString& sfx);
     /** 某个音效当前是否在播（仅多媒体后端）。 */
     bool effectPlayingForTest(const QString& sfx);
+    /** 池子里这个音效有几个实例（自检断言池子真的建起来了）。 */
+    int poolSizeForTest(const QString& sfx) const;
+    /** 某个音效**实际放出去**的次数（`allowOverlap=false` 被跳过的那些不算）。 */
+    int playCountForTest(const QString& sfx) const;
+    /** 因为"上一次还在播 + `allowOverlap=false`"而**跳过**的次数。 */
+    int overlapSkipCountForTest() const { return m_overlapSkips; }
+
+    // ---- 诊断 ----
+    /**
+     * 某个音效的 `QSoundEffect` 状态文本（`Ready` / `Loading` / `Error` / `missing`）。
+     *
+     * <p>只在开了 `MAHJONG_SFX_TRACE=1` 时才被打印，用来定位"某一局之后就没声音"这类报障。
+     */
+    QString effectStateForTrace(const QString& sfx) const;
 
 private:
     Player();
@@ -116,14 +141,17 @@ private:
     /** 取某个音效的 WAV 字节（带缓存）；找不到返回空。 */
     const QByteArray& data(const QString& sfx);
     /** 按三档后端真正把字节放出去。 */
-    void emitSound(const QString& sfx, const QByteArray& bytes);
+    void emitSound(const QString& sfx, const QByteArray& bytes, bool allowOverlap);
 
     bool m_available = false;
     QString m_backend = QStringLiteral("none");
     bool m_enabled = true;
     int m_volume = 70;
-    QHash<QString, QByteArray> m_cache;          // 名字 → WAV 字节
-    QHash<QString, QSoundEffect*> m_effects;     // 名字 → QSoundEffect（仅 ① 档）
+    QHash<QString, QByteArray> m_cache;                // 名字 → WAV 字节
+    QHash<QString, QVector<QSoundEffect*>> m_effects;  // 名字 → 实例池（仅 ① 档）
+    QHash<QString, QUrl> m_source;                     // 名字 → 源 URL（Error 自愈要重设）
+    QHash<QString, int> m_plays;                       // 名字 → 实际播放次数（自检）
+    int m_overlapSkips = 0;                            // 被 allowOverlap=false 跳过的次数
 };
 
 } // namespace sound

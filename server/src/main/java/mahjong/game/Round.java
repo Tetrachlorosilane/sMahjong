@@ -551,9 +551,14 @@ public final class Round {
         // 回放：把这一小局的**牌山快照**（136 张，按抓牌顺序）记在事件流最前面。
         // 只给回放看，不发给客户端 —— 正常报文里凭空多 136 个牌 id 是白花的下行。
         table.noteRoundWall(roundWindName(), kyoku, honba, dealer, wallOrder());
+        // 庄家起手的第 14 张 = 他"刚摸到"的那张（第一巡不再摸，见 play()）
+        lastDrawer = dealer;
         for (int s = 0; s < 4; s++) {
             table.send(s, roundStartEvent(s));
         }
+        // 观战者没有座位，`round_start` 是**按座位**发的（带该家的暗牌），所以到不了他们手里。
+        // 这里补一份**公开快照**：他们在新一局开局就能把牌桌摆对（点数/场次/宝牌/各家张数）。
+        table.sendSpectators(table.stateFor(-1));
     }
 
     /** 构造座位 {@code s} 的 `round_start` 报文（拆出来是为了让自检能直接断言内容）。 */
@@ -618,22 +623,36 @@ public final class Round {
         return wall.debugAllTiles();
     }
 
+    /**
+     * 最后一个「刚摸到牌」的座位（庄家开局第 14 张算他摸到的）——公开信息。
+     *
+     * <p>谁手里有 14 张是**看得见的**（张数），所以这不算泄密；它的用途是让
+     * **半场进入的观战者/重连者**把各家张数一次摆对（客户端按
+     * {@code 13 − 3×副露 + (drawn_seat == 该家)} 算张数，见 `TableModel::concealedCount`）。
+     */
+    public int lastDrawer = -1;
+
     private void broadcastDraw(int seat, int tile, boolean rinshan) {
+        lastDrawer = seat;
+        // 公开部分先建好：观战者要看到「谁摸了一张」（否则他们的牌桌整局不动），
+        // 但**看不到牌面** —— `tile` 只发给摸牌的那一家。
+        Map<String, Object> pub = Json.obj(
+                "ev", "draw",
+                "seat", seat,
+                "tiles_left", tilesLeft(),
+                // ⚠ 岭上剩余张数**必须随每次摸牌下发**：杠后这张是从王牌摸的
+                //   （livePos/liveEnd 都不动），所以 `tiles_left` 看不出它少了没有，
+                //   界面上的「岭上 N」只能靠这个字段更新。漏了它 → 整局都显示 4。
+                "dead_wall_left", deadWallLeft(),
+                "rinshan", rinshan);
         for (int s = 0; s < 4; s++) {
-            Map<String, Object> ev = Json.obj(
-                    "ev", "draw",
-                    "seat", seat,
-                    "tiles_left", tilesLeft(),
-                    // ⚠ 岭上剩余张数**必须随每次摸牌下发**：杠后这张是从王牌摸的
-                    //   （livePos/liveEnd 都不动），所以 `tiles_left` 看不出它少了没有，
-                    //   界面上的「岭上 N」只能靠这个字段更新。漏了它 → 整局都显示 4。
-                    "dead_wall_left", deadWallLeft(),
-                    "rinshan", rinshan);
+            Map<String, Object> ev = new java.util.LinkedHashMap<>(pub);
             if (s == seat) {
                 ev.put("tile", Tiles.toStr(tile));
             }
             table.send(s, ev);
         }
+        table.sendSpectators(pub);
     }
 
     private void sendDiscard(int seat, int tile, boolean tsumogiri, boolean riichiFlag,
@@ -1904,6 +1923,16 @@ public final class Round {
         return pickChiTiles(seat, tileId, want);
     }
 
+    /** 供自检：没被点名时的自动取牌（普通牌优先，见 {@link #pickAuto}）。 */
+    public int[] debugPickAuto(int seat, int kind, int n) {
+        List<Integer> l = pickAuto(seat, kind, n);
+        int[] out = new int[l.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = l.get(i);
+        }
+        return out;
+    }
+
     /** 供自检：按精确牌码挑 n 张（副露赤宝选择）。 */
     public int[] debugPickHandTiles(int seat, int tileId, List<String> want, int n) {
         List<Integer> l = pickHandTiles(seat, tileId, want, n);
@@ -1988,13 +2017,24 @@ public final class Round {
             return opts;
         }
         if (c[kind] >= 2) {
-            opts.add(Json.obj("type", "pon"));
+            // 副露赤宝选择：**手里同 kind 能凑出的取法全列出来**（每种带精确牌码）。
+            // 于是一个"碰 5p"可能下发两条：`tiles:["5p","5p"]`（不用赤五）与
+            // `tiles:["0p","5p"]`（用赤五）—— 客户端按 `tiles` 里有没有赤牌画不同按钮。
+            // ⚠ 旧协议下 pon 不带 `tiles`，客户端也就**没法选**，只能由服务端"取前两张"……
+            //   那正是报障「副露无法区分红五与普通五」的根因（见 PROTOCOL §3.6）。
+            for (List<String> variant : akaVariants(seat, kind, 2)) {
+                opts.add(Json.obj("type", "pon", "tiles", new ArrayList<Object>(variant)));
+            }
         }
         // 大明杠：**立直后不可**（它一定会改变手牌构成，而暗杠才可能"听牌不变"）。
         // 立直是门前状态，大明杠还会把 menzen 打掉；任何规则都不允许，所以这里直接挡掉。
         if (canDaiminkan(seat, kind)) {
-            opts.add(Json.obj("type", "kan",
-                    "kans", Json.arr(Json.obj("kind", "daiminkan", "tile", Tiles.kindToStr(kind)))));
+            List<Object> kans = new ArrayList<>();
+            for (List<String> variant : akaVariants(seat, kind, 3)) {
+                kans.add(Json.obj("kind", "daiminkan", "tile", Tiles.kindToStr(kind),
+                        "tiles", new ArrayList<Object>(variant)));
+            }
+            opts.add(Json.obj("type", "kan", "kans", kans));
         }
         // 吃：只有下家能吃（见 PROTOCOL），组合枚举是纯计算，见 RoundOptions
         if (seat == (from + 1) % 4) {
@@ -2005,6 +2045,89 @@ public final class Round {
         }
         opts.add(Json.obj("type", "pass"));
         return opts;
+    }
+
+    /**
+     * 副露赤宝选择：手里同 {@code kind} 的牌能凑出的**取法**（每种一组精确牌码）。
+     *
+     * <p>只在"真的有得选"时才给出两条：手里既有赤五又有普通五，且够凑出这一副。
+     * 顺序固定为**不用赤 → 用赤**（客户端按钮顺序也就稳定）：
+     * <ul>
+     *   <li>{@code ["5p","5p"]}：普通牌优先（默认取法，见 {@link #pickAuto}）；</li>
+     *   <li>{@code ["0p","5p"]}：明确用赤五（赤五比普通五值钱，所以必须是玩家点名才用）。</li>
+     * </ul>
+     * 只有一种取法时只给一条（但**仍然带 `tiles`**，客户端才有依据显示"这一副会用到赤五"）。
+     *
+     * @param need 这一副要用几张（碰 2 / 大明杠 3）
+     */
+    private List<List<String>> akaVariants(int seat, int kind, int need) {
+        List<Integer> plain = new ArrayList<>();      // 普通牌（按手里的顺序）
+        List<Integer> red = new ArrayList<>();
+        for (int id : hand[seat]) {
+            if (Tiles.kind(id) != kind) {
+                continue;
+            }
+            if (Tiles.isRedId(id)) {
+                red.add(id);
+            } else {
+                plain.add(id);
+            }
+        }
+        List<List<String>> out = new ArrayList<>();
+        if (plain.size() >= need) {
+            out.add(codesOf(plain.subList(0, need)));
+        }
+        if (!red.isEmpty() && plain.size() + red.size() >= need) {
+            List<Integer> mix = new ArrayList<>();
+            mix.add(red.get(0));
+            for (int i = 0; i < need - 1 && i < plain.size(); i++) {
+                mix.add(plain.get(i));
+            }
+            if (mix.size() == need) {
+                List<String> codes = codesOf(mix);
+                if (!out.contains(codes)) {
+                    out.add(codes);
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            // 理论上到不了这里（能鸣就说明手里够），留一条"按手里顺序"的兜底。
+            List<Integer> all = new ArrayList<>(plain);
+            all.addAll(red);
+            if (all.size() >= need) {
+                out.add(codesOf(all.subList(0, need)));
+            }
+        }
+        return out;
+    }
+
+    private static List<String> codesOf(List<Integer> ids) {
+        List<String> out = new ArrayList<>(ids.size());
+        for (int id : ids) {
+            out.add(Tiles.toStr(id));
+        }
+        return out;
+    }
+
+    /**
+     * 没被点名时的自动取牌：**普通牌优先**（赤五是资源，别在玩家没要求时顺手用掉）。
+     *
+     * <p>报障「副露无法区分红五与普通五」的另一半：旧实现是"按手牌顺序取前 n 张"，
+     * 而手牌是按 {@link #compareTile} 排过序的（**赤在前**），于是"碰 5p"会**悄悄吃掉赤五**。
+     */
+    private List<Integer> pickAuto(int seat, int kind, int n) {
+        List<Integer> out = new ArrayList<>();
+        for (int id : hand[seat]) {
+            if (Tiles.kind(id) == kind && !Tiles.isRedId(id) && out.size() < n) {
+                out.add(id);
+            }
+        }
+        for (int id : hand[seat]) {
+            if (Tiles.kind(id) == kind && out.size() < n && !out.contains(id)) {
+                out.add(id);
+            }
+        }
+        return out;
     }
 
     private void applyMeld(Claim cl, int from, int tileId) {
@@ -2019,12 +2142,7 @@ public final class Round {
             // 同样是赤宝选择：客户端可指定用哪三张
             kanPicked = pickHandTiles(seat, tileId, cl.wantTiles, 3);
             if (kanPicked == null) {
-                kanPicked = new ArrayList<>();
-                for (int id : hand[seat]) {
-                    if (Tiles.kind(id) == kind && kanPicked.size() < 3) {
-                        kanPicked.add(id);
-                    }
-                }
+                kanPicked = pickAuto(seat, kind, 3);     // 普通牌优先（别顺手吃赤五）
             }
             if (kanPicked.size() < 3) {
                 return;
@@ -2072,12 +2190,7 @@ public final class Round {
                 // 没给（老客户端）走"同 kind 取前两张"的旧行为。
                 List<Integer> picked = pickHandTiles(seat, tileId, cl.wantTiles, 2);
                 if (picked == null) {
-                    picked = new ArrayList<>();
-                    for (int id : hand[seat]) {
-                        if (Tiles.kind(id) == kind && picked.size() < 2) {
-                            picked.add(id);
-                        }
-                    }
+                    picked = pickAuto(seat, kind, 2);    // 普通牌优先（别顺手吃赤五）
                 }
                 if (picked.size() < 2) {
                     return;   // 与大明杠同理：状态改之前就挡住（防越界 / 防伪造报文改分）

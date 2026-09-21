@@ -14,6 +14,7 @@
 #include "ui/TableView.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QFile>
 #include <QFont>
 #include <QGroupBox>
@@ -252,7 +253,22 @@ void MainWindow::buildTablePage()
     // 三个自动开关摆在**牌桌外**（牌桌下方、操作栏之下），不挤占牌桌绘制区，
     // 也不进 ActionBar —— 后者的按钮是随询问动态增删的，混进去会改它的固定高度。
     m_autoBar = new AutoBar(m_tablePage);
+    // 观战条（只在观战时出现）：说明"你在观战" + 一个视角下拉（与回放界面同一套做法，
+    // 另外**点名牌**也能切视角 —— 见 TableView::seatClicked）。
+    m_spectateBar = new QWidget(m_tablePage);
+    auto* specRow = new QHBoxLayout(m_spectateBar);
+    specRow->setContentsMargins(6, 2, 6, 2);
+    m_spectateLabel = new QLabel(lang::t("ui.main.spectating"), m_spectateBar);
+    m_spectateLabel->setStyleSheet(QStringLiteral("color:#9AA3B2;"));
+    specRow->addWidget(m_spectateLabel);
+    specRow->addWidget(new QLabel(lang::t("ui.main.spectate_view"), m_spectateBar));
+    m_spectateSeat = new QComboBox(m_spectateBar);
+    m_spectateSeat->setMinimumWidth(140);
+    specRow->addWidget(m_spectateSeat);
+    specRow->addStretch(1);
+    m_spectateBar->hide();
     left->addWidget(m_table, 1);
+    left->addWidget(m_spectateBar);
     left->addWidget(m_actions);
     left->addWidget(m_autoBar);
     root->addLayout(left, 1);
@@ -288,6 +304,10 @@ void MainWindow::buildTablePage()
     m_stack->addWidget(m_tablePage);
 
     connect(m_table, &TableView::tileClicked, this, &MainWindow::onTileClicked);
+    // 点名牌切视角：实时对局里只有**观战**会接这个信号（玩家自己的名牌点了没用）
+    connect(m_table, &TableView::seatClicked, this, &MainWindow::onSeatClicked);
+    connect(m_spectateSeat, QOverload<int>::of(&QComboBox::activated), this,
+            [this](int idx) { onViewSeatPicked(idx); });
     connect(m_actions, &ActionBar::actionReady, this, &MainWindow::onActionReady);
     connect(m_actions, &ActionBar::riichiModeChanged, this, &MainWindow::onRiichiModeChanged);
     connect(m_autoBar, &AutoBar::flagsChanged, this, &MainWindow::onAutoFlagsChanged);
@@ -677,6 +697,42 @@ void MainWindow::onRiichiModeChanged(bool on)
         statusBar()->showMessage(lang::t("ui.main.riichi_prompt"), 5000);
 }
 
+void MainWindow::setSpectatingUi(bool on)
+{
+    if (m_spectateBar == nullptr)
+        return;
+    m_spectateBar->setVisible(on);
+    // 观战没有操作：操作栏与三个自动开关一起收起来（自动开关本来是替**自己**应答的）
+    m_actions->setVisible(!on);
+    m_autoBar->setVisible(!on);
+    if (on) {
+        // 视角下拉按**玩家名**列出（与回放界面的「视角」同一个口径）
+        const int keep = m_spectateSeat->currentIndex();
+        m_spectateSeat->clear();
+        for (int s = 0; s < 4; ++s)
+            m_spectateSeat->addItem(QStringLiteral("%1").arg(m_model.playerName(s)), s);
+        m_spectateSeat->setCurrentIndex(keep >= 0 ? keep : m_model.viewSeat());
+    }
+}
+
+void MainWindow::onSeatClicked(int seat)
+{
+    if (!m_model.spectating())
+        return;                     // 实时对局里点名牌不是切视角
+    m_model.setViewSeat(seat);
+    if (m_spectateSeat != nullptr)
+        m_spectateSeat->setCurrentIndex(m_model.viewSeat());
+    m_table->update();
+}
+
+void MainWindow::onViewSeatPicked(int index)
+{
+    if (!m_model.spectating())
+        return;
+    m_model.setViewSeat(index);
+    m_table->update();
+}
+
 void MainWindow::onTileClicked(const QString& tile, int index)
 {
     Q_UNUSED(index);
@@ -836,8 +892,7 @@ void MainWindow::onEvent(const QJsonObject& ev)
         if (ev.value(QStringLiteral("seat")).toInt(-1) == m_model.mySeat())
             sound::Player::instance().play(QLatin1String(sound::name::Draw), false);
     }
-    if (name == QLatin1String("hello_ok")) {
-        m_myPid = ev.value(QStringLiteral("pid")).toInt();
+    if (name == QLatin1String("hello_ok")) {        m_myPid = ev.value(QStringLiteral("pid")).toInt();
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
         if (m_lobby)
             m_lobby->setStatus(lang::t("ui.main.handshake_done"));
@@ -891,6 +946,22 @@ void MainWindow::onEvent(const QJsonObject& ev)
         m_stack->setCurrentWidget(m_tablePage);
         m_chatView->clear();
         m_table->showToast(lang::t("ui.main.game_started"), QColor(0x9F, 0xE8, 0xC4));
+    } else if (name == QLatin1String("spectate")) {
+        // 对局中入局 = **观战**（服务端不给座位）。
+        // 客户端从这里起进入"无座位"模式：不画自家手牌、不显示操作栏，
+        // 视角可以切（点名牌 / 下拉），跟着服务端后续的公开事件走。
+        // ⚠ 旧实现**根本没有这个分支**：`spectate` 被 `onEvent` 开头排除在模型之外，
+        //   紧接着的 `state`（seat=-1）又被 qBound 夹成座位 0，于是玩家看到的是
+        //   "坐在东家、手里一张牌都没有"的未定义状态（报障原文）。
+        if (m_lobby != nullptr)
+            m_lobby->hide();
+        m_model.setSpectating(true);
+        setSpectatingUi(true);
+        if (m_stack->currentWidget() != m_tablePage)
+            m_stack->setCurrentWidget(m_tablePage);
+        m_actions->clearAsk();
+        m_spectateSeat->setCurrentIndex(m_model.viewSeat());
+        m_table->showToast(lang::t("ui.main.spectating_hint"), QColor(0x9F, 0xC8, 0xE8));
     } else if (name == QLatin1String("round_start")) {
         // 新一局已经开始 → 上一局的结算弹窗必须关掉。
         // 这里**不算玩家确认**（服务端已经开新局了，再发 confirm 会残留到下一次局间，
@@ -904,6 +975,20 @@ void MainWindow::onEvent(const QJsonObject& ev)
         m_actions->clearAsk();
         m_table->setHighlightTiles(QStringList());
         m_table->showToast(m_model.roundText(), QColor(0x9F, 0xE8, 0xC4));
+    } else if (name == QLatin1String("state")) {
+        // 全量快照：既是**重连**（自己有座位）也是**观战**（seat = -1）的入口。
+        // 两者的区别只在 `spectate` 一个字段上，UI 也按它切（观战的快照可能在
+        // `spectate` 事件之后才到，所以两条路都要摆一次 UI）。
+        const bool spect = ev.value(QStringLiteral("spectate")).toBool(false)
+                || ev.value(QStringLiteral("seat")).toInt(0) < 0;
+        setSpectatingUi(spect);
+        if (spect) {
+            if (m_lobby != nullptr)
+                m_lobby->hide();
+            if (m_stack->currentWidget() != m_tablePage)
+                m_stack->setCurrentWidget(m_tablePage);
+            m_spectateSeat->setCurrentIndex(m_model.viewSeat());
+        }
     } else if (name == QLatin1String("ask")) {
         const proto::AskInfo info = proto::parseAsk(ev);
         if (info.valid && (info.seat < 0 || info.seat == m_model.mySeat())) {

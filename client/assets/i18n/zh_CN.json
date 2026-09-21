@@ -239,6 +239,8 @@
   "ui.main.send": "发送",
   "ui.main.server_error": "服务端错误：%1",
   "ui.main.spectating": "观战中",
+  "ui.main.spectating_hint": "对局进行中，你以观战身份进入（点名牌切换视角）",
+  "ui.main.spectate_view": "视角",
   "ui.main.start_game": "开始游戏",
   "ui.main.tiles_left_html": "<p>余牌 %1 · 岭上 %2</p>",
   "ui.main.wait_line_html": "<b>%1</b>：%2",

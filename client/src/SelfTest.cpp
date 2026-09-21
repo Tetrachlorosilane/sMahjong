@@ -541,6 +541,68 @@ int run(const QString& outDir)
                   .arg(expectKw).arg(kw));
     }
 
+    // ---- 回归：副露三张**底部齐平**（横置那张不许"浮"在中间）----
+    // 报障原文：「副露的三张牌底部应该是相互齐平的，但现在横置的那张是居中而应该是居下的」。
+    // 断言直接读**绘制用的同一份几何**（`TableView::meldSlotRectForTest` → `meldSlotRects`），
+    // 不是照着重算一遍公式。
+    {
+        TableModel tm;
+        const auto feed = [&tm](const char* json) {
+            tm.applyEvent(proto::decodeLine(QByteArray(json), nullptr));
+        };
+        feed(R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p"],"dora_indicators":[],"tiles_left":60,"dead_wall_left":4})");
+        // 自家碰了下家的 5z：横置位在最右（meldRotatedIndex = 2）
+        feed(R"({"ev":"meld","seat":0,"kind":"pon","tiles":["5z","5z","5z"],"from":1,"called_tile":"5z","aka":[false,false,false],"called_index":0})");
+        TableView tv;
+        tv.resize(900, 640);
+        tv.setModel(&tm);
+        tv.updateLayoutForTest();
+        const QRectF r0 = tv.meldSlotRectForTest(0, 0, 0);
+        const QRectF r1 = tv.meldSlotRectForTest(0, 0, 1);
+        const QRectF rRot = tv.meldSlotRectForTest(0, 0, 2);   // 横置那张
+        check(r0.isValid() && r1.isValid() && rRot.isValid(),
+              QStringLiteral("副露三格的矩形都算得出来"));
+        check(qAbs(r0.bottom() - r1.bottom()) < 0.01,
+              QStringLiteral("两张竖直的底边齐平（%1 vs %2）").arg(r0.bottom()).arg(r1.bottom()));
+        check(qAbs(rRot.bottom() - r0.bottom()) < 0.01,
+              QStringLiteral("横置那张的底边也要齐平：期望 %1 实际 %2")
+                  .arg(r0.bottom()).arg(rRot.bottom()));
+        check(rRot.width() > rRot.height(),
+              QStringLiteral("横置那张确实是横的（宽 %1 > 高 %2）")
+                  .arg(rRot.width()).arg(rRot.height()));
+        check(rRot.height() < r0.height() + 0.01,
+              QStringLiteral("横置那张的高 = 牌河牌宽（比竖直的矮）"));
+    }
+
+    // ---- 回归：名牌（ID 框）在**右下**，四家角位轮转一位 ----
+    // 用户口径：「ID 框从左下移动到右下，即顺时针旋转变换一位」。
+    {
+        TableView tv;
+        tv.resize(900, 640);
+        tv.updateLayoutForTest();
+        const QRectF self = tv.plateRectForTest(0);
+        const QRectF right = tv.plateRectForTest(1);
+        const QRectF top = tv.plateRectForTest(2);
+        const QRectF left = tv.plateRectForTest(3);
+        check(self.center().x() > 450.0 && self.center().y() > 320.0,
+              QStringLiteral("自家名牌在**右下**（中心 %1,%2）")
+                  .arg(self.center().x()).arg(self.center().y()));
+        check(right.center().x() > 450.0 && right.center().y() < 320.0,
+              QStringLiteral("下家名牌在右上（轮转一位后）"));
+        check(top.center().x() < 450.0 && top.center().y() < 320.0,
+              QStringLiteral("对家名牌在左上（轮转一位后）"));
+        check(left.center().x() < 450.0 && left.center().y() > 320.0,
+              QStringLiteral("上家名牌在左下（轮转一位后）"));
+        const QStringList names { QStringLiteral("自家"), QStringLiteral("下家"),
+                                  QStringLiteral("对家"), QStringLiteral("上家") };
+        for (int i = 0; i < 4; ++i) {
+            const QRectF a = tv.plateRectForTest(i);
+            const QRectF b = tv.plateRectForTest((i + 1) % 4);
+            check(!a.intersects(b),
+                  QStringLiteral("%1 与 %2 的名牌不重叠").arg(names.at(i), names.at((i + 1) % 4)));
+        }
+    }
+
     // ---- 回归：一个人牌河里最多只能有一张横置牌 ----
     // 旧实现的问题：riichi 事件到达时把「牌河最后一张」误标为横置，
     // 而服务端是先发 riichi 再发 discard，于是宣言牌之前那张被误标，
@@ -1323,6 +1385,52 @@ int run(const QString& outDir)
               QStringLiteral("提交后 discardCmd 必须返回空对象"));
         check(ab.buttonForTest(QStringLiteral("立直")) == nullptr,
               QStringLiteral("提交后「立直」按钮已销毁"));
+    }
+
+    // ---------- 副露赤宝选择：碰的两条选项要能分别点、回包带精确牌码 ----------
+    // 服务端对「不用赤五 / 用赤五」各下发一条 `pon`（各带 `tiles`，见 PROTOCOL §3.6）。
+    // 报障原文是「副露无法区分红五与普通五」：旧协议 pon 不带 `tiles`，客户端连选都没得选。
+    {
+        ActionBar ab;
+        ab.setAsk(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"ask","ask_id":91,"seat":0,"kind":"claim","deadline_ms":15000,)"
+            R"("options":[{"type":"pon","tiles":["5p","5p"]},)"
+            R"({"type":"pon","tiles":["0p","5p"]},{"type":"pass"}]})"),
+            nullptr));
+        const QString akaLabel = TileRenderer::label(QStringLiteral("0p"));
+        const QString plainLabel = lang::t("ui.action.pon");
+        QPushButton* plainBtn = ab.buttonForTest(plainLabel);
+        QPushButton* akaBtn = ab.buttonForTest(plainLabel + QStringLiteral(" ") + akaLabel);
+        check(plainBtn != nullptr, QStringLiteral("「碰」按钮在（不用赤五那条）"));
+        check(akaBtn != nullptr, QStringLiteral("「碰 %1」按钮在（用赤五那条，实际按钮：%2）")
+                                     .arg(akaLabel, ab.buttonTextsForTest().join(QStringLiteral("/"))));
+        // 两个按钮文案必须不同 —— 否则玩家根本看不出哪条会用掉赤五
+        check(plainLabel != plainLabel + QStringLiteral(" ") + akaLabel,
+              QStringLiteral("两条碰的按钮文案必须可区分"));
+        QJsonObject sent;
+        QObject::connect(&ab, &ActionBar::actionReady, [&](const QJsonObject& o) { sent = o; });
+        if (akaBtn != nullptr) {
+            akaBtn->click();
+            const QJsonArray t = sent.value(QStringLiteral("tiles")).toArray();
+            checkEq(QString::number(t.size()), QStringLiteral("2"),
+                    QStringLiteral("用赤五那条回包要带 tiles（两张）"));
+            checkEq(t.isEmpty() ? QString() : t.at(0).toString(), QStringLiteral("0p"),
+                    QStringLiteral("回包的第一张就是赤五（服务端据此精确取牌）"));
+            checkEq(sent.value(QStringLiteral("type")).toString(), QStringLiteral("pon"),
+                    QStringLiteral("回包 type 仍是 pon"));
+            checkEq(QString::number(sent.value(QStringLiteral("ask_id")).toInt()),
+                    QStringLiteral("91"), QStringLiteral("赤宝选择回包也要带 ask_id"));
+        }
+        if (plainBtn != nullptr) {
+            sent = QJsonObject();
+            plainBtn->click();
+            const QJsonArray t = sent.value(QStringLiteral("tiles")).toArray();
+            checkEq(QString::number(t.size()), QStringLiteral("2"),
+                    QStringLiteral("不用赤五那条也要带 tiles（普通五优先）"));
+            check(t.isEmpty() || !t.at(0).toString().startsWith(QLatin1Char('0')),
+                  QStringLiteral("不用赤五那条的第一张不能是赤牌，实际 %1")
+                      .arg(t.isEmpty() ? QString() : t.at(0).toString()));
+        }
     }
 
     // ---------- 回归：牌桌外的三个自动开关（自动胡了 / 不吃碰杠 / 自动摸切）----------
@@ -2223,7 +2331,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("425"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("427"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2250,7 +2358,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("301"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("303"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()
@@ -3139,10 +3247,126 @@ int run(const QString& outDir)
             }
             check(sp.effectReadyForTest(notify),
                   QStringLiteral("Qt Multimedia 后端必须接受这份 WAV（status == Ready）"));
+
+            // ⑤ 实例池 + `allowOverlap`：报障「只有第一小局有音效」的现场是
+            //    「同一个 QSoundEffect 被反复 stop()+play()」——旧实现**忽略**了
+            //    `allowOverlap=false`（摸牌那条路明确要求"别叠"），每次都停掉重放。
+            //    现在：池子里换一个空闲实例（根本不停），池子都忙时才按 allowOverlap 决定。
+            for (const QString& n : names) {
+                check(sp.poolSizeForTest(n) >= 2,
+                      QStringLiteral("音效 %1 要有实例池（>=2），实际 %2")
+                              .arg(n)
+                              .arg(sp.poolSizeForTest(n)));
+            }
+            const QString draw = QLatin1String(sound::name::Draw);
+            sp.play(draw);                       // 先确保这个音效已 Ready
+            for (int i = 0; i < 40 && !sp.effectReadyForTest(draw); ++i) {
+                QCoreApplication::processEvents();
+                QThread::msleep(25);
+            }
+            // 叠放（默认）：连着两次都要真的放出去 —— 池子换实例，不丢音
+            const int kanBefore = sp.playCountForTest(QLatin1String(sound::name::Kan));
+            sp.play(QLatin1String(sound::name::Kan), true);
+            sp.play(QLatin1String(sound::name::Kan), true);
+            checkEq(QString::number(sp.playCountForTest(QLatin1String(sound::name::Kan))
+                                    - kanBefore),
+                    QStringLiteral("2"),
+                    QStringLiteral("allowOverlap=true：连续两次都要放（换池内实例，不停不丢）"));
+            // 不叠（摸牌那条路的口径）：上一次还在播时必须**跳过**。
+            // ⚠ 用 `ron`（≈0.5 s）而不是 `draw`（≈70 ms）来测：70 ms 的窗口太窄，
+            //   两次调用之间稍微慢一点（事件循环/GC）就变成"上一次已经放完"了。
+            const QString quiet = QLatin1String(sound::name::Ron);
+            sp.play(quiet);                      // 热身（确保已 Ready 并进入过 playing）
+            for (int i = 0; i < 80 && !sp.effectReadyForTest(quiet); ++i) {
+                QCoreApplication::processEvents();
+                QThread::msleep(25);
+            }
+            for (int i = 0; i < 200 && sp.effectPlayingForTest(quiet); ++i) {
+                QCoreApplication::processEvents();
+                QThread::msleep(10);
+            }
+            check(!sp.effectPlayingForTest(quiet),
+                  QStringLiteral("自检前提：热身那次已经放完（否则测不出「跳过」）"));
+            const int skipBefore = sp.overlapSkipCountForTest();
+            const int quietBefore = sp.playCountForTest(quiet);
+            sp.play(quiet, false);
+            bool started = false;
+            for (int i = 0; i < 20 && !started; ++i) {
+                started = sp.effectPlayingForTest(quiet);
+                if (!started) {
+                    QCoreApplication::processEvents();
+                    QThread::msleep(10);
+                }
+            }
+            check(started, QStringLiteral("自检前提：play() 之后立刻进入 playing"
+                                          "（否则下面的跳过断言没有意义）"));
+            sp.play(quiet, false);
+            const int quietAfter = sp.playCountForTest(quiet);
+            checkEq(QString::number(quietAfter - quietBefore), QStringLiteral("1"),
+                    QStringLiteral("allowOverlap=false：上一次还在播时第二次**跳过**"
+                                   "（旧实现会停掉重放 —— 那条路径正是把声卡搞哑的嫌疑）"));
+            check(sp.overlapSkipCountForTest() > skipBefore,
+                  QStringLiteral("跳过计数被走到"));
         } else {
             log << QStringLiteral("[i] 后端 %1 没有 Ready 状态可查（跳过该断言）")
                        .arg(sp.backendName());
         }
+    }
+
+    // ---------- 观战：对局中入局 = 无座位（四家牌背 + 视角可切） ----------
+    // 报障：对局中入局会被放行进入"未定义的观战状态" —— 旧代码把 `state.seat = -1`
+    // 用 qBound 夹成 0 并 `m_hasSeat = true`，于是观战者被当成"东家、手里没牌"的玩家。
+    {
+        TableModel m;
+        m.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"spectate","room":"AB12"})"),
+            nullptr));
+        check(m.spectating(), QStringLiteral("spectate 事件 → 进入观战模式"));
+        check(!m.hasSeat(), QStringLiteral("观战者没有座位（hasSeat=false）"));
+
+        // 服务端随后补的公开快照：seat = -1
+        m.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"state","phase":"playing","seat":-1,"spectate":true,"dealer":2,)"
+            R"("drawn_seat":2,"turn":2,"round":{"bakaze":"E","kyoku":2,"honba":0,)"
+            R"("riichi_sticks":0},"scores":[25000,24000,26000,25000],)"
+            R"("melds":[[],[],[],[]],"discards":[[],["1m"],[],[]],)"
+            R"("riichi":[false,false,false,false],"furiten":[false,false,false,false],)"
+            R"("dora_indicators":["5p"],"tiles_left":60,"dead_wall_left":4})"),
+            nullptr));
+        check(m.spectating(), QStringLiteral("seat=-1 的快照仍然保持观战（不被夹成座位 0）"));
+        check(!m.hasSeat(), QStringLiteral("观战快照不得把 hasSeat 置真"));
+        check(m.hand().isEmpty(), QStringLiteral("观战者手里没有牌"));
+        checkEq(QString::number(m.dealer()), QStringLiteral("2"),
+                QStringLiteral("快照要带上 dealer（自风显示靠它）"));
+        checkEq(QString::number(m.drawnSeat()), QStringLiteral("2"),
+                QStringLiteral("快照要带上 drawn_seat（半场进入时各家张数靠它）"));
+        checkEq(QString::number(m.concealedCount(2)), QStringLiteral("14"),
+                QStringLiteral("刚摸牌那家按 14 张画（13 + 摸牌）"));
+        checkEq(QString::number(m.concealedCount(0)), QStringLiteral("13"),
+                QStringLiteral("其余家 13 张"));
+        checkEq(QString::number(m.kyoku()), QStringLiteral("2"),
+                QStringLiteral("快照里的场次要吃进来（半场进入不能从东 1 局重来）"));
+        // 视角切换：只改"哪家画在下方"，不改任何判定
+        const int before = m.mySeat();
+        m.setViewSeat(3);
+        checkEq(QString::number(m.viewSeat()), QStringLiteral("3"), QStringLiteral("视角切到 3"));
+        checkEq(QString::number(m.mySeat()), QStringLiteral("3"),
+                QStringLiteral("观战下 mySeat 就是视角座位（旋转用）"));
+        check(before != m.mySeat(), QStringLiteral("切换视角确实换了座位号"));
+        check(!m.hasSeat(), QStringLiteral("切视角不会让观战者变成有座位"));
+        // 回到有座位：接一份正常 state 必须退出观战
+        m.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"state","phase":"playing","seat":1,"spectate":false,"dealer":0,)"
+            R"("turn":0,"drawn_seat":0,"round":{"bakaze":"E","kyoku":1,"honba":0,)"
+            R"("riichi_sticks":0},"scores":[25000,25000,25000,25000],)"
+            R"("hand":["1m","2m","3m"],"melds":[[],[],[],[]],"discards":[[],[],[],[]],)"
+            R"("riichi":[false,false,false,false],"furiten":[false,false,false,false],)"
+            R"("dora_indicators":[],"tiles_left":69,"dead_wall_left":4})"),
+            nullptr));
+        check(!m.spectating(), QStringLiteral("正常快照（seat>=0）退出观战"));
+        check(m.hasSeat(), QStringLiteral("正常快照恢复 hasSeat"));
+        checkEq(QString::number(m.mySeat()), QStringLiteral("1"),
+                QStringLiteral("正常快照的座位号照旧"));
     }
 
     // ---------- 汇总 ----------

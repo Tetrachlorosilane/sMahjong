@@ -430,6 +430,19 @@ public final class Table implements Runnable {
      * 只发不记。给「已经手工记过」的报文用（目前只有终局的 `game_end`：它必须
      * **先落盘再下发**，否则客户端一收到结算就点"看回放"会查不到 —— 见 {@link #sendGameEnd}）。
      */
+    /**
+     * 只发给**观战者**（公开信息）。
+     *
+     * <p>为什么需要单独一条路：`round_start` 与 `draw` 是**按座位**发的（要带那一家的暗牌/
+     * 摸到的那张），观战者 `seat = -1` 一条都收不到 —— 他们的牌桌会整局停在入局那一刻
+     * （报障：「进入未定义的观战状态」）。这里把**公开版本**补给他们。
+     */
+    public void sendSpectators(Map<String, Object> ev) {
+        for (Session sp : spectators) {
+            sp.send(ev);
+        }
+    }
+
     private void broadcastRaw(Map<String, Object> ev) {
         for (Seat s : seats) {
             if (s.session != null) {
@@ -1242,7 +1255,8 @@ public final class Table implements Runnable {
     public Map<String, Object> stateFor(int seat) {
         Round r = currentRound;
         if (r == null) {
-            return Json.obj("ev", "state", "phase", "idle", "scores", intList(lastScores));
+            return Json.obj("ev", "state", "phase", "idle", "scores", intList(lastScores),
+                    "spectate", seat < 0);
         }
         List<Object> meldsAll = new ArrayList<>();
         List<Object> discardsAll = new ArrayList<>();
@@ -1274,6 +1288,13 @@ public final class Table implements Runnable {
                 "ev", "state",
                 "phase", "playing",
                 "seat", seat,
+                // 观战（seat < 0）时显式标出来：客户端据此进入"无座位"模式
+                //（不画自家手牌、不显示操作栏、点名牌切换视角）—— 见 PROTOCOL §3.12。
+                "spectate", seat < 0,
+                "dealer", r.dealer,
+                // 谁手里有 14 张（公开信息）：半场进入时各家张数靠它一次摆对
+                "drawn_seat", r.lastDrawer,
+                "turn", r.lastDrawer,
                 "round", Json.obj(
                         "bakaze", new String[]{"E", "S", "W", "N"}[r.roundWind],
                         "kyoku", r.kyoku,

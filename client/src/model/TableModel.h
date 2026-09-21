@@ -73,6 +73,17 @@ public:
     bool hasSeat() const { return m_hasSeat; }
     int mySeat() const { return m_mySeat; }
     void setMySeat(int seat);
+    /**
+     * 观战模式：**没有座位**，四家一律按张数画牌背、不显示操作栏。
+     *
+     * <p>`mySeat()` 在观战下表示**视角座位**（点名牌切换，见 {@link #setViewSeat}）——
+     * 它只影响"哪一家画在下方"的旋转，与座位/操作无关。
+     */
+    bool spectating() const { return m_spectating; }
+    void setSpectating(bool on);
+    int viewSeat() const { return m_viewSeat; }
+    /** 切换观战视角（点了哪一家的名牌就把那家摆到下方）。 */
+    void setViewSeat(int seat);
     int dealer() const { return m_dealer; }
     QString bakaze() const { return m_bakaze; }
     int kyoku() const { return m_kyoku; }
@@ -179,6 +190,10 @@ private:
     static bool isWinningForm(const QVector<int>& counts, int meldCount);
 
     bool m_hasSeat = false;
+    /** 观战：无座位（四家一律牌背 + 视角可切换）。 */
+    bool m_spectating = false;
+    /** 观战视角座位（`mySeat()` 在观战下就是它）。 */
+    int m_viewSeat = 0;
     bool m_silent = false;
     int m_mySeat = 0;
     int m_dealer = 0;

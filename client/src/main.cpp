@@ -87,7 +87,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("mahjong-client"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.7.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.8.0"));
 
     const QStringList args = QCoreApplication::arguments();
 

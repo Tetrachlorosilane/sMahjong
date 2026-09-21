@@ -254,13 +254,21 @@ void TableLayout::computeLayout(QSize viewSize, const TableModel& model,
         f.riverStep = riverStep;
 
         // 名牌沿**对角线向内**移到「两家牌河之间的拐角空隙」：
-        // 离开屏幕角落，就不会和邻家的手牌行 / 副露带挤在一起
+        // 离开屏幕角落，就不会和邻家的手牌行 / 副露带挤在一起。
+        //
+        // ⚠ 四个角是**轮转一位**的（用户口径：「ID 框从左下移动到右下，即顺时针旋转变换一位」）：
+        //   自家的名牌从**左下**挪到**右下**，其余三家跟着一起转一格 ——
+        //   所以这里 pos 用的是「下一个座位那一格」的矩形（`(pos + 1) % 4`）。
+        //   为什么要一起转：四个角必须各占一个（只挪自家就会和下家的名牌重叠），
+        //   而且转完之后每家的名牌仍落在「自己那条边的自己这一侧」的同一端。
+        //   角落预留（`plateReserve`）也在**同一端**，所以名牌挪到哪、牌河/副露就在哪让开。
         const qreal diag = m_tileH * 1.9;
-        if (pos == 0)
+        const int corner = (pos + 1) % 4;      // 0=下 1=右 2=上 3=左（屏幕方位）
+        if (corner == 0)
             f.plate = QRectF(kPad + diag, H - kPad - plateH - diag, plateW, plateH);
-        else if (pos == 2)
+        else if (corner == 2)
             f.plate = QRectF(W - kPad - plateW - diag, kPad + diag, plateW, plateH);
-        else if (pos == 1)
+        else if (corner == 1)
             f.plate = QRectF(W - kPad - plateW - diag, H - kPad - plateH - diag, plateW, plateH);
         else
             f.plate = QRectF(kPad + diag, kPad + diag, plateW, plateH);

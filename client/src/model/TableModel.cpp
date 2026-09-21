@@ -140,6 +140,10 @@ void TableModel::reset()
     m_deadWallLeft = 0;
     m_turn = 0;
     m_phase.clear();
+    // 观战状态也要复位（`reset()` 会被"回放跳转/换房间"复用；留着它会让下一桌
+    // 一进来就是无座位模式）。
+    m_spectating = false;
+    m_viewSeat = 0;
 
     m_ask = QJsonObject();
     m_askValid = false;
@@ -156,7 +160,32 @@ void TableModel::reset()
 void TableModel::setMySeat(int seat)
 {
     m_hasSeat = true;
+    m_spectating = false;
     m_mySeat = qBound(0, seat, 3);
+}
+
+void TableModel::setSpectating(bool on)
+{
+    m_spectating = on;
+    if (on) {
+        m_hasSeat = false;
+        m_mySeat = qBound(0, m_viewSeat, 3);   // 视角座位驱动"哪家画在下方"
+        m_hand.clear();
+        m_drawn.clear();
+        m_drawnSeat = -1;
+        clearAsk();
+        m_phase = QStringLiteral("spectate");
+    }
+    emit changed();
+}
+
+void TableModel::setViewSeat(int seat)
+{
+    m_viewSeat = qBound(0, seat, 3);
+    if (m_spectating) {
+        m_mySeat = m_viewSeat;                 // 只影响旋转，不影响任何判定
+    }
+    emit changed();
 }
 
 QString TableModel::roundText() const
@@ -791,8 +820,20 @@ void TableModel::applyEvent(const QJsonObject& ev)
         setScores(proto::intVector(ev.value(QStringLiteral("scores"))));
         clearAsk();
     } else if (name == QLatin1String("state")) {
-        m_hasSeat = true;
-        m_mySeat = qBound(0, ev.value(QStringLiteral("seat")).toInt(0), 3);
+        // 观战（`spectate:true` / `seat < 0`）：**没有座位**。
+        // 旧实现把 `seat:-1` 用 qBound 夹成 0 并 `m_hasSeat = true`，于是观战者
+        // 被当成"坐在 0 号位、手里一张牌都没有"的玩家（报障：「进入未定义的观战状态」）。
+        // 现在：座位信息交给"视角座位"（`m_viewSeat`，点名牌可切换），`m_hasSeat` 保持假，
+        // 手里也不放牌 —— 四家一律按张数画牌背（见 TableView::paintSeat）。
+        const bool spect = ev.value(QStringLiteral("spectate")).toBool(false)
+                || ev.value(QStringLiteral("seat")).toInt(0) < 0;
+        m_spectating = spect;
+        m_hasSeat = !spect;
+        if (spect) {
+            setViewSeat(m_viewSeat);          // 保持当前视角（默认 0）
+        } else {
+            m_mySeat = qBound(0, ev.value(QStringLiteral("seat")).toInt(0), 3);
+        }
         const QJsonObject round = ev.value(QStringLiteral("round")).toObject();
         m_bakaze = round.value(QStringLiteral("bakaze")).toString(m_bakaze);
         m_kyoku = round.value(QStringLiteral("kyoku")).toInt(m_kyoku);
@@ -800,6 +841,8 @@ void TableModel::applyEvent(const QJsonObject& ev)
         m_riichiSticks = round.value(QStringLiteral("riichi_sticks")).toInt(0);
         if (round.contains(QStringLiteral("dealer")))
             m_dealer = qBound(0, round.value(QStringLiteral("dealer")).toInt(m_dealer), 3);
+        else if (ev.contains(QStringLiteral("dealer")))
+            m_dealer = qBound(0, ev.value(QStringLiteral("dealer")).toInt(m_dealer), 3);
         setScores(proto::intVector(ev.value(QStringLiteral("scores"))));
 
         m_hand = proto::stringList(ev.value(QStringLiteral("hand")), proto::MaxHandTiles,
@@ -813,6 +856,10 @@ void TableModel::applyEvent(const QJsonObject& ev)
         // 否则重连后界面上的「岭上 N」会退回旧值。
         m_deadWallLeft = ev.value(QStringLiteral("dead_wall_left")).toInt(m_deadWallLeft);
         m_turn = ev.value(QStringLiteral("turn")).toInt(0);
+        // 半场进入：谁手里有 14 张（公开信息）。**必须**吃这个字段，
+        // 否则四家张数都按 13 画，正在摸牌的那家会少一张（观战/重连都会看到）。
+        if (ev.contains(QStringLiteral("drawn_seat")))
+            m_drawnSeat = qBound(-1, ev.value(QStringLiteral("drawn_seat")).toInt(-1), 3);
         m_phase = ev.value(QStringLiteral("phase")).toString();
 
         const QJsonArray melds = ev.value(QStringLiteral("melds")).toArray();
@@ -855,6 +902,16 @@ void TableModel::applyEvent(const QJsonObject& ev)
             m_furiten[s] = (s < fu.size()) ? fu.at(s) : false;
         }
         clearAsk();
+    } else if (name == QLatin1String("spectate")) {
+        // 对局中入局 = **观战**（服务端不会再给座位，见 PROTOCOL §3.12）。
+        // 这里只置标志 + 清空自家手牌；紧接着服务端会补一份公开快照（`state`）。
+        m_spectating = true;
+        m_hasSeat = false;
+        m_hand.clear();
+        m_drawn.clear();
+        m_drawnSeat = -1;
+        clearAsk();
+        m_phase = QStringLiteral("spectate");
     } else if (name == QLatin1String("chat")) {
         emit chatReceived(ev.value(QStringLiteral("seat")).toInt(-1),
                           ev.value(QStringLiteral("name")).toString(),

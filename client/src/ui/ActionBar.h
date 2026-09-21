@@ -55,6 +55,8 @@ public:
     // 自检用
     QString titleTextForTest() const;
     QPushButton* buttonForTest(const QString& label) const;
+    /** 当前所有动作按钮的文案（断言失败时打出来，省得靠猜"到底画了哪几个"）。 */
+    QStringList buttonTextsForTest() const;
 
 signals:
     void actionReady(const QJsonObject& action);  // 已组装好的完整 cmd
@@ -65,6 +67,8 @@ private:
     void rebuild();
     void onTick();
     void sendSimple(const QString& type);
+    /** 按**整条选项**发包（会带上 `tiles` = 副露赤宝选择的精确牌码，见 PROTOCOL §3.6）。 */
+    void sendOption(const QJsonObject& opt);
     void showChiMenu();
     void showKanMenu();
     QString baseTitle() const;    // 不含倒计时的标题

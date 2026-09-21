@@ -17,6 +17,7 @@
 class ActionBar;
 class AutoBar;
 class LobbyDialog;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -67,6 +68,16 @@ private slots:
     void onNetError(const QString& msg);
     void onActionReady(const QJsonObject& action);
     void onTileClicked(const QString& tile, int index);
+    /**
+     * 点了某家的名牌：**观战时**把视角切到那一家（与回放界面同一条路径）。
+     *
+     * <p>实时对局里坐着的人点自己的名牌没有意义 —— 那时直接忽略。
+     */
+    void onSeatClicked(int seat);
+    /** 观战视角下拉选了一条（`index` = 座位号）。 */
+    void onViewSeatPicked(int index);
+    /** 观战 UI 开关：隐藏操作栏/自动开关，显示「观战中 + 视角」那一条。 */
+    void setSpectatingUi(bool on);
     void onRiichiModeChanged(bool on);
     void onAutoFlagsChanged();
     void onLeaveRoom();
@@ -142,6 +153,10 @@ private:
     TableView* m_table = nullptr;
     ActionBar* m_actions = nullptr;
     AutoBar* m_autoBar = nullptr;          // 牌桌外的三个自动开关
+    // 观战（对局中入局 = 无座位）：说明条 + 视角下拉（点名牌也走同一条路）
+    QWidget* m_spectateBar = nullptr;
+    QLabel* m_spectateLabel = nullptr;
+    QComboBox* m_spectateSeat = nullptr;
     autopolicy::Flags m_autoFlags;         // 它们的当前状态（decide 的输入）
     QLabel* m_scorePanel = nullptr;
     QTextBrowser* m_chatView = nullptr;

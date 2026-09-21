@@ -334,6 +334,22 @@
 - `kind ∈ {turn, claim, chankan}`
 - `option.type ∈ {discard, riichi, tsumo, kan, chi, pon, ron, pass, kyuushu}`
 - `chi` 选项形如 `{"type":"chi","sets":[["3m","4m"],["2m","4m"],["2m","3m"]]}`（手中取出的两张）
+- **副露赤宝选择（2026-09）**：`pon` 与 `kan(daiminkan)` 的选项带 `tiles` = **这一副用哪几张的精确牌码**
+  （赤五是 `0m/0p/0s`）。手里既有赤五又有普通五时，服务端对两种取法**各下发一条**：
+
+  ```jsonc
+  {"type":"pon","tiles":["5p","5p"]}                      // 不用赤五（普通牌优先）
+  {"type":"pon","tiles":["0p","5p"]}                      // 用赤五
+  {"type":"kan","kans":[{"kind":"daiminkan","tile":"5p","tiles":["0p","5p","5p"]}]}
+  ```
+
+  客户端应把它们渲染成**可区分的两个按钮**（例如「碰」与「碰 赤五筒」），并在回包时
+  **原样带回 `tiles`**：`{"cmd":"action","ask_id":13,"type":"pon","tiles":["0p","5p"]}`。
+  ⚠ 老客户端（`pon` 不带 `tiles`）与机器人走**默认取法**：**普通牌优先**——
+  赤五是资源，没被点名时不会被顺手用掉（旧实现按手牌顺序取前两张，而手牌把赤排在前面，
+  等于"碰五必吃赤五"，这正是报障「副露无法区分红五与普通五」的另一半）。
+  服务端校验：`tiles` 的牌种必须与被鸣那张一致、张数必须对、要赤五就得真有赤五，
+  任一条不满足就**作废这次鸣牌**（绝不拿另一张顶上，见 §7）。
 - 客户端必须在 `deadline_ms` 内回 `{"cmd":"action",...}`；**超时由服务端代打：回合超时一律按「摸切」处理**
   （打出刚摸到的那张，`discard.tsumogiri = true`），鸣牌/抢杠超时按 `pass` 处理。
 - 同一时刻可能有多个 `ask` 并发发往不同玩家（`kind=claim`）；每个玩家只需回自己的。
@@ -462,6 +478,7 @@
 {"ev":"state","seat":0,"round":{...},"scores":[...],"hand":[...],
  "melds":[[...],[...],[...],[...]],"discards":[[...],[...],[...],[...]],
  "dora_indicators":[...],"tiles_left":40,"dead_wall_left":2,"phase":"playing",
+ "dealer":0,"drawn_seat":0,"turn":0,"spectate":false,
  "riichi":[false,true,false,false],"furiten":[false,false,false,false]}
 ```
 
@@ -469,11 +486,44 @@
 - `tiles_left` / `dead_wall_left` 只是**张数**，不含任何牌面。
 - `furiten` 数组长度仍是 4，但**只有请求者自己那一项可能为 true**，其余恒 false；
   旁观者（`seat = -1`）四项全 false。理由见 §3.10 —— 临时振听等价于「他听牌了」。
+- `dealer` / `drawn_seat` / `turn` 是**公开信息**（谁坐庄、谁手里有 14 张、轮到谁），
+  2026-09 补的：半场进入的**观战者/重连者**要靠它们一次把牌桌摆对
+  （缺 `drawn_seat` 时正在摸牌的那家会被画成 13 张；缺 `dealer` 时四家自风全错）。
+  `spectate` 见 §3.9。
 
-### 3.9 观战
+### 3.9 观战（对局中入局 = 观战，**不是**未定义状态）
 
-非入座者收到与其他玩家相同的公开事件（不含 `hand`、不含 `draw.tile`），并收到
-`{"ev":"spectate","room":"AB12"}`。观战者不收到 `ask`。
+**语义**：牌局进行中 `join_room` 的人**不会**被安排座位（`Table.playing` 时 `firstEmptySeat` 也不给），
+而是成为**观战者**：`seat = -1`，人数上限 `Table.MAX_SPECTATORS = 8`（超过回 `error: no_room`）。
+
+```jsonc
+{"ev":"spectate","room":"AB12"}          // 入局即通知
+{"ev":"state","phase":"playing","seat":-1,"spectate":true,"dealer":2,
+ "drawn_seat":2,"turn":2,"round":{...},"scores":[...],"hand":[],      // 观战：没有手牌
+ "melds":[...],"discards":[...],"dora_indicators":[...]}
+```
+
+观战者收到的是**公开事件流**（`discard` / `meld` / `riichi` / `dora_reveal` / `agari` /
+`ryuukyoku` / `round_end` …），**不含**任何人的 `hand`、`draw.tile`、`ask`。
+
+⚠ **`round_start` 与 `draw` 是按座位发的**（要带那一家的暗牌 / 摸到的那张），`seat = -1` 一条都收不到 ——
+所以服务端另有两条补充（`Table.sendSpectators`）：
+
+| 时机 | 补什么 | 为什么 |
+| --- | --- | --- |
+| 入局那一刻 | 一份 `stateFor(-1)` 快照 | 半场进入要能立刻把牌桌摆对（点数/场次/宝牌/各家张数/牌河/副露） |
+| **每小局开始** | 一份新的 `stateFor(-1)` 快照 | 否则观战者的牌桌停在入局那一刻的残局（跨局不更新） |
+| **每次摸牌** | `draw` 的**公开版本**（去掉 `tile`） | 否则观战者看不到"谁摸了一张"，牌桌整局不动 |
+
+⚠ **局间入局**（`Table.currentRound == null`，一小局刚结束、下一局还没开）时，入局那一份快照是
+`{"ev":"state","phase":"idle","scores":[...],"spectate":true}`（没有 `seat`/`hand`/`discards` 等字段）——
+这是**正常**的：下一局开始时服务端会补上 `playing` 的那一份。客户端在拿到 `playing` 之前显示"等待下一局"即可
+（不要拿 `idle` 快照去更新牌河/手牌）。
+
+观战者**不能操作**：`action` / `confirm` 一律被拒（`Session` 里 `seat < 0` → `error: no_room`）。
+客户端侧的适配：**视角切换**（点名牌 / 视角下拉，只改"哪家画在下方"，四家手牌一律牌背）
+与"无座位"渲染（`TableModel::spectating()`；不再把 `seat:-1` 夹成座位 0）。
+回归：`node tools/spectate-test.mjs <host> <port>` + `client --selftest` 的「观战」组。
 
 ### 3.10 信息可见性：服务端**绝不**下发的东西
 

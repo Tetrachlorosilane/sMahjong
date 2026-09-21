@@ -452,6 +452,64 @@ QRectF TableView::riverSlotLocalForTest(int pos, int index) const
     return m_layout.riverSlotLocal((m_model->mySeat() + pos) % 4, index, *m_model);
 }
 
+QVector<QRectF> TableView::meldSlotRects(const QStringList& disp, const Meld& m, int rotIdx,
+                                        qreal left, qreal my, qreal hgap) const
+{
+    const int cnt = disp.size();
+    if (cnt <= 0)
+        return {};
+    // 加杠：第 4 张（加上的那张）**叠在碰的中张（下标 1）之上**，不占新槽位。
+    // 排布仍是一横排三格，所以这里先按"前 3 张"算出每格的左缘，再把叠上去的那张
+    // 画到第 1 格的位置上（后画即在上层）。
+    const bool stacked = (m.kind == QLatin1String("kakan") && cnt >= 4);
+    const int slotCount = stacked ? 3 : cnt;
+    QVector<qreal> slotLeft(slotCount + 1, 0.0);
+    qreal acc = left;                       // 本副露内部是从左到右
+    for (int ti = 0; ti < slotCount; ++ti) {
+        slotLeft[ti] = acc;
+        acc += (ti == rotIdx ? m_layout.m_riverH : m_layout.m_riverW) + hgap;
+    }
+    slotLeft[slotCount] = acc;
+
+    QVector<QRectF> out;
+    out.reserve(cnt);
+    for (int ti = 0; ti < cnt; ++ti) {
+        // 叠放时第 4 张落在第 1 格的左缘上；其余每张走自己的格
+        const qreal sx = slotLeft.at(stacked && ti == 3 ? 1 : ti);
+        if (ti == rotIdx) {
+            // 横置那张：宽 = 牌河牌高、高 = 牌河牌宽，且**底边与同组另两张齐平**
+            //（用户口径：三张牌底部要平；旧实现按高度居中，看着像"浮"在中间）。
+            // ⚠ 牌河里的横置牌**不适用**这条：那是网格里的一格，见 paintRiver 的注释。
+            out.append(QRectF(sx, my + (m_layout.m_riverH - m_layout.m_riverW),
+                              m_layout.m_riverH, m_layout.m_riverW));
+        } else {
+            out.append(QRectF(sx, my, m_layout.m_riverW, m_layout.m_riverH));
+        }
+    }
+    return out;
+}
+
+QRectF TableView::meldSlotRectForTest(int pos, int meldIndex, int tileIndex) const
+{
+    if (!m_model || pos < 0 || pos > 3 || m_layout.m_tileW <= 0.0)
+        return QRectF();
+    const int seat = (m_model->mySeat() + pos) % 4;
+    const QVector<Meld> melds = m_model->melds(seat);
+    if (meldIndex < 0 || meldIndex >= melds.size())
+        return QRectF();
+    const HandLayout L = layoutHand(pos);
+    const QVector<qreal> lefts = TableLayout::meldLeftsOf(melds, seat, L.meldRight,
+                                                          m_layout.m_riverW, m_layout.m_riverH,
+                                                          L.hgap, L.meldBetween);
+    const Meld& m = melds.at(meldIndex);
+    const int rotIdx = TableLayout::meldRotatedIndex(m, seat);
+    const QStringList disp = meldDisplayTiles(m, rotIdx);
+    if (tileIndex < 0 || tileIndex >= disp.size())
+        return QRectF();
+    const qreal my = m_layout.m_frames[pos].handV0 + (m_layout.m_tileH - m_layout.m_riverH);
+    return meldSlotRects(disp, m, rotIdx, lefts.at(meldIndex), my, L.hgap).at(tileIndex);
+}
+
 QVector<qreal> TableView::meldLeftsForTest(int pos) const
 {
     if (!m_model || pos < 0 || pos > 3 || m_layout.m_tileW <= 0.0)
@@ -644,7 +702,10 @@ void TableView::paintRiver(QPainter& p, const SeatFrame& f, int seat, const QStr
             if (i != skipIndex) {
                 const QString& t = tiles.at(i);
                 if (side) {
-                    // 横置：在牌主视角里多转 90°，故本家视角下邻家的横置牌是竖的
+                    // 横置：在牌主视角里多转 90°，故本家视角下邻家的横置牌是竖的。
+                    // ⚠ 这里**按高度居中**是刻意的（与副露不同）：牌河是一格一格的网格，
+                    //   横置牌占的格子宽出去一截，居中才不会看着"掉出这一行"。
+                    //   副露那三张是**一组**，那里要求底部齐平（见 paintSeat）。
                     const QRectF slot(u, v + (m_layout.m_riverH - m_layout.m_riverW) / 2.0, w, h);
                     TileRenderer::drawFaceRot(p, slot, t, TileRenderer::isRed(t), 1);
                 } else {
@@ -684,7 +745,10 @@ void TableView::paintSeat(QPainter& p, int pos)
 {
     const SeatFrame& f = m_layout.m_frames[pos];
     const int seat = (m_model->mySeat() + pos) % 4;
-    const bool isSelf = (pos == 0);
+    // ⚠ **观战者没有座位**：`mySeat()` 那时只是"视角座位"（点名牌可切），
+    //   所以"这一格是我自己"必须同时要求 `hasSeat()` —— 否则观战者会以
+    //   为 0 号位是自己的手牌区，画出一片空白（旧实现的"未定义观战状态"）。
+    const bool isSelf = (pos == 0) && m_model->hasSeat();
     const bool active = (m_model->turn() == seat);
 
     p.save();
@@ -789,42 +853,27 @@ void TableView::paintSeat(QPainter& p, int pos)
         const qreal my = y + (m_layout.m_tileH - m_layout.m_riverH);
         for (int mi = 0; mi < melds.size(); ++mi) {
             const Meld& m = melds.at(mi);
-            const int rotIdx = TableLayout::meldRotatedIndex(m, seat);
-            // 显示顺序：被鸣的那张按来源方位落位（吃时可能与点数顺序不同）
-            const QStringList disp = meldDisplayTiles(m, rotIdx);
-            const int cnt = disp.size();
-            // 加杠：第 4 张（加上的那张）**叠在碰的中张（下标 1）之上**，不占新槽位。
-            // 排布仍是一横排三格，所以这里先按"前 3 张"算出每格的左缘，
-            // 再把叠上去的那张画到第 1 格的位置上（后画即在上层）。
-            const bool stacked = (m.kind == QLatin1String("kakan") && cnt >= 4);
-            const int slotCount = stacked ? 3 : cnt;
-            QVector<qreal> slotLeft(slotCount + 1, 0.0);
-            {
-                qreal acc = lefts.at(mi);           // 本副露内部仍是从左到右
-                for (int ti = 0; ti < slotCount; ++ti) {
-                    slotLeft[ti] = acc;
-                    acc += (ti == rotIdx ? m_layout.m_riverH : m_layout.m_riverW) + hgap;
-                }
-                slotLeft[slotCount] = acc;
-            }
-            for (int ti = 0; ti < cnt; ++ti) {
+            const QStringList disp = meldDisplayTiles(m, TableLayout::meldRotatedIndex(m, seat));
+            // 每一格的矩形由 `meldSlotRects()` 算（**绘制与自检共用同一份几何**，
+            // 否则断言会变成"照着另一份公式再算一遍"，画错了照样绿）。
+            const QVector<QRectF> rects = meldSlotRects(
+                disp, m, TableLayout::meldRotatedIndex(m, seat), lefts.at(mi), my, hgap);
+            const bool edgeBase = m.isConcealed();
+            for (int ti = 0; ti < rects.size(); ++ti) {
                 const QString& t = disp.at(ti);
-                const bool edge = m.isConcealed() && (ti == 0 || ti == cnt - 1);
-                // 叠放时第 4 张落在第 1 格的左缘上；其余每张走自己的格
-                const qreal sx = slotLeft.at(stacked && ti == 3 ? 1 : ti);
-                if (ti == rotIdx) {
-                    const QRectF slot(sx, my + (m_layout.m_riverH - m_layout.m_riverW) / 2.0,
-                                      m_layout.m_riverH, m_layout.m_riverW);
+                const bool edge = edgeBase && (ti == 0 || ti == disp.size() - 1);
+                const QRectF& r = rects.at(ti);
+                if (r.width() > r.height()) {
+                    // 横置的那张（宽 > 高）：比另两张**矮**，三张**底部齐平**
                     if (edge)
-                        TileRenderer::drawBackRot(p, slot, 1);
+                        TileRenderer::drawBackRot(p, r, 1);
                     else
-                        TileRenderer::drawFaceRot(p, slot, t, TileRenderer::isRed(t), 1);
+                        TileRenderer::drawFaceRot(p, r, t, TileRenderer::isRed(t), 1);
                 } else {
-                    const QRectF tr(sx, my, m_layout.m_riverW, m_layout.m_riverH);
                     if (edge)
-                        TileRenderer::drawBackF(p, tr);
+                        TileRenderer::drawBackF(p, r);
                     else
-                        TileRenderer::drawFaceF(p, tr, t, TileRenderer::isRed(t));
+                        TileRenderer::drawFaceF(p, r, t, TileRenderer::isRed(t));
                 }
             }
         }

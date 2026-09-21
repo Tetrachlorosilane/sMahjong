@@ -547,6 +547,20 @@ public final class SelfTest {
         check("state.hand 只有自己那 13 张", stateList(st0, "hand").size() == 13);
         check("state.hand 不含别家的牌", !stateList(st0, "hand").contains("5p"));
         check("state 旁观者没有手牌", stateList(stSp, "hand").isEmpty());
+
+        // ---- 观战（对局中入局）：快照必须**明确**是"无座位"，而且够把牌桌摆对 ----
+        // 报障：对局中入局被放行进入"未定义的观战状态"——客户端把 `seat:-1` 夹成座位 0。
+        // 所以快照要显式带 `spectate`，并补上**公开**的 dealer / drawn_seat（半场进入时
+        // 四家张数、自风、亲家全靠它们；这两个都是看得见的公开信息，不是泄密）。
+        eq("旁观快照的 seat 是 -1（客户端据此进无座位模式）", stSp.get("seat"), -1);
+        eq("旁观快照显式带 spectate=true", stSp.get("spectate"), Boolean.TRUE);
+        eq("本人快照的 spectate=false", st0.get("spectate"), Boolean.FALSE);
+        eq("旁观快照带 dealer（公开：谁是亲）", stSp.get("dealer"), 0);
+        r.lastDrawer = 2;                       // 假设刚才是座位 2 摸的牌
+        eq("旁观快照带 drawn_seat（谁手里 14 张）", t.stateFor(-1).get("drawn_seat"), 2);
+        eq("旁观快照的 turn 也指向那一家（高亮当前行动者）", t.stateFor(-1).get("turn"), 2);
+        check("旁观快照带四家点数", stateList(stSp, "scores").size() == 4);
+        check("旁观快照带四家牌河", stateList(stSp, "discards").size() == 4);
     }
 
     private static java.util.List<?> stateList(java.util.Map<String, Object> m, String key) {
@@ -2669,6 +2683,56 @@ public final class SelfTest {
                 r.debugPickHandTiles(0, called5, Arrays.asList("5m"), 2), null);
         eq("赤宝选择：按赤/普通能精确取到那一张",
                 r.debugFindHandTile(0, Tiles.AKA_M, true), aka5);
+
+        // ---------- ⑤ 档 C 之后补的一半：**选项里就要有得选**、默认**普通牌优先**
+        // 报障「副露无法区分红五与普通五」：旧协议 pon 不带 `tiles`，客户端没得选，
+        // 而服务端的"按手牌顺序取前两张"因为手牌把**赤排在前面**，会悄悄吃掉赤五。
+        Round c = newRound();
+        c.hand[1].clear();
+        c.hand[1].add(aka5);
+        c.hand[1].add(norm5a);
+        c.hand[1].add(norm5b);
+        for (int id : parse("1m2m3m4m5m6m7m9m1p2p3p4p")) {   // 补满 13 张
+            if (c.hand[1].size() < 13) {
+                c.hand[1].add(id);
+            }
+        }
+        List<Map<String, Object>> opts = c.debugClaimOptions(1, 0, called5);
+        int ponVariants = 0;
+        boolean sawPlain = false;
+        boolean sawRed = false;
+        for (Map<String, Object> o : opts) {
+            if (!"pon".equals(o.get("type"))) {
+                continue;
+            }
+            ponVariants++;
+            @SuppressWarnings("unchecked")
+            List<Object> tiles = (List<Object>) o.get("tiles");
+            check("副露赤宝：碰的选项必须带精确牌码（" + tiles + "）", tiles != null
+                    && tiles.size() == 2);
+            if (tiles != null && String.valueOf(tiles.get(0)).startsWith("0")) {
+                sawRed = true;
+            } else if (tiles != null) {
+                sawPlain = true;
+            }
+        }
+        eq("副露赤宝：手里赤五+两张普通五 → 碰**两种取法**都下发", ponVariants, 2);
+        check("副露赤宝：不用赤五那一条在（tiles=[5m,5m]）", sawPlain);
+        check("副露赤宝：用赤五那一条也在（tiles=[0m,5m]）", sawRed);
+        // 默认取法（老客户端 / 机器人不带 `tiles`）必须**普通牌优先**
+        int[] auto = c.debugPickAuto(1, Tiles.AKA_M, 2);
+        eq("副露赤宝：默认取牌的张数", auto.length, 2);
+        check("副露赤宝：默认取牌**不吃赤五**（" + Tiles.toStr(auto[0]) + "," + Tiles.toStr(auto[1]) + "）",
+                !Tiles.isRedId(auto[0]) && !Tiles.isRedId(auto[1]));
+        // 只有赤五可用时仍然要能鸣（不能因为"优先普通"就鸣不了）
+        Round only = newRound();
+        only.hand[1].clear();
+        only.hand[1].add(aka5);
+        only.hand[1].add(Tiles.id(Tiles.AKA_M, 1));
+        int[] forced = only.debugPickAuto(1, Tiles.AKA_M, 2);
+        eq("副露赤宝：赤五+一张普通五 → 两张都得用上", forced.length, 2);
+        check("副露赤宝：这时候赤五在里面（没有它凑不出碰）", Tiles.isRedId(forced[0])
+                || Tiles.isRedId(forced[1]));
     }
 
     /**

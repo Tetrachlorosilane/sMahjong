@@ -35,6 +35,22 @@ QString joinTiles(const QStringList& tiles)
 }
 
 /**
+ * 这一组牌码里有没有**赤五**，有就返回那个码（`0m`/`0p`/`0s`）。
+ *
+ * <p>用来区分「副露赤宝选择」下发的多条同名选项：服务端会给
+ * `tiles:["5p","5p"]`（不用赤）与 `tiles:["0p","5p"]`（用赤）各一条，
+ * 按钮文案必须让玩家看出哪条会用掉赤五（报障：副露无法区分红五与普通五）。
+ */
+QString akaCodeIn(const QStringList& tiles)
+{
+    for (const QString& t : tiles) {
+        if (mj::isRedTile(t))
+            return t;
+    }
+    return QString();
+}
+
+/**
  * 按动作种类给按钮上色的样式表（用户要求：「附录提示不明显，增大按钮或添加不同按钮颜色
  * 或按钮颜色闪烁」）。
  *
@@ -276,6 +292,15 @@ QPushButton* ActionBar::buttonForTest(const QString& label) const
     return nullptr;
 }
 
+QStringList ActionBar::buttonTextsForTest() const
+{
+    QStringList out;
+    for (QPushButton* b : m_buttons) {
+        out << b->text();
+    }
+    return out;
+}
+
 bool ActionBar::canDiscard() const
 {
     if (!m_valid || m_expired)
@@ -353,9 +378,14 @@ void ActionBar::rebuild()
             label = lang::t("ui.action.tsumo");
         else if (type == QLatin1String("ron"))
             label = lang::t("ui.action.ron");
-        else if (type == QLatin1String("pon"))
+        else if (type == QLatin1String("pon")) {
+            // 副露赤宝选择：服务端对"用赤 / 不用赤"各下发一条 pon（各带 `tiles`）。
+            // 用赤那条必须在文案里写出来，否则两个按钮长得一样（报障的原文）。
             label = lang::t("ui.action.pon");
-        else if (type == QLatin1String("chi"))
+            const QString aka = akaCodeIn(proto::stringList(opt.value(QStringLiteral("tiles"))));
+            if (!aka.isEmpty())
+                label += QStringLiteral(" ") + tileText(aka);
+        } else if (type == QLatin1String("chi"))
             label = lang::t("ui.action.chi");
         else if (type == QLatin1String("kan"))
             label = lang::t("ui.action.kan");
@@ -409,6 +439,10 @@ void ActionBar::rebuild()
             connect(btn, &QPushButton::clicked, this, &ActionBar::showChiMenu);
         } else if (type == QLatin1String("kan")) {
             connect(btn, &QPushButton::clicked, this, &ActionBar::showKanMenu);
+        } else if (type == QLatin1String("pon")) {
+            // 碰：把这一条选项原样带回去（可能带 `tiles` = 用哪几张，见 PROTOCOL §3.6）
+            const QJsonObject o = opt;
+            connect(btn, &QPushButton::clicked, this, [this, o]() { sendOption(o); });
         } else {
             const QString t = type;
             connect(btn, &QPushButton::clicked, this, [this, t]() { sendSimple(t); });
@@ -423,6 +457,20 @@ void ActionBar::sendSimple(const QString& type)
     const QJsonObject cmd = actionCmd(type);
     if (cmd.isEmpty())
         return;
+    emit actionReady(cmd);
+}
+
+void ActionBar::sendOption(const QJsonObject& opt)
+{
+    const QString type = opt.value(QStringLiteral("type")).toString();
+    QJsonObject cmd = actionCmd(type);
+    if (cmd.isEmpty())
+        return;
+    // 副露赤宝选择：服务端下发的 `tiles` 是「这一副**用哪几张**」的精确牌码，
+    // 原样带回（不带就等于"普通牌优先"，见 PROTOCOL §3.6）。
+    const QJsonArray tiles = opt.value(QStringLiteral("tiles")).toArray();
+    if (!tiles.isEmpty())
+        cmd.insert(QStringLiteral("tiles"), tiles);
     emit actionReady(cmd);
 }
 
@@ -484,7 +532,12 @@ void ActionBar::showKanMenu()
             prefix = lang::t("ui.action.kakan");
         else if (kind == QLatin1String("daiminkan"))
             prefix = lang::t("ui.action.daiminkan");
-        QAction* act = menu.addAction(QStringLiteral("%1 %2").arg(prefix, tileText(tile)));
+        QString label = QStringLiteral("%1 %2").arg(prefix, tileText(tile));
+        // 大明杠的赤宝选择：用赤五那一条在菜单里写出来（与碰同一口径）
+        const QString aka = akaCodeIn(proto::stringList(k.value(QStringLiteral("tiles"))));
+        if (!aka.isEmpty())
+            label += QStringLiteral(" ") + tileText(aka);
+        QAction* act = menu.addAction(label);
         act->setData(k);
     }
     QAction* chosen = menu.exec(QCursor::pos());
@@ -497,6 +550,10 @@ void ActionBar::showKanMenu()
         return;
     cmd.insert(QStringLiteral("kind"), k.value(QStringLiteral("kind")).toString());
     cmd.insert(QStringLiteral("tile"), k.value(QStringLiteral("tile")).toString());
+    // 大明杠的赤宝选择：选中的那条带 `tiles` 就原样带回（不带 = 普通牌优先）
+    const QJsonArray kanTiles = k.value(QStringLiteral("tiles")).toArray();
+    if (!kanTiles.isEmpty())
+        cmd.insert(QStringLiteral("tiles"), kanTiles);
     emit actionReady(cmd);
 }
 
