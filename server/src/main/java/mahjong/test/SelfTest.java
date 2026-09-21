@@ -2580,13 +2580,6 @@ public final class SelfTest {
     }
 
     /**
-     * 赤宝牌张数：默认 3 张；`rules.aka = 0` 时**整副牌山都不含赤五**。
-     *
-     * <p>审计出来的问题正是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，
-     * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
-     * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
-     */
-    /**
      * 开局前的**自选座位 / 随机洗座**（用户要求：门风 = 座次，可自选或随机）。
      *
      * <p>三条不变量：
@@ -2807,6 +2800,13 @@ public final class SelfTest {
         }
     }
 
+    /**
+     * 赤宝牌张数：默认 3 张；`rules.aka = 0` 时**整副牌山都不含赤五**。
+     *
+     * <p>审计出来的问题正是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，
+     * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
+     * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
+     */
     private static void akaRuleTests() {
         int[] def = new mahjong.core.Wall(20240914L, Rules.defaults()).debugAllTiles();
         int red = 0;

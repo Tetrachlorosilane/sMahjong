@@ -1054,6 +1054,16 @@ public final class Round {
     }
 
     /**
+     * 该座位能不能对 {@code kind} 这张舍张**大明杠**（手里正好 3 张、名额没满、未立直）。
+     *
+     * <p>三个入口共用同一个判据：鸣牌选项下发、鸣牌仲裁、{@code applyMeld} 的落地校验。
+     * 各写各的就会出现"选项给了但落地崩"或"立直了还能大明杠"。
+     */
+    public boolean canDaiminkan(int seat, int kind) {
+        return kind >= 0 && !riichi[seat] && canKan() && concealCounts(seat)[kind] >= 3;
+    }
+
+    /**
      * 立直后可不可以杠。
      *
      * <p>两条门槛：①「听牌不变」（{@link RoundOptions#kanAllowedAfterRiichi}）；
@@ -1066,16 +1076,6 @@ public final class Round {
      * 所以必须把刚摸到的那张减掉再算；而传给 {@code kanAllowedAfterRiichi} 的
      * 计数仍是那张 14 张的（它内部要 {@code -= 4} 把这 4 张拿走）。
      */
-    /**
-     * 该座位能不能对 {@code kind} 这张舍张**大明杠**（手里正好 3 张、名额没满、未立直）。
-     *
-     * <p>三个入口共用同一个判据：鸣牌选项下发、鸣牌仲裁、{@code applyMeld} 的落地校验。
-     * 各写各的就会出现"选项给了但落地崩"或"立直了还能大明杠"。
-     */
-    public boolean canDaiminkan(int seat, int kind) {
-        return kind >= 0 && !riichi[seat] && canKan() && concealCounts(seat)[kind] >= 3;
-    }
-
     private boolean kanAllowedByRiichi(int seat, int kind, int drawn) {
         if (!riichi[seat]) {
             return true;
