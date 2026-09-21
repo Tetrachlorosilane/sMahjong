@@ -168,6 +168,17 @@ public final class RoundScoring {
     }
 
     /**
+     * 本场赛制的**最后一场风**：东风战 0（东）、半庄 1（南）—— 延长战还会往上走（南入 / 西入）。
+     *
+     * <p>抽出来是因为"这是不是最后一局"有**两个**调用方：牌桌推进（{@code Table} 决定何时终局）
+     * 与 teacher 的终局取舍（{@code Bot.HandState.allLast}）。各写一份 `"tonpuu".equals(...)`
+     * 迟早会漂 —— 判据必须同源（这条与 `keepPlayingWest` 的 `lastWind` 参数是同一把尺子）。
+     */
+    public static int lastWind(Rules rules) {
+        return rules != null && "tonpuu".equals(rules.length) ? 0 : 1;
+    }
+
+    /**
      * All Last 轮庄后要不要**进延长战**（东风战 → 南入、半庄战 → 西入）。
      *
      * <p>`docs/日本麻将.md` L143/L145：「决定是否进入延长战的分数称为**一位必要点数**」；

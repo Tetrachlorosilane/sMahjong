@@ -503,6 +503,16 @@ public final class SelfTest {
                 new int[]{25000, 25000, 25000, 25000}, 0, 7);
     }
 
+    /**
+     * 指定规则集 / 场风 / 局数 / 点数的一局 —— **终局（オーラス）类断言必须用它**：
+     * `allLast` 是"场风已达本赛制上限 + 第 4 局"，用默认的東 1 局构造不出终局
+     * （座位 0 仍是庄家，座位信息与 {@link #newRound(Rules)} 一致）。
+     */
+    private static mahjong.game.Round newRound(Rules rules, int roundWind, int kyoku, int[] scores) {
+        Table t = new Table("T", "t", rules);
+        return new mahjong.game.Round(t, roundWind, kyoku, 0, 0, scores, 0, 7);
+    }
+
     // ------------------------------------------------- 重连快照的信息可见性
 
     /**
@@ -4399,25 +4409,242 @@ public final class SelfTest {
             tt.botDelayMs = 0;
             tt.roundDelayMs = 0;
             tt.debugDeterministicSeed = true;
-            tt.debugMaxHands = 4;              // 4 小局 × 3 场 ≈ 12 局：够让"自然开杠"真的出现
+            tt.debugMaxHands = 8;              // 8 小局 × 3 场：够让"自然开杠"真的出现
             tt.seedBase = 90210L + g * 7919L;
             for (int i = 0; i < 4; i++) {
                 tt.addBot(i);
             }
             tt.playGame();
         }
-        System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount + " 次、推进 "
+        System.out.println("  [覆盖] teacher 取舍：弃和 " + Bot.debugFoldCount
+                + " 次（其中「鸣き手威胁」" + Bot.debugOpenFoldCount + " 次）、推进 "
                 + Bot.debugPushCount + " 次、默听 " + Bot.debugDamaCount
                 + " 次、因无役放掉鸣牌 " + Bot.debugNoYakuRefuseCount + " 次、因「鸣了不值」放掉 "
                 + Bot.debugCallValueRefuseCount + " 次、"
                 + "开杠 " + Bot.debugKanCount + " 次（因丢听牌放掉 " + Bot.debugKanRefuseWait
                 + "、弃和 " + Bot.debugKanRefusePressure + "、四杠散了 " + Bot.debugKanRefuseFourKan
-                + "、危险 " + Bot.debugKanRefuseDanger + "）");
+                + "、危险 " + Bot.debugKanRefuseDanger + "）、顺位门槛翻结论 "
+                + Bot.debugPlacementFlipCount + " 次、终局见逃 " + Bot.debugRonDeclineCount + " 次");
         check("实局里走过「有人立直 → 弃和」这条", Bot.debugFoldCount > 0);
         check("实局里走过「期望值为正 → 推进」这条", Bot.debugPushCount > 0);
         check("实局里走过「鸣完没役 → 放掉」这条", Bot.debugNoYakuRefuseCount > 0);
         check("实局里走过「门清鸣了不值 → 放掉」这条", Bot.debugCallValueRefuseCount > 0);
         check("实局里**自然开过杠**（不是靠 debugAlwaysKan 才开）", Bot.debugKanCount > 0);
+        // 档 C 的两条闸门：都在实局里真的改过结论（见 ⑮/⑯ 的纯函数对拍 + 实局路径）
+        check("实局里顺位门槛真的改过结论（" + Bot.debugPlacementFlipCount + " 次）",
+                Bot.debugPlacementFlipCount > 0);
+        check("实局里走过「没人立直、但鸣き手威胁明显 → 弃和」这条（" + Bot.debugOpenFoldCount + " 次）",
+                Bot.debugOpenFoldCount > 0);
+
+        // ---------- ⑮ 顺位与终局（档 C）：押し引き的门槛随顺位走、终局见逃
+        Bot.debugResetCounts();
+        // 顺位判据与终局精算**同一把尺子**（同点按起家座次）—— 逐座位对拍 settle().rank
+        int[] sc4 = {28600, 53600, 20000, -2200};
+        RoundScoring.Settlement stl = RoundScoring.settle(sc4, preset("majsoul"));
+        for (int s = 0; s < 4; s++) {
+            eq("顺位与终局精算同一把尺子（座位 " + s + "）",
+                    Bot.placementOf(sc4, s), stl.rank[s] + 1);
+        }
+        eq("点数未知（自检构造的局面）→ 顺位 0",
+                Bot.placementOf(null, 0), 0);
+        eq("并列时按座次：四方同点 → seat0 是 1 位",
+                Bot.placementOf(new int[]{25000, 25000, 25000, 25000}, 0), 1);
+        eq("并列时按座次：四方同点 → seat3 是 4 位",
+                Bot.placementOf(new int[]{25000, 25000, 25000, 25000}, 3), 4);
+
+        // 门槛表：1 位守、4 位抢；终局翻倍
+        Bot.HandState thr = state("2m3m4m5m6m7m2p3p4p5p5p6p7p9s", 0);
+        eq("点数未知 → 门槛 0（不看顺位）", Bot.pushThreshold(thr), 0.0);
+        thr.scores = new int[]{30000, 25000, 25000, 20000};        // seat 0 = 1 位
+        eq("1 位 → 门槛 +800（守）", Bot.pushThreshold(thr), 800.0);
+        thr.scores = new int[]{20000, 25000, 25000, 30000};        // seat 0 = 4 位
+        eq("4 位 → 门槛 -1000（抢）", Bot.pushThreshold(thr), -1000.0);
+        thr.allLast = true;
+        eq("终局把顺位偏置放大一倍（4 位 → -2000）", Bot.pushThreshold(thr), -2000.0);
+        thr.scores = new int[]{25000, 25000, 25000, 25000};        // 四方同点 → 按座次 1 位
+        eq("终局 + 并列 1 位 → +1600", Bot.pushThreshold(thr), 1600.0);
+        // 门槛与"期望值为正"是两条独立的判据
+        check("期望值 +500：没有顺位门槛时推", Bot.shouldPush(0.1, 5000, 0.0, 0));
+        check("同一手在 1 位（门槛 +800）→ 不推（守领先）", !Bot.shouldPush(0.1, 5000, 0.0, 800));
+        check("同一手在 4 位（门槛 -1000）→ 推（不推就输定了）",
+                Bot.shouldPush(0.1, 5000, 0.0, -1000));
+        check("期望值为负（400 - 780 = -380）：1 位的门槛过不了",
+                !Bot.shouldPush(0.1, 4000, Bot.dealProbability(50), 800));
+        check("同一个负期望值：4 位的门槛（-1000）照样推",
+                Bot.shouldPush(0.1, 4000, Bot.dealProbability(50), -1000));
+
+        // 实局路径：同一手牌、同一个局面，**只改点数** → 结论从"弃和打现物"变成"推进"
+        final String far3 = "2m3m4m2p3p4p5p5p1z2z3z4z1s4s";
+        List<Object> far3Cands = new ArrayList<>();
+        for (int id : parse(far3)) {
+            String c = Tiles.kindToStr(Tiles.kind(id));
+            if (!far3Cands.contains(c)) {
+                far3Cands.add(c);
+            }
+        }
+        Bot.HandState top = state(far3, 0);
+        top.riichi[2] = true;                                      // 下家立直
+        top.rivers[2][Tiles.parseKind("4s")] = 1;                  // 4s 是他的现物
+        top.scores = new int[]{30000, 25000, 25000, 20000};        // seat 0 = 1 位
+        eq("自检前提：1 位 + 中局 → 门槛为正", Bot.pushThreshold(top) > 0, true);
+        eq("1 位（门槛 +800）：这点期望值过不了 → 弃和打现物 4s",
+                Bot.chooseDiscard(top, far3Cands), "4s");
+        Bot.HandState last = state(far3, 0);
+        last.riichi[2] = true;
+        last.rivers[2][Tiles.parseKind("4s")] = 1;
+        last.scores = new int[]{20000, 25000, 25000, 30000};       // seat 0 = 4 位
+        last.allLast = true;                                        // 终局ラス目 → 门槛 -2000
+        eq("自检前提：4 位 + 终局 → 门槛为负", Bot.pushThreshold(last) < 0, true);
+        check("ラス目の终局：同一手牌不再弃和（打 " + Bot.chooseDiscard(last, far3Cands)
+                + "，不是现物 4s）", !"4s".equals(Bot.chooseDiscard(last, far3Cands)));
+        check("顺位门槛确实翻过结论", Bot.debugPlacementFlipCount > 0);
+
+        // 终局见逃：默听 + 断幺（**门清荣和 40 符**：副底 20 + 门清荣和 10 + 嵌张 2；
+        // 自摸则多一个门清自摸和 → 2 番 30 符，进得**比荣和多**），正好卡出"点数差一点点"的局面
+        final int k6s = Tiles.parseKind("6s");
+        final String ronHand = "2m3m4m5m6m7m2p3p4p5p5p5s7s";       // 13 张，嵌 6s 听（断幺九）
+        Round rr = newRound(Rules.defaults(), 1, 4, new int[]{25000, 25000, 25000, 25000});
+        rr.debugSetDora(List.of());                                 // 宝牌归零：这一步要精确到 100 点
+        rr.hand[1].addAll(parse(ronHand));
+        Bot.HandState rst0 = Bot.HandState.of(rr, 1);
+        check("自检前提：这是最后一局（南 4 局）", rst0.allLast);
+        Evaluator.HandScore ronSc = rr.scoreIfWin(1, k6s, false, false);
+        int[] withWin = rst0.counts.clone();
+        withWin[k6s]++;
+        Evaluator.HandScore tsumoSc = rr.scoreIfWin(1, withWin, k6s, true, false, rst0.akaInHand);
+        check("自检前提：这一手能荣和（" + (ronSc == null ? "null"
+                : ronSc.totalHan() + " 番 " + ronSc.fu + " 符）"), ronSc != null);
+        check("自检前提：自摸也是和了形（" + (tsumoSc == null ? "null"
+                : tsumoSc.totalHan() + " 番 " + tsumoSc.fu + " 符）"), tsumoSc != null);
+        // 进账用**生产同一套** Payments 算（见高亮：这就是"自摸才够"的那点差）
+        final int ronGain = ronSc == null ? 0 : Payments.compute(ronSc, 1, 2, 0, 0, 0, false,
+                Payments.NO_PAO).winnerGain;
+        final int tsumoGain = tsumoSc == null ? 0 : Payments.compute(tsumoSc, 1, -1, 0, 0, 0, true,
+                Payments.NO_PAO).winnerGain;
+        check("自检前提：自摸比荣和进得多（" + ronGain + " vs " + tsumoGain + "）—— 见逃的收益就在这里",
+                tsumoGain > ronGain);
+        // 把第一名的点数卡在两者**中间**：荣和抬不动顺位、自摸抬得动
+        final int mid = ronGain + Math.max(1, (tsumoGain - ronGain) / 2);
+        rr.scores[0] = 25000 + mid;
+        rr.scores[1] = 25000;
+        rr.scores[2] = 25000;
+        rr.scores[3] = 25000 - mid;
+        Bot.HandState rst = Bot.HandState.of(rr, 1);
+        eq("自检前提：现在是 2 位", Bot.placementOf(rst.scores, 1), 2);
+        int[] afterRon = rst.scores.clone();
+        afterRon[1] += ronGain;
+        int[] afterTsumo = rst.scores.clone();
+        afterTsumo[1] += tsumoGain;
+        eq("自检前提：荣和之后还是 2 位", Bot.placementOf(afterRon, 1), 2);
+        eq("自检前提：自摸之后就是 1 位", Bot.placementOf(afterTsumo, 1), 1);
+        check("终局 + 默听 + 荣和抬不动顺位、自摸才抬得动 → 见逃",
+                Bot.shouldDeclineRon(rr, 1, rst, k6s));
+        eq("见逃计数被走到", Bot.debugRonDeclineCount > 0, true);
+        // 走真实的鸣牌询问（服务端下发的选项 + Bot.decide 这个决策漏斗）
+        List<Map<String, Object>> ronOpts = rr.debugClaimOptions(1, 0, Tiles.id(k6s, 1));
+        check("自检前提：服务端真的下发了 ron 选项", findType(ronOpts, "ron") != null);
+        Map<String, Object> rd = Bot.decide(rr, 1, "claim", ronOpts, Json.obj("tile", "6s"));
+        check("实局路径：终局见逃不接这张荣和（实际回 " + rd.get("type") + "）",
+                !"ron".equals(rd.get("type")));
+        // 对照一：同一局面但**荣和就能抬顺位** → 照和
+        Round rr2 = newRound(Rules.defaults(), 1, 4, new int[]{25000, 25000, 25000, 25000});
+        rr2.debugSetDora(List.of());
+        rr2.hand[1].addAll(parse(ronHand));
+        rr2.scores[0] = 25000 + ronGain - 100;                     // 荣和正好能反超
+        Bot.HandState rst2 = Bot.HandState.of(rr2, 1);
+        eq("自检前提：荣和就能反超", Bot.placementOf(rst2.scores, 1), 2);
+        check("对照：荣和就能抬顺位 → 照和", !Bot.shouldDeclineRon(rr2, 1, rst2, k6s));
+        eq("对照走真实选项 → 就接这张",
+                Bot.decide(rr2, 1, "claim", rr2.debugClaimOptions(1, 0, Tiles.id(k6s, 1)),
+                        Json.obj("tile", "6s")).get("type"), "ron");
+        // 对照二：立直中见逃 = 立直振听 → 一律照和
+        Round rr3 = newRound(Rules.defaults(), 1, 4, rr.scores.clone());
+        rr3.debugSetDora(List.of());
+        rr3.hand[1].addAll(parse(ronHand));
+        rr3.riichi[1] = true;
+        check("对照：立直中（立直振听的代价太大）→ 照和",
+                !Bot.shouldDeclineRon(rr3, 1, Bot.HandState.of(rr3, 1), k6s));
+        // 对照三：不是终局 → 见逃纯亏，照和
+        Round rr4 = newRound(Rules.defaults(), 1, 3, rr.scores.clone());
+        rr4.debugSetDora(List.of());
+        rr4.hand[1].addAll(parse(ronHand));
+        Bot.HandState rst4 = Bot.HandState.of(rr4, 1);
+        check("对照：南 3 局（不是终局）→ 照和", !Bot.shouldDeclineRon(rr4, 1, rst4, k6s));
+        // 对照四：剩的牌不够（摸不回来）→ 照和
+        Bot.HandState rst5 = Bot.HandState.of(rr, 1);
+        rst5.tilesLeft = Bot.RON_DECLINE_MIN_TILES - 1;
+        check("对照：剩余牌数不够 → 照和", !Bot.shouldDeclineRon(rr, 1, rst5, k6s));
+        // 对照五：点数未知 → 照和（纯形状的局面不该被见逃判据顺手改掉）
+        Bot.HandState rst6 = Bot.HandState.of(rr, 1);
+        rst6.scores = null;
+        check("对照：点数未知 → 照和", !Bot.shouldDeclineRon(rr, 1, rst6, k6s));
+
+        // ---------- ⑯ 对手模型（档 C）：没人立直也可能该弃和
+        Bot.debugResetCounts();
+        Bot.HandState noThreat = state(far3, 0);
+        eq("没有副露 → 鸣き手威胁 0", Bot.openThreat(noThreat), 0.0);
+        Bot.HandState oneMeld = state(far3, 0);
+        oneMeld.meldCounts[2] = 1;
+        eq("1 副露 + 巡目 6 → 0.43（没过线）", Math.round(Bot.openThreat(oneMeld) * 100) / 100.0, 0.43);
+        check("1 副露在中局还不够格按「疑似听牌」权衡",
+                Bot.openThreat(oneMeld) < Bot.OPEN_THREAT_GATE);
+        Bot.HandState twoMelds = state(far3, 0);
+        twoMelds.meldCounts[3] = 2;
+        eq("2 副露 + 巡目 6 → 0.63（过线）",
+                Math.round(Bot.openThreat(twoMelds) * 100) / 100.0, 0.63);
+        check("2 副露过了闸门", Bot.openThreat(twoMelds) >= Bot.OPEN_THREAT_GATE);
+        Bot.HandState riichiOnly = state(far3, 0);
+        riichiOnly.riichi[2] = true;
+        riichiOnly.meldCounts[2] = 2;
+        eq("立直家的副露不再重复计算（立直已经是最强威胁）", Bot.openThreat(riichiOnly), 0.0);
+        riichiOnly.meldCounts[3] = 1;
+        check("但另一家鸣开了还是要算", Bot.openThreat(riichiOnly) > 0);
+
+        // 危险度抬档：无信息的牌往上抬，现物 / 筋 的硬判据不许被抬坏
+        final int k4p = Tiles.parseKind("4p");
+        Bot.HandState model = state(far3, 0);
+        model.meldCounts[3] = 2;
+        model.turn = 12;
+        int plainScore = mahjong.rules.Danger.worst(k4p, model.visible, model.rivers,
+                model.riichi, model.turn, model.seat).score;
+        int raised = Bot.dealScore(model, k4p);
+        check("2 副露 + 终盘：无信息牌的风险分被抬档（" + plainScore + " → " + raised + "）",
+                raised > plainScore);
+        check("抬档后不超过「当作立直家」那一档",
+                raised <= mahjong.rules.Danger.of(k4p, model.visible, model.rivers[3], true,
+                        model.turn).score);
+        check("没威胁时分数一动不动",
+                Bot.dealScore(noThreat, k4p) == mahjong.rules.Danger.worst(k4p, noThreat.visible,
+                        noThreat.rivers, noThreat.riichi, noThreat.turn, noThreat.seat).score);
+        Bot.HandState genbutsu = state(far3, 0);
+        genbutsu.meldCounts[3] = 2;
+        genbutsu.turn = 12;
+        genbutsu.rivers[3][k4p] = 1;                              // 4p 是他打过的现物
+        // 抬档只许**往上**：插值里「当作立直家」那一版对现物是 0 分，若不加 Math.max
+        // 就会把"对别家最坏 42 分"的牌算成更安全 —— 那是把硬判据算没了。
+        eq("抬档只许往上：对威胁家是现物的牌不会低于基准（对四家的最坏值）",
+                Bot.dealScore(genbutsu, k4p),
+                mahjong.rules.Danger.worst(k4p, genbutsu.visible, genbutsu.rivers,
+                        genbutsu.riichi, genbutsu.turn, genbutsu.seat).score);
+        // 威胁家就是"该盯的那几家"
+        Bot.HandState threatPick = state(far3, 0);
+        threatPick.meldCounts[1] = 2;
+        boolean[] ts = Bot.threatSeats(threatPick);
+        check("没有立直家 → 威胁家 = 鸣开了的那几家", ts[1] && !ts[2] && !ts[3] && !ts[0]);
+        threatPick.riichi[2] = true;
+        boolean[] ts2 = Bot.threatSeats(threatPick);
+        check("有立直家 → 只盯立直家（现物的价值不许被淹掉）", ts2[2] && !ts2[1]);
+        // 实局路径：同一手牌，加上"下家 2 副露"就弃和（巡目不变，只有对手模型变了）
+        Bot.HandState openPush = state(far3, 0);
+        final String openPick = Bot.chooseDiscard(openPush, far3Cands);
+        check("没人立直、也没人鸣开 → 照旧打牌效（实际打 " + openPick + "）",
+                !"4s".equals(openPick));
+        Bot.HandState openFold = state(far3, 0);
+        openFold.meldCounts[2] = 2;                                // 下家碰了两副
+        openFold.rivers[2][Tiles.parseKind("4s")] = 1;             // 他的现物
+        eq("没人立直、但下家 2 副露 → 按押し引き权衡，弃和打他的现物 4s",
+                Bot.chooseDiscard(openFold, far3Cands), "4s");
+        eq("这条闸门的计数被走到", Bot.debugOpenFoldCount > 0, true);
     }
 
     /** teacher 视图的稳定文本表示（置换不变式对比用）。 */
@@ -4431,7 +4658,13 @@ public final class SelfTest {
         sb.append(Arrays.toString(st.riichi)).append('|').append(st.seat).append('|')
                 .append(st.dealer).append('|').append(st.roundWind).append('|').append(st.turn)
                 .append('|').append(st.doraIndicators).append('|').append(st.kuitan)
-                .append('|').append(st.kanCount).append('|').append(st.fourKanAbort);
+                .append('|').append(st.kanCount).append('|').append(st.fourKanAbort)
+                // 档 C 的新字段也要进置换不变式：它们同样是公开信息（点数 / 场次 / 副露数），
+                // 换掉别家**手牌**不该改它们，改了就说明有哪条读了不该读的东西。
+                .append('|').append(Arrays.toString(st.scores)).append('|').append(st.sticks)
+                .append('|').append(st.kyoku).append('|').append(st.allLast)
+                .append('|').append(Arrays.toString(st.meldCounts)).append('|')
+                .append(st.tilesLeft);
         return sb.toString();
     }
 

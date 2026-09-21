@@ -919,8 +919,9 @@ public final class Table implements Runnable {
         return true;
     }
 
+    /** 本场赛制的最后一场风（东风战 0 / 半庄 1）—— 判据在 {@link RoundScoring#lastWind}。 */
     private int lastWind() {
-        return "tonpuu".equals(rules.length) ? 0 : 1;
+        return RoundScoring.lastWind(rules);
     }
 
     /** 跑完一整场（自测直接调用）。 */
