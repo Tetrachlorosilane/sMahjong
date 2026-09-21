@@ -319,10 +319,13 @@ node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言
 **不要靠运气等牌**——用假服务端把客户端直接推进到目标状态，再截图看：
 
 ```powershell
-node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn
+node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld
 # turn 自摸/立直/杠 · claim 荣和/碰/跳过 · note 无役提示 · river 横置顺延（顺带压测 5 张宝牌栏）
 # agari 结算 + round_wait(5000) 倒计时 · yakuman 须写「2倍役满」不得出现「0 番」
 # kan 「嶺上 M」跟着减（4→3→2） · twoturn 跨局首巡不得只剩 1 秒
+# sticks 立直棒按座位分布/供託居中 · hand2meld 自己 N 副露（`hand<N>[meld]`）
+# allmeld 四家都有副露 —— **副露界面两条口径的定点复现**：横置张与另两张**底边齐平**
+#         + 四角名牌互不重叠（`--shot` 后按列扫牌像素底边，全部落在同一 y 附近即齐平）
 client\dist\mahjong-client.exe --demo 127.0.0.1 10999 --bots 3 --no-answer `
     --shot client\build\shot.png --after 6
 ```

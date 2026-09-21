@@ -219,7 +219,6 @@ const srv = net.createServer((sock) => {
   }
 
 
-  // 模式 allmeld：四家都有 1~2 副露 + 自己有摸牌，用来核对四角的重叠
   // 和牌结算：验证结算界面里的**牌面示意**（内嵌字体 + liga）。
   // 带一个吃副露，用来检查被鸣的那张是否渲染成横置。
   function pushAgariScenario() {
@@ -286,6 +285,11 @@ const srv = net.createServer((sock) => {
     }, 1500);
   }
 
+  // 模式 allmeld：四家都有副露 + 自己有摸牌 —— L4 定点复现两条界面口径用：
+  //   ① **四角名牌互不重叠**（每家各占一个角，名牌轮转一位后仍如此）；
+  //   ② **副露里横置那张与另两张底边齐平**（横置张占的是牌河牌高，宽高互换）。
+  // 实拍核对：`--shot` 后按列扫牌像素的**底边**，全部落在同一个 y 附近即齐平
+  // （横置张若按高度居中，底边会比邻牌高出 (牌高 − 牌宽) / 2）。
   function pushAllMeldScenario() {
     send({ ev: 'game_start', rules: { length: 'hanpu' },
            seats: [ { seat: 0, name: '测试玩家', score: 25000 }, { seat: 1, name: 'CPU-1', score: 25000 },
