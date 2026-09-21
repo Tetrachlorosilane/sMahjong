@@ -319,13 +319,16 @@ node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言
 **不要靠运气等牌**——用假服务端把客户端直接推进到目标状态，再截图看：
 
 ```powershell
-node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld
+node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld|sfx|sfxburst
 # turn 自摸/立直/杠 · claim 荣和/碰/跳过 · note 无役提示 · river 横置顺延（顺带压测 5 张宝牌栏）
 # agari 结算 + round_wait(5000) 倒计时 · yakuman 须写「2倍役满」不得出现「0 番」
 # kan 「嶺上 M」跟着减（4→3→2） · twoturn 跨局首巡不得只剩 1 秒
 # sticks 立直棒按座位分布/供託居中 · hand2meld 自己 N 副露（`hand<N>[meld]`）
 # allmeld 四家都有副露 —— **副露界面两条口径的定点复现**：横置张与另两张**底边齐平**
 #         + 四角名牌互不重叠（`--shot` 后按列扫牌像素底边，全部落在同一 y 附近即齐平）
+# sfx / sfxburst —— **音效回归的场景驱动器**（配合 `MAHJONG_SFX_TRACE=1`）：
+#         sfx = 副露/选择不副露前后各夹一次自家摸牌（报障的触发点）；sfxburst = 把池子打到饱和，
+#         看有没有实例"卡在 playing"（`--after 7` 跑完看 stderr 的 play/跳过/卡死/池子状态）
 client\dist\mahjong-client.exe --demo 127.0.0.1 10999 --bots 3 --no-answer `
     --shot client\build\shot.png --after 6
 ```
@@ -546,9 +549,19 @@ mahjong/
   自家在**右下**，其余三家跟着转一格（下家→右上、对家→左上、上家→左下）。
   ⚠ 四个角**必须各占一个**：只挪自家会与下家的名牌重叠。角落预留 `plateReserve` 在
   **同一端**，所以名牌挪到哪、牌河/副露就在哪让开（自检断言四家名牌互不重叠 + 各自象限）。
-- **音效是"池子 + allowOverlap"，不是"一个对象反复 stop+play"**（`model/Sound.cpp`）：
-  每个音效 3 个 `QSoundEffect`，优先用**空闲**实例（绝大多数情况**根本不需要 stop**）；
-  `allowOverlap=false`（摸牌那条路）时**整个音效还在响就跳过**。
+- **音效是"池子 + 时长对账"，不是"一个对象反复 stop+play"**（`model/Sound.cpp`）：
+  每个音效 3 个 `QSoundEffect`，优先用**真正空闲**的实例（绝大多数情况**根本不需要 stop**）。
+  ⚠⚠ **"还在播"不能只信 `QSoundEffect::isPlaying()`**（2026-09 二次报障：
+  「音效在有副露 / 在可副露时选择不副露之后消失」）。设备异常（驱动切换 / 睡眠唤醒 / 独占占用）
+  之后它会**永远为真**，而"上一次还在播就跳过"这条判据会因此把那条音效**永久静音** ——
+  这是"某个音效从此再也不响"的唯一机制。所以内部记**每个实例本次开始播放的时刻**，
+  再与 **WAV 时长**（`wavDurationMs()` 解析 RIFF 的 `fmt `/`data`）对账：
+  - 时长内 = 真在播；超出「时长 + `kStuckMarginMs`」= 判**卡死** → `stop()` 后**复用**（计入 `stuckStopCountForTest`）；
+  - `allowOverlap=false`（摸牌那条路）的"别叠"**只对真在播生效**，卡死的实例没有否决权；
+  - 池子都在真播时**放弃这一次**（不再 `stop()` 硬插 —— 那条路径正是最可疑的静音来源），计入 `exhaustedSkipCountForTest`。
+  判据抽成**纯函数** `sound::pickSlot(playing[], ageMs[], durMs, allowOverlap)`，自检直接喂合成输入
+  （含"三个实例都卡死"这种声卡上造不出来的局面）。红证：把 `ageMs < limit` 去掉（只信 `isPlaying()`），
+  L2 立刻红两条（「卡死也要挑一个复用」「卡死的没有否决权」）。
   ⚠ 报障「只有第一小局有音效」的现场实测是：客户端**每局都在播**（10 局 80 次 play，
   Qt 侧 status=Ready、`isPlaying()=1`），所以剩下最可疑的就是旧实现那条
   `stop()+play()` 热路径（而且它**忽略了 `allowOverlap` 参数**——调用方明确要求"别叠"）。
@@ -883,7 +896,9 @@ mahjong/
 | **某家"没动就被代打"**（尤其发生在刚有人鸣牌/有人的鸣牌询问被取消之后） | 废包漏进了队列：① 取消询问时有没有 `table.dropReplies(seat, cancelledAskId)`？② `awaitAction` / claimPhase 有没有校验「`type` 属于本次询问的选项」？见 §2.3-10 与 §2.2 的 `ask_id` 行。⚠ 只做 `cancelAsk` 不摘队列是**不够**的 |
 | **对局中入局的人进了"未定义的观战状态"**（看到一张空牌桌 / 以为自己是东家却没手牌） | `spectate` 事件在客户端**没有分支**、而 `state.seat = -1` 被 `qBound` 夹成座位 0。修法与语义见 §6.2/PROTOCOL §3.9：`TableModel::spectating()` + 四家一律牌背 + 视角可切；服务端另补公开快照与 `draw` 公开版（`Table.sendSpectators`）。定性：`node tools\spectate-test.mjs <host> <port>` |
 | **鸣牌时看不出/选不了用赤五还是普通五** | `pon`/`kan(daiminkan)` 的选项必须带 `tiles`（赤五 `0p`），默认取法**普通牌优先**（`Round.pickAuto`）。见 PROTOCOL §3.6 与 `SelfTest.meldAkaPickTests` |
-| **只有第一小局有音效** | 先跑 `MAHJONG_SFX_TRACE=1 client --demo ...` 看 stderr：每一条都会打出开关/可用/音量/池子状态/`play()` 后是否 playing。客户端实测**每局都在播**，所以重点查旧实现那条 `stop()+play()`（已改成实例池 + `allowOverlap`），见 §6.2 |
+| **只有第一小局有音效** | 先跑 `MAHJONG_SFX_TRACE=1 client --demo ...` 看 stderr：每一条都会打出开关/可用/音量/池子状态（`pool3(ready/playing/stale/err)`）/`play()` 后是否 playing。客户端实测**每局都在播**，所以重点查 `stop()+play()` 那条路径（已改成实例池；池子真满时不再硬插），见 §6.2 |
+| **音效在"有副露 / 可副露时选择不副露"之后消失** | 同一个 `MAHJONG_SFX_TRACE=1`：看有没有 `stale`（自称在播但其实早该结束）。真因是 **`QSoundEffect::isPlaying()` 在设备异常后会永远为真**，而旧判据"还在播就跳过"会因此把那条音效永久静音 —— 现在按 **WAV 时长**对账（卡死则 `stop` 后复用），见 §6.2。⚠ 本机压测（85 次播放 / 池子打满）**复现不出来**：真机上请把 trace 发回来，`stale` 与 `放弃` 两行能直接定位 |
+| **赤宝不该拼在「碰/吃」后面** | 用户口径：`碰` = 一个按钮，赤宝放进**副露子列表**；只有一种取法时**不区分**。`ActionBar::buildPonMenu/buildKanMenu` 是子列表的唯一来源（自检 `menuEntriesForTest` 直接读它），见 §6.2/PROTOCOL §3.6 |
 | **副露里横置的那张"浮"在中间** | 横置牌顶边必须是 `my + (riverH − riverW)`（底部与另两张齐平），见 §6.2 与 `TableView::meldSlotRects` |
 | **名牌（ID 框）位置不对** | 四角**轮转一位**：自家右下、下家右上、对家左上、上家左下，见 §6.2 与 `TableLayout::computeLayout` |
 
@@ -915,7 +930,7 @@ mahjong/
 - 断线重连 `rejoin` 协议已实现，UI 未暴露入口。
 - **副露的赤宝选择：协议 / 服务端 / 客户端三层都已就绪**（1.8.0 起）。服务端对"用赤 / 不用赤"
   两种取法**各下发一条选项**（`ask.options[].tiles` = 精确牌码，见 PROTOCOL §2.2 与 §3.6），
-  客户端把它们渲染成**两个按钮**（`碰` / `碰 赤五筒`，大明杠同理）并原样回带 `tiles`；
+  客户端把它们放进**副露的子列表**（`碰` 一个按钮 + 子列表两条；大明杠同理）并原样回带 `tiles`；
   不给 `tiles` 的老客户端 / 机器人走 `Round.pickAuto` = **普通牌优先**（旧实现"取前 n 张"
   等于"碰五必吃赤五"）。回归：`SelfTest.meldAkaPickTests` + `client --selftest` 的 ActionBar 组。
   `chi` 的选项里赤五本来就以 `0m` 列出（选它即用赤五）。

@@ -1387,50 +1387,129 @@ int run(const QString& outDir)
               QStringLiteral("提交后「立直」按钮已销毁"));
     }
 
-    // ---------- 副露赤宝选择：碰的两条选项要能分别点、回包带精确牌码 ----------
+    // ---------- 副露赤宝选择：**子列表**（碰只有一个按钮，用哪几张在子列表里选）----------
     // 服务端对「不用赤五 / 用赤五」各下发一条 `pon`（各带 `tiles`，见 PROTOCOL §3.6）。
-    // 报障原文是「副露无法区分红五与普通五」：旧协议 pon 不带 `tiles`，客户端连选都没得选。
+    // 用户口径（2026-09 二次修订）：
+    //   ① 赤宝**不能拼在「碰」后面**，要放进副露的**子列表栏**；
+    //   ② 只有一种取法（手里只有赤五 / 只有普通五）时**无须区分两者** —— 单按钮直接执行、不弹子弹。
+    // 红证：把 `rebuild()` 里那段改回"每条 pon 各出一个按钮 + 拼牌名"，下面两条立刻红。
     {
+        const QString plainLabel = lang::t("ui.action.pon");
+        const QString akaName = TileRenderer::label(QStringLiteral("0p"));
+        const QString fiveName = TileRenderer::label(QStringLiteral("5p"));
+
+        // ① 真有得选（两条 pon）→ **一个**「碰」按钮 + 子列表两条
         ActionBar ab;
         ab.setAsk(proto::decodeLine(QByteArrayLiteral(
             R"({"ev":"ask","ask_id":91,"seat":0,"kind":"claim","deadline_ms":15000,)"
             R"("options":[{"type":"pon","tiles":["5p","5p"]},)"
             R"({"type":"pon","tiles":["0p","5p"]},{"type":"pass"}]})"),
             nullptr));
-        const QString akaLabel = TileRenderer::label(QStringLiteral("0p"));
-        const QString plainLabel = lang::t("ui.action.pon");
-        QPushButton* plainBtn = ab.buttonForTest(plainLabel);
-        QPushButton* akaBtn = ab.buttonForTest(plainLabel + QStringLiteral(" ") + akaLabel);
-        check(plainBtn != nullptr, QStringLiteral("「碰」按钮在（不用赤五那条）"));
-        check(akaBtn != nullptr, QStringLiteral("「碰 %1」按钮在（用赤五那条，实际按钮：%2）")
-                                     .arg(akaLabel, ab.buttonTextsForTest().join(QStringLiteral("/"))));
-        // 两个按钮文案必须不同 —— 否则玩家根本看不出哪条会用掉赤五
-        check(plainLabel != plainLabel + QStringLiteral(" ") + akaLabel,
-              QStringLiteral("两条碰的按钮文案必须可区分"));
+        QPushButton* ponBtn = ab.buttonForTest(plainLabel);
+        check(ponBtn != nullptr, QStringLiteral("「碰」按钮在（实际按钮：%1）")
+                                     .arg(ab.buttonTextsForTest().join(QStringLiteral("/"))));
+        check(ab.buttonForTest(plainLabel + QStringLiteral(" ") + akaName) == nullptr,
+              QStringLiteral("按钮文案里**不许**再拼赤五（赤宝改放子列表，实际按钮：%1）")
+                  .arg(ab.buttonTextsForTest().join(QStringLiteral("/"))));
+        checkEq(QString::number(ab.buttonTextsForTest().size()), QStringLiteral("2"),
+                QStringLiteral("两条 pon 只出一个按钮（另一个是「跳过」），实际：%1")
+                    .arg(ab.buttonTextsForTest().join(QStringLiteral("/"))));
+        const QStringList ponEntries = ab.menuEntriesForTest("pon");
+        checkEq(QString::number(ponEntries.size()), QStringLiteral("2"),
+                QStringLiteral("子列表里两条取法"));
+        checkEq(ponEntries.value(0), QStringLiteral("%1 %2").arg(fiveName, fiveName),
+                QStringLiteral("子列表第 1 条 = 不用赤五（普通牌优先）"));
+        checkEq(ponEntries.value(1), QStringLiteral("%1 %2").arg(akaName, fiveName),
+                QStringLiteral("子列表第 2 条 = 用赤五（写的是牌，不是拼在「碰」后面）"));
         QJsonObject sent;
         QObject::connect(&ab, &ActionBar::actionReady, [&](const QJsonObject& o) { sent = o; });
-        if (akaBtn != nullptr) {
-            akaBtn->click();
-            const QJsonArray t = sent.value(QStringLiteral("tiles")).toArray();
+        ab.triggerMenuEntryForTest(QStringLiteral("pon"), 1);
+        const QJsonArray akaTiles = sent.value(QStringLiteral("tiles")).toArray();
+        checkEq(QString::number(akaTiles.size()), QStringLiteral("2"),
+                QStringLiteral("点「用赤五」那条回包要带 tiles（两张）"));
+        checkEq(akaTiles.isEmpty() ? QString() : akaTiles.at(0).toString(), QStringLiteral("0p"),
+                QStringLiteral("回包的第一张就是赤五（服务端据此精确取牌）"));
+        checkEq(sent.value(QStringLiteral("type")).toString(), QStringLiteral("pon"),
+                QStringLiteral("回包 type 仍是 pon"));
+        checkEq(QString::number(sent.value(QStringLiteral("ask_id")).toInt()),
+                QStringLiteral("91"), QStringLiteral("赤宝选择回包也要带 ask_id"));
+        sent = QJsonObject();
+        ab.triggerMenuEntryForTest(QStringLiteral("pon"), 0);
+        const QJsonArray plainTiles = sent.value(QStringLiteral("tiles")).toArray();
+        checkEq(QString::number(plainTiles.size()), QStringLiteral("2"),
+                QStringLiteral("不用赤五那条也要带 tiles（普通五优先）"));
+        check(plainTiles.isEmpty() || !plainTiles.at(0).toString().startsWith(QLatin1Char('0')),
+              QStringLiteral("不用赤五那条的第一张不能是赤牌，实际 %1")
+                  .arg(plainTiles.isEmpty() ? QString() : plainTiles.at(0).toString()));
+
+        // ② 只有一种取法（手里只有赤五）→ 单按钮直接执行，**任何地方都不区分**
+        ActionBar solo;
+        solo.setAsk(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"ask","ask_id":92,"seat":0,"kind":"claim","deadline_ms":15000,)"
+            R"("options":[{"type":"pon","tiles":["0p","0p"]},{"type":"pass"}]})"),
+            nullptr));
+        checkEq(solo.buttonTextsForTest().join(QStringLiteral("/")),
+                QStringLiteral("%1/%2").arg(plainLabel, lang::t("ui.action.pass")),
+                QStringLiteral("只有赤五时按钮就是「碰」+「跳过」，不带任何牌名"));
+        QJsonObject soloSent;
+        QObject::connect(&solo, &ActionBar::actionReady,
+                         [&](const QJsonObject& o) { soloSent = o; });
+        QPushButton* soloBtn = solo.buttonForTest(plainLabel);
+        check(soloBtn != nullptr, QStringLiteral("只有赤五时「碰」按钮在"));
+        if (soloBtn != nullptr) {
+            soloBtn->click();     // 单一取法：直接执行（不弹子列表，所以这里不会阻塞）
+            const QJsonArray t = soloSent.value(QStringLiteral("tiles")).toArray();
             checkEq(QString::number(t.size()), QStringLiteral("2"),
-                    QStringLiteral("用赤五那条回包要带 tiles（两张）"));
+                    QStringLiteral("单一取法也要带 tiles（服务端据此精确取牌）"));
             checkEq(t.isEmpty() ? QString() : t.at(0).toString(), QStringLiteral("0p"),
-                    QStringLiteral("回包的第一张就是赤五（服务端据此精确取牌）"));
-            checkEq(sent.value(QStringLiteral("type")).toString(), QStringLiteral("pon"),
-                    QStringLiteral("回包 type 仍是 pon"));
-            checkEq(QString::number(sent.value(QStringLiteral("ask_id")).toInt()),
-                    QStringLiteral("91"), QStringLiteral("赤宝选择回包也要带 ask_id"));
+                    QStringLiteral("单一取法（只有赤五）回包仍带赤五牌码"));
         }
-        if (plainBtn != nullptr) {
-            sent = QJsonObject();
-            plainBtn->click();
-            const QJsonArray t = sent.value(QStringLiteral("tiles")).toArray();
-            checkEq(QString::number(t.size()), QStringLiteral("2"),
-                    QStringLiteral("不用赤五那条也要带 tiles（普通五优先）"));
-            check(t.isEmpty() || !t.at(0).toString().startsWith(QLatin1Char('0')),
-                  QStringLiteral("不用赤五那条的第一张不能是赤牌，实际 %1")
-                      .arg(t.isEmpty() ? QString() : t.at(0).toString()));
-        }
+    }
+
+    // ---------- 大明杠的赤宝选择：同样只做"真有得选"时的区分 ----------
+    {
+        const QString kanLabel = lang::t("ui.action.daiminkan");
+        const QString akaName = TileRenderer::label(QStringLiteral("0p"));
+        const QString fiveName = TileRenderer::label(QStringLiteral("5p"));
+        ActionBar ab;
+        ab.setAsk(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"ask","ask_id":93,"seat":0,"kind":"turn","deadline_ms":15000,)"
+            R"("options":[{"type":"kan","kans":[)"
+            R"({"kind":"daiminkan","tile":"5p","tiles":["5p","5p","5p"]},)"
+            R"({"kind":"daiminkan","tile":"5p","tiles":["0p","5p","5p"]},)"
+            R"({"kind":"ankan","tile":"9m"}]}]})"),
+            nullptr));
+        const QStringList entries = ab.menuEntriesForTest("kan");
+        checkEq(QString::number(entries.size()), QStringLiteral("3"),
+                QStringLiteral("杠子列表三条（两种大明杠取法 + 一个暗杠）"));
+        checkEq(entries.value(0), QStringLiteral("%1 %2 %3 %4").arg(kanLabel, fiveName, fiveName, fiveName),
+                QStringLiteral("大明杠第 1 条 = 不用赤五"));
+        checkEq(entries.value(1), QStringLiteral("%1 %2 %3 %4").arg(kanLabel, akaName, fiveName, fiveName),
+                QStringLiteral("大明杠第 2 条 = 用赤五（列的是牌，不拼在动作名后面）"));
+        check(!entries.value(0).endsWith(akaName) && !entries.value(2).contains(akaName),
+              QStringLiteral("不用赤五那条与暗杠那条都不许出现赤五字样，实际：%1")
+                  .arg(entries.join(QStringLiteral(" / "))));
+        QJsonObject sent;
+        QObject::connect(&ab, &ActionBar::actionReady, [&](const QJsonObject& o) { sent = o; });
+        ab.triggerMenuEntryForTest(QStringLiteral("kan"), 1);
+        checkEq(sent.value(QStringLiteral("kind")).toString(), QStringLiteral("daiminkan"),
+                QStringLiteral("回包 kind = daiminkan"));
+        checkEq(sent.value(QStringLiteral("tile")).toString(), QStringLiteral("5p"),
+                QStringLiteral("回包 tile = 被鸣的那张"));
+        const QJsonArray kt = sent.value(QStringLiteral("tiles")).toArray();
+        checkEq(kt.isEmpty() ? QString() : kt.at(0).toString(), QStringLiteral("0p"),
+                QStringLiteral("用赤五那条回包要带精确牌码（第一张是赤五）"));
+
+        // 单一取法：带着赤五牌码，但界面上**不区分**（按牌种写）
+        ActionBar solo;
+        solo.setAsk(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"ask","ask_id":94,"seat":0,"kind":"turn","deadline_ms":15000,)"
+            R"("options":[{"type":"kan","kans":[)"
+            R"({"kind":"daiminkan","tile":"5p","tiles":["0p","0p","0p"]}]}]})"),
+            nullptr));
+        checkEq(solo.menuEntriesForTest("kan").join(QStringLiteral("/")),
+                QStringLiteral("%1 %2").arg(kanLabel, fiveName),
+                QStringLiteral("只有一种取法时大明杠按牌种写，不出现赤五字样"));
     }
 
     // ---------- 回归：牌桌外的三个自动开关（自动胡了 / 不吃碰杠 / 自动摸切）----------
@@ -3310,6 +3389,61 @@ int run(const QString& outDir)
         } else {
             log << QStringLiteral("[i] 后端 %1 没有 Ready 状态可查（跳过该断言）")
                        .arg(sp.backendName());
+        }
+
+        // ⑥ 「自称在播」必须与 **WAV 时长** 对账（2026-09 二次报障：
+        //    「音效在有副露 / 在可副露时选择不副露之后消失」）。
+        //
+        //    真因机制：设备异常后 `QSoundEffect::isPlaying()` 会**永远为真**，而"上一次还在播
+        //    就跳过"这条判据会因此把那条音效**永久静音**。修法是记每个实例的开始时刻、
+        //    超过「时长 + 余量」就判卡死并复用。这里把两件事都钉住：
+        //      ① WAV 时长解析得对（拿真实素材对账，不是拿假数据自证）；
+        //      ② 判据本身对"卡死实例"的处理 —— **红证**：把 `pickSlot` 里那句
+        //         `ageMs < limit` 去掉（只看 isPlaying），下面第一条断言立刻变红。
+        {
+            const int drawMs = sound::wavDurationMs(sp.dataForTest(QLatin1String(sound::name::Draw)));
+            const int ronMs = sound::wavDurationMs(sp.dataForTest(QLatin1String(sound::name::Ron)));
+            check(drawMs > 20 && drawMs < 400,
+                  QStringLiteral("摸牌音效时长解析（应 ≈140ms），实际 %1 ms").arg(drawMs));
+            check(ronMs > 600 && ronMs < 2000,
+                  QStringLiteral("荣和音效时长解析（应 ≈1050ms），实际 %1 ms").arg(ronMs));
+            checkEq(QString::number(sound::wavDurationMs(QByteArrayLiteral("RIFFxxxxWAVEjunk"))),
+                    QStringLiteral("0"),
+                    QStringLiteral("不是合法 WAV 时时长返回 0（退回保守上限，绝不静默永恒在播）"));
+
+            const qint64 dur = drawMs > 0 ? drawMs : 140;
+            const qint64 stale = dur + sound::kStuckMarginMs + 50;   // 早该结束了
+            const qint64 fresh = 10;                                 // 刚刚才播
+            // 三个实例都自称在播、但都"卡"了很久 → 必须还能挑出一个来复用（不能全军覆没）
+            checkEq(QString::number(sound::pickSlot({ true, true, true },
+                                                    { stale, stale, stale }, int(dur), true)),
+                    QStringLiteral("0"),
+                    QStringLiteral("自称在播但已超过时长上限 → 仍要挑一个出来复用（否则该音效永久静音）"));
+            // `allowOverlap=false`：「真在播」才有否决权
+            checkEq(QString::number(sound::pickSlot({ true, false, false }, { fresh, stale, stale },
+                                                    int(dur), false)),
+                    QStringLiteral("-1"),
+                    QStringLiteral("allowOverlap=false：确实还在响 → 跳过（不叠口径不变）"));
+            checkEq(QString::number(sound::pickSlot({ true, false, false }, { stale, stale, stale },
+                                                    int(dur), false)),
+                    QStringLiteral("1"),
+                    QStringLiteral("allowOverlap=false：卡死的那个**没有否决权**——"
+                                   "还有空闲实例就照放（旧实现永久哑在这里）"));
+            checkEq(QString::number(sound::pickSlot({ true, true, true }, { fresh, fresh, fresh },
+                                                    int(dur), true)),
+                    QStringLiteral("-2"),
+                    QStringLiteral("池子都在真播 → 放弃这次（叠放口径也不再 stop() 硬插）"));
+            checkEq(QString::number(sound::pickSlot({ false, false, false }, { stale, stale, stale },
+                                                    int(dur), false)),
+                    QStringLiteral("0"),
+                    QStringLiteral("都空闲 → 用第一个"));
+            checkEq(QString::number(sound::pickSlot({ true, false, true }, { stale, fresh, stale },
+                                                    int(dur), true)),
+                    QStringLiteral("1"),
+                    QStringLiteral("混合：优先用**真正空闲**的那个，卡死的次之，不动真在播的"));
+            // 自检期间真的播过之后，卡死计数**不该**被无端增加（没有假阳性）
+            checkEq(QString::number(sp.stuckStopCountForTest()), QStringLiteral("0"),
+                    QStringLiteral("正常播放不该被判成卡死（无假阳性）"));
         }
     }
 

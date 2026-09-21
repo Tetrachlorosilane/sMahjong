@@ -367,6 +367,8 @@ void ActionBar::rebuild()
     m_alertArmed = false;
     m_alertTimer.start();
 
+    bool ponAlreadyBuilt = false;   // 多条 pon 只出一个按钮（选择在子列表里）
+
     for (const QJsonObject& opt : m_options) {
         const QString type = opt.value(QStringLiteral("type")).toString();
         QString label;
@@ -380,11 +382,14 @@ void ActionBar::rebuild()
             label = lang::t("ui.action.ron");
         else if (type == QLatin1String("pon")) {
             // 副露赤宝选择：服务端对"用赤 / 不用赤"各下发一条 pon（各带 `tiles`）。
-            // 用赤那条必须在文案里写出来，否则两个按钮长得一样（报障的原文）。
+            // ⚠ **只出一个「碰」按钮**，赤宝的选择放进它的**子列表**里（用户口径：
+            //   「赤宝牌不应该放在碰/吃的后面，而应放在副露的子列表栏中」）——
+            //   按钮文案里绝不拼牌名，否则按钮数会随取法数量膨胀。
+            //   只有**真的有得选**（≥2 条）时才出子列表；只有一种取法时直接执行、不做任何区分。
+            if (ponAlreadyBuilt)
+                continue;
+            ponAlreadyBuilt = true;
             label = lang::t("ui.action.pon");
-            const QString aka = akaCodeIn(proto::stringList(opt.value(QStringLiteral("tiles"))));
-            if (!aka.isEmpty())
-                label += QStringLiteral(" ") + tileText(aka);
         } else if (type == QLatin1String("chi"))
             label = lang::t("ui.action.chi");
         else if (type == QLatin1String("kan"))
@@ -440,9 +445,14 @@ void ActionBar::rebuild()
         } else if (type == QLatin1String("kan")) {
             connect(btn, &QPushButton::clicked, this, &ActionBar::showKanMenu);
         } else if (type == QLatin1String("pon")) {
-            // 碰：把这一条选项原样带回去（可能带 `tiles` = 用哪几张，见 PROTOCOL §3.6）
-            const QJsonObject o = opt;
-            connect(btn, &QPushButton::clicked, this, [this, o]() { sendOption(o); });
+            if (optionCount(QStringLiteral("pon")) >= 2) {
+                // 真的有得选（手里既有赤五又有普通五）：出子列表，让玩家点哪条用哪条。
+                connect(btn, &QPushButton::clicked, this, &ActionBar::showPonMenu);
+            } else {
+                // 只有一种取法（只有赤五 / 只有普通五）→ **无须区分**，直接执行。
+                const QJsonObject o = opt;
+                connect(btn, &QPushButton::clicked, this, [this, o]() { sendPonEntry(o); });
+            }
         } else {
             const QString t = type;
             connect(btn, &QPushButton::clicked, this, [this, t]() { sendSimple(t); });
@@ -478,73 +488,137 @@ void ActionBar::showChiMenu()
 {
     if (!m_valid || m_expired)
         return;
-    QJsonObject chi;
-    for (const QJsonObject& o : m_options) {
-        if (o.value(QStringLiteral("type")).toString() == QLatin1String("chi"))
-            chi = o;
-    }
-    const QJsonArray sets = chi.value(QStringLiteral("sets")).toArray();
-    if (sets.isEmpty())
-        return;
-
     QMenu menu(this);
-    for (const QJsonValue& v : sets) {
-        const QStringList tiles = proto::stringList(v);
-        QAction* act = menu.addAction(joinTiles(tiles));
-        act->setData(tiles);
-    }
+    buildChiMenu(menu);
+    if (menu.isEmpty())
+        return;
     QAction* chosen = menu.exec(QCursor::pos());
     if (!chosen)
         return;
+    sendChiEntry(chosen->data().toStringList());
+}
 
-    QJsonObject cmd = actionCmd(QStringLiteral("chi"));
-    if (cmd.isEmpty())
+void ActionBar::showPonMenu()
+{
+    if (!m_valid || m_expired)
         return;
-    QJsonArray arr;
-    for (const QString& t : chosen->data().toStringList())
-        arr.append(t);
-    cmd.insert(QStringLiteral("tiles"), arr);
-    emit actionReady(cmd);
+    QMenu menu(this);
+    buildPonMenu(menu);
+    if (menu.isEmpty())
+        return;
+    QAction* chosen = menu.exec(QCursor::pos());
+    if (!chosen)
+        return;
+    sendPonEntry(chosen->data().toJsonObject());
+}
+
+void ActionBar::buildPonMenu(QMenu& menu) const
+{
+    // 副露子列表：每一条 = 一种取法（服务端 `tiles` 给了这一副**用哪几张**的精确牌码）。
+    // 条目写的是**牌**（「五筒 五筒」/「赤五筒 五筒」），不是把牌名拼在「碰」后面 ——
+    // 动作名在按钮上（碰），子列表只回答"用哪几张"（用户口径）。
+    for (const QJsonObject& o : m_options) {
+        if (o.value(QStringLiteral("type")).toString() != QLatin1String("pon"))
+            continue;
+        const QStringList tiles = proto::stringList(o.value(QStringLiteral("tiles")));
+        QAction* act = menu.addAction(tiles.isEmpty() ? lang::t("ui.action.pon")
+                                                      : joinTiles(tiles));
+        act->setData(o);
+    }
 }
 
 void ActionBar::showKanMenu()
 {
     if (!m_valid || m_expired)
         return;
-    QJsonObject kan;
-    for (const QJsonObject& o : m_options) {
-        if (o.value(QStringLiteral("type")).toString() == QLatin1String("kan"))
-            kan = o;
-    }
-    const QJsonArray kans = kan.value(QStringLiteral("kans")).toArray();
-    if (kans.isEmpty())
-        return;
-
     QMenu menu(this);
-    for (const QJsonValue& v : kans) {
-        const QJsonObject k = v.toObject();
-        const QString kind = k.value(QStringLiteral("kind")).toString();
-        const QString tile = k.value(QStringLiteral("tile")).toString();
-        QString prefix = lang::t("ui.action.kan");
-        if (kind == QLatin1String("ankan"))
-            prefix = lang::t("ui.action.ankan");
-        else if (kind == QLatin1String("kakan"))
-            prefix = lang::t("ui.action.kakan");
-        else if (kind == QLatin1String("daiminkan"))
-            prefix = lang::t("ui.action.daiminkan");
-        QString label = QStringLiteral("%1 %2").arg(prefix, tileText(tile));
-        // 大明杠的赤宝选择：用赤五那一条在菜单里写出来（与碰同一口径）
-        const QString aka = akaCodeIn(proto::stringList(k.value(QStringLiteral("tiles"))));
-        if (!aka.isEmpty())
-            label += QStringLiteral(" ") + tileText(aka);
-        QAction* act = menu.addAction(label);
-        act->setData(k);
-    }
+    buildKanMenu(menu);
+    if (menu.isEmpty())
+        return;
     QAction* chosen = menu.exec(QCursor::pos());
     if (!chosen)
         return;
+    sendKanEntry(chosen->data().toJsonObject());
+}
 
-    const QJsonObject k = chosen->data().toJsonObject();
+void ActionBar::buildKanMenu(QMenu& menu) const
+{
+    for (const QJsonObject& o : m_options) {
+        if (o.value(QStringLiteral("type")).toString() != QLatin1String("kan"))
+            continue;
+        const QJsonArray kans = o.value(QStringLiteral("kans")).toArray();
+        for (const QJsonValue& v : kans) {
+            const QJsonObject k = v.toObject();
+            const QString kind = k.value(QStringLiteral("kind")).toString();
+            const QString tile = k.value(QStringLiteral("tile")).toString();
+            QString prefix = lang::t("ui.action.kan");
+            if (kind == QLatin1String("ankan"))
+                prefix = lang::t("ui.action.ankan");
+            else if (kind == QLatin1String("kakan"))
+                prefix = lang::t("ui.action.kakan");
+            else if (kind == QLatin1String("daiminkan"))
+                prefix = lang::t("ui.action.daiminkan");
+            // 大明杠的赤宝选择：同一个 `kind`+`tile` 可能有好几条（差在 `tiles` 上）——
+            // **只有真的有得选**时，才在子列表里把"用哪几张"列出来区分；
+            // 只有一种取法时按牌种写（不区分赤/普通，用户口径）。
+            const QStringList tiles = proto::stringList(k.value(QStringLiteral("tiles")));
+            const bool ambiguous = kanVariantCount(kind, tile) >= 2;
+            const QString label = (ambiguous && !tiles.isEmpty())
+                    ? QStringLiteral("%1 %2").arg(prefix, joinTiles(tiles))
+                    : QStringLiteral("%1 %2").arg(prefix, tileText(tile));
+            QAction* act = menu.addAction(label);
+            act->setData(k);
+        }
+    }
+}
+
+/** 同一个 `kind`+`tile` 的大明杠有几种取法（赤宝选择会给出多条）。 */
+int ActionBar::kanVariantCount(const QString& kind, const QString& tile) const
+{
+    int n = 0;
+    for (const QJsonObject& o : m_options) {
+        if (o.value(QStringLiteral("type")).toString() != QLatin1String("kan"))
+            continue;
+        for (const QJsonValue& v : o.value(QStringLiteral("kans")).toArray()) {
+            const QJsonObject k = v.toObject();
+            if (k.value(QStringLiteral("kind")).toString() == kind
+                && k.value(QStringLiteral("tile")).toString() == tile)
+                ++n;
+        }
+    }
+    return n;
+}
+
+int ActionBar::optionCount(const QString& type) const
+{
+    int n = 0;
+    for (const QJsonObject& o : m_options) {
+        if (o.value(QStringLiteral("type")).toString() == type)
+            ++n;
+    }
+    return n;
+}
+
+void ActionBar::sendChiEntry(const QStringList& tiles)
+{
+    QJsonObject cmd = actionCmd(QStringLiteral("chi"));
+    if (cmd.isEmpty())
+        return;
+    QJsonArray arr;
+    for (const QString& t : tiles)
+        arr.append(t);
+    cmd.insert(QStringLiteral("tiles"), arr);
+    emit actionReady(cmd);
+}
+
+void ActionBar::sendPonEntry(const QJsonObject& opt)
+{
+    // 碰：把这一条选项原样带回去（`tiles` = 用哪几张，见 PROTOCOL §3.6）
+    sendOption(opt);
+}
+
+void ActionBar::sendKanEntry(const QJsonObject& k)
+{
     QJsonObject cmd = actionCmd(QStringLiteral("kan"));
     if (cmd.isEmpty())
         return;
@@ -555,6 +629,57 @@ void ActionBar::showKanMenu()
     if (!kanTiles.isEmpty())
         cmd.insert(QStringLiteral("tiles"), kanTiles);
     emit actionReady(cmd);
+}
+
+QStringList ActionBar::menuEntriesForTest(const QString& type) const
+{
+    QMenu menu;
+    if (type == QLatin1String("chi"))
+        buildChiMenu(menu);
+    else if (type == QLatin1String("pon"))
+        buildPonMenu(menu);
+    else if (type == QLatin1String("kan"))
+        buildKanMenu(menu);
+    QStringList out;
+    for (QAction* a : menu.actions())
+        out << a->text();
+    return out;
+}
+
+void ActionBar::triggerMenuEntryForTest(const QString& type, int index)
+{
+    QMenu menu;
+    if (type == QLatin1String("chi"))
+        buildChiMenu(menu);
+    else if (type == QLatin1String("pon"))
+        buildPonMenu(menu);
+    else if (type == QLatin1String("kan"))
+        buildKanMenu(menu);
+    const QList<QAction*> acts = menu.actions();
+    if (index < 0 || index >= acts.size())
+        return;
+    const QAction* a = acts.at(index);
+    if (type == QLatin1String("chi"))
+        sendChiEntry(a->data().toStringList());
+    else if (type == QLatin1String("pon"))
+        sendPonEntry(a->data().toJsonObject());
+    else if (type == QLatin1String("kan"))
+        sendKanEntry(a->data().toJsonObject());
+}
+
+void ActionBar::buildChiMenu(QMenu& menu) const
+{
+    QJsonObject chi;
+    for (const QJsonObject& o : m_options) {
+        if (o.value(QStringLiteral("type")).toString() == QLatin1String("chi"))
+            chi = o;
+    }
+    const QJsonArray sets = chi.value(QStringLiteral("sets")).toArray();
+    for (const QJsonValue& v : sets) {
+        const QStringList tiles = proto::stringList(v);
+        QAction* act = menu.addAction(joinTiles(tiles));
+        act->setData(tiles);
+    }
 }
 
 void ActionBar::onTick()

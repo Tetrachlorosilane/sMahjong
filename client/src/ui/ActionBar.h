@@ -12,6 +12,7 @@
 
 class QHBoxLayout;
 class QLabel;
+class QMenu;
 class QProgressBar;
 class QPushButton;
 
@@ -57,6 +58,13 @@ public:
     QPushButton* buttonForTest(const QString& label) const;
     /** 当前所有动作按钮的文案（断言失败时打出来，省得靠猜"到底画了哪几个"）。 */
     QStringList buttonTextsForTest() const;
+    /**
+     * 副露子列表（吃 / 碰 / 杠的弹菜单）里每一条的文案 —— 与点击时弹出的那份**同源**
+     * （都走 `buildXMenu`），所以断言的就是玩家看到的东西。
+     */
+    QStringList menuEntriesForTest(const QString& type) const;
+    /** 点子列表里第 `index` 条（自检用；等价于玩家在弹出的菜单里点它）。 */
+    void triggerMenuEntryForTest(const QString& type, int index);
 
 signals:
     void actionReady(const QJsonObject& action);  // 已组装好的完整 cmd
@@ -71,6 +79,19 @@ private:
     void sendOption(const QJsonObject& opt);
     void showChiMenu();
     void showKanMenu();
+    void showPonMenu();
+    /** 子列表内容只有一份来源：弹出（上面的 show*Menu）与自检都调它。 */
+    void buildChiMenu(QMenu& menu) const;
+    void buildKanMenu(QMenu& menu) const;
+    void buildPonMenu(QMenu& menu) const;
+    /** 点了子列表里的一条之后怎么发包（吃/碰/杠各一种）。 */
+    void sendChiEntry(const QStringList& tiles);
+    void sendKanEntry(const QJsonObject& k);
+    void sendPonEntry(const QJsonObject& opt);
+    /** 本询里某类动作有几条选项（副露赤宝会给出多条，见 PROTOCOL §3.6）。 */
+    int optionCount(const QString& type) const;
+    /** 同一个 `kind`+`tile` 的大明杠有几种取法（≥2 才在子列表里区分）。 */
+    int kanVariantCount(const QString& kind, const QString& tile) const;
     QString baseTitle() const;    // 不含倒计时的标题
     void refreshTitle();          // 标题 = 基标题/立直提示 + 倒计时
 

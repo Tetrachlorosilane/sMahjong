@@ -59,6 +59,8 @@ const srv = net.createServer((sock) => {
         else if (MODE === 'agari') setTimeout(pushAgariScenario, 400);
         else if (MODE === 'yakuman') setTimeout(pushYakumanScenario, 400);
         else if (MODE === 'twoturn') setTimeout(pushTwoTurnScenario, 400);
+        else if (MODE === 'sfx') setTimeout(pushSfxScenario, 400);
+        else if (MODE === 'sfxburst') setTimeout(pushSfxBurstScenario, 400);
         else setTimeout(pushRound, 400);
         break;
       case 'action':
@@ -313,6 +315,84 @@ const srv = net.createServer((sock) => {
     setTimeout(() => { send({ ev: 'draw', seat: 1, tiles_left: 38, rinshan: false, tile: '3m' }); }, d + 200);
     console.log('[mock] allmeld 场景已下发');
   }
+  // 模式 sfx：**音效本体回归**的场景驱动器。
+  //
+  // 报障：「音效在有副露、或在可副露时选择不副露之后消失」。要定位就得把两种触发点
+  // 都摆出来，并夹着自家摸牌（`Draw` 是 `allowOverlap=false` 那条路，最容易先哑）：
+  //   ① 可副露 → 客户端自动选「不副露」（demo 模式的自动应答挑 `pass`，见 MainWindow）；
+  //   ② 有副露（直接广播 `meld`，四种 kind 各来一次）；
+  // 每次触发前后各发一次自家 `draw`，配合 `MAHJONG_SFX_TRACE=1` 就能看出
+  // 「play 有没有被调用 / 是不是被 allowOverlap 吞了 / play() 之后还响不响」。
+  function pushSfxScenario() {
+    send({ ev: 'game_start', rules: { length: 'hanpu' },
+           seats: [ { seat: 0, name: '测试玩家', score: 25000 }, { seat: 1, name: 'CPU-1', score: 25000 },
+                    { seat: 2, name: 'CPU-2', score: 25000 }, { seat: 3, name: 'CPU-3', score: 25000 } ],
+           round: { bakaze: 'E', kyoku: 1, honba: 0 } });
+    send({ ev: 'round_start', round: { bakaze: 'E', kyoku: 1, honba: 0, riichi_sticks: 0 },
+           seat: 0, dealer: 0, scores: [25000, 25000, 25000, 25000],
+           hand: ['1m','2m','3m','4m','5m','6m','7m','8m','9m','1p','2p','3p'],
+           dora_indicators: ['5p'], tiles_left: 60, dead_wall_left: 4 });
+    let t = 500;
+    let n = 0;
+    const draw = () => { setTimeout(() => send({ ev: 'draw', seat: 0, tiles_left: 60 - (++n),
+                                                rinshan: false, tile: '1m' }), t); t += 400; };
+    const meld = (seat, kind, tiles, from, called) => setTimeout(() => send({
+      ev: 'meld', seat, kind, tiles, from, called_tile: called,
+      aka: [false, false, false], called_index: 0 }), t);
+    draw();                                    // ① 基线：副露之前
+    setTimeout(() => {
+      send({ ev: 'discard', seat: 1, tile: '9m', tsumogiri: false, riichi: false });
+      send({ ev: 'ask', ask_id: 11, seat: 0, kind: 'claim', deadline_ms: 60000,
+             from: 1, tile: '9m', base_ms: 20000, bank_ms: 5000,
+             options: [ { type: 'pon', tiles: ['9m', '9m'] }, { type: 'pass' } ] });
+      console.log('[mock] claim 询问已发（客户端 1.2s 后自动「不副露」）');
+    }, t);
+    t += 2600;                                 // 让自动应答真的发出 pass
+    draw();                                    // ② 不副露之后
+    meld(0, 'pon', ['9m','9m','9m'], 1, '9m'); t += 400;
+    draw();                                    // ③ 自家碰之后
+    meld(1, 'chi', ['3p','4p','5p'], 0, '4p'); t += 400;
+    draw();                                    // ④ 别家吃之后
+    meld(2, 'daiminkan', ['7z','7z','7z','7z'], 1, '7z'); t += 400;
+    draw();                                    // ⑤ 别家大明杠之后
+    setTimeout(() => send({ ev: 'riichi', seat: 3, tile: '8s' }), t); t += 400;
+    draw();                                    // ⑥ 别家立直之后
+    t += 200;
+    console.log('[mock] sfx 场景已下发（共 6 次自家摸牌）');
+  }
+
+  // 模式 sfxburst：**把音效池打到饱和**，看会不会有实例"卡在 playing"再也放不出来。
+  // 连发 40 组（每组 meld + draw，间隔 15 ms）先把池子占满（`allowOverlap=true` 会走唯一的
+  // `stop()` 路径），停 1 秒后再发 5 次自家摸牌 —— 后 5 次要是全被 `allowOverlap=false` 吞掉，
+  // 就说明池子里有实例永远自称在播（这正是"音效消失"最可能的机制）。
+  function pushSfxBurstScenario() {
+    send({ ev: 'game_start', rules: { length: 'hanpu' },
+           seats: [ { seat: 0, name: '测试玩家', score: 25000 }, { seat: 1, name: 'CPU-1', score: 25000 },
+                    { seat: 2, name: 'CPU-2', score: 25000 }, { seat: 3, name: 'CPU-3', score: 25000 } ],
+           round: { bakaze: 'E', kyoku: 1, honba: 0 } });
+    send({ ev: 'round_start', round: { bakaze: 'E', kyoku: 1, honba: 0, riichi_sticks: 0 },
+           seat: 0, dealer: 0, scores: [25000, 25000, 25000, 25000],
+           hand: ['1m','2m','3m','4m','5m','6m','7m','8m','9m','1p','2p','3p'],
+           dora_indicators: ['5p'], tiles_left: 60, dead_wall_left: 4 });
+    let t = 400;
+    for (let i = 0; i < 40; i++) {
+      setTimeout(() => send({ ev: 'meld', seat: 1, kind: 'chi', tiles: ['3p','4p','5p'],
+                              from: 0, called_tile: '4p', aka: [false,false,false],
+                              called_index: 0 }), t);
+      t += 15;
+      setTimeout(() => send({ ev: 'draw', seat: 0, tiles_left: 60 - i, rinshan: false,
+                              tile: '1m' }), t);
+      t += 15;
+    }
+    t += 1000;
+    for (let i = 0; i < 5; i++) {
+      setTimeout(() => send({ ev: 'draw', seat: 0, tiles_left: 20 - i, rinshan: false,
+                              tile: '1m' }), t);
+      t += 600;
+    }
+    console.log('[mock] sfxburst 场景已下发（40 组饱和 + 1 秒后 5 次摸牌）');
+  }
+
   // 模式 river：脚本化「立直宣言牌被鸣走 → 横置顺延」的完整序列
   function pushRiverScenario() {
     send({ ev: 'game_start', rules: { length: 'hanpu' },

@@ -30,6 +30,17 @@
 //   （Qt 不会报错，`isPlaying()` 照样是 true）。池子让"上一次还没放完"时换一个空闲实例，
 //   绝大多数情况下**根本不需要 stop**；`allowOverlap=false` 时才真的跳过（见下）。
 //
+// ⚠⚠ **"还在播"不能只信 `QSoundEffect::isPlaying()`**（2026-09 二次报障：
+//   「音效在有副露 / 在可副露时选择不副露之后消失」）。设备异常（驱动切换、睡眠唤醒、
+//   独占占用）之后它会**永远为真**，而"上一次还在播就跳过"这条判据会因此把那条音效
+//   **永久静音** —— 这正是"某个音效从此再也不响"的唯一机制（而且它在本地可能复现不出来：
+//   本机压测 85 次播放里 `isPlaying()` 都能正常回落）。
+//   所以内部记**每个实例本次开始播放的时刻**，并把"自称在播"与"WAV 时长"对账：
+//     · 时长内 → 真在播；超出时长 + 余量 → 判为卡死，`stop()` 后**复用**（并计数/打日志）；
+//   `allowOverlap=false` 的"别叠"只对**真在播**生效，卡死的实例不再有否决权。
+//   池子真满时**放弃这一次**（不再 `stop()` 硬插 —— 那条路径正是最可疑的静音来源）。
+//   诊断：`MAHJONG_SFX_TRACE=1` 会打出 `pool3(ready/playing/stale/err)` 与每个判定分支。
+//
 // 音效**只影响听感**，任何失败都不该影响对局 —— 所有接口都不抛异常、不阻塞。
 
 #include <QByteArray>
@@ -108,6 +119,8 @@ public:
     int loadedCountForTest();
     /** 某个音效的 WAV 字节数（0 = 找不到）；用来断言"能取到素材"。 */
     int dataSizeForTest(const QString& sfx);
+    /** 某个音效的 WAV 原始字节（自检拿去核对时长解析）。 */
+    QByteArray dataForTest(const QString& sfx) { return data(sfx); }
     /**
      * 某个音效的 `QSoundEffect` 是否真的**接受了这份素材**（只有多媒体后端有意义）。
      *
@@ -125,6 +138,17 @@ public:
     int playCountForTest(const QString& sfx) const;
     /** 因为"上一次还在播 + `allowOverlap=false`"而**跳过**的次数。 */
     int overlapSkipCountForTest() const { return m_overlapSkips; }
+    /**
+     * 因为某个实例**自称在播、但已经超过这个 WAV 可能的最长时长**（判定为卡死）
+     * 而把它 `stop()` 后复用的次数。
+     *
+     * <p>为什么必须这么判：`QSoundEffect::isPlaying()` 在设备异常（驱动切换 / 睡眠唤醒 /
+     * 独占占用）之后可能**永远为真**，而那正是"音效从此再也不响"的唯一机制 ——
+     * 旧实现拿它当"还在播"的唯一判据，一个假 playing 就能把那条音效永久静音。
+     */
+    int stuckStopCountForTest() const { return m_stuckStops; }
+    /** 池子里的实例**都在真播**、叠放口径下也只能放弃的次数（不再 `stop()` 硬插）。 */
+    int exhaustedSkipCountForTest() const { return m_exhaustedSkips; }
 
     // ---- 诊断 ----
     /**
@@ -151,7 +175,34 @@ private:
     QHash<QString, QVector<QSoundEffect*>> m_effects;  // 名字 → 实例池（仅 ① 档）
     QHash<QString, QUrl> m_source;                     // 名字 → 源 URL（Error 自愈要重设）
     QHash<QString, int> m_plays;                       // 名字 → 实际播放次数（自检）
+    QHash<QString, int> m_durationMs;                  // 名字 → WAV 时长（判"自称在播"是否说谎）
+    QHash<QString, QVector<qint64>> m_startedAt;       // 名字 → 每个实例本次开始播放的时刻
     int m_overlapSkips = 0;                            // 被 allowOverlap=false 跳过的次数
+    int m_stuckStops = 0;                              // 判定某个实例"卡在 playing"并复用的次数
+    int m_exhaustedSkips = 0;                          // 池子真满而放弃的次数
 };
+
+/**
+ * WAV 时长（毫秒）：解析 RIFF 的 `fmt `/`data` 两块。不是合法 WAV 时返回 0
+ * （调用方退回一个保守上限，绝不因为"解析不出来"就把实例当成永远在播）。
+ */
+int wavDurationMs(const QByteArray& wav);
+
+/**
+ * 挑实例的**纯判据**（自检直接调它，不依赖声卡）。
+ *
+ * @param playing  每个实例**自称**是否在播（`QSoundEffect::isPlaying()`）
+ * @param ageMs    每个实例"已经播了多久"（毫秒；没播过 / 未知时给一个很大的值）
+ * @param durMs    该音效的 WAV 时长（0 = 未知 → 用保守上限）
+ * @return `>=0` 用这个实例（若 `playing[i]` 为真，说明它自称在播但其实早该结束 → 调用方先 `stop()`）；
+ *         `-1` 放弃（`allowOverlap=false` 且确实还在响）；`-2` 放弃（池子都在真播，叠放口径下也不硬插）。
+ */
+int pickSlot(const QVector<bool>& playing, const QVector<qint64>& ageMs, int durMs,
+             bool allowOverlap);
+
+/** 「自称在播」最多被容忍多久（时长未知时的兜底，以及给解码/调度留的余量）。 */
+constexpr qint64 kStuckMarginMs = 800;
+/** 时长未知时的保守上限：超过它就认为那个实例在说谎。 */
+constexpr qint64 kUnknownDurationMs = 2000;
 
 } // namespace sound

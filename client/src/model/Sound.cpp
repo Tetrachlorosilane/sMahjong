@@ -12,6 +12,7 @@
 #include "model/Theme.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QTemporaryFile>
@@ -104,7 +105,87 @@ void trace(const QString& msg)
     std::fflush(stderr);
 }
 
+// ⚠ `wavDurationMs` / `pickSlot` 定义在**匿名 namespace 之外**（就在下面 `} // namespace`
+// 之后）：它们要在头文件里公开给自检，放匿名 namespace 里会与头文件那份声明撞成二义。
 } // namespace
+
+int wavDurationMs(const QByteArray& wav)
+{
+    if (wav.size() < 44 || wav.left(4) != QByteArrayLiteral("RIFF")
+        || wav.mid(8, 4) != QByteArrayLiteral("WAVE")) {
+        return 0;
+    }
+    auto u16 = [&wav](int at) {
+        return int(quint8(wav.at(at))) | (int(quint8(wav.at(at + 1))) << 8);
+    };
+    auto u32 = [&wav](int at) {
+        return qint64(quint32(quint8(wav.at(at))) | (quint32(quint8(wav.at(at + 1))) << 8)
+                      | (quint32(quint8(wav.at(at + 2))) << 16)
+                      | (quint32(quint8(wav.at(at + 3))) << 24));
+    };
+    int rate = 0;
+    int ch = 0;
+    int bits = 0;
+    qint64 dataLen = 0;
+    int i = 12;
+    while (i + 8 <= wav.size()) {
+        const QByteArray id = wav.mid(i, 4);
+        const qint64 sz = u32(i + 4);
+        // 块长必须落在文件内（坏文件里它可能是天文数字，直接当解析失败）
+        if (sz < 0 || i + 8 + sz > wav.size()) {
+            if (id == QByteArrayLiteral("data")) {
+                dataLen = wav.size() - (i + 8);     // 头写坏但数据在：按剩下的算
+            }
+            break;
+        }
+        if (id == QByteArrayLiteral("fmt ") && sz >= 16) {
+            ch = u16(i + 10);
+            rate = int(u32(i + 12));
+            bits = u16(i + 22);
+        } else if (id == QByteArrayLiteral("data")) {
+            dataLen = sz;
+            break;
+        }
+        i += 8 + int(sz) + (int(sz) & 1);
+    }
+    const int bytesPerSample = bits / 8;
+    if (rate <= 0 || ch <= 0 || bytesPerSample <= 0 || dataLen <= 0) {
+        return 0;
+    }
+    return int(dataLen * 1000 / (qint64(rate) * ch * bytesPerSample));
+}
+
+int pickSlot(const QVector<bool>& playing, const QVector<qint64>& ageMs, int durMs,
+             bool allowOverlap)
+{
+    const qint64 limit = (durMs > 0 ? qint64(durMs) : kUnknownDurationMs) + kStuckMarginMs;
+    // 「真在播」= 自称在播 **且** 还没超过这个 WAV 可能的最长时长。
+    // 只看 `isPlaying()` 是不够的：设备异常之后它会永远为真，那条音效就再也放不出来了。
+    auto live = [&](int i) {
+        return playing.value(i) && ageMs.value(i) >= 0 && ageMs.value(i) < limit;
+    };
+    if (!allowOverlap) {
+        for (int i = 0; i < playing.size(); ++i) {
+            if (live(i)) {
+                return -1;      // 不叠口径：真的还在响 → 这次跳过
+            }
+        }
+    }
+    // 第一轮：**真正空闲**的实例（`play()` 之前不用 stop，最干净的一条路）。
+    for (int i = 0; i < playing.size(); ++i) {
+        if (!playing.value(i)) {
+            return i;
+        }
+    }
+    // 第二轮：自称在播、但已经超过这个 WAV 可能的最长时长 —— 判为卡死，调用方 stop 后复用。
+    // 没有这一轮，一个假 playing 就能让这条音效**永久静音**（正是二次报障的机制）。
+    for (int i = 0; i < playing.size(); ++i) {
+        if (!live(i)) {
+            return i;
+        }
+    }
+    return -2;                  // 都在真播：叠放口径下也不再 stop() 硬插（那条路径最可疑）
+}
 
 QStringList allNames()
 {
@@ -185,6 +266,9 @@ void Player::init()
             }
             m_source.insert(n, url);
             m_effects.insert(n, pool);
+            // 时长用来判"自称在播"是不是在说谎（见 `pickSlot`）。解析不出来就记 0，
+            // `pickSlot` 会退回保守上限，绝不因此把实例当成永远在播。
+            m_durationMs.insert(n, wavDurationMs(bytes));
         }
     }
 #endif
@@ -256,14 +340,27 @@ QString Player::effectStateForTrace(const QString& sfx) const
         return QStringLiteral("missing");
     }
     int playing = 0;
+    int stale = 0;
     int ready = 0;
     int errors = 0;
-    for (QSoundEffect* e : pool) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 limit = (m_durationMs.value(sfx, 0) > 0 ? qint64(m_durationMs.value(sfx, 0))
+                                                        : kUnknownDurationMs)
+            + kStuckMarginMs;
+    const QVector<qint64> starts = m_startedAt.value(sfx);
+    for (int i = 0; i < pool.size(); ++i) {
+        QSoundEffect* e = pool.at(i);
         if (e == nullptr) {
             continue;
         }
         if (e->isPlaying()) {
-            ++playing;
+            // 自称在播但已经超过这个 WAV 可能的最长时长 = 卡死（设备异常后 isPlaying 会永远为真）
+            const qint64 started = starts.value(i, 0);
+            if (started > 0 && now - started >= limit) {
+                ++stale;
+            } else {
+                ++playing;
+            }
         }
         if (e->status() == QSoundEffect::Ready) {
             ++ready;
@@ -271,10 +368,11 @@ QString Player::effectStateForTrace(const QString& sfx) const
             ++errors;
         }
     }
-    return QStringLiteral("pool%1(ready %2/playing %3/err %4)")
+    return QStringLiteral("pool%1(ready %2/playing %3/stale %4/err %5)")
             .arg(pool.size())
             .arg(ready)
             .arg(playing)
+            .arg(stale)
             .arg(errors);
 #else
     Q_UNUSED(sfx);
@@ -290,30 +388,47 @@ void Player::emitSound(const QString& sfx, const QByteArray& bytes, bool allowOv
     if (pool.isEmpty()) {
         return;
     }
-    // ① 挑一个**空闲**实例：绝大多数情况下这一步就够了，**完全不需要 stop()**。
-    QSoundEffect* e = nullptr;
-    for (QSoundEffect* cand : pool) {
-        if (cand != nullptr && !cand->isPlaying()) {
-            e = cand;
-            break;
-        }
+    // ① 先把"池子现状"翻成判据要的形状：谁自称在播、已经播了多久。
+    //    ⚠ 只看 `isPlaying()` 是不行的（见 `pickSlot` 的注释）：这里额外带上年龄，
+    //      于是"声称在播但其实早该结束"的实例会被识别出来并复用 —— 这条判据修的是
+    //      「某个音效从此再也不响」（报障：音效在有副露 / 选择不副露之后消失）。
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QVector<qint64> starts = m_startedAt.value(sfx);
+    QVector<bool> playing;
+    QVector<qint64> ageMs;
+    playing.reserve(pool.size());
+    ageMs.reserve(pool.size());
+    for (int i = 0; i < pool.size(); ++i) {
+        playing.append(pool.at(i) != nullptr && pool.at(i)->isPlaying());
+        const qint64 started = starts.value(i, 0);
+        // 没记录过开始时刻（或从没播过）：给一个很大值 = "不像是在播"
+        ageMs.append(started > 0 ? (now - started) : (kUnknownDurationMs + kStuckMarginMs + 1));
     }
-    if (!allowOverlap) {
-        // 「别叠」的语义是**整个音效**只要还在响就不再放（不是"这个实例"）——
-        // 摸牌音效每巡都触发，叠起来很吵；而且旧实现"停掉再从头放"正是把声卡
-        // 搞哑的那条嫌疑路径（见 Sound.h 顶部）。
-        for (QSoundEffect* cand : pool) {
-            if (cand != nullptr && cand->isPlaying()) {
-                ++m_overlapSkips;
-                trace(QStringLiteral("  ↳ %1 仍在播，allowOverlap=false → 跳过").arg(sfx));   // i18n-keep
-                return;
-            }
+    const int idx = pickSlot(playing, ageMs, m_durationMs.value(sfx, 0), allowOverlap);
+    if (idx < 0) {
+        if (idx == -1) {
+            ++m_overlapSkips;
+            trace(QStringLiteral("  ↳ %1 仍在播，allowOverlap=false → 跳过").arg(sfx));   // i18n-keep
+        } else {
+            ++m_exhaustedSkips;
+            trace(QStringLiteral("  ↳ %1 池子 %2 个实例都在真播 → 放弃这一次（不再 stop 硬插）")   // i18n-keep
+                      .arg(sfx)
+                      .arg(pool.size()));
         }
+        return;
     }
-    if (e == nullptr) {
-        // 池子都忙（只有 `allowOverlap=true` 会走到这里）：从头放最早那个 ——
-        // 这是**唯一**还会 stop() 的路径。
-        e = pool.first();
+    QSoundEffect* e = pool.at(idx);
+    if (playing.value(idx)) {
+        // 自称在播、但已经超过这个 WAV 可能的最长时长 → 卡死（设备异常后 isPlaying 会永远为真）。
+        // 这是**唯一**还会 stop() 的路径，而且停的是一个本来就没在响的实例。
+        ++m_stuckStops;
+        trace(QStringLiteral("  ↳ %1 实例 %2 卡在 playing（%3 ms ≥ 上限 %4 ms）→ stop 后复用")   // i18n-keep
+                  .arg(sfx)
+                  .arg(idx)
+                  .arg(ageMs.value(idx))
+                  .arg((m_durationMs.value(sfx, 0) > 0 ? m_durationMs.value(sfx, 0)
+                                                       : int(kUnknownDurationMs))
+                       + int(kStuckMarginMs)));
         e->stop();
     }
     // ③ 自愈：后端把效果标成 Error 时（声卡切换 / 设备睡眠之后会遇到），重设一次源。
@@ -322,6 +437,12 @@ void Player::emitSound(const QString& sfx, const QByteArray& bytes, bool allowOv
         trace(QStringLiteral("  ↳ %1 status=Error → 重设源").arg(sfx));   // i18n-keep
     }
     e->play();
+    QVector<qint64> updated = starts;
+    if (updated.size() < pool.size()) {
+        updated.resize(pool.size());
+    }
+    updated[idx] = now;
+    m_startedAt.insert(sfx, updated);
     m_plays[sfx] = m_plays.value(sfx) + 1;
     if (traceEnabled()) {
         // 「play() 之后还响不响」是这类报障唯一能客观观测的点：效果被卡死时
@@ -379,6 +500,8 @@ void Player::clearCache()
     }
     m_effects.clear();
     m_source.clear();
+    m_durationMs.clear();
+    m_startedAt.clear();     // 实例都销毁了，旧的"开始时刻"必须一起清掉
 #endif
     m_cache.clear();
     // 换材质包后重新探测（`init()` 会按需重建）
