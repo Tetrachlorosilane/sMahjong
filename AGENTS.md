@@ -398,6 +398,7 @@ mahjong/
                        + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server
                        / gen-tile-placeholders / inline-svg-style / dump-otf-features
                        / gen-sfx + gen-sfx-qrc（见 §9.3）/ package-release.ps1（发布打包，见 §9.5）
+                       / gh-push-payload.ps1（git 通道不通时的 REST 推送载荷，见 §9.5）
 ```
 
 ---
@@ -987,3 +988,12 @@ mahjong/
   与 `tag_name`** 才会重新发布并关联（URL 变回 `/releases/download/<tag>/…`）。
   完整链路：`DELETE` tag → `POST` tag（指向新提交）→ `DELETE` 旧资产 → 上传新资产
   → `PATCH {draft:false, tag_name, body}`。别漏最后一步，否则 release 会静默变成草稿（只有自己看得见）。
+- **提交推送**：优先 `gh` / git 通道；**git 通道不通时**（本机实测：broker 到 `github.com:443` 被拦，
+  `git push` / `ls-remote` 都失败，而 `api.github.com` 通）走 **dsh-github 插件的 REST 通道** +
+  `tools\gh-push-payload.ps1` 生成 blobs/tree/commit/ref 载荷（脚本会**自算 commit sha** 与本地比对）。
+  三条硬要求：`bodyFile` 用**绝对路径**；`PATCH /git/refs/…` 的 body 也走文件（内联字符串会被当字符串发走、
+  422 `is not an object`）；提交对象的 message **必须带尾随换行**，否则远端 commit sha 与本地不同
+  （内容一样、对象不一样 → 本地与远端分叉）。
+- **`client\dist` 与 release 的关系**：`dist` 只在 `-Deploy` 时更新，所以**发布前先看客户端源码有没有
+  在 v<上个版本> 之后改过**（`git diff --name-only v1.6.0..HEAD -- client/`）—— 改过就必须重出 `dist`，
+  否则包里是旧 exe（2026-09 档 C 发布时就撞到：LobbyDialog / TableModel 变了而 dist 还是旧的）。
