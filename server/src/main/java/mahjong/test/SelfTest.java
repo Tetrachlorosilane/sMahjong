@@ -2774,6 +2774,38 @@ public final class SelfTest {
         // ⑦ 本巡没摸牌（drawn < 0）时"声明摸切"没有意义 → 仍按牌码
         eq("出牌对齐：无摸牌时按牌码", Round.pickDiscardId(hand, -1, "7p", true), p7);
 
+        // ⑩ **同牌码两张**（手里一张 + 刚摸到的那张）时的「手切」必须打**手里那张**。
+        //    报障：「摸到的牌与手牌里有同码牌时选择手切，动画却是摸切」。
+        //    根因：`hand` 是**按 id 排序**的，`findByCode` 可能先撞上**摸牌位那张**，
+        //    于是服务端广播的 `tsumogiri = (discardId == drawn)` 变成 true ——
+        //    客户端据此把动画演成摸切（天凤牌谱的手切/摸切标记也跟着错）。
+        //    ⚠ 两种排序都要写：谁在前只取决于牌 id，与"玩家点的是哪一张"无关。
+        {
+            final List<Integer> two = new ArrayList<>(List.of(norm5a, norm5b));   // norm5a < norm5b
+            eq("出牌对齐：同码手切（摸到的那张排在前）→ 打手里那张",
+                    Round.pickDiscardId(two, norm5a, "5m", false), norm5b);
+            eq("出牌对齐：同码手切（摸到的那张排在后）→ 打手里那张",
+                    Round.pickDiscardId(two, norm5b, "5m", false), norm5a);
+            // 反向也要钉：同码**摸切**仍取摸牌位那张（否则修了手切会把摸切带偏）
+            eq("出牌对齐：同码摸切（排前）→ 取摸牌位那张",
+                    Round.pickDiscardId(two, norm5a, "5m", true), norm5a);
+            eq("出牌对齐：同码摸切（排后）→ 取摸牌位那张",
+                    Round.pickDiscardId(two, norm5b, "5m", true), norm5b);
+            // 同 kind 但不同牌码（赤五 / 普通五）不受影响：要哪个码就给哪个
+            final List<Integer> mixed = new ArrayList<>(List.of(aka5, norm5a));
+            eq("出牌对齐：同 kind 点赤五码 → 取赤五",
+                    Round.pickDiscardId(mixed, norm5a, "0m", false), aka5);
+            eq("出牌对齐：同 kind 点普通五码（摸到的是赤五）→ 取手里那张普通五",
+                    Round.pickDiscardId(mixed, aka5, "5m", false), norm5a);
+            // 三张同码：手切也绝不碰摸牌位那张
+            final List<Integer> three = new ArrayList<>(
+                    List.of(norm5a, norm5b, Tiles.id(Tiles.AKA_M, 3)));
+            final int picked = Round.pickDiscardId(three, norm5a, "5m", false);
+            check("出牌对齐：三张同码时手切也不打摸牌位那张（实际 "
+                          + Tiles.toStr(picked) + " id=" + picked + "）",
+                    picked != norm5a && Tiles.kind(picked) == Tiles.AKA_M);
+        }
+
         // ⑧ 庄家 `round_start` 必须点名 `drawn`，且就是第 14 张；闲家不带这个字段
         Round r = newRound();                       // 座位 0 是庄
         r.debugSetup();                             // 配牌在 play() 里，这里手动跑一遍

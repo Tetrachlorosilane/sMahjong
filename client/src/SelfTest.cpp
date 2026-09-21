@@ -1108,6 +1108,48 @@ int run(const QString& outDir)
         check(m2.hand().size() == before2, QStringLiteral("摸切不动手牌（摸牌本来就不在里面）"));
     }
 
+    // ---- 回归：同码手切/摸切的**动画起点**（报障：同码手切被演成摸切）----
+    // 服务端那一半由 `SelfTest.discardAlignTests` 钉住（手切必须打**手里那张**、广播
+    // `tsumogiri=false`；`hand` 按 id 排序时 `findByCode` 会先撞上摸牌位那张）。
+    // 这里钉客户端这一半：拿到 `tsumogiri=false` 时动画必须从**手牌那一格**起飞，
+    // 只有 `tsumogiri=true` 才从摸牌槽起飞 —— 两张牌长得一模一样，除了这个字段没有别的依据。
+    {
+        TableModel mv;
+        mv.setMySeat(0);
+        TableView tv;
+        tv.setModel(&mv);
+        tv.resize(1354, 930);
+        mv.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["5m","5m","1m","2m","3m","4m","6m","7m","8m","1p","2p","3p","9s"],"dora_indicators":["1z"],"tiles_left":70,"dead_wall_left":4})"),
+            nullptr));
+        mv.applyEvent(proto::decodeLine(
+            QByteArrayLiteral(R"({"ev":"draw","seat":0,"tiles_left":69,"rinshan":false,"tile":"5m"})"),
+            nullptr));
+        tv.grab();          // 画一帧 → TableView 记下「手牌 13 格 + 摸牌位 1 格」
+        // ① 手切（手里那张 5m）：起点必须是手牌行里的一格，不能是摸牌槽
+        mv.applyEvent(proto::decodeLine(
+            QByteArrayLiteral(R"({"ev":"discard","seat":0,"tile":"5m","tsumogiri":false,"riichi":false,"riichi_stick":false})"),
+            nullptr));
+        const int idxHandCut = tv.lastFlightFromIndexForTest();
+        check(idxHandCut >= 0,
+              QStringLiteral("同码手切：动画从**手牌格**起飞（第 %1 格；-1 = 摸牌槽）")
+                  .arg(idxHandCut));
+        check(tv.lastFlightWasExactForTest(),
+              QStringLiteral("同码手切：起点按真实手牌定位（不是随机兜底）"));
+        // ② 再摸一张同码，这次**摸切**：起点固定是摸牌槽（-1）
+        mv.applyEvent(proto::decodeLine(
+            QByteArrayLiteral(R"({"ev":"draw","seat":0,"tiles_left":68,"rinshan":false,"tile":"5m"})"),
+            nullptr));
+        tv.grab();
+        mv.applyEvent(proto::decodeLine(
+            QByteArrayLiteral(R"({"ev":"discard","seat":0,"tile":"5m","tsumogiri":true,"riichi":false,"riichi_stick":false})"),
+            nullptr));
+        checkEq(QString::number(tv.lastFlightFromIndexForTest()), QStringLiteral("-1"),
+                QStringLiteral("同码摸切：动画从摸牌槽起飞（两张同码牌只能靠 tsumogiri 区分）"));
+        check(tv.lastFlightWasExactForTest(),
+              QStringLiteral("同码摸切：起点是确定的（摸牌槽），不是随机兜底"));
+    }
+
     // ---- 回归：庄家第一巡「哪张是刚摸到的」必须由 round_start.drawn 点名 ----
     // 报障：庄家第一巡点摸牌位，服务端却打了另一张（摸切），之后手牌内容与服务端差一张。
     // 根因：`round_start.hand` 是**已排序**的 14 张，客户端按"最后一张"认摸牌位，

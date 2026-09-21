@@ -1258,7 +1258,25 @@ public final class Round {
         if (claimTsumogiri && drawn >= 0 && code.equals(Tiles.toStr(drawn))) {
             return drawn;                       // 声明摸切且牌码吻合：铁证，就是摸牌位那张
         }
-        return findByCode(hand, code);           // 其余一律按牌码取（含"摸切声明对不上"的情况）
+        // 手切：**从"除摸牌位之外"的暗手里**按牌码取。
+        //
+        // ⚠ 为什么必须排除摸牌位：`hand` 里同时装着手里那张和刚摸到的那张（**同牌码**），
+        //   而 `hand` 是**按牌 id 排序**的 —— 两张同码牌谁在前只取决于 id，与"玩家点的是哪一张"
+        //   毫无关系。不排除的话，`findByCode` 有大约一半概率返回**摸牌位那张**，于是
+        //     · 服务端广播 `tsumogiri = (discardId == drawn)` 变成 true → 客户端把动画演成**摸切**
+        //       （报障：「手里有同码牌时选择手切，动画却是摸切」；
+        //        端到端红证：`node tools/discard-align-test.mjs` 在旧代码上会报 2 条 D 违例）；
+        //     · 天凤牌谱导出的手切/摸切标记也跟着错（摸切写 60）——
+        //   两端手牌张数仍然对得上（同码牌不可区分），所以这个 bug 只会从**表现与牌谱**上看出来。
+        if (drawn >= 0) {
+            final List<Integer> rest = new ArrayList<>(hand);
+            rest.remove(Integer.valueOf(drawn));    // ⚠ 按**值**删，不是按下标
+            final int id = findByCode(rest, code);
+            if (id >= 0) {
+                return id;
+            }
+        }
+        return findByCode(hand, code);           // 兜底（摸牌位那张是同码唯一一张时）
     }
 
     // ================================================================= 询问
