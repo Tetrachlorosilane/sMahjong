@@ -2908,6 +2908,25 @@ public final class SelfTest {
         eq("副露赤宝：手里赤五+两张普通五 → 碰**两种取法**都下发", ponVariants, 2);
         check("副露赤宝：不用赤五那一条在（tiles=[5m,5m]）", sawPlain);
         check("副露赤宝：用赤五那一条也在（tiles=[0m,5m]）", sawRed);
+        // 这两条取法在**动作空间**里必须是两个不同的动作：旧写法把它们折成同一个裸 pon，
+        // 于是 legal 出现重复键、chosen_index 无从分辨（`selfplay-check` 报的
+        // 「legal 里有重复动作」就是这条，2026-09）。
+        mahjong.ai.Observation oc = mahjong.ai.Observation.ofClaim(c, 1, opts, 0,
+                Tiles.toStr(called5), null);
+        eq("副露赤宝：legal 的键不许有重复（取法已进键）",
+                new java.util.LinkedHashSet<>(oc.legalKeys()).size(), oc.legalKeys().size());
+        boolean sawPlainPonKey = false;
+        boolean sawRedPonKey = false;
+        for (mahjong.ai.Action a : oc.legal) {
+            if ("pon:5m+5m".equals(a.key())) {
+                sawPlainPonKey = true;
+            }
+            if ("pon:5m+0m".equals(a.key())) {
+                sawRedPonKey = true;
+            }
+        }
+        check("副露赤宝：两条取法各有自己的键（pon:5m+5m / pon:5m+0m）",
+                sawPlainPonKey && sawRedPonKey);
         // 默认取法（老客户端 / 机器人不带 `tiles`）必须**普通牌优先**
         int[] auto = c.debugPickAuto(1, Tiles.AKA_M, 2);
         eq("副露赤宝：默认取牌的张数", auto.length, 2);
@@ -5047,6 +5066,43 @@ public final class SelfTest {
             }
         }
         check("动作键解析往返（含赤五/摸切/吃/杠）", parseOk);
+        // ---------- ①b 取法进键：碰 / 大明杠的两三种取法是**不同的合法动作**
+        // 手里同时有赤五与普通五时服务端会各下发一条（PROTOCOL §3.6 / §8.3）。旧写法把它们
+        // 折成同一个裸 `pon` → legal 里出现重复键、chosen_index 无从分辨（`selfplay-check` 抓到的）。
+        List<Map<String, Object>> akaCallOpts = new ArrayList<>();
+        akaCallOpts.add(Json.obj("type", "pon", "tiles", Json.arr("5p", "5p")));
+        akaCallOpts.add(Json.obj("type", "pon", "tiles", Json.arr("0p", "5p")));
+        akaCallOpts.add(Json.obj("type", "kan", "kans", Json.arr(
+                Json.obj("kind", "daiminkan", "tile", "5s",
+                        "tiles", Json.arr("5s", "5s", "0s")))));
+        akaCallOpts.add(Json.obj("type", "pass"));
+        List<mahjong.ai.Action> varied = mahjong.ai.Action.enumerate(akaCallOpts);
+        eq("取法选项展开成四条（2 碰 + 1 大明杠 + 过）", varied.size(), 4);
+        eq("取法不同 → 键必须不同",
+                new java.util.LinkedHashSet<>(varied.stream().map(mahjong.ai.Action::key)
+                        .collect(java.util.stream.Collectors.toList())).size(), varied.size());
+        eq("碰键带取法（按槽位升序归一：普通五在前）", varied.get(1).key(), "pon:5p+0p");
+        eq("碰是参数化动作（不在固定头里）", varied.get(0).index(), -1);
+        eq("大明杠键带三张取法", varied.get(2).key(), "kan:daiminkan:5s+5s+0s");
+        boolean akaParseOk = true;
+        for (mahjong.ai.Action a : varied) {
+            mahjong.ai.Action back = mahjong.ai.Action.parse(a.key());
+            if (back == null || !a.key().equals(back.key())) {
+                akaParseOk = false;
+                failures.add("取法键解析往返失败: " + a.key());
+            }
+        }
+        check("取法键解析往返（碰 / 大明杠）", akaParseOk);
+        eq("裸 pon 回包 resolve 到默认取法那一条（普通五优先）",
+                mahjong.ai.Action.resolve(Json.obj("type", "pon"), varied).key(), "pon:5p+5p");
+        eq("带取法的回包 resolve 到指定那一条",
+                mahjong.ai.Action.resolve(mahjong.ai.Action.pon(List.of("0p", "5p")).toCmd(),
+                        varied).key(), "pon:5p+0p");
+        check("碰的回包带 tiles（服务端照它取牌）",
+                Json.write(varied.get(1).toCmd()).contains("[\"5p\",\"0p\"]"));
+        // 其余动作**不许**宽松匹配：认不出就打回（宁可"无标签"，也别写错标签）
+        check("打牌回包不在 legal 里时 resolve 返回 null",
+                mahjong.ai.Action.resolve(Json.obj("type", "discard", "tile", "1z"), varied) == null);
         // 从选项展开动作集：这是"合法动作 + 掩码"的唯一来源
         List<Map<String, Object>> demoOpts = new ArrayList<>();
         demoOpts.add(Json.obj("type", "discard", "tiles", Json.arr("1m", "9p")));

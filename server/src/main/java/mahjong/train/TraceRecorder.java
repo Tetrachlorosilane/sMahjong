@@ -99,7 +99,10 @@ final class TraceRecorder {
         if (!recordClaims && "claim".equals(d.kind)) {
             return;
         }
-        final Action a = Action.fromCmd(cmd);
+        // `resolve` 而不是 `fromCmd`：策略可以回**部分指定**的包（裸 pon / 不带 tiles 的大明杠），
+        // 而服务端按"普通牌优先"的默认取法执行 —— 那正是本次 legal 里的第一条。
+        // 记成裸键会与 legal（只含带取法的键）对不上（PROTOCOL §8.3 的裸 pon 规则）。
+        final Action a = Action.resolve(cmd, d.obs.legal);
         if (a == null) {
             // 认不出的回包**不编造标签**（宁可少一条样本）
             return;

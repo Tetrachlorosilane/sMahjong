@@ -108,9 +108,18 @@ for (const f of files) {
       if (at < 0) add(file, ln, `chosen=${row.chosen} 不在合法动作集里`);
       else if (at !== row.chosen_index) add(file, ln, `chosen_index=${row.chosen_index} 实际应为 ${at}`);
     }
-    // 动作键形状
-    if (!/^(discard|riichi):[0-9][mpsz](\/tsumogiri)?$|^kan:(ankan|kakan|daiminkan):[0-9][mpsz]$|^chi:[0-9][mpsz]\+[0-9][mpsz]$|^(tsumo|ron|pon|pass|kyuushu)$/.test(row.chosen)) {
-      add(file, ln, `chosen 键形状可疑：${row.chosen}`);
+    // 动作键形状：**只认真实键文法**（碰 / 大明杠必须带取法 —— 赤五与普通五是两个不同的合法动作，
+    // 见 PROTOCOL §8.3）。裸 `pon` / 单码 `kan:daiminkan:<码>` 是**老数据集**的形态（已作废），
+    // 这里故意不放行：旧轨迹必须重采，而不是让校验器替它兜底。
+    if (!/^discard:[0-9][mpsz](\/tsumogiri)?$|^riichi:[0-9][mpsz]$|^pon:[0-9][mpsz]\+[0-9][mpsz]$|^kan:(ankan|kakan):[0-9][mpsz]$|^kan:daiminkan:[0-9][mpsz]\+[0-9][mpsz]\+[0-9][mpsz]$|^chi:[0-9][mpsz]\+[0-9][mpsz]$|^(tsumo|ron|pass|kyuushu)$/.test(row.chosen)) {
+      add(file, ln, `chosen 键形状可疑（旧格式或写错）：${row.chosen}`);
+    }
+    // 取法必须"同牌种"（碰的两张 / 大明杠的三张只能是同一个 kind）—— 独立于服务端实现判一次
+    for (const key of [row.chosen, ...(row.legal || [])]) {
+      const m = /^(?:pon|kan:daiminkan):(.+)$/.exec(key);
+      if (!m) continue;
+      const kinds = m[1].split('+').map((c) => (c[0] === '0' ? '5' : c[0]) + c[1]);
+      if (new Set(kinds).size !== 1) add(file, ln, `取法里的牌不是同一牌种：${key}`);
     }
     // 手牌张数：13 - 3×副露 + (自家回合 ? 1 : 0)
     const myMelds = obs.melds[row.seat] || [];
@@ -182,8 +191,35 @@ for (const f of files) {
     if (game.row.hands !== hands.length) {
       add(file, game.ln, `game.hands=${game.row.hands}，实际小局行 ${hands.length}`);
     }
-    if (prev && JSON.stringify(prev.scores_after) !== JSON.stringify(game.row.final_scores)) {
-      add(file, game.ln, '最后一局的 scores_after 与终局分数不一致');
+    if (prev) {
+      // 终局账：末局结算**之后**，供託里的立直棒按规则归末局第 1 位（并列则由相关者均分、
+      // 以 100 点为单位向下取整、尾数归更接近起家 = 座次小的一方，见 DESIGN「终局与精算」）。
+      // 所以 final_scores 与末局 scores_after 的差额**正是这批余棒**，不是账不平。
+      const sticks = Number((prev.round && prev.round.riichi_sticks) || 0);
+      const total = sticks * 1000;
+      const diff = game.row.final_scores.map((v, i) => v - prev.scores_after[i]);
+      const sum = diff.reduce((a, b) => a + b, 0);
+      if (diff.some((d) => d < 0) || sum !== total) {
+        add(file, game.ln, `终局分数 − 末局 scores_after 的差额之和应为余棒 ${total}（末局 riichi_sticks=${sticks}），实际 ${sum}`);
+      } else {
+        const best = Math.max(...prev.scores_after);
+        const group = prev.scores_after.map((v, i) => (v === best ? i : -1))
+          .filter((i) => i >= 0).sort((a, b) => a - b);          // 座次小的在前 = 更接近起家
+        for (let i = 0; i < 4; i++) {
+          if (diff[i] !== 0 && !group.includes(i)) {
+            add(file, game.ln, `座位${i} 分到余棒，但它不是末局 1 位（末局：${prev.scores_after.join(',')}）`);
+          }
+        }
+        const unit = 100;
+        const q = Math.floor(total / group.length / unit) * unit;
+        const need = (total - q * group.length) / unit;           // 有几个座位多拿一份
+        group.forEach((seat, k) => {
+          const want = q + (k < need ? unit : 0);
+          if (diff[seat] !== want) {
+            add(file, game.ln, `座位${seat} 的余棒 ${diff[seat]} 应为 ${want}（共 ${total} 点、${group.length} 人并列 1 位）`);
+          }
+        });
+      }
     }
     const place = placementOf(game.row.final_scores);
     if (JSON.stringify(place) !== JSON.stringify(game.row.placement)) {

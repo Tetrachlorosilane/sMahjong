@@ -945,6 +945,9 @@ java -jar mahjong-server.jar [--port 10086] [--host 0.0.0.0] [--verbose]
 这一节**不是网络协议**：它描述服务端为「训练一个基于机器学习的电脑玩家」暴露的进程内 API 与命令行，
 外加**产出的数据格式**（那部分是被离线消费的契约，所以必须写在这里）。
 
+> 📄 **本节是接口契约（唯一权威）**。至于"怎么用这些接口训出一个模型"——阶段计划、模型与特征设计、
+> 算力预算、每阶段的验收判据 —— 见 **`docs/TRAINING.md`**（规划文档，尚未实施）。
+
 训练侧有两种接法，各自的权威性来源不同：
 
 | 接法 | 信息集从哪来 | 服务端改动 | 适用 |
@@ -1049,9 +1052,23 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `discard:<码>` | 打牌。**只给牌码**：同码牌物理等价，服务端 `pickDiscardId` 按牌码取牌 |
 | `discard:<码>/tsumogiri` | 同上并声明摸切（可选；不声明即走纯牌码查找） |
 | `riichi:<码>` | 立直宣言（`<码>` 是宣言牌） |
-| `kan:ankan\|kakan\|daiminkan:<码>` | 杠 |
+| `pon:<码>+<码>` | 碰。两张 = **从手里取哪两张**（按槽位升序；`0p` 表示用赤五） |
+| `kan:ankan:<码>` / `kan:kakan:<码>` | 暗杠 / 加杠 |
+| `kan:daiminkan:<码>+<码>+<码>` | 大明杠。三张 = **从手里取哪三张**（按槽位升序） |
 | `chi:<码>+<码>` | 吃（两张按牌种升序） |
-| `tsumo` / `ron` / `pon` / `pass` / `kyuushu` | 无参数动作 |
+| `tsumo` / `ron` / `pass` / `kyuushu` | 无参数动作 |
+| `pon`（**兼容形态**） | 不带取法的裸 `pon`：只在**老客户端报文 / 老数据集**里出现。服务端仍然接受它（按默认取法执行），但**轨迹里不会记成裸键**（见下），`selfplay-check.mjs` 也**不再放行**这种键 —— 旧数据集作废、要重采 |
+
+> ⚠ **为什么碰 / 大明杠必须带取法**：手里同时有赤五与普通五时，服务端会为"用普通五"与"用赤五"
+> 各下发一条选项（`tiles` 不同，见 §3.6），**它们是两个不同的合法动作**。旧的动作空间把两者都折成
+> 裸 `pon` → `legal` 里出现**重复键**、`chosen_index` 无从分辨（2026-09 由
+> `tools/selfplay-check.mjs` 的"`legal` 里有重复动作"抓出来）。现在键里带上那两张/三张牌码，
+> 与 `chi:<码>+<码>` 同一套写法。
+>
+> **裸 `pon` 的解析规则（唯一）**：策略若回一条不带 `tiles` 的 `{"type":"pon"}`（老客户端 / 内置机器人），
+> 服务端按 **"普通牌优先"的默认取法**执行（`Round.pickAuto`）——**恰好是本次 `legal` 里第一条 pon**。
+> 轨迹记录因此把"策略回包"解析成**实际执行的那一个动作**（`Action.resolve`），而不是记成裸键
+> （见 §8.4 的 `chosen`）。
 
 **固定头**（`Action.index()`，`Action.FIXED_ACTIONS = 79`）—— 喂给定长输出的网络用：
 
@@ -1059,11 +1076,12 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | --- | --- |
 | `0..36` | 打牌（37 个槽：34 种牌 + 赤 `0m`/`0p`/`0s`） |
 | `37..73` | 立直宣言（同 37 个槽） |
-| `74` / `75` / `76` / `77` / `78` | `tsumo` / `ron` / `pon` / `pass` / `kyuushu` |
+| `74` / `75` / `77` / `78` | `tsumo` / `ron` / `pass` / `kyuushu` |
+| `76` | **保留**（历史上是 `pon`）—— 现在 `pon` 是参数化动作，`index()` 返回 `-1` |
 
-`chi` 与 `kan` 是**参数化**的（一次询问里最多各几种），没有固定下标：做法是「按本次 `legal`
-枚举 + 掩码」，标识仍用动作键。牌码 → 槽位：34 种牌按 `kind` 排，赤五另占 `34`/`35`/`36`
-（`Action.tileIndex` / `Action.tileCode`）。
+`pon` / `chi` / `kan` 都是**参数化**的（一次询问里最多各有几种取法），没有固定下标：
+做法是「按本次 `legal` 枚举 + 掩码」，标识仍用动作键。牌码 → 槽位：34 种牌按 `kind` 排，
+赤五另占 `34`/`35`/`36`（`Action.tileIndex` / `Action.tileCode`）。
 
 ### 8.4 自对弈 / 评测命令行
 
@@ -1096,6 +1114,9 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `game` | `{game, seed, policies, start_score, hands, decisions, sampled_every, final_scores, placement}` |
 
 - `chosen_index` = 该动作在本次 `legal` 里的下标 —— 直接就是「枚举 + 掩码」策略头的监督信号。
+- `chosen` = **实际执行**的那个动作键：策略若回的是"部分指定"的包（裸 `pon`、不带 `tiles` 的
+  大明杠），记的是**服务端默认取法对应的那一条**（§8.3 的裸 `pon` 规则），所以 `chosen` 一定
+  `∈ legal`、`chosen_index` 一定对得上，且**不会**出现"记了裸键、执行了另一条"的错位。
 - **奖励是事后回填的**：决策发生时还不知道这一手 / 这一场的结果，所以 `hand_delta`（本小局四家收支）、
   `hand_winner`/`hand_loser`、`placement`（整场顺位）是在小局 / 整场结束时补进去的。
 - `placement` 恒为 `1..4` 的一个排列：**同点按座次先后**（M.League 起家优先）拆开 ——
@@ -1112,7 +1133,11 @@ node tools/selfplay-check.mjs <dir>
 ```
 
 **独立实现**（不是把 Java 断言翻译一遍）逐行核对：观测字段白名单（防泄漏）、
-`chosen ∈ legal` 且 `chosen_index` 对得上、暗牌张数 = `13 − 3×副露 + (自家回合 ? 1 : 0)`、
+`chosen ∈ legal` 且 `chosen_index` 对得上、**`legal` 里不许有重复动作**（键必须唯一 ——
+碰/大明杠的取法已进键，见 §8.3）、动作键文法（`discard|riichi|pon|kan|chi|…` 的完整文法见脚本内正则）、
+暗牌张数 = `13 − 3×副露 + (自家回合 ? 1 : 0)`、
 `visible` = 牌河 + 副露 + 宝牌、`hand_red` 与 `hand` 不矛盾、小局收支账（`scores_after` 链、
-`delta` 为 1000 的整数倍、和了者收支为正）、`placement` 与终局分数一致、
+`delta` 为 1000 的整数倍、和了者收支为正）、**终局账**（终局分数 = 末局 `scores_after` +
+末局 `round.riichi_sticks × 1000`，且这批**余棒只归末局第 1 位**、按 100 点为单位平分、
+尾数归更接近起家者 —— 见 `DESIGN.md`「终局与精算」）、`placement` 与终局分数一致、
 `summary.json` 与逐场数据一致。退出码 0/1。

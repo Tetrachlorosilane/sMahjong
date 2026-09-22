@@ -28,10 +28,17 @@ import mahjong.util.Json;
  * <pre>
  *   0 .. 36   打牌（34 种牌 + 赤 5m/5p/5s 三个槽）  key = discard:&lt;码&gt;
  *   37 .. 73  立直宣言（同上的 37 个槽）            key = riichi:&lt;码&gt;
- *   74        自摸     75 荣和     76 碰     77 过     78 九种九牌
+ *   74        自摸     75 荣和     77 过     78 九种九牌     （76 保留：历史上是碰）
  * </pre>
- * 吃（{@code chi:1m+2m}）与杠（{@code kan:ankan:7z}）是**参数化**动作：一次询问里最多各几种，
- * 所以做成"按本次 {@code options} 枚举 + 掩码"，标识仍用 {@link #key()}。
+ * 碰 / 吃 / 杠是**参数化**动作（一次询问里最多各有几种取法），所以做成"按本次 {@code options}
+ * 枚举 + 掩码"、{@link #index()} 返回 {@code -1}，标识仍用 {@link #key()}。
+ *
+ * <p>⚠ **碰与大明杠的键里必须带"从手里取哪几张"**（{@code pon:5p+5p} /
+ * {@code kan:daiminkan:5s+5s+0s}）：手里同时有赤五与普通五时，服务端为两种取法**各下发一条**选项，
+ * 它们是两个不同的合法动作。旧写法把两者都折成裸 {@code pon}，于是 {@code legal} 里出现重复键、
+ * {@code chosen_index} 无从分辨（2026-09 被 {@code tools/selfplay-check.mjs} 抓出来）。
+ * 裸 {@code pon} 只作为**老客户端 / 老数据集**的兼容形态保留：它按"普通牌优先"的默认取法执行，
+ * 也就是本次 {@code legal} 里的第一条 pon（见 {@link #resolve}）。
  */
 public final class Action {
 
@@ -61,7 +68,7 @@ public final class Action {
     public final String type;
     /** 牌码（{@code "5m"} / {@code "0p"}）；吃与九种九牌等为 {@code null}。 */
     public final String tile;
-    /** 吃用的另外两张（按牌种升序）；其余为 {@code null}。 */
+    /** 吃 / 碰 / 大明杠用的那几张**手里牌**（按槽位升序）；其余为 {@code null}。 */
     public final List<String> tiles;
     /** 杠的种类：{@code ankan} / {@code kakan} / {@code daiminkan}；非杠为 {@code null}。 */
     public final String kanKind;
@@ -98,8 +105,18 @@ public final class Action {
         return new Action(CHI, null, two, null, false);
     }
 
+    /** 碰：{@code two} = 从手里取的两张（按槽位升序；赤五写作 {@code "0p"}）。 */
+    public static Action pon(List<String> two) {
+        return new Action(PON, null, two, null, false);
+    }
+
     public static Action kan(String kanKind, String tile) {
         return new Action(KAN, tile, null, kanKind, false);
+    }
+
+    /** 大明杠：{@code handTiles} = 从手里取的三张（按槽位升序）；暗杠/加杠传 {@code null}。 */
+    public static Action kan(String kanKind, String tile, List<String> handTiles) {
+        return new Action(KAN, tile, handTiles, kanKind, false);
     }
 
     // ------------------------------------------------------------------ 枚举
@@ -144,7 +161,9 @@ public final class Action {
                             if (km == null) {
                                 continue;
                             }
-                            out.add(kan(Json.str(km, "kind", "ankan"), Json.str(km, "tile", "")));
+                            // 大明杠会带 `tiles`（手里取哪三张）；暗杠/加杠不带（那两种没有取法可挑）
+                            out.add(kan(Json.str(km, "kind", "ankan"), Json.str(km, "tile", ""),
+                                    canonical(Json.strList(km, "tiles"), 3)));
                         }
                     }
                     break;
@@ -162,9 +181,15 @@ public final class Action {
                     }
                     break;
                 }
+                case PON: {
+                    // 取法进键：手里有赤五时，"用普通五碰"与"用赤五碰"是两个不同的合法动作。
+                    // `tiles` 缺失 = 老服务端下发的裸 pon（兼容形态，键就是 "pon"）。
+                    List<String> two = canonical(Json.strList(o, "tiles"), 2);
+                    out.add(two == null ? of(PON) : pon(two));
+                    break;
+                }
                 case TSUMO:
                 case RON:
-                case PON:
                 case PASS:
                 case KYUUSHU:
                     out.add(of(type));
@@ -186,8 +211,11 @@ public final class Action {
                 return tsumogiri ? "discard:" + tile + "/tsumogiri" : "discard:" + tile;
             case RIICHI:
                 return "riichi:" + tile;
+            case PON:
+                return tiles == null ? PON : "pon:" + tiles.get(0) + "+" + tiles.get(1);
             case KAN:
-                return "kan:" + kanKind + ":" + tile;
+                return tiles == null ? "kan:" + kanKind + ":" + tile
+                                     : "kan:" + kanKind + ":" + String.join("+", tiles);
             case CHI:
                 return "chi:" + tiles.get(0) + "+" + tiles.get(1);
             default:
@@ -195,7 +223,7 @@ public final class Action {
         }
     }
 
-    /** 固定头下标；吃/杠返回 {@code -1}（它们是按询问枚举的参数化动作）。 */
+    /** 固定头下标；碰 / 吃 / 杠返回 {@code -1}（它们是按询问枚举的参数化动作）。 */
     public int index() {
         int t = tileIndex(tile);
         switch (type) {
@@ -208,7 +236,9 @@ public final class Action {
             case RON:
                 return RON_ID;
             case PON:
-                return PON_ID;
+                // 带取法的碰是参数化动作（一次询问里可能 1~2 种取法），没有固定槽；
+                // 裸 pon 只来自老客户端/老数据集，保留历史槽位 76
+                return tiles == null ? PON_ID : -1;
             case PASS:
                 return PASS_ID;
             case KYUUSHU:
@@ -263,6 +293,14 @@ public final class Action {
             case KAN:
                 cmd.put("kind", kanKind);
                 cmd.put("tile", tile);
+                if (tiles != null) {
+                    cmd.put("tiles", new ArrayList<Object>(tiles));   // 大明杠的取法
+                }
+                break;
+            case PON:
+                if (tiles != null) {
+                    cmd.put("tiles", new ArrayList<Object>(tiles));   // 碰的取法（赤五与否）
+                }
                 break;
             case CHI:
                 cmd.put("tiles", new ArrayList<Object>(tiles));
@@ -300,7 +338,15 @@ public final class Action {
             case KAN: {
                 String kind = Json.str(cmd, "kind", null);
                 String t = Json.str(cmd, "tile", null);
-                return kind == null || t == null || tileIndex(t) < 0 ? null : kan(kind, t);
+                if (kind == null || t == null || tileIndex(t) < 0) {
+                    return null;
+                }
+                return kan(kind, t, canonical(Json.strList(cmd, "tiles"), 3));
+            }
+            case PON: {
+                // 不带 `tiles` = 老客户端/内置机器人的兼容形态；它真正对应的动作由 resolve 落位
+                List<String> two = canonical(Json.strList(cmd, "tiles"), 2);
+                return two == null ? of(PON) : pon(two);
             }
             case CHI: {
                 List<String> two = Json.strList(cmd, "tiles");
@@ -314,7 +360,6 @@ public final class Action {
             }
             case TSUMO:
             case RON:
-            case PON:
             case PASS:
             case KYUUSHU:
                 return of(type);
@@ -351,12 +396,21 @@ public final class Action {
             String code = key.substring("riichi:".length());
             return tileIndex(code) < 0 ? null : riichi(code);
         }
+        if (key.startsWith("pon:")) {
+            List<String> two = canonical(splitPlus(key.substring("pon:".length())), 2);
+            return two == null ? null : pon(two);
+        }
         if (key.startsWith("kan:")) {
             String[] p = key.split(":");
-            if (p.length != 3 || tileIndex(p[2]) < 0) {
+            if (p.length != 3) {
                 return null;
             }
-            return kan(p[1], p[2]);
+            // 大明杠的第三段是"手里取哪三张"（带 `+`）；暗杠/加杠是单个牌码
+            List<String> hand = canonical(splitPlus(p[2]), 3);
+            if (hand != null) {
+                return kan(p[1], Tiles.kindToStr(Tiles.parseKind(hand.get(0))), hand);
+            }
+            return tileIndex(p[2]) < 0 ? null : kan(p[1], p[2]);
         }
         if (key.startsWith("chi:")) {
             String[] p = key.substring("chi:".length()).split("\\+");
@@ -371,6 +425,76 @@ public final class Action {
     @Override
     public String toString() {
         return key();
+    }
+
+    // ------------------------------------------------------------------ 取法与回包落位
+
+    /**
+     * 把"从手里取哪几张"规范化：**按槽位升序**、张数与牌码都必须合法，否则返回 {@code null}。
+     *
+     * <p>顺序固定下来键才唯一 —— 服务端下发 `tiles` 的顺序（"不用赤"在前）与策略回包的顺序
+     * 都不该改变动作身份。
+     */
+    private static List<String> canonical(List<String> codes, int need) {
+        if (codes == null || codes.size() != need) {
+            return null;
+        }
+        List<String> out = new ArrayList<>(codes);
+        for (String c : out) {
+            if (tileIndex(c) < 0) {
+                return null;
+            }
+        }
+        out.sort((a, b) -> Integer.compare(tileIndex(a), tileIndex(b)));
+        return out;
+    }
+
+    private static List<String> splitPlus(String s) {
+        return new ArrayList<>(List.of(s.split("\\+")));
+    }
+
+    /**
+     * 把策略的**回包**解析成"本次 {@code legal} 里那一个"动作 —— 轨迹记录的 `chosen` 用它。
+     *
+     * <p>为什么不能只用 {@link #fromCmd}：策略可以回**部分指定**的包（裸 {@code pon}、
+     * 不带 `tiles` 的大明杠），服务端随后按**普通牌优先的默认取法**执行
+     * （{@code Round.pickAuto}）—— 而那恰好就是本次选项里的**第一条**（{@code Round.akaVariants}
+     * 的顺序是"不用赤 → 用赤"）。若记成裸键，它会与 `legal`（只含带取法的键）对不上，
+     * 于是 `chosen ∈ legal` 与 `chosen_index` 两条不变式同时失真。
+     *
+     * <p>规则：**先精确匹配；匹配不上才按"同类型的第一条"落位**，且只对**碰 / 杠**开这个口子
+     * —— 其余动作必须精确匹配，绝不"挑一个像的"（那会把错标签写进数据集）。
+     *
+     * @return 本次 {@code legal} 里的动作；无法归位返回 {@code null}（记"无标签"，不猜）
+     */
+    public static Action resolve(Map<String, Object> cmd, List<Action> legal) {
+        if (cmd == null || legal == null || legal.isEmpty()) {
+            return null;
+        }
+        final Action exact = fromCmd(cmd);
+        if (exact != null) {
+            for (Action a : legal) {
+                if (a.key().equals(exact.key())) {
+                    return a;
+                }
+            }
+        }
+        final String type = Json.str(cmd, "type", null);
+        if (!PON.equals(type) && !KAN.equals(type)) {
+            return null;
+        }
+        // 一次询问只针对**一张**舍张，所以同 kind 的杠只可能有一种；取第一条即默认取法
+        final String kind = KAN.equals(type) ? Json.str(cmd, "kind", null) : null;
+        for (Action a : legal) {
+            if (!type.equals(a.type)) {
+                continue;
+            }
+            if (kind != null && !kind.equals(a.kanKind)) {
+                continue;
+            }
+            return a;
+        }
+        return null;
     }
 
     @Override

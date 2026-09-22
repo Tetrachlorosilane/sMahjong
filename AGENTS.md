@@ -23,7 +23,8 @@
 文档地图：`docs/PROTOCOL.md`（协议契约 —— **改协议先改它**）· `docs/DESIGN.md`（架构与规则取舍）·
 `docs/AUDIT.md`（审计与修复清单，条目号 `S-nn`）· `docs/THEME.md`（材质包/设置文件）·
 `docs/THIRD-PARTY.md`（第三方许可与分发义务）· `docs/DEPLOY.md`（Ubuntu 部署）·
-`client/README.md`（客户端构建与链接方式）· `README.md`（**面向玩家**）· `NOTES.md`（**细节分册**）。
+`client/README.md`（客户端构建与链接方式）· `README.md`（**面向玩家**）· `NOTES.md`（**细节分册**）·
+`docs/TRAINING.md`（机器学习训练方案 · 规划未实施）。
 ### 2.3 十四条曾经踩过的坑（同类问题会再犯）
 
 > 这里只有**判据**（"再遇到同类问题，代码该怎么写"）。每条的**报障原文 / 根因推导 / 红证数据**

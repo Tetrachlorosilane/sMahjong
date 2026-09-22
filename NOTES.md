@@ -579,6 +579,9 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
+> 📄 **训练方案的落地计划**（teacher 基模 → 行为克隆 → 对抗式数据 → 离线/在线 RL → 联赛自对抗进化，
+> 含算力预算与每阶段验收判据）见 **`docs/TRAINING.md`**（规划文档，尚未实施）。
+
 - **只有一个决策漏斗**：`Table.decideBot(seat, Decision)`。自家摸打（`Round.ask`）与鸣牌段
   （`Round.claimPhase` 里那段 bot 分支）都汇到它，`Table.policy[seat] == null` 时走内置 `Bot`。
   **不要**再往第三个地方直接调 `Bot.decide` —— 那样注入的策略就漏了一段。
@@ -605,6 +608,12 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 - **改了产出格式就三处一起改**：`TraceRecorder` / `docs/PROTOCOL.md` §8.4 / `tools/selfplay-check.mjs`，
   并重跑 `node tools\selfplay-check.mjs <dir>`（它会用独立实现核对；红证：把 `chosen` 改成非法动作、
   删掉一个 `hand_delta`，都必须判 FAIL）。
+- **动作键里必须带"取法"**（AUDIT S-73）：碰 / 大明杠的**赤五取法**是两个不同的合法动作，键必须写成
+  `pon:<码>+<码>` / `kan:daiminkan:<码>+<码>+<码>`（与 `chi:<码>+<码>` 同一套写法）。
+  裸 `pon` 只作为**老客户端报文**的兼容形态（服务端按 `Round.pickAuto` 的默认取法执行），
+  轨迹记录走 `Action.resolve` 落到**实际执行**的那一条 —— **绝不把裸键写进数据集**
+  （否则 `legal` 会出现重复键、`chosen_index` 语义失真）。`selfplay-check.mjs` 对旧键**故意不放行**：
+  旧轨迹要重采，而不是让校验器替它兜底。
 - 回归：`SelfTest.trainingInterfaceTests`（动作空间往返、观测反作弊不变式 + 正向对照、
   策略三种失败方式兜底、同种子可复现、注入真的改变行为、runner 统计自洽）+ `tools\selfplay-check.mjs`。
 
