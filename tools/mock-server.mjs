@@ -8,7 +8,13 @@
  *   turn  → 发一个 kind=turn 的 ask，options 含 discard + tsumo + riichi
  *   claim → 发一个 kind=claim 的 ask，options 含 ron + pon + pass
  *   kan   → 暗杠/加杠后从岭上摸牌：`dead_wall_left` 4 → 3 → 2（验「岭上 N 会不会减」）
- *   其余模式（river / agari / yakuman / twoturn / note / allmeld / hand*）见 AGENTS.md §4 L4。
+ *   vote  → 对局中广播「有人发起了结束对局投票」→ 看「同意 / 不同意」与状态行
+ *   其余模式（river / agari / yakuman / twoturn / note / allmeld / hand* / seats / sfx）见 AGENTS.md §4 L4。
+ *
+ * 与真服务端一致的两处握手（2026-09 起）：
+ *   · 连接后立刻发 `uuid_ask`，客户端回 `uuid` → 本脚本回 `uuid_ok{issued:true}`
+ *     （于是 L4 也顺带验证"客户端会保存身份"这条路径）；
+ *   · `vote_end` / `vote` 有最小应答，方便手动点按钮时看界面反应。
  */
 import net from 'node:net';
 
@@ -20,6 +26,9 @@ const HAND14 = ['1m', '1m', '1m', '2m', '3m', '4m', '5m', '6m', '7m', '8m', '9m'
 const srv = net.createServer((sock) => {
   let buf = '';
   const send = (o) => sock.write(JSON.stringify(o) + '\n');
+
+  // 与真服务端一样：**连接后立刻问身份**（PROTOCOL §2.0）。客户端那时会回 `cmd:uuid`。
+  setTimeout(() => send({ ev: 'uuid_ask' }), 10);
 
   sock.setEncoding('utf8');
   sock.on('data', (chunk) => {
@@ -41,6 +50,18 @@ const srv = net.createServer((sock) => {
       case 'hello':
         send({ ev: 'hello_ok', pid: 1, token: 'mock', name: cmd.name || 'mock', ver: 1 });
         break;
+      case 'uuid':
+        // `issued:true` = "这个身份是服务端刚生成的" → 客户端应当把它**落盘**
+        send({ ev: 'uuid_ok', uuid: '6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e',
+               issued: true, new_player: true });
+        break;
+      case 'vote_end':
+        send({ ev: 'vote_start', by: 1, need: 2, total: 3, deadline_ms: 60000 });
+        break;
+      case 'vote':
+        send({ ev: 'vote_update', agree: cmd.agree ? 2 : 1, need: 2, total: 3,
+               agreed: cmd.agree ? [0, 1] : [1], declined: cmd.agree ? [] : [0] });
+        break;
       case 'create_room':
         send({ ev: 'room_joined', room: 'MOCK', seat: 0 });
         send({ ev: 'room', id: 'MOCK', name: '假服务端', host: 1, playing: false,
@@ -61,6 +82,7 @@ const srv = net.createServer((sock) => {
         else if (MODE === 'twoturn') setTimeout(pushTwoTurnScenario, 400);
         else if (MODE === 'sfx') setTimeout(pushSfxScenario, 400);
         else if (MODE === 'sfxburst') setTimeout(pushSfxBurstScenario, 400);
+        else if (MODE === 'vote') setTimeout(pushVoteScenario, 400);
         else setTimeout(pushRound, 400);
         break;
       case 'action':
@@ -394,6 +416,28 @@ const srv = net.createServer((sock) => {
   }
 
   // 模式 river：脚本化「立直宣言牌被鸣走 → 横置顺延」的完整序列
+  // 模式 vote：**结束对局投票**的界面定点复现（2026-09）。
+  // 路径：开局（自己摸牌）→ 别家发起投票 → 场上票数更新。
+  // 看三件事：① 「结束对局」按钮在牌局中出现；② 投票进来后出现「同意 / 不同意」且可点；
+  // ③ 状态行写着"投票中：同意 N/M（在场 X 人）· 剩 N 秒"。
+  // 手动点「同意」时本脚本会回一条 `vote_update`（见 onCmd 的 vote 分支），
+  // 于是可以肉眼确认"点完就锁住、票数 +1"这条交互。
+  function pushVoteScenario() {
+    const seatsInfo = [ { seat: 0, name: '测试玩家', score: 25000 }, { seat: 1, name: 'CPU-1', score: 25000 },
+                        { seat: 2, name: 'CPU-2', score: 25000 }, { seat: 3, name: 'CPU-3', score: 25000 } ];
+    send({ ev: 'game_start', rules: { length: 'hanpu' }, seats: seatsInfo,
+           round: { bakaze: 'E', kyoku: 1, honba: 0 } });
+    send({ ev: 'round_start', round: { bakaze: 'E', kyoku: 1, honba: 0, riichi_sticks: 0 },
+           seat: 0, dealer: 0, scores: [25000, 25000, 25000, 25000],
+           hand: HAND14.slice(1).concat(['5p']),
+           dora_indicators: ['5p'], tiles_left: 70, dead_wall_left: 4 });
+    // 别家（座位 1）发起投票：`total=3` = 三个在场真人（座位 3 是机器人，不数）
+    setTimeout(() => send({ ev: 'vote_start', by: 1, need: 2, total: 3, deadline_ms: 60000 }), 700);
+    // 已经有一家同意了（发起人自己算同意）
+    setTimeout(() => send({ ev: 'vote_update', agree: 1, need: 2, total: 3,
+                            agreed: [1], declined: [] }), 1500);
+  }
+
   function pushRiverScenario() {
     send({ ev: 'game_start', rules: { length: 'hanpu' },
            seats: [ { seat: 0, name: '测试玩家', score: 25000 }, { seat: 1, name: 'CPU-1', score: 25000 },
