@@ -368,9 +368,4 @@ public final class ReplayStore {
         }
         return out;
     }
-
-    /** 供自检/日志：一行统计。 */
-    public synchronized String stats() {
-        return "场数 " + order.size() + " / 字节 " + totalBytes + " / 热缓存 " + hot.size();
-    }
 }

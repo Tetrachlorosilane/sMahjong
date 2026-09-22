@@ -81,8 +81,6 @@ public:
     const QVector<WallSlot>& wallSlots(int round) const;
 
     QString playerName(int seat) const;
-    /** 小局标签，例 "東 1 局 0 本場"。 */
-    QString roundLabel(int round) const;
     QString roundText(int round) const;
 
     int roundOf(int index) const;

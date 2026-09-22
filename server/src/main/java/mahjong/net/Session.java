@@ -164,9 +164,6 @@ public final class Session {
         server.onClosed(this);
     }
 
-    public boolean isClosed() {
-        return closed;
-    }
 
     private void writeLoop() {
         try {

@@ -150,11 +150,7 @@ public:
     bool hasAsk() const { return m_askValid; }
     QJsonObject askEvent() const { return m_ask; }
     QString askKind() const;
-    QVector<QJsonObject> askOptions() const;
     qint64 askRemainMs() const;   // 剩余毫秒（<0 表示已超时）
-    qint64 askTotalMs() const;
-    int askFrom() const;
-    QString askTile() const;
     void clearAsk();
 
     /**
@@ -173,7 +169,6 @@ public:
     QJsonObject lastRoundEnd() const { return m_roundEnd; }
     QJsonObject lastGameEnd() const { return m_gameEnd; }
     QJsonObject lastError() const { return m_error; }
-    QString lastErrorText() const;
 
 signals:
     void changed();

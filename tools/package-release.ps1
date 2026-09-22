@@ -78,29 +78,35 @@ Remove-Item $clientZip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $clientStage '*') -DestinationPath $clientZip -CompressionLevel Optimal
 
 # ── 服务端 ────────────────────────────────────────────────────────────────
-Copy-Item $serverJar (Join-Path $serverStage 'mahjong-server.jar') -Force
-Copy-Item (Join-Path $root 'server\build.sh') $serverStage -Force
-Copy-Item (Join-Path $root 'server\run.sh') $serverStage -Force
-Copy-Item (Join-Path $root 'docs\DEPLOY.md') $serverStage -Force
-$serverReadme = @"
-立直麻将 服务端 v$ver（目标机只需要 JDK 17+，零第三方依赖）
+# 结构（2026-09 重构）：**包内一层同名目录**，且带后台 start/stop/restart/status/update 脚本。
+# 旧结构把 build.sh / run.sh / jar / README 平铺在 zip 根 —— 两个问题：
+#   ① `build.sh` 在包里**没有源码**，根本跑不起来（误导）；
+#   ② 解压即散落一地把文件扔进当前目录，没有版本目录可回滚。
+# 现在 jar 是构建产物，所以包里**不带 build.sh**（要构建请克隆源码），换成运维脚本。
+$serverRoot = Join-Path $serverStage "sMahjong-server-v$ver"
+New-Item -ItemType Directory -Force -Path $serverRoot | Out-Null
+Copy-Item $serverJar (Join-Path $serverRoot 'mahjong-server.jar') -Force
+Copy-Item (Join-Path $root 'docs\DEPLOY.md') $serverRoot -Force
+Copy-Item (Join-Path $root 'server\pack\*') $serverRoot -Force
+Set-Content -Path (Join-Path $serverRoot 'VERSION') -Value $ver -Encoding UTF8 -NoNewline
 
-  ./build.sh && ./run.sh          # 启动后打印 LISTENING 0.0.0.0:10086
-  java -jar mahjong-server.jar --selftest    # 规则引擎回归（期望 SELFTEST PASS）
-
-部署（systemd / 防火墙 / WSL 端口转发）见 DEPLOY.md。
-客户端下载：https://github.com/Tetrachlorosilane/sMahjong/releases
-"@
-Set-Content -Path (Join-Path $serverStage 'README.txt') -Value $serverReadme -Encoding UTF8
+$shellScripts = (Get-ChildItem (Join-Path $serverRoot '*.sh')).Name
+if ($shellScripts.Count -lt 5) {
+    throw "server\pack 下的脚本不全（期望 start/stop/restart/status/update，实际 $($shellScripts -join ','))"
+}
 
 $serverZip = Join-Path $releaseDir "sMahjong-server-v$ver.zip"
 Remove-Item $serverZip -Force -ErrorAction SilentlyContinue
-Compress-Archive -Path (Join-Path $serverStage '*') -DestinationPath $serverZip -CompressionLevel Optimal
+# ⚠ 不能用 Compress-Archive：它写的条目 versionMadeBy = 0（FAT），Linux 侧**忽略**权限位，
+#   解压后 `.sh` 全是 0644 → `./start.sh` 报 Permission denied（实测 bsdtar 显示 -rw-rw-r--）。
+#   所以服务端包交给 tools/make-zip.mjs 手写（versionMadeBy=Unix + externalAttrs 高位 = 0755）。
+node (Join-Path $root 'tools\make-zip.mjs') $serverZip "sMahjong-server-v$ver" $serverRoot
+if ($LASTEXITCODE -ne 0) { throw "make-zip.mjs 打包失败（退出码 $LASTEXITCODE）" }
 
-foreach ($zip in @($clientZip, $serverZip)) {
-    $item = Get-Item $zip
-    $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-    $count = (tar -tf $zip | Measure-Object).Count
+foreach ($zip2 in @($clientZip, $serverZip)) {
+    $item = Get-Item $zip2
+    $hash = (Get-FileHash $zip2 -Algorithm SHA256).Hash.ToLower()
+    $count = (tar -tf $zip2 | Measure-Object).Count
     Write-Host ("    {0}  {1:N0} 字节  {2} 条目  sha256={3}" -f $item.Name, $item.Length, $count, $hash)
 }
 Write-Host '==> 完成'

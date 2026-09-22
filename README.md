@@ -13,8 +13,10 @@
 3. **创建房间**（或从房间列表里加入别人的房间）。一个人的话，勾上「补 3 个机器人」。
 4. 点「准备」。四家都点了准备就开局。
 
-> 想自己开一台服务器？把 `server/` 传到 Ubuntu 机器上，按 `docs/DEPLOY.md` 走一遍即可
-> （默认监听 `10086` 端口）。
+> 想自己开一台服务器？从 [Releases](https://github.com/Tetrachlorosilane/sMahjong/releases)
+> 下载 `sMahjong-server-v<版本>.zip`，解压后 `./start.sh` 就跑起来了（默认监听 `10086`）。
+> 包里还带 `stop.sh` / `restart.sh` / `status.sh`，以及**自动更新**的 `update.sh`
+> ——详细步骤、防火墙、systemd 常驻见 `docs/DEPLOY.md`。
 
 ## 怎么操作
 

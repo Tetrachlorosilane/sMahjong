@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import mahjong.bot.Bot;
 import mahjong.core.Meld;
 import mahjong.core.Rules;
 import mahjong.core.Tiles;
@@ -14,7 +13,6 @@ import mahjong.core.Wall;
 import mahjong.rules.Agari;
 import mahjong.rules.Evaluator;
 import mahjong.rules.Payments;
-import mahjong.rules.Shanten;
 import mahjong.rules.YakuCodes;
 import mahjong.rules.WinContext;
 import mahjong.util.Json;
@@ -709,15 +707,6 @@ public final class Round {
             l.add(Tiles.toStr(id));
         }
         return l;
-    }
-
-    /** kind 列表 → 只含非赤 5 的 id 列表。 */
-    private static List<Integer> kindsToIds(List<Integer> kinds) {
-        List<Integer> ids = new ArrayList<>();
-        for (int k : kinds) {
-            ids.add(Tiles.id(k, 1));
-        }
-        return ids;
     }
 
     private static List<Object> kindsToStrs(List<Integer> kinds) {
@@ -2005,14 +1994,6 @@ public final class Round {
         return false;
     }
 
-    private static boolean containsId(int[] arr, int len, int v) {
-        for (int i = 0; i < len; i++) {
-            if (arr[i] == v) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     List<Map<String, Object>> claimOptions(int seat, int from, int tileId) {
         List<Map<String, Object>> opts = new ArrayList<>();

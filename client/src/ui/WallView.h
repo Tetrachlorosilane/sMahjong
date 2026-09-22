@@ -30,8 +30,6 @@ public:
 
     /** 绑定模型 + 当前小局 + 当前步（步 = entries 下标）。 */
     void setState(ReplayModel* model, int round, int step);
-    /** 换小局（重新按该小局的牌山排布）。 */
-    void setRound(int round);
 
 signals:
     /** 点某一张牌 → 请求跳到"它被拿走"的那一步（-1 = 王牌/还没摸到）。 */

@@ -5,86 +5,107 @@
 | 项目 | 要求 |
 | --- | --- |
 | 系统 | Ubuntu 20.04 / 22.04 / 24.04（任何 Linux 均可） |
-| JDK | **17 或更高**（推荐 21）。只用到 `javac` / `jar` / `java` |
+| JDK | **17 或更高**（推荐 21）。跑发布包只要 `java`；自己构建才需要 `javac` / `jar` |
 | 第三方依赖 | **无**。不需要 Maven、Gradle、数据库、Redis |
 
 安装 JDK：
 
 ```bash
 sudo apt update
-sudo apt install -y openjdk-21-jdk-headless
+sudo apt install -y openjdk-21-jdk-headless     # 只跑服务端可装 openjdk-21-jre-headless
 java -version
 ```
 
-> **JDK 装在哪都行。** `build.sh` / `run.sh` 不写死路径，按
-> `JDK_HOME` → `JAVA_HOME` → `PATH` → `/usr/lib/jvm`、`~/.sdkman`、`/opt/java*`、
-> `/Library/Java/...` 依次查找 `javac`（取版本最高的一个，要求 ≥ 17），
+> **JDK 装在哪都行。** 发布包里的脚本与仓库里的 `build.sh` / `run.sh` 都不写死路径，
+> 按 `JDK_HOME` → `JAVA_HOME` → `PATH` → `/usr/lib/jvm`、`~/.sdkman`、`/opt/java*` 依次查找，
 > 找不到才报错。想指定就用 `JDK_HOME=/path/to/jdk ./build.sh`。
 
-## 2. 构建
+## 2. 拿到服务端：发布包（推荐）或源码构建
 
-把 `server/` 目录上传到服务器，例如 `/opt/mahjong/server`：
+### 2.1 发布包（开箱即跑，不需要源码）
 
-```bash
-cd /opt/mahjong/server
-chmod +x build.sh run.sh
-./build.sh
+从 [Releases](https://github.com/Tetrachlorosilane/sMahjong/releases) 下载
+`sMahjong-server-v<版本>.zip`，解压后是**一层版本目录**：
+
+```
+sMahjong-server-v1.8.0/
+├── mahjong-server.jar    服务端本体（唯一权威方）
+├── VERSION               版本号
+├── start.sh              后台启动（PID → run/，日志 → logs/）
+├── stop.sh               停止（SIGTERM → 最多等 20s → SIGKILL）
+├── restart.sh            重启
+├── status.sh             状态一览（进程/端口/版本/日志尾部）
+├── update.sh             自动获取并安装更新（见 §4）
+├── DEPLOY.md             本文件
+└── README.txt            一页速览
 ```
 
-产物：`build/mahjong-server.jar`（单文件，约 120 KB）。
-
-常用参数（都是可选的）：
-
 ```bash
-./build.sh --selftest        # 编译完顺带跑一次规则引擎自检
-JDK_HOME=/opt/jdk-21 ./build.sh
-MJ_RELEASE=21 ./build.sh     # 改用 --release 21 编译
-MJ_OUT=dist ./build.sh       # 换产出目录
+unzip sMahjong-server-v1.8.0.zip
+cd sMahjong-server-v1.8.0
+./start.sh                 # 后台启动，监听 0.0.0.0:10086
+./status.sh                # 确认在跑
 ```
 
-> **默认 `--release 17`**：用 JDK 21 构建出来的 jar 也能跑在 JDK 17 上，
-> 产物不再取决于构建机的 JDK 版本。
+> zip **保留了可执行位**（`-rwxr-xr-x`）。如果是从别处拷进来丢了权限：`chmod +x *.sh`。
+> 发布包**不再包含 `build.sh`** —— 包里没有源码，那个脚本本来也跑不起来（旧结构的坑）。
 
-> 也可以直接在 Windows 上构建：`pwsh -File server/build.ps1`（同样自动找 JDK），
-> 产出的 jar 同样能跑在 Ubuntu 上（纯 Java 字节码，没有平台相关内容）。
+### 2.2 从源码构建
+
+```bash
+git clone https://github.com/Tetrachlorosilane/sMahjong.git
+cd sMahjong/server
+./build.sh                 # → build/mahjong-server.jar
+./build.sh --selftest      # 编译完顺带跑一次规则引擎自检
+```
+
+常用参数（都可选）：`JDK_HOME=/opt/jdk-21 ./build.sh`、`MJ_RELEASE=21 ./build.sh`（默认 `--release 17`，
+用 JDK 21 构建的 jar 也能跑在 JDK 17 上）、`MJ_OUT=dist ./build.sh`。
+Windows 上同样可以：`pwsh -File server/build.ps1`。
 
 ## 3. 运行
 
+### 3.1 后台脚本（发布包）/ 前台运行（源码）
+
 ```bash
-# 前台运行，监听 0.0.0.0:10086
-./run.sh
-
-# 自定义端口
-PORT=9000 ./run.sh
-
-# 或直接
-java -jar build/mahjong-server.jar --host 0.0.0.0 --port 10086 --verbose
+./start.sh                      # 后台：0.0.0.0:10086，日志 logs/mahjong-server-YYYYMMDD.log
+PORT=9000 ./start.sh            # 换端口
+HOST=127.0.0.1 ./start.sh       # 只监听本机
+./start.sh --fast --no-replay   # 其它参数原样透传给 jar（见 §3.4）
+JAVA_OPTS="-Xmx512m" ./start.sh # 额外 JVM 参数
+./stop.sh                       # 停止（--force 直接 SIGKILL）
+./restart.sh                    # 重启
+./status.sh                     # 状态：进程 / 端口 / 版本 / 日志尾部
 ```
 
-`run.sh` 里的 `java` 同样是自动查找的（`JAVA_HOME` → `PATH` → `/usr/lib/jvm` …），
-只装了 JRE 也能跑。
+源码目录里则是前台跑：`./run.sh`（同样支持 `PORT=` / `HOST=`，`java` 也是自动查找的）。
 
-启动成功会打印一行：
-
-```
-LISTENING 0.0.0.0:10086
-```
+启动成功会打印一行 `LISTENING 0.0.0.0:10086`（默认**双栈监听**，IPv4/IPv6 都能连）。
 
 自测（不需要网络，验证规则引擎）：
 
 ```bash
-java -jar build/mahjong-server.jar --selftest
+java -jar mahjong-server.jar --selftest
 # 期望输出：通过 N 项，失败 0 项 / SELFTEST PASS
 ```
 
-### 3.1 对局记录（回放）的磁盘占用
+### 3.2 运行期目录
+
+| 路径 | 内容 | 升级时 |
+| --- | --- | --- |
+| `run/mahjong-server.pid` | 进程号（`stop.sh` / `status.sh` 用它） | 保留 |
+| `run/installed.sha256` · `run/installed.tag` | 当前安装的包摘要与 tag（`update.sh` 用它判断"同 tag 重发"） | 保留 |
+| `run/backup/mahjong-server-<旧版本>.jar` | 升级前的 jar（回滚用） | 保留 |
+| `logs/` | 每次启动追加一个按日期的日志 | 保留 |
+| `replays/` | 对局记录（回放用，见 §3.3） | 保留 |
+
+### 3.3 对局记录（回放）的磁盘占用
 
 服务端默认把每一场半庄记下来并落盘到 **`./replays/`**（相对启动目录），
-每场约 0.3~1 MB（东风战实测 384 KB）。容量是**双上限**，超出会**淘汰最旧的并删文件**，
-所以磁盘占用有硬上限、不会无限增长：
+每场约 0.3~1 MB（东风战实测 384 KB）。容量是**双上限**，超出会**淘汰最旧的并删文件**：
 
 ```bash
---replay-dir /var/lib/mahjong/replays   # 换目录（systemd 里建议给绝对路径，见 §5）
+--replay-dir /var/lib/mahjong/replays   # 换目录（systemd 里建议给绝对路径，见 §6）
 --replay-max 200                        # 最多留多少场（默认 50）
 --replay-max-mb 512                     # 记录总字节上限（默认 96）
 --no-replay                             # 完全不记录（既省磁盘也省内存）
@@ -93,27 +114,56 @@ java -jar build/mahjong-server.jar --selftest
 ⚠ 要点：
 
 - 目录要**可写**（systemd 里若开了 `ProtectSystem=strict` / `ReadWritePaths`，把它加进可写路径）。
-- 回放是**上帝视角**（四家手牌 + 整副牌山），所以记录只在**牌局结束后**可读；
-  读取接口是只读的，且 ID 是随机生成的 10 位字符串。**别把 replays 目录暴露成静态站点** ——
-  要分享某一场，把 ID 给对方，让他用客户端的大厅「对局回放」拉。
-- 想保留更久就把 `--replay-max` / `--replay-max-mb` 调大；两者谁先到就按谁淘汰。
+- 回放是**上帝视角**（四家手牌 + 整副牌山），只在**牌局结束后**可读；读取接口只读，
+  ID 是随机 10 位字符串。**别把 replays 目录暴露成静态站点** —— 要分享就把 ID 给对方。
+- 想保留更久就调大 `--replay-max` / `--replay-max-mb`；两者谁先到按谁淘汰。
 
-## 4. 开放端口
+### 3.4 全部命令行开关
 
 ```bash
-# 如果开了 ufw
+java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要）
+--host 0.0.0.0 --port 10086                # 监听地址/端口
+--fast                                     # 缩短机器人思考与局间停顿（压测用）
+--no-replay                                # 不写对局记录
+--selftest                                 # 规则引擎自检后退出
+--selfplay N --workers K --policy a,b,c,d  # 自对弈 / 评测（训练接口，见 PROTOCOL §8）
+```
+
+## 4. 自动更新（update.sh）
+
+```bash
+./update.sh --check     # 只查有没有新内容（不动进程、不下载）
+./update.sh             # 装最新；本来在跑就自动重启
+./update.sh --tag v1.8.0 --force    # 指定版本 / 强制重装
+./update.sh --no-restart            # 只装，不重启
+REPO=you/sMahjong ./update.sh        # 换仓库（自建 fork）
+```
+
+它做的事：查 GitHub Release → 比"版本 + **资产 sha256**"→ 下载 → 校验摘要（可选 `--sha256` 兜底）
+→ `unzip -t` 完整性 → 解包 → 备份旧 jar → 替换 jar/脚本/文档（保留 `logs/ run/ replays/`）→ 重启。
+
+⚠ **为什么不能只比版本号**：本仓库修 bug 时**不换版本号、原地重发同名资产**
+（`v1.8.0` 就这样重发过两次）。所以 `update.sh` 还比 release 资产的`digest`，
+同一 tag 下资产变了也会装（`--check` 会显示"同一个 tag 下的资产变了"）。
+
+回滚：
+
+```bash
+cp run/backup/mahjong-server-<旧版本>.jar mahjong-server.jar
+./restart.sh
+```
+
+## 5. 开放端口
+
+```bash
 sudo ufw allow 10086/tcp
-
-# 如果在云厂商（阿里云/腾讯云/AWS）上，还要在安全组放行 TCP 10086
+# 云厂商（阿里云/腾讯云/AWS）还要在安全组放行 TCP 10086
+ss -lntp | grep 10086        # 或 ./status.sh
 ```
 
-验证端口：
+## 6. 用 systemd 常驻
 
-```bash
-ss -lntp | grep 10086
-```
-
-## 5. 用 systemd 常驻
+想开机自启 / 交给 systemd 管（推荐生产环境；用了它就不必再 `./start.sh` 常驻）：
 
 `/etc/systemd/system/mahjong.service`：
 
@@ -126,11 +176,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=mahjong
-WorkingDirectory=/opt/mahjong/server
-Environment=PORT=10086
-Environment=HOST=0.0.0.0
+WorkingDirectory=/opt/mahjong
 Environment=JAVA_TOOL_OPTIONS=-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8
-ExecStart=/usr/bin/java -jar /opt/mahjong/server/build/mahjong-server.jar --host 0.0.0.0 --port 10086
+ExecStart=/usr/bin/java -jar /opt/mahjong/mahjong-server.jar --host 0.0.0.0 --port 10086
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/mahjong/server.log
@@ -149,21 +197,25 @@ sudo systemctl status mahjong
 sudo journalctl -u mahjong -f
 ```
 
-## 6. 客户端连接
+> `update.sh` 会先 `./stop.sh`（看 PID 文件）。**systemd 管理的进程不在 PID 文件里**，
+> 所以 systemd 场景请这样更新：
+> ```bash
+> sudo systemctl stop mahjong
+> sudo -u mahjong ./update.sh --no-restart
+> sudo systemctl start mahjong
+> ```
 
-Windows 上运行 `mahjong-client.exe`（构建方式见 `client/README.md` —— **不需要预先装 Qt**，
-构建脚本会自己把 Qt 取回来），服务器地址填 Ubuntu 机器的 **公网 IP 或内网 IP**，
-端口 `10086`，点「连接」→「创建房间」→ 勾选补 3 个机器人（单人也能玩）→ 准备。
+## 7. 客户端连接
 
-### 6.1 服务端跑在 WSL 里时（本机开发最常见）
+Windows 上运行 `mahjong-client.exe`（构建方式见 `client/README.md` —— **不需要预先装 Qt**），
+服务器地址填 Ubuntu 机器的**公网 IP 或内网 IP**，端口 `10086`，点「连接」→「创建房间」→
+勾选补 3 个机器人（单人也能玩）→ 准备。
 
-服务端默认**双栈监听**（启动日志会打印 `（双栈：IPv4 与 IPv6 都可连）`），
-所以 `127.0.0.1` 和 `localhost` 都能连。
+### 7.1 服务端跑在 WSL 里时（本机开发最常见）
 
-如果没有双栈（旧版本 / 环境只支持 IPv4），WSL2 的 localhost 转发可能**只把端口绑在
-IPv6 回环 `[::1]`** 上，此时 `127.0.0.1:10086` 会 `Connection refused`，而 `localhost` 能通。
-
-排查：
+默认双栈监听（日志会打印 `（双栈：IPv4 与 IPv6 都可连）`），`127.0.0.1` 与 `localhost` 都能连。
+若环境只支持 IPv4，WSL2 的 localhost 转发可能只绑在 `[::1]`，此时 `127.0.0.1:10086` 会
+`Connection refused` 而 `localhost` 能通。排查：
 
 ```powershell
 netstat -ano | findstr :10086      # 看是 0.0.0.0 / 127.0.0.1 / [::1] 哪个在监听
@@ -172,26 +224,17 @@ Test-NetConnection ::1       -Port 10086
 ss -lntp | grep 10086              # 在 WSL 里确认服务端确实在监听
 ```
 
-客户端的 Qt 程序**会自动在 IPv4/IPv6 之间回退**，所以填 `127.0.0.1` 也能连上只绑了 `::1`
-的服务端；但为了少踩坑，WSL 场景建议直接填 `localhost`。
+客户端的 Qt 程序**会自动在 IPv4/IPv6 之间回退**；WSL 场景建议直接填 `localhost`。
+想让同局域网其它机器访问 WSL 里的服务端：`%UserProfile%\.wslconfig` 里
+`[wsl2] networkingMode=mirrored` 后 `wsl --shutdown`，或在 Windows 防火墙放行
+`wslrelay` / `vEthernet (WSL)` 的 TCP 10086。
 
-想让 WSL 里的服务端被同局域网其它机器访问：
-
-```ini
-# %UserProfile%\.wslconfig
-[wsl2]
-networkingMode=mirrored
-```
-
-改完 `wsl --shutdown` 重启；或在 WSL 里 `ip addr` 取 IP 后连它，并在 Windows 防火墙
-放行 `wslrelay`/`vEthernet (WSL)` 的 TCP 10086。
-
-## 7. 协议与扩容
+## 8. 协议与扩容
 
 - 协议见 `docs/PROTOCOL.md`。服务端是纯 TCP NDJSON，一条连接一个玩家。
 - 一个进程可承载多个房间；每个房间一个线程，房间之间完全独立。
 - 单机压测参考：4 个机器人 + 1 个人类的一桌约占用 1 个 CPU 核的百分之几。
-- 如果想要多机部署，可在前面放 nginx `stream` 做 TCP 负载均衡：
+- 多机部署可在前面放 nginx `stream` 做 TCP 负载均衡：
 
 ```nginx
 stream {
@@ -200,12 +243,16 @@ stream {
 }
 ```
 
-## 8. 常见问题
+## 9. 常见问题
 
 | 现象 | 处理 |
 | --- | --- |
-| `javac: command not found` | 装 JDK 而不是 JRE：`sudo apt install openjdk-21-jdk-headless` |
-| 客户端连不上 | `ss -lntp \| grep 10086` 确认监听；检查 ufw / 云安全组 |
-| 客户端连上后马上断开 | 服务端日志会有原因；确认客户端发的是 `{"cmd":"hello",...}` 且以 `\n` 结尾 |
-| 中文日志乱码 | 加 `-Dstdout.encoding=UTF-8`，或把日志重定向到文件 |
+| `./start.sh: Permission denied` | `chmod +x *.sh`（zip 本身保留了 `0755`，从别处拷贝可能丢） |
+| `javac: command not found` | 只在**自己构建**时需要：`sudo apt install openjdk-21-jdk-headless` |
+| 找不到 java | `sudo apt install -y openjdk-21-jre-headless`，或设 `JAVA_HOME` |
+| 客户端连不上 | `./status.sh` 或 `ss -lntp \| grep 10086`；检查 ufw / 云安全组 |
+| 客户端连上后马上断开 | 服务端日志有原因；确认客户端发的是 `{"cmd":"hello",...}` 且以 `\n` 结尾 |
+| 中文日志乱码 | 脚本已带 `-Dstdout.encoding=UTF-8`；自己起 java 时手动加上 |
+| `update.sh` 说"已是最新"但确实修了 bug | 加 `--force`，或先 `./update.sh --check` 看资产摘要是否变了 |
+| 更新后行为没变 | `./status.sh` 看进程启动时间；systemd 场景别忘了 `systemctl restart mahjong` |
 | 想改规则 | 建房间时客户端可传 `rules` 对象（见 `docs/PROTOCOL.md` §5），服务端逐项校验 |

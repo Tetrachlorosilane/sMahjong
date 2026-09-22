@@ -118,9 +118,6 @@ private:
     /** 该相对路径是否存在（目录或文件）。 */
     bool exists(const QString& rel) const;
 
-    /** 清单键 → 相对目录（已做安全检查）；没有/非法时返回空。 */
-    QString categoryDir(const QString& key) const;
-
     QString m_root;                     // 目录包：根目录；zip 包：zip 文件路径
     bool m_isZip = false;
     QHash<QString, QString> m_dirs;     // 类别 → 包内相对目录
