@@ -112,8 +112,13 @@ public final class ReplayRecorder {
      *
      * <p>会跳过 {@link Replay#SKIP} 里的事件；聊天正文再兜一层长度上限
      * （协议侧已经按码点截断，这里是防止 body 里塞了别的东西）。
+     *
+     * <p>⚠ **`synchronized`**：录制原本只在牌桌线程上发生，但**聊天**（各连接的读线程）
+     * 与**投票事件**（同样来自各连接的读线程）也会经 {@code Table.broadcast} 走到这里 ——
+     * 两个线程同时往 `entries` 这个 ArrayList 里追加，序号与内容都可能错乱
+     * （而"回放与实时同一条渲染路径"正是这个功能的前提）。
      */
-    public void add(int to, Map<String, Object> body) {
+    public synchronized void add(int to, Map<String, Object> body) {
         if (body == null) {
             return;
         }
@@ -143,7 +148,7 @@ public final class ReplayRecorder {
     }
 
     /** 记一条**只给回放看**的条目（不发给任何客户端）。 */
-    public void note(int to, Map<String, Object> body) {
+    public synchronized void note(int to, Map<String, Object> body) {
         add(to, body);
     }
 
@@ -171,7 +176,7 @@ public final class ReplayRecorder {
     }
 
     /** 收尾：返回可落盘的不可变记录（之后不再续记）。 */
-    public Replay finish() {
+    public synchronized Replay finish() {
         bytes = 0;
         return replay;
     }

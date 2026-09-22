@@ -69,8 +69,11 @@
 | `limit` / `reason` / `error.code` | `agari` / `ryuukyoku` / `error` | 同样是 ASCII 码（`"mangan"` / `"exhaustive"` / `"no_room"`）。**`error.arg` 是可选的 ASCII 参数**（如 `unknown_cmd` 带命令名）。报文里**只有** `name`/`text`/`msg` 三个字段允许非 ASCII。 |
 | `dead_wall_left` | `draw` / `round_start` / `state` | 剩余**岭上**牌数。⚠ **每次摸牌都要带**：杠后那张取自王牌，`tiles_left` 在**岭上摸牌时不动**（开杠那一刻牌山末尾一张移进王牌才减 1），所以「岭上有没有被摸走」只能看它。一局 4 张：4→3→2→1。见 §6「王牌/岭上」与 PROTOCOL §3.4。 |
 | `drawn` | `round_start`（**仅庄家**） | 本巡「刚摸到的那张」的牌码（= 14 张里的第 14 张）。**必须有**：`hand` 是**已排序**下发的，位置推不出来，客户端只能猜 —— 猜错就是幽灵手牌（见 §2.3-11）。客户端摆摸牌位只认它；缺这个字段的老服务端会退回"最后一张是摸到的"（会认错）。 |
+| `away` | `room.seats[]` | **掉线托管的唯一判据**（服务端给的）：`true` = 人不在但座位还归他（自动摸切、不鸣牌）。⚠ **不要**拿 `bot` 或"`session` 为不为空"去猜：那是服务端内部状态，客户端只该看这个字段（见 §2.3-13、PROTOCOL §3.13）。 |
+| `uuid` / `issued` / `new_player` | `uuid_ask` / `uuid_ok` | 身份握手（PROTOCOL §2.0）：服务端**连接后立刻**问一次，客户端回 `{"cmd":"uuid",...}`（没有记录就回空）。`issued:true` = 这个 uuid 是**服务端刚生成的** → 客户端**必须落盘**，否则下次又变成新玩家。**uuid 从不进任何其它报文**（它是身份凭据，见 §6.8）。 |
+| `need` / `total` | `vote_start` / `vote_update` / `vote_result` | 结束对局投票的门槛与分母（PROTOCOL §2.5）：`total` = **在场人类数**（不数机器人、不数托管），`need = total/2 + 1`（**严格过半**）。**客户端不许自己算**：拿服务端给的显示即可，否则改一次客户端就能改规则（见 §6.9）。 |
 
-### 2.3 十二条曾经踩过的坑（同类问题会再犯）
+### 2.3 十四条曾经踩过的坑（同类问题会再犯）
 
 1. **`riichi` 事件到达时，绝不能把"牌河最后一张"标成横置。**
    服务端顺序是**先广播 `riichi`、再广播 `discard`**，此刻牌河最后一张还是宣言牌**之前**那张，标它就等于一人牌河两张横置。
@@ -177,6 +180,38 @@
     所以它们必须改成走 `debugPushDiscard`（= 生产的记账）。**测试里绕过记账点就是在给 bug 背书。**
     已知偏差（无役见逃不触发同巡振听）与实现位置见 `docs/DESIGN.md`「振听：三种都要记」。
     回归：`SelfTest.furitenRuleTests`（含"确实造出过见逃机会"的非空转断言）。
+
+13. **掉线 ≠ 换机器人。托管只做"必须打一张"，绝不替玩家做决定。**
+    用户口径（2026-09）：有人掉线或退出时，牌局**不结束**、也**不换机器人**，而是把那一格标成
+    **托管**（`Seat.away = true`）—— 他的回合**自动摸切**，鸣牌一律**放过**（连 `ask` 都不发），
+    牌局照常推进到终局；四个人全掉线时才回收房间（那一条没变）。
+    - 判据只有一处：`Seat.away`（`Round.awaySeat(seat)` = "没连接且不是机器人"）。
+      ⚠ **不要**用 `bot` 或 `session == null` 去反推"谁在托管"：`session == null` 在等待室
+      里表示**空位**，而空位与托管的行为完全不同（空位不该参与对局）。
+    - 托管中的座位**仍算被占**（`occupied()` 含 `away`）：否则 `firstEmptySeat()` 会把它交出去，
+      别人一进来就顶掉一个正在打牌的座位，人回来时无处可回。
+    - 人回来：**同一个 uuid** 重连就接回原座位（§6.8）—— 这条是"托管"能成立的前提，
+      没有它托管等于永久失去座位。
+    - 机器人与托管的区别必须**一直在**：机器人会吃碰杠、会胡牌（那是它的本事），
+      托管**只**自动打出刚摸到的那张。回归：`SelfTest.awaySeatTests/awayPlayTests`
+      + `node tools\away-test.mjs <host> <port>`（真 socket：断言 `away=true/bot=false`、
+      托管后每张都是 `tsumogiri=true`、整局 0 次鸣牌、牌局不结束、全掉线才回收）。
+      红证：把 `Table.markAway` 的 `s.bot=false` 改回 `true`，away-test 立刻红两条
+      （`bot 不是 true` + 掉线后的牌变成 `tsumogiri=false` 的手切）。
+
+14. **"投票通过"发生在别的线程上，牌局线程必须能被叫醒 —— 否则要等满整个 ask 超时。**
+    「结束对局」投票（§6.9）由各连接的读线程处理（它要跨多次询问、还要记 5 分钟冷却），
+    而牌局线程此刻可能正阻塞在 `pollResponse(remain)` 上等某一家出牌（最长 25 秒）。
+    只置一个标志是不够的：那条 `poll` 会一直睡到超时，玩家会看到"票都通过了，牌桌还在等"。
+    现在两条一起：
+    - `Table.finishVoteLocked(passed)` → `voteEnded = true` **且** `wake()` 往命令队列里
+      投一个哨兵（座位号 `-1`、**没有 `type`**，所以两个等待循环都会把它当"不是本次答复"跳过）；
+    - 牌局线程在**五个检查点**看这个标志：`Round.play()` 主循环开头、`ask()` 之后、
+      `claimPhase()` 之后与它的等待循环里、`Table.awaitAction` 循环开头；局间则由
+      `sleepMs`（切片轮询）与 `awaitRoundConfirm` 负责提前醒。
+    漏掉任何一个检查点的症状都是"投票通过了但牌局还在往下打/还在等"。
+    回归：`SelfTest.voteTests` 的 ⑥（真的开一条线程投票、量 `awaitAction` 多快返回 ——
+    实测 ~120ms，上限给了 30s）与 `node tools\vote-test.mjs`。
 
 ### 2.4 别做危险操作
 
@@ -315,6 +350,16 @@ node tools\spectate-test.mjs 127.0.0.1 10086            # 观战（对局中入�
 node tools\utf8-test.mjs 127.0.0.1 10086                  # 报文编码：中文/代理对原样往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086                # 对局记录：写入/列表/分页/出牌守恒/路径穿越/限速
                                                           #（加 --no-game 只验读取路径，几秒跑完）
+node tools\uuid-test.mjs 127.0.0.1 10086                  # 身份（uuid）：连接即问 → 应答；同 uuid 两次 = 同一个玩家；
+                                                          # 形状不对按"没有记录"处理；**掉线托管后同 uuid 接回原座位**
+                                                          # （原连接还活着时不会被第二条同 uuid 顶掉）
+node tools\away-test.mjs 127.0.0.1 10086                  # 掉线托管：那一格 away=true/bot=false + 托管后每张都是摸切 +
+                                                          # 整局 0 次鸣牌 + 牌局不结束 + **真人全掉线才回收房间**
+                                                          # ⚠ 需要 >= 2 个真人（只有一个真人时他一走房间就该回收）
+node tools\vote-test.mjs 127.0.0.1 10086                  # 结束对局投票：分母不数机器人（total/need）+ 发起人算同意 +
+                                                          # 够票 passed→game_end{reason:"vote"} + 点数守恒 +
+                                                          # 不够票当场否决 + 5 分钟冷却（vote_denied.wait_ms）
+                                                          # ⚠ 三个脚本共用 tools/test-client.mjs（握手/等待/自动应答）
 node tools\check-i18n.mjs                                 # **静态**核对：服务端每个码都有客户端译文（不用起服务端）
 node tools\selfplay-check.mjs <轨迹目录>                    # 训练数据集校验（独立实现；不用起服务端；见 §6.5）
 node tools\i18n-scan.mjs --check                          # 界面文案必须都在语言文件里（源码里不留中文；见 §6）
@@ -395,6 +440,7 @@ mahjong/
 │     ├─ game/         Round(一局状态机) Table(房间/半庄/线程)
 │     │                 WinCheck/RoundOptions/RoundClaims/RoundScoring(纯判据，可单独单测)
 │     ├─ replay/       Replay Store Recorder（对局记录：录制 / 落盘 / 容量淘汰）
+│     ├─ player/       PlayerStore（**玩家档案**：uuid → 昵称/登录时间，TTL 清理；见 §6.8）
 │     ├─ net/          Server Session
 │     ├─ bot/          Bot(牌效 AI，补位用；同时是训练用的 teacher)
 │     ├─ ai/           ★ 训练接口：Policy/ActionPolicy/PolicyFactory(接缝) Observation(合法信息集)
@@ -426,6 +472,7 @@ mahjong/
                        / gen-sfx + gen-sfx-qrc（见 §9.3）
                        / package-release.ps1 + make-zip.mjs（发布打包，见 §9.5）
                        / deadcode-scan.mjs（无用函数扫描，见 §6.7）
+                       / test-client.mjs + uuid-test / away-test / vote-test（身份·托管·投票，见 §6.8/§6.9）
 ```
 
 ---
@@ -866,6 +913,44 @@ mahjong/
 
 顺带：`server/build/unused-imports.mjs` 一类的临时脚本不必进仓库；真正可复用的（扫描器）放 `tools/`。
 
+### 6.8 身份（uuid）与玩家档案
+
+需求（2026-09）：**连接后服务端立刻问客户端要一个保存过的 uuid**，客户端应答；客户端没有就由服务端
+生成并回发（客户端必须存下来）；服务端没有这个 uuid 的档案就建一份**初始玩家**。
+**同一个 uuid = 同一个玩家**，显示仍以昵称为准；每个 uuid 记一个时间戳、登录时更新；
+定期清理**超过 2 个月**没登录的。uuid 将来是**玩家信息的主键**。协议见 PROTOCOL §2.0。
+
+- 服务端：`server/.../player/PlayerStore.java`（进程级单例，和 `ReplayStore` 一个套路）。
+  落盘 `<--player-dir>/players.json`（默认 `players/`，`--uuid-ttl-days` 默认 60，`--no-player-store` 关掉）。
+  - **档案里认不出的键原样保留** —— 它就是为"以后要当主键存更多东西"准备的（同 `Settings.extra`）。
+  - **原子写**（`.tmp` + ATOMIC_MOVE）+ **落盘节流**（登录是热路径，2 秒内的多次登录合并成一次写）。
+  - 清理：**启动时一次**，之后维护线程每 6 小时一次；判据是**严格大于** TTL（`ttl=0` 也能对）。
+- 客户端：`Settings.uuid`（`settings.json`；形状不对就清空 = "我还没有身份"）+
+  `MainWindow` 的 `uuid_ask` / `uuid_ok` 两个分支（**`issued:true` 时必须落盘**，否则下次又变成新玩家）。
+- **接回座位**：uuid 此刻若正**托管**在某个座位上（§6.9/§2.3-13），新连接直接接回那个座位
+  （`Session.tryResumeSeat`：锁内二次确认"那一格确实空着"→ 沿用**原 pid** → `room_joined` + `state`）。
+  ⚠ 判据是"座位上没有别的活连接"，不是"uuid 认得" —— 否则重放一份设置文件就成了踢人手段。
+- 回归：`SelfTest.playerStoreTests`（形状/记账/TTL/向前兼容/坏文件）+ `node tools\uuid-test.mjs`（真 socket）。
+
+### 6.9 掉线托管 与 结束对局投票
+
+两件事都写在协议里（PROTOCOL §2.5 / §3.13），共同点是**状态不在牌局线程上**：
+
+- **托管**（`Seat.away`）：判据、行为与坑见 §2.3-13。实现三处：
+  `Table.markAway`（掉线/退房都走它，含**房主转移**）、`Round.awaySeat`（那一家的回合走"返回 null →
+  默认摸切"，鸣牌段**连选项都不算**）、`Table.releaseAwaySeats`（整场结束后释放托管座位）。
+  ⚠ 「托管」与「空位」必须一直分开：`occupied()` 含 `away`（座位不会被抢），但 `readyToStart()` 不认它
+  （托管的人不能算"已准备"）。
+- **投票**（`vote_*`）：`Table.requestVoteEnd/castVote/onVoteTimeout`，状态机在 `voteLock` 下，
+  事件**从各连接的读线程广播**（所以 `ReplayRecorder.add` 是 `synchronized`、`Table.replay` 是 `volatile`）。
+  - 门槛 `votesNeeded(total) = total/2 + 1`，分母 `eligibleVoters()` = **在场真人**（不数机器人、不数托管）；
+  - **发起人算同意**（点「结束对局」就是在表态）；
+  - 够票→`passed`（→`voteEnded` + `wake()`，见 §2.3-14）；不够票→`impossible`；到点→`timeout`；
+  - 一次结论之后**全员冷却 5 分钟**（`VOTE_COOLDOWN_MS`，**服务端记时**：拒绝时回 `wait_ms`）；
+  - 通过之后 `playGame` 走**正常终局路径**（发 `game_end{reason:"vote"}`、按规则分掉供託、落盘回放），
+    所以**点数仍然守恒**（`SelfTest`/`vote-test` 都断言 100000）。
+- 回归：`SelfTest.voteTests`（含"真的开线程投票把牌局线程叫醒"那条）+ `node tools\vote-test.mjs`。
+
 ## 7. 常见症状 → 先查哪里
 
 > **最常查的 5 条**：编译/链接失败 · 手牌数量对不上（`tsumogiri`）· 一人牌河两张横置（`discard.sideways`）·
@@ -874,6 +959,11 @@ mahjong/
 | 症状 | 首先怀疑 |
 | --- | --- |
 | 编译不过 / 链接失败 | exe 是否在运行（锁文件）；AUTOMOC 缓存陈旧 → 加 `-Clean` |
+| **有人掉线后那一格变成机器人（会吃碰杠/胡牌）**，或者掉线就再也没法继续打 | `Table.markAway` 里是不是把 `bot` 置真了？托管只该置 `away = true`（§2.3-13）。判据只看 `Seat.away`；掉线者只自动摸切、不鸣牌。定性：`node tools\away-test.mjs <host> <port>` |
+| **对局中有人掉线，其他三家突然看到"准备/开始游戏"** | 对局中的 `room` 事件（掉线托管时会广播一次）被当成"回等待室"了 —— `MainWindow` 的 `room` 分支要看 `playing`（`client --selftest` 有断言兜底） |
+| **掉线的人重连后没有回到原来的座位 / 每次连上都是"新玩家"** | ① 客户端收到 `uuid_ok{issued:true}` 时有没有把 uuid **落盘**（`MainWindow::saveIdentity`）？② 入座/认领身份时有没有把 uuid 写到座位上（`Session.claimIdentity`）？③ 那格是不是已经被释放（整场结束会释放托管座位）。定性：`node tools\uuid-test.mjs <host> <port>` |
+| **投票通过了，牌局却还在等出牌 / 还在往下打** | §2.3-14：`finishVoteLocked` 要 `wake()` **且**五个检查点都要看 `voteEnded`；少一个就是"等满 25 秒"。定性：`node tools\vote-test.mjs <host> <port>` |
+| **点了「结束对局」没反应 / 按钮一直显示冷却** | 看服务端回的 `vote_denied.reason`（`not_playing` 不在局中 / `running` 已有投票 / `cooldown` 冷却中）；冷却**只在服务端**记时，客户端只显示 `wait_ms` |
 | `Connection refused` | 服务端没起 / 端口错 / **WSL 只转发到 `[::1]`**（客户端已自动回退 IPv4↔IPv6；WSL 填 `localhost`） |
 | 大厅按钮是灰的 | `MainWindow::onConnected()` 必须调 `m_lobby->setConnected(true)`（曾漏过） |
 | **自选座位：点过的那一格一直灰着（"上一个按钮不会弹起"），反向点却正常** | 同一趟循环里**既更新又读**派生状态：`updateWaitingRoom()` 曾在 0→3 的循环里一边 `setMySeat(pid 命中的那格)` 一边用 `mySeat()` 决定按钮 enabled —— 座位号变**大**时，先被处理的正是"我刚离开的那一格"，读到的还是旧值 → 它被判成"我坐着"而永远置灰；号变**小**时新座位排在前面，就恰好正常。修法：**先用一趟把"我在哪一格"定下来，第二趟再画**。回归：`client --selftest` 的「自选座位」组（正反两向 + 开局后全灰） |

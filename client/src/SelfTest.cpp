@@ -34,6 +34,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
@@ -2452,7 +2453,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("427"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("443"),
                 QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2479,8 +2480,26 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("303"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("319"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
+        // 结束对局投票 / 掉线托管：这两族同样是"漏一条 key 就会显示裸键"，
+        // 所以除了上面那条总数断言，再把**用得着的几条**逐条点名（占位符也点）。
+        check(!lang::t(QStringLiteral("ui.vote.end")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.agree")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.disagree")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.idle")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.started")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.passed")).isEmpty()
+                  && lang::t(QStringLiteral("ui.vote.rejected")).contains(QStringLiteral("%1"))
+                  && lang::t(QStringLiteral("ui.vote.running")).contains(QStringLiteral("%4")),
+              QStringLiteral("投票族文案齐全（含 %1/%4 占位符）"));
+        check(!lang::t(QStringLiteral("ui.vote.denied_cooldown")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.denied_running")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.vote.denied_not_playing")).isEmpty(),
+              QStringLiteral("投票被拒的三种原因都有文案"));
+        check(!lang::t(QStringLiteral("ui.main.away_tag")).isEmpty()
+                  && !lang::t(QStringLiteral("ui.main.identity_saved")).isEmpty(),
+              QStringLiteral("掉线托管标记与身份提示的文案都在语言文件里"));
         // 回放：文案键必须齐（源码里直接写 lang::t("ui.replay.*")，漏一条就会显示裸键）
         check(!lang::t(QStringLiteral("ui.replay.title")).isEmpty()
                   && !lang::t(QStringLiteral("ui.replay.wall_legend")).isEmpty()
@@ -3543,6 +3562,179 @@ int run(const QString& outDir)
         check(m.hasSeat(), QStringLiteral("正常快照恢复 hasSeat"));
         checkEq(QString::number(m.mySeat()), QStringLiteral("1"),
                 QStringLiteral("正常快照的座位号照旧"));
+    }
+
+    // ---------- 回归：身份（uuid）握手 + 掉线托管标记 + 结束对局投票 ----------
+    // 三条 2026-09 需求，客户端这一侧各有一半责任：
+    //   ① 身份：服务端问 → 客户端报上本地保存的；服务端给新的 → **必须存下来**；
+    //   ② 掉线托管：服务端不换机器人、只自动摸切，界面上要看得见"谁掉线了"；
+    //   ③ 投票：界面给「结束对局」+「同意/不同意」，**计票与冷却全在服务端**
+    //      （客户端只显示，连倒计时都只是本地推算 —— 改客户端改不动规则）。
+    {
+        const QString dir = outDir + QStringLiteral("/uuid_vote_test");
+        QDir().mkpath(dir);
+        const QString path = dir + QStringLiteral("/settings.json");
+        QFile::remove(path);
+        const QString kOld = QStringLiteral("6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e");
+        const QString kNew = QStringLiteral("11112222-3333-4444-5555-666677778888");
+
+        // ---- ① uuid 存得住、坏值被清掉 ----
+        {
+            Settings st;
+            st.uuid = kOld;
+            check(st.save(path), QStringLiteral("身份：uuid 能写进设置文件"));
+            Settings back = Settings::load(path);
+            checkEq(back.uuid, kOld, QStringLiteral("身份：uuid 往返（下次连接才报得出身份）"));
+
+            QJsonObject bad;
+            bad.insert(QStringLiteral("uuid"), QStringLiteral("not-a-uuid"));
+            bad.insert(QStringLiteral("host"), QStringLiteral("10.0.0.9"));
+            QFile f(path);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                f.write(QJsonDocument(bad).toJson());
+                f.close();
+            }
+            QStringList repaired;
+            Settings fixed = Settings::load(path, &repaired);
+            checkEq(fixed.uuid, QString(),
+                    QStringLiteral("身份：形状不对的 uuid 被清掉（= 还没有身份）"));
+            check(repaired.contains(QStringLiteral("uuid")),
+                  QStringLiteral("身份：坏 uuid 出现在重置清单里（不静默）"));
+            checkEq(fixed.host, QStringLiteral("10.0.0.9"),
+                    QStringLiteral("身份：清 uuid 不影响别的键"));
+        }
+
+        // ---- ① uuid 握手：问 → 答；服务端给的新身份存下来 ----
+        {
+            MainWindow w;
+            Settings st;
+            st.uuid = kOld;
+            w.applySettings(st, path);
+            QVector<QJsonObject> sent;
+            w.setCommandTapForTest([&sent](const QJsonObject& o) { sent.append(o); });
+
+            w.feedEventForTest(parseEv(R"({"ev":"uuid_ask"})"));
+            check(!sent.isEmpty()
+                          && sent.last().value(QStringLiteral("cmd")).toString()
+                                  == QLatin1String("uuid"),
+                  QStringLiteral("身份：收到 uuid_ask 要回一条 uuid 命令"));
+            checkEq(sent.last().value(QStringLiteral("uuid")).toString(), kOld,
+                    QStringLiteral("身份：把本地保存的 uuid 报上去"));
+
+            sent.clear();
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"uuid_ok","uuid":"11112222-3333-4444-5555-666677778888",)"
+                    R"("issued":true,"new_player":true})"));
+            checkEq(w.uuidForTest(), kNew,
+                    QStringLiteral("身份：服务端给的新身份被采纳"));
+            Settings reread = Settings::load(path);
+            checkEq(reread.uuid, kNew,
+                    QStringLiteral("身份：新身份**立刻落盘**（否则下次连接又变成新玩家）"));
+        }
+
+        // ---- ② 掉线托管：等待室座位行与牌桌分数栏都要标出来 ----
+        {
+            MainWindow w;
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"room","id":"AB12","name":"房","host":1,"playing":true,)"
+                    R"("rules":{},"seats":[)"
+                    R"({"seat":0,"pid":1,"name":"甲","ready":false,"bot":false,"away":false,"score":25000},)"
+                    R"({"seat":1,"pid":2,"name":"乙","ready":false,"bot":false,"away":true,"score":24000},)"
+                    R"({"seat":2,"pid":3,"name":"丙","ready":true,"bot":false,"away":false,"score":26000},)"
+                    R"({"seat":3,"pid":4,"name":"丁","ready":false,"bot":false,"away":false,"score":25000}]})"));
+            QLabel* row1 = w.seatLabelForTest(1);
+            QLabel* row0 = w.seatLabelForTest(0);
+            check(row1 != nullptr && row1->text().contains(QStringLiteral("掉线")),
+                  QStringLiteral("托管：座位行标出「掉线」（实际：%1）")
+                          .arg(row1 == nullptr ? QStringLiteral("<null>") : row1->text()));
+            check(row0 != nullptr && !row0->text().contains(QStringLiteral("掉线")),
+                  QStringLiteral("托管：没掉线的那家不标"));
+            check(row1 != nullptr && !row1->text().contains(QStringLiteral("准备")),
+                  QStringLiteral("托管：托管中的座位不再显示「准备/未准备」（那两个词没有意义）"));
+            // 对局进行中的 `room` 事件**不得**把界面切回等待室（掉线会触发一次广播）
+            check(w.stackPageForTest() == QLatin1String("table"),
+                  QStringLiteral("托管：对局中的 room 事件不该把界面切回等待室"));
+        }
+
+        // ---- ③ 投票条：可见性 / 组包 / 冷却 ----
+        {
+            MainWindow w;
+            QVector<QJsonObject> sent;
+            w.setCommandTapForTest([&sent](const QJsonObject& o) { sent.append(o); });
+            check(w.voteEndButtonForTest() != nullptr && w.voteAgreeButtonForTest() != nullptr
+                          && w.voteDisagreeButtonForTest() != nullptr
+                          && w.voteLabelForTest() != nullptr,
+                  QStringLiteral("投票：投票条三个按钮与状态行都在"));
+            check(w.voteEndButtonForTest()->isHidden(),
+                  QStringLiteral("投票：还没开局时「结束对局」不显示"));
+
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"game_start","replay_id":"","seats":[],)"
+                    R"("round":{"bakaze":"E","kyoku":1,"honba":0}})"));
+            check(!w.voteEndButtonForTest()->isHidden(),
+                  QStringLiteral("投票：牌局中「结束对局」按钮出现"));
+            check(w.voteEndButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：没有冷却时可以发起"));
+
+            sent.clear();
+            w.voteEndButtonForTest()->click();
+            check(!sent.isEmpty()
+                          && sent.last().value(QStringLiteral("cmd")).toString()
+                                  == QLatin1String("vote_end"),
+                  QStringLiteral("投票：点「结束对局」发 vote_end"));
+
+            // 服务端广播"有人发起了投票"（by=1 = 别家）
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"vote_start","by":1,"need":2,"total":3,"deadline_ms":60000})"));
+            check(!w.voteAgreeButtonForTest()->isHidden()
+                          && !w.voteDisagreeButtonForTest()->isHidden(),
+                  QStringLiteral("投票：进行中才出现「同意 / 不同意」"));
+            check(w.voteAgreeButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：我还没表态，可以点"));
+            check(!w.voteEndButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：投票进行中不能再发起"));
+
+            sent.clear();
+            w.voteAgreeButtonForTest()->click();
+            check(!sent.isEmpty()
+                          && sent.last().value(QStringLiteral("cmd")).toString()
+                                  == QLatin1String("vote")
+                          && sent.last().value(QStringLiteral("agree")).toBool(),
+                  QStringLiteral("投票：点「同意」发 vote{agree:true}"));
+            check(!w.voteAgreeButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：表态后立刻锁住（防连点，服务端只认第一次）"));
+
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"vote_update","agree":2,"need":2,"total":3,"agreed":[0,1],)"
+                    R"("declined":[]})"));
+            check(w.voteLabelForTest()->text().contains(QStringLiteral("2/2")),
+                  QStringLiteral("投票：状态行显示票数（实际：%1）")
+                          .arg(w.voteLabelForTest()->text()));
+
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"vote_result","result":"rejected","agree":1,"need":2,"total":3,)"
+                    R"("reason":"impossible","cooldown_ms":300000})"));
+            check(w.voteAgreeButtonForTest()->isHidden()
+                          && w.voteDisagreeButtonForTest()->isHidden(),
+                  QStringLiteral("投票：出结论后收起「同意 / 不同意」"));
+            check(!w.voteEndButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：冷却期内不能发起（由服务端计时，客户端只显示）"));
+            check(w.voteLabelForTest()->text().contains(QStringLiteral("冷却")),
+                  QStringLiteral("投票：状态行显示冷却（实际：%1）")
+                          .arg(w.voteLabelForTest()->text()));
+
+            // 发起被服务端拒（冷却中）：客户端把倒计时补上，别一直显示"可发起"
+            w.feedEventForTest(parseEv(R"({"ev":"vote_denied","reason":"cooldown","wait_ms":120000})"));
+            check(!w.voteEndButtonForTest()->isEnabled(),
+                  QStringLiteral("投票：被拒（冷却）之后按钮仍然不可点"));
+
+            w.feedEventForTest(parseEv(
+                    R"({"ev":"game_end","final":[)"
+                    R"({"seat":0,"name":"甲","score":25000,"point":0,"uma":0,"rank":1}],)"
+                    R"("scores":[25000,25000,25000,25000],"ranking":[0,1,2,3],"reason":"vote"})"));
+            check(w.voteEndButtonForTest()->isHidden(),
+                  QStringLiteral("投票：整场结束后「结束对局」按钮收起"));
+        }
     }
 
     // ---------- 汇总 ----------

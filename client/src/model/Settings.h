@@ -22,6 +22,15 @@ struct Settings
     quint16 port = 10086;
     /** 昵称；空 = 用语言文件里的默认名（见 `ui.lobby.default_name`）。 */
     QString name;
+    /**
+     * 身份（uuid）：服务端在连接后问我们要它，同一个 uuid = 同一个玩家。
+     *
+     * <p>第一次玩时这里是空的 —— 服务端会生成一个并通过 `uuid_ok{issued:true}` 回发，
+     * 客户端**必须**把它存下来（见 `MainWindow::onEvent` 的 `uuid_ok` 分支），
+     * 下次连接带上它，服务端就认得你（掉线回来还能接回原座位）。
+     * 形状不对的值在 {@link #sanitize} 里被清掉（不报错、不阻断）。
+     */
+    QString uuid;
     /** 材质包路径：目录或 `.zip`。空 = 全用默认素材。 */
     QString pack;
     /** 音效总开关（缺省开）。 */

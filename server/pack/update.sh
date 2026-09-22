@@ -158,7 +158,7 @@ if [ -f mahjong-server.jar ]; then
   echo "==> 旧 jar 已备份到 $BAK（回滚：cp '$BAK' mahjong-server.jar && ./restart.sh）"
 fi
 
-echo "==> 安装新文件（保留 logs/ run/ replays/）"
+echo "==> 安装新文件（保留 logs/ run/ replays/ players/ —— 玩家档案不能被升级冲掉）"
 cp -f "$SRC/mahjong-server.jar" ./mahjong-server.jar
 for f in "$SRC"/*.sh; do
   [ -f "$f" ] || continue

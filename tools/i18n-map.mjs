@@ -86,6 +86,10 @@ export const MAP = {
     '终局': 'ui.result.title_game_end',
     '服务端错误：%1': 'ui.main.server_error',
     '错误：%1': 'ui.main.error_prefix',
+    // 掉线托管 / 身份（2026-09）
+    '  [掉线] ': 'ui.main.away_tag',
+    '已保存身份，下次连接会自动认出你': 'ui.main.identity_saved',
+    '身份保存失败：%1': 'ui.main.identity_save_failed',
   },
 
   'client/src/ui/LobbyDialog.cpp': {
@@ -236,6 +240,23 @@ export const MAP = {
  * 对应源码由人工改成 `lang::t("…")`（见 `HANDLED`）。
  */
 export const EXTRA = {
+  // ---- 结束对局投票（2026-09）----
+  // 与 ui.replay.* 同一套做法：源码里直接写 `lang::t("ui.vote.*")`，
+  // 文案在这里给一份 —— i18n-gen 照常写进语言文件，i18n-scan 看不到中文残留。
+  // 计票口径与冷却时长由**服务端**决定（见 docs/PROTOCOL.md §2.5/§3.12），这里只是措辞。
+  'ui.vote.end': '结束对局',
+  'ui.vote.end_tip': '发起投票结束本场：在场玩家超过半数同意即结束（不数机器人、不数掉线的人；由服务端计时，冷却 5 分钟）',
+  'ui.vote.agree': '同意',
+  'ui.vote.disagree': '不同意',
+  'ui.vote.idle': '可发起「结束对局」投票',
+  'ui.vote.running': '投票中：同意 %1/%2（在场 %3 人） · 剩 %4 秒',
+  'ui.vote.cooldown': '投票冷却中 · 剩 %1 秒',
+  'ui.vote.started': '%1 发起了结束对局的投票',
+  'ui.vote.passed': '投票通过，本场结束',
+  'ui.vote.rejected': '投票未通过（%1/%2 同意），本场继续',
+  'ui.vote.denied_cooldown': '投票冷却中，请稍后再试',
+  'ui.vote.denied_running': '已有投票正在进行',
+  'ui.vote.denied_not_playing': '不在对局中，无法发起投票',
   // ---- 服务端新增的错误码（回放接口）----
   'error.replay_not_found': '这条回放记录不存在（可能已被容量上限淘汰，或 ID 抄错了）',
   'error.replay_rate_limited': '回放请求太频繁，请稍等几秒再试',

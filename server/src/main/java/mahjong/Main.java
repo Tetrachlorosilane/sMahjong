@@ -3,6 +3,7 @@ package mahjong;
 import java.nio.file.Path;
 
 import mahjong.net.Server;
+import mahjong.player.PlayerStore;
 import mahjong.replay.ReplayStore;
 import mahjong.test.SelfTest;
 import mahjong.util.Log;
@@ -23,6 +24,11 @@ public final class Main {
         String replayDir = "replays";
         int replayMax = 50;
         long replayMaxMb = 96;
+        // 玩家档案（uuid）：同样**默认开启并落盘**（`./players`）。
+        // TTL 是需求里的"2 个月"，可用 `--uuid-ttl-days` 覆盖（0 = 只留本进程登录过的，便于自检/运维）。
+        boolean playerStore = true;
+        String playerDir = "players";
+        long uuidTtlDays = PlayerStore.DEFAULT_TTL_MS / 86400000L;
         // ---- 训练接口（自对弈）：见 mahjong.train.SelfPlay
         int selfplay = -1;
         long selfplaySeed = 20260101L;
@@ -68,6 +74,19 @@ public final class Main {
                     break;
                 case "--no-replay":
                     replay = false;
+                    break;
+                case "--player-dir":
+                    if (i + 1 < args.length) {
+                        playerDir = args[++i];
+                    }
+                    break;
+                case "--uuid-ttl-days":
+                    if (i + 1 < args.length) {
+                        uuidTtlDays = Long.parseLong(args[++i]);
+                    }
+                    break;
+                case "--no-player-store":
+                    playerStore = false;
                     break;
                 case "--fast":
                     // 自动化测试用：机器人不思考、局间不停顿（对局几秒钟跑完）
@@ -178,8 +197,40 @@ public final class Main {
         } else {
             Log.info("回放已关闭（--no-replay）");
         }
+        // 玩家档案：装库 + **启动时清一次过期**（超过 TTL 没登录的），之后每 6 小时一次。
+        // 维护线程是守护线程：它只做"清理 + 补落盘"，进程退出时不该被它拖住。
+        PlayerStore store = new PlayerStore(Path.of(playerDir),
+                uuidTtlDays * 86400000L, playerStore);
+        PlayerStore.install(store);
+        if (playerStore) {
+            int purged = store.purge(System.currentTimeMillis());
+            Log.info("玩家档案：" + store.summary() + (purged > 0 ? "，启动时清理 " + purged + " 份" : ""));
+            Thread upkeep = new Thread(() -> {
+                long lastPurge = System.currentTimeMillis();
+                while (true) {
+                    try {
+                        Thread.sleep(60_000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    store.flush();      // 节流落盘的补写
+                    if (System.currentTimeMillis() - lastPurge >= 6 * 3600_000L) {
+                        lastPurge = System.currentTimeMillis();
+                        store.purge(lastPurge);
+                    }
+                }
+            }, "player-upkeep");
+            upkeep.setDaemon(true);
+            upkeep.start();
+        } else {
+            Log.info("玩家档案已关闭（--no-player-store）：uuid 握手照常，只是不落盘");
+        }
         Server server = new Server(host, port);
-        Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "shutdown"));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            store.flush();          // 退出前把节流掉的档案补上
+            server.stop();
+        }, "shutdown"));
         server.start();
     }
 
@@ -193,6 +244,9 @@ public final class Main {
         System.out.println("  --replay-max <n>   最多保留多少场（默认 50，超出淘汰最旧）");
         System.out.println("  --replay-max-mb <n> 记录总字节上限（默认 96 MB）");
         System.out.println("  --no-replay        不记录对局");
+        System.out.println("  --player-dir <dir> 玩家档案目录（uuid → 昵称/登录时间，默认 players）");
+        System.out.println("  --uuid-ttl-days <n> 多久没登录就清理档案（默认 60 = 2 个月）");
+        System.out.println("  --no-player-store  不落盘玩家档案（uuid 握手照常，只是服务端不记得人）");
         System.out.println("  --fast             机器人不思考、局间不停顿（自动化测试用）");
         System.out.println("  --selftest         运行规则引擎自测后退出");
         System.out.println("  --help             显示帮助");

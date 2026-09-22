@@ -15,6 +15,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDateTime>
 #include <QFile>
 #include <QFont>
 #include <QGroupBox>
@@ -271,6 +272,36 @@ void MainWindow::buildTablePage()
     left->addWidget(m_spectateBar);
     left->addWidget(m_actions);
     left->addWidget(m_autoBar);
+    // 「结束对局」投票条：单独一行（在自动开关之下）。
+    // ⚠ 这一条**恒定存在**（按钮只在牌局中可见，行本身不增删）：它与自动开关一起夹着牌桌，
+    //   一旦某一行按需出现/消失，整张牌桌的高度就会跳一下（见 AGENTS §6.2）。
+    m_voteBar = new QWidget(m_tablePage);
+    {
+        auto* voteRow = new QHBoxLayout(m_voteBar);
+        voteRow->setContentsMargins(0, 0, 8, 4);
+        voteRow->setSpacing(6);
+        m_voteLabel = new QLabel(m_voteBar);
+        m_voteLabel->setStyleSheet(QStringLiteral("color:#9AA3B2;"));
+        m_voteEndBtn = new QPushButton(lang::t("ui.vote.end"), m_voteBar);
+        m_voteEndBtn->setToolTip(lang::t("ui.vote.end_tip"));
+        m_voteAgreeBtn = new QPushButton(lang::t("ui.vote.agree"), m_voteBar);
+        m_voteDisagreeBtn = new QPushButton(lang::t("ui.vote.disagree"), m_voteBar);
+        m_voteAgreeBtn->setVisible(false);
+        m_voteDisagreeBtn->setVisible(false);
+        voteRow->addWidget(m_voteLabel, 1);
+        voteRow->addWidget(m_voteAgreeBtn);
+        voteRow->addWidget(m_voteDisagreeBtn);
+        voteRow->addWidget(m_voteEndBtn);
+    }
+    left->addWidget(m_voteBar);
+    connect(m_voteEndBtn, &QPushButton::clicked, this, [this]() { requestVoteEnd(); });
+    connect(m_voteAgreeBtn, &QPushButton::clicked, this, [this]() { castVote(true); });
+    connect(m_voteDisagreeBtn, &QPushButton::clicked, this, [this]() { castVote(false); });
+    // 倒计时每秒刷一次（投票窗口 / 冷却）；**只影响显示**，真正的计时在服务端。
+    m_voteTick = new QTimer(this);
+    m_voteTick->setInterval(500);
+    connect(m_voteTick, &QTimer::timeout, this, [this]() { refreshVoteUi(); });
+    m_voteTick->start();
     root->addLayout(left, 1);
 
     auto* right = new QWidget(m_tablePage);
@@ -325,6 +356,17 @@ void MainWindow::showLobby()
     m_model.reset();
     m_ready = false;
     resetAutoFlags();   // 离开牌桌：自动开关也一并复位，别带进下一个房间
+    // 回到大厅 = 不在牌局里：投票条也一并复位（服务端的投票状态与这里无关，
+    // 下一次入局/开局会重新同步）
+    m_inGame = false;
+    m_voteRunning = false;
+    m_voteVoted = false;
+    m_voteAgree = 0;
+    m_voteNeed = 0;
+    m_voteTotal = 0;
+    m_voteDeadlineMs = 0;
+    m_voteCooldownUntilMs = 0;
+    refreshVoteUi();
     if (m_readyBtn)
         m_readyBtn->setText(lang::t("ui.main.ready"));
     if (m_lobby) {
@@ -385,12 +427,21 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
                        .arg(i)
                        .arg(o.value(QStringLiteral("name")).toString())
                        .arg(o.value(QStringLiteral("score")).toInt())
-                       .arg(o.value(QStringLiteral("ready")).toBool() ? lang::t("ui.main.is_ready")
-                                                                     : lang::t("ui.main.not_ready"))
-                       .arg(o.value(QStringLiteral("bot")).toBool() ? lang::t("ui.main.bot_tag")
-                                                                    : QString());
+                       .arg(o.value(QStringLiteral("away")).toBool()
+                                    ? QString()
+                                    : (o.value(QStringLiteral("ready")).toBool()
+                                               ? lang::t("ui.main.is_ready")
+                                               : lang::t("ui.main.not_ready")))
+                       .arg(o.value(QStringLiteral("bot")).toBool()
+                                    ? lang::t("ui.main.bot_tag")
+                                    : (o.value(QStringLiteral("away")).toBool()
+                                               ? lang::t("ui.main.away_tag")
+                                               : QString()));
         }
         m_seatLabels[i]->setText(text);
+        // 记下"谁掉线托管了"：牌桌上的分数栏要用它标出来（`room` 事件是对局中也会来的）
+        m_away[i] = i < seats.size() && seats.at(i).isObject()
+                && seats.at(i).toObject().value(QStringLiteral("away")).toBool();
         // 自选座位按钮：牌局进行中不可用；已经是我坐的那一格也不可用（点了没意义）
         if (m_takeSeatBtn[i]) {
             m_takeSeatBtn[i]->setEnabled(!playing && i != m_model.mySeat());
@@ -426,11 +477,14 @@ void MainWindow::updateScorePanel()
     html += QStringLiteral("<table cellspacing='0' cellpadding='3'>");
     for (int s = 0; s < 4; ++s) {
         const bool me = (s == m_model.mySeat());
+        // 掉线托管：分数栏上直接标出来（牌桌上唯一一处能看出"谁不在"的地方）——
+        // 托管的人仍然在打牌（自动摸切），看不见标记就只会觉得"他怎么突然不鸣牌了"。
+        const QString awayTag = m_away[s] ? lang::t("ui.main.away_tag") : QString();
         html += QStringLiteral("<tr><td>%1%2</td><td align='right'>%3</td><td>%4</td></tr>")
                     .arg(me ? QStringLiteral("<b>") : QString(),
                          // 玩家名是**用户数据**，进 HTML 前必须转义（与聊天同一套处理），
                          // 否则名字里的 `<`/`&` 会破坏表格结构、甚至注入标记。
-                         m_model.playerName(s).toHtmlEscaped()
+                         m_model.playerName(s).toHtmlEscaped() + awayTag
                              + (me ? QStringLiteral("</b>") : QString()))
                     .arg(m_model.score(s))
                     .arg(m_model.riichi(s) ? QStringLiteral("立") : QString());  // i18n-keep: 立直标记（字形，不是文案）
@@ -528,6 +582,112 @@ void MainWindow::sendCommand(const QJsonObject& obj)
         return;
     }
     m_net.sendCommand(obj);
+}
+
+QString MainWindow::stackPageForTest() const
+{
+    if (m_stack == nullptr) {
+        return QStringLiteral("other");
+    }
+    if (m_stack->currentWidget() == m_tablePage) {
+        return QStringLiteral("table");
+    }
+    if (m_stack->currentWidget() == m_waitPage) {
+        return QStringLiteral("wait");
+    }
+    return QStringLiteral("other");
+}
+
+// ================================================================= 结束对局投票
+
+/**
+ * 发起「结束对局」投票。
+ *
+ * <p>客户端**不做任何判定**：在不在对局、冷却好没好、谁算在场，全是服务端的事
+ * （它才看得到掉线托管与机器人）。这里只负责把命令发出去、把结果显示出来 ——
+ * 被拒时服务端回 `vote_denied`（带原因与还要等多久）。
+ */
+void MainWindow::requestVoteEnd()
+{
+    QJsonObject cmd;
+    cmd.insert(QStringLiteral("cmd"), QStringLiteral("vote_end"));
+    sendCommand(cmd);
+}
+
+/** 对进行中的投票表态（每人只算第一次，服务端负责去重）。 */
+void MainWindow::castVote(bool agree)
+{
+    if (!m_voteRunning || m_voteVoted)
+        return;
+    QJsonObject cmd;
+    cmd.insert(QStringLiteral("cmd"), QStringLiteral("vote"));
+    cmd.insert(QStringLiteral("agree"), agree);
+    sendCommand(cmd);
+    // 立刻本地锁住（别指望回包先到）：与 §2.3-9 的「重复点击」同一条经验 ——
+    // 按钮不禁用的话，连点两下就是两条表态（第二条虽然被服务端忽略，但界面会闪）。
+    m_voteVoted = true;
+    refreshVoteUi();
+}
+
+/**
+ * 按当前状态重画投票条。
+ *
+ * <p>三条口径：
+ *   · **能发起**：在牌局里、不是观战、没有投票进行中、不在冷却期；
+ *   · **能表态**：投票进行中且我还没表态（发起人算已表态 —— 服务端已经把他计成同意）；
+ *   · 文案里的倒计时只是**显示**，真正的窗口与冷却在服务端（`vote_result.cooldown_ms` /
+ *     `vote_denied.wait_ms`）；本地时间被改动也不会让规则松动。
+ */
+void MainWindow::refreshVoteUi()
+{
+    if (m_voteBar == nullptr)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_voteCooldownUntilMs != 0 && now >= m_voteCooldownUntilMs) {
+        m_voteCooldownUntilMs = 0;
+    }
+    const bool inGame = m_inGame && !m_model.spectating();
+
+    if (m_voteRunning) {
+        const qint64 left = m_voteDeadlineMs > 0 ? m_voteDeadlineMs - now : 0;
+        m_voteLabel->setText(lang::t("ui.vote.running")
+                                 .arg(m_voteAgree)
+                                 .arg(m_voteNeed)
+                                 .arg(m_voteTotal)
+                                 .arg(qMax<qint64>(0, (left + 999) / 1000)));
+    } else if (m_voteCooldownUntilMs > 0) {
+        const qint64 left = m_voteCooldownUntilMs - now;
+        const qint64 sec = qMax<qint64>(0, (left + 999) / 1000);
+        m_voteLabel->setText(lang::t("ui.vote.cooldown").arg(sec));
+    } else if (inGame) {
+        m_voteLabel->setText(lang::t("ui.vote.idle"));
+    } else {
+        m_voteLabel->clear();
+    }
+
+    m_voteEndBtn->setVisible(inGame);
+    m_voteEndBtn->setEnabled(inGame && !m_voteRunning && m_voteCooldownUntilMs == 0);
+    const bool canVote = inGame && m_voteRunning && !m_voteVoted;
+    m_voteAgreeBtn->setVisible(m_voteRunning && !m_model.spectating());
+    m_voteDisagreeBtn->setVisible(m_voteRunning && !m_model.spectating());
+    m_voteAgreeBtn->setEnabled(canVote);
+    m_voteDisagreeBtn->setEnabled(canVote);
+}
+
+/**
+ * 把**当前身份**（`m_settings.uuid`）写进设置文件。
+ *
+ * <p>调用点已经判过"需不需要写"（服务端给的是新身份、或本地还没有）；这里只负责落盘，
+ * 失败也不阻断游戏 —— 大不了下次连接再拿一个新身份。
+ */
+void MainWindow::saveIdentity()
+{
+    if (m_settings.uuid.isEmpty() || m_settingsPath.isEmpty())
+        return;
+    QString err;
+    if (!m_settings.save(m_settingsPath, &err)) {
+        statusBar()->showMessage(lang::t("ui.main.identity_save_failed").arg(err), 6000);
+    }
 }
 
 void MainWindow::onConnected()
@@ -892,7 +1052,70 @@ void MainWindow::onEvent(const QJsonObject& ev)
         if (ev.value(QStringLiteral("seat")).toInt(-1) == m_model.mySeat())
             sound::Player::instance().play(QLatin1String(sound::name::Draw), false);
     }
-    if (name == QLatin1String("hello_ok")) {        m_myPid = ev.value(QStringLiteral("pid")).toInt();
+    if (name == QLatin1String("uuid_ask")) {
+        // 服务端问身份（连接后立刻，见 PROTOCOL §2.0）：有就报上去，没有就报空 ——
+        // 它会给一个并要求我们保存。**这条命令允许在 hello 之前发**。
+        QJsonObject cmd;
+        cmd.insert(QStringLiteral("cmd"), QStringLiteral("uuid"));
+        if (!m_settings.uuid.isEmpty())
+            cmd.insert(QStringLiteral("uuid"), m_settings.uuid);
+        sendCommand(cmd);
+    } else if (name == QLatin1String("uuid_ok")) {
+        const QString got = ev.value(QStringLiteral("uuid")).toString();
+        if (!got.isEmpty() && got != m_settings.uuid) {
+            // 服务端给的身份是**权威**（`issued=true` 时就是它刚生成的）：
+            // 存下来，下次连接带上，服务端才认得出是同一个人。
+            m_settings.uuid = got;
+            saveIdentity();
+            statusBar()->showMessage(lang::t("ui.main.identity_saved"), 4000);
+        }
+    } else if (name == QLatin1String("vote_start")) {
+        m_voteRunning = true;
+        m_voteVoted = (ev.value(QStringLiteral("by")).toInt(-1) == m_model.mySeat());
+        m_voteAgree = m_voteVoted ? 1 : 0;      // 发起人已被服务端计为同意
+        m_voteNeed = ev.value(QStringLiteral("need")).toInt(0);
+        m_voteTotal = ev.value(QStringLiteral("total")).toInt(0);
+        m_voteDeadlineMs = QDateTime::currentMSecsSinceEpoch()
+                + ev.value(QStringLiteral("deadline_ms")).toInt(60000);
+        const int by = ev.value(QStringLiteral("by")).toInt(-1);
+        m_table->showToast(lang::t("ui.vote.started")
+                                   .arg(by >= 0 ? m_model.playerName(by) : QString()),
+                           QColor(0xFF, 0xD2, 0x4A));
+        refreshVoteUi();
+    } else if (name == QLatin1String("vote_update")) {
+        m_voteAgree = ev.value(QStringLiteral("agree")).toInt(0);
+        m_voteNeed = ev.value(QStringLiteral("need")).toInt(0);
+        m_voteTotal = ev.value(QStringLiteral("total")).toInt(0);
+        refreshVoteUi();
+    } else if (name == QLatin1String("vote_result")) {
+        const bool passed = ev.value(QStringLiteral("result")).toString() == QLatin1String("passed");
+        m_voteAgree = ev.value(QStringLiteral("agree")).toInt(0);
+        m_voteNeed = ev.value(QStringLiteral("need")).toInt(0);
+        m_voteTotal = ev.value(QStringLiteral("total")).toInt(0);
+        m_voteRunning = false;
+        m_voteVoted = false;
+        m_voteDeadlineMs = 0;
+        m_voteCooldownUntilMs = QDateTime::currentMSecsSinceEpoch()
+                + ev.value(QStringLiteral("cooldown_ms")).toInt(300000);
+        m_table->showToast(passed
+                                   ? lang::t("ui.vote.passed")
+                                   : lang::t("ui.vote.rejected").arg(m_voteAgree).arg(m_voteNeed),
+                           passed ? QColor(0x9F, 0xE8, 0xC4) : QColor(0xE8, 0xA8, 0xA8));
+        refreshVoteUi();
+    } else if (name == QLatin1String("vote_denied")) {
+        // 发起被拒：原因由服务端给（in game / 冷却中 / 已有投票），冷却时还带剩余时间
+        const QString reason = ev.value(QStringLiteral("reason")).toString();
+        if (reason == QLatin1String("cooldown")) {
+            m_voteCooldownUntilMs = QDateTime::currentMSecsSinceEpoch()
+                    + ev.value(QStringLiteral("wait_ms")).toInt(0);
+            statusBar()->showMessage(lang::t("ui.vote.denied_cooldown"), 5000);
+        } else if (reason == QLatin1String("running")) {
+            statusBar()->showMessage(lang::t("ui.vote.denied_running"), 5000);
+        } else {
+            statusBar()->showMessage(lang::t("ui.vote.denied_not_playing"), 5000);
+        }
+        refreshVoteUi();
+    } else if (name == QLatin1String("hello_ok")) {        m_myPid = ev.value(QStringLiteral("pid")).toInt();
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
         if (m_lobby)
             m_lobby->setStatus(lang::t("ui.main.handshake_done"));
@@ -926,7 +1149,17 @@ void MainWindow::onEvent(const QJsonObject& ev)
         updateWaitingRoom(ev);
         if (m_lobby && m_lobby->isVisible())
             m_lobby->hide();
-        m_stack->setCurrentWidget(m_waitPage);
+        // ⚠ 对局**进行中**的 `room` 事件（有人掉线托管 / 有人退出时服务端会广播）
+        //   **不能**把界面切回等待室 —— 否则四个正在打牌的人会突然看到"准备/开始游戏"。
+        //   旧代码无条件切页；以前"掉线 = 牌局立刻结束"，所以没人发现这一条。
+        if (ev.value(QStringLiteral("playing")).toBool()) {
+            m_inGame = true;
+            refreshVoteUi();
+            if (m_stack->currentWidget() != m_tablePage)
+                m_stack->setCurrentWidget(m_tablePage);
+        } else {
+            m_stack->setCurrentWidget(m_waitPage);
+        }
         setWindowTitle(lang::t("ui.main.room_window_title")
                            .arg(ev.value(QStringLiteral("id")).toString()));
     } else if (name == QLatin1String("left_room")) {
@@ -939,6 +1172,17 @@ void MainWindow::onEvent(const QJsonObject& ev)
     } else if (name == QLatin1String("game_start")) {
         m_room = QJsonObject();
         resetAutoFlags();   // 新的一场：自动开关一律从关闭开始
+        // 新的一场：投票条复位（上一场的冷却/结论不带到这一场；真要是服务端还在冷却，
+        // 一发 `vote_end` 就会收到 `vote_denied{cooldown}`，客户端再把倒计时补上）
+        m_inGame = true;
+        m_voteRunning = false;
+        m_voteVoted = false;
+        m_voteAgree = 0;
+        m_voteNeed = 0;
+        m_voteTotal = 0;
+        m_voteDeadlineMs = 0;
+        m_voteCooldownUntilMs = 0;
+        refreshVoteUi();
         // 记下这一场的回放 ID：结算界面的「看本局回放」要用它
         m_replayId = ev.value(QStringLiteral("replay_id")).toString();
         if (m_lobby && m_lobby->isVisible())
@@ -981,7 +1225,12 @@ void MainWindow::onEvent(const QJsonObject& ev)
         // `spectate` 事件之后才到，所以两条路都要摆一次 UI）。
         const bool spect = ev.value(QStringLiteral("spectate")).toBool(false)
                 || ev.value(QStringLiteral("seat")).toInt(0) < 0;
+        // 快照说"正在打" → 进入牌局状态（掉线接回座位时走的就是这条路）
+        if (ev.value(QStringLiteral("phase")).toString() == QLatin1String("playing")) {
+            m_inGame = true;
+        }
         setSpectatingUi(spect);
+        refreshVoteUi();
         if (spect) {
             if (m_lobby != nullptr)
                 m_lobby->hide();
@@ -1157,6 +1406,12 @@ void MainWindow::onEvent(const QJsonObject& ev)
         }
     } else if (name == QLatin1String("game_end")) {
         closeResultDialog(false);
+        // 本场结束：投票条收起来（结果由结算弹窗给）
+        m_inGame = false;
+        m_voteRunning = false;
+        m_voteVoted = false;
+        m_voteDeadlineMs = 0;
+        refreshVoteUi();
         // 终局报文里也带 replay_id（game_start 没收到时兜底）
         const QString endId = ev.value(QStringLiteral("replay_id")).toString();
         if (!endId.isEmpty()) {

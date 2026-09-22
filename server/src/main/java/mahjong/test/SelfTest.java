@@ -18,6 +18,9 @@ import mahjong.game.RoundScoring;
 import mahjong.game.Round;
 import mahjong.game.WinCheck;
 import mahjong.game.Table;
+import mahjong.net.Server;
+import mahjong.net.Session;
+import mahjong.player.PlayerStore;
 import mahjong.rules.Agari;
 import mahjong.rules.Evaluator;
 import mahjong.rules.Payments;
@@ -79,6 +82,11 @@ public final class SelfTest {
         meldAkaPickTests();
         seatSwapTests();
         discardAlignTests();
+        // 身份（uuid → 玩家档案）/ 掉线托管 / 结束对局投票（2026-09 需求）
+        playerStoreTests();
+        awaySeatTests();
+        awayPlayTests();
+        voteTests();
         nagashiLivePathTest();
         simulationTest();
         rinshanTests();
@@ -5444,6 +5452,501 @@ public final class SelfTest {
             }
         }
         return false;
+    }
+
+    // ------------------------------------------------------------- 身份（uuid）与玩家档案
+
+    /**
+     * 玩家档案（uuid → 玩家信息）：形状校验、登录记账、TTL 清理、向前兼容、原子落盘。
+     *
+     * <p>需求（2026-09）：「以同样的 uuid 连接视为同一玩家」「每个 uuid 具有一个时间戳，
+     * 登录时更新」「定期清理超过 2 个月未登录的 uuid」「uuid 未来将作为主键保存玩家的相关信息」。
+     * 最后一条决定了这里的前两条断言（**认不出的键必须原样保留**）—— 主键归档最怕的就是
+     * "跑一次旧版本，把新版本写的字段抹掉了"。
+     */
+    private static void playerStoreTests() {
+        // ---------- ① 形状：宽进严出 ----------
+        check("uuid：合法 v4 形状通过", PlayerStore.validUuid("6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e"));
+        check("uuid：大写也收（输入宽进）", PlayerStore.validUuid("6F1C1F0E-8F4A-4A1F-9D5F-2C3A4B5C6D7E"));
+        eq("uuid：规范化成小写（输出严出）",
+                PlayerStore.normalize("6F1C1F0E-8F4A-4A1F-9D5F-2C3A4B5C6D7E"),
+                "6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e");
+        check("uuid：长度不对 → 不合法", !PlayerStore.validUuid("6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7"));
+        check("uuid：分隔位不对 → 不合法", !PlayerStore.validUuid("6f1c1f0e8-f4a-4a1f-9d5f-2c3a4b5c6d7e"));
+        check("uuid：非十六进制 → 不合法", !PlayerStore.validUuid("zzzzzzzz-8f4a-4a1f-9d5f-2c3a4b5c6d7e"));
+        check("uuid：空串 → 不合法", !PlayerStore.validUuid(""));
+        check("uuid：null → 不合法", !PlayerStore.validUuid(null));
+        eq("uuid：不规范的东西 normalize 成 null（调用方据此当「没有记录」）",
+                PlayerStore.normalize("not-a-uuid"), null);
+        // 生成器必须**每次都不一样**（它是身份凭据，也是"接回座位"的唯一钥匙）
+        String g1 = PlayerStore.newUuid();
+        String g2 = PlayerStore.newUuid();
+        check("uuid：生成的都是合法形状：" + g1, PlayerStore.validUuid(g1) && PlayerStore.validUuid(g2));
+        check("uuid：两次生成不重复", !g1.equals(g2));
+
+        // ---------- ② 登录记账 / TTL 清理 / 落盘往返 ----------
+        java.nio.file.Path dir = null;
+        PlayerStore prev = PlayerStore.current();
+        try {
+            dir = java.nio.file.Files.createTempDirectory("mj-players");
+            final long day = 86400000L;
+            final long t0 = 1_700_000_000_000L;      // 固定"现在"，避免依赖真实时钟
+            PlayerStore store = new PlayerStore(dir, 60 * day, true);
+            PlayerStore.install(store);
+            eq("档案：新库是空的", store.count(), 0);
+            eq("档案：空库里查不到东西", store.get(g1), null);
+
+            PlayerStore.Login l1 = store.touch(g1, "甲", t0);
+            check("档案：第一次登录 = 新建", l1 != null && l1.isNew);
+            eq("档案：新建后计数 1", store.count(), 1);
+            eq("档案：昵称记下了", store.get(g1).name, "甲");
+            eq("档案：创建时间 = 本次登录时间", store.get(g1).created, t0);
+            eq("档案：登录时间 = 本次登录时间", store.get(g1).lastLogin, t0);
+            eq("档案：登录次数 1", store.get(g1).logins, 1);
+
+            PlayerStore.Login l2 = store.touch(g1, "甲改名", t0 + 5 * day);
+            check("档案：第二次登录不是新建", l2 != null && !l2.isNew);
+            eq("档案：还是同一份档案（同一个 uuid = 同一个玩家）", store.count(), 1);
+            eq("档案：登录时间被更新", store.get(g1).lastLogin, t0 + 5 * day);
+            eq("档案：创建时间不动", store.get(g1).created, t0);
+            eq("档案：登录次数 2", store.get(g1).logins, 2);
+            eq("档案：昵称跟着更新（显示以昵称为准）", store.get(g1).name, "甲改名");
+
+            // 昵称未知时（uuid 比 hello 先到）不能把旧昵称抹成空
+            store.touch(g1, "", t0 + 6 * day);
+            eq("档案：空昵称不会抹掉已记下的昵称", store.get(g1).name, "甲改名");
+            store.rename(g1, "甲三改");
+            eq("档案：rename 只改昵称", store.get(g1).name, "甲三改");
+            eq("档案：rename 不动登录次数", store.get(g1).logins, 3);
+            eq("档案：rename 不动登录时间", store.get(g1).lastLogin, t0 + 6 * day);
+
+            // 另一个 uuid 是"另一个人"
+            store.touch(g2, "乙", t0 + 1 * day);
+            eq("档案：另一个 uuid = 另一个人", store.count(), 2);
+
+            // ---------- ③ TTL：2 个月（60 天）为界，**严格大于**才算过期 ----------
+            // g1 上次登录 t0+6 天，g2 上次登录 t0+1 天。
+            eq("档案：整整 60 天还不算过期（判据是严格大于）",
+                    store.purge(t0 + 1 * day + 60 * day), 0);
+            eq("档案：此时两份都还在", store.count(), 2);
+            int removed = store.purge(t0 + 1 * day + 60 * day + 1);
+            eq("档案：超过 60 天未登录 → 清掉", removed, 1);
+            eq("档案：被清掉的是久未登录的那个", store.get(g2), null);
+            eq("档案：刚登录过的那个留着", store.get(g1) == null ? null : store.get(g1).name, "甲三改");
+            eq("档案：清理后只剩一份", store.count(), 1);
+
+            // ---------- ④ 向前兼容：认不出的键原样保留 ----------
+            store.get(g1).extra.put("games_played", 128);
+            store.get(g1).extra.put("future", Json.obj("nested", 1));
+            store.save();
+            PlayerStore reloaded = new PlayerStore(dir, 60 * 86400000L, true);
+            PlayerStore.install(reloaded);
+            eq("档案：重启后仍能读到", reloaded.count(), 1);
+            eq("档案：重启后昵称还在", reloaded.get(g1).name, "甲三改");
+            eq("档案：重启后登录次数还在", reloaded.get(g1).logins, 3);
+            eq("档案：认不出的键（主键归档要能长）原样保留",
+                    Json.i(reloaded.get(g1).extra, "games_played", -1), 128);
+            check("档案：认不出的**结构化**键也原样保留（嵌套 map 不丢）",
+                    reloaded.get(g1).extra.get("future") instanceof Map);
+
+            // ---------- ⑤ 坏文件不能让服务端起不来（备份 .bak，从空库继续） ----------
+            java.nio.file.Files.writeString(dir.resolve("players.json"), "{ 这不是 json ");
+            PlayerStore broken = new PlayerStore(dir, 60 * 86400000L, true);
+            eq("档案：坏文件 → 空库（不抛异常、不影响启动）", broken.count(), 0);
+            check("档案：坏文件被备份成 .bak（不直接扔掉）",
+                    java.nio.file.Files.exists(dir.resolve("players.json.bak")));
+
+            // ---------- ⑥ 关闭时不落盘，但形状照旧（--no-player-store） ----------
+            PlayerStore off = new PlayerStore(dir, 60 * 86400000L, false);
+            eq("档案：关闭时不加载（空库）", off.count(), 0);
+            eq("档案：关闭时不记账", off.touch(g1, "甲", t0), null);
+            eq("档案：关闭时 purge 是空操作", off.purge(t0 + 999 * 86400000L), 0);
+        } catch (Exception e) {
+            check("玩家档案用例本身抛异常：" + e, false);
+        } finally {
+            PlayerStore.install(prev);
+            if (dir != null) {
+                try {
+                    java.nio.file.Files.walk(dir)
+                            .sorted(java.util.Comparator.reverseOrder())
+                            .forEach(p -> {
+                                try {
+                                    java.nio.file.Files.deleteIfExists(p);
+                                } catch (Exception ignored) {
+                                    // 清理失败无所谓（临时目录）
+                                }
+                            });
+                } catch (Exception ignored) {
+                    // 同上
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- 掉线托管 / 投票
+
+    /**
+     * 造一个"没有线程"的假连接（回环 socket 对）。
+     *
+     * <p>为什么要真 socket：`Seat.session` 是判定"这一家有没有人在"的唯一依据
+     * （托管、投票分母、`awaitAction` 早退都看它），而 `Session` 的构造函数要一个
+     * `Socket`。这里**不启动**它的读写线程 —— 于是它不会自己发/收任何报文，
+     * 正是"人在但不动"的最小模型。
+     */
+    private static Session fakeSession(Server server, java.net.ServerSocket ss) throws Exception {
+        java.net.Socket client = new java.net.Socket("127.0.0.1", ss.getLocalPort());
+        java.net.Socket peer = ss.accept();
+        client.setTcpNoDelay(true);
+        fakeClientSockets.add(client);
+        Session s = new Session(server, peer);
+        s.pid = server.nextPid();
+        s.welcomed = true;
+        return s;
+    }
+
+    /** 假连接的对端（本进程侧）：用例结束时一起关掉，别在自检里漏 fd。 */
+    private static final List<java.net.Socket> fakeClientSockets = new ArrayList<>();
+
+    private static void closeFakeClients() {
+        for (java.net.Socket c : fakeClientSockets) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+                // 关闭失败无所谓
+            }
+        }
+        fakeClientSockets.clear();
+    }
+
+    /**
+     * 掉线托管（`docs/PROTOCOL.md` §3.13）：**不换机器人**、座位保留、四家全掉线才回收。
+     *
+     * <p>这是用户口径的一次**反向修改**：原来掉线就转机器人代打。现在的判据：
+     * 托管的一格 `away=true` / `bot=false` / `session=null`，座位仍然**占着**
+     * （`occupied()` 为真、`firstEmptySeat()` 不会把它交出去），人还能用同一个 uuid 接回来。
+     */
+    private static void awaySeatTests() {
+        java.net.ServerSocket ss = null;
+        List<Session> sessions = new ArrayList<>();
+        try {
+            Server server = new Server("127.0.0.1", 0);
+            ss = new java.net.ServerSocket(0);
+            Table t = new Table("AWAY", "托管桌", Rules.defaults());
+            t.botDelayMs = 0;
+            t.roundDelayMs = 0;
+            for (int i = 0; i < 4; i++) {
+                Session s = fakeSession(server, ss);
+                sessions.add(s);
+                t.seat(i).session = s;
+                t.seat(i).pid = s.pid;
+                t.seat(i).name = "P" + i;
+                t.seat(i).uuid = String.format("0000000%d-0000-4000-8000-000000000000", i);
+                t.seat(i).ready = true;
+                s.table = t;
+                s.seat = i;
+            }
+            t.hostPid = t.seat(2).pid;
+            t.playing = true;
+
+            eq("托管：四家都在时 eligible 是四家", t.eligibleVoters().length, 4);
+            eq("托管：0 号不是托管", t.seatOfUuid("00000000-0000-4000-8000-000000000000"), -1);
+
+            // ---------- 掉线 ----------
+            t.onSessionClosed(t.seat(1).session);
+            eq("托管：掉线后 session 置空", t.seat(1).session, null);
+            eq("托管：掉线后**不换机器人**（用户要求）", t.seat(1).bot, false);
+            eq("托管：掉线后标成 away", t.seat(1).away, true);
+            check("托管：座位仍算被占着（别人不能顶掉）", t.seat(1).occupied());
+            eq("托管：昵称保留（桌上还看得到他）", t.seat(1).name, "P1");
+            check("托管：firstEmptySeat 不会把托管的位置交出去",
+                    t.firstEmptySeat() != 1);
+            eq("托管：已经不能投票了（不在场）", t.eligibleVoters().length, 3);
+            eq("托管：按 uuid 能找回他的座位", t.seatOfUuid(t.seat(1).uuid), 1);
+
+            // ---------- 主动退房也走同一条路 ----------
+            Table t2 = new Table("AWAY2", "托管桌2", Rules.defaults());
+            t2.playing = true;
+            Session s5 = fakeSession(server, ss);
+            sessions.add(s5);
+            t2.seat(0).session = s5;
+            t2.seat(0).pid = s5.pid;
+            t2.seat(0).name = "Q0";
+            t2.seat(0).uuid = "aaaaaaaa-0000-4000-8000-000000000000";
+            t2.hostPid = s5.pid;
+            t2.markAway(0);
+            eq("托管：主动退出同样标 away", t2.seat(0).away, true);
+            eq("托管：主动退出同样不换机器人", t2.seat(0).bot, false);
+
+            // ---------- 房主转移：掉线的房主不能把整桌锁死 ----------
+            eq("托管：房主掉线前是 2 号", t.hostPid, t.seat(2).pid);
+            t.onSessionClosed(t.seat(2).session);
+            check("托管：房主掉线 → 房主转给仍在场的第一位真人",
+                    t.hostPid != t.seat(2).pid && t.seatOfPid(t.hostPid) >= 0);
+            eq("托管：新房主是 0 号（座位顺序第一位在线的）", t.seatOfPid(t.hostPid), 0);
+
+            // ---------- 四家全掉线：**依旧回收** ----------
+            final boolean[] recycled = {false};
+            t.onEmpty = () -> recycled[0] = true;
+            for (Session s : new ArrayList<>(sessions)) {
+                if (s.table == t) {
+                    t.onSessionClosed(s);
+                }
+            }
+            check("托管：四家都掉线 → 房间依旧回收（用户要求）", recycled[0] && t.stopped());
+            for (int i = 0; i < 4; i++) {
+                eq("托管：全掉线后四格都是 away", t.seat(i).away, true);
+            }
+            int bots = 0;
+            for (int i = 0; i < 4; i++) {
+                if (t.seat(i).bot) {
+                    bots++;
+                }
+            }
+            eq("托管：全掉线后一个机器人都没造出来", bots, 0);
+        } catch (Exception e) {
+            check("托管用例本身抛异常：" + e, false);
+        } finally {
+            for (Session s : sessions) {
+                try {
+                    s.close();
+                } catch (RuntimeException ignored) {
+                    // 关闭失败无所谓
+                }
+            }
+            closeFakeClients();
+            if (ss != null) {
+                try {
+                    ss.close();
+                } catch (Exception ignored) {
+                    // 同上
+                }
+            }
+        }
+    }
+
+    /**
+     * 掉线托管在**牌局里**的真实行为：自动摸切、绝不鸣牌、绝不替他做决定。
+     *
+     * <p>对照组（同一张牌桌、同一个种子，但那一格是机器人）证明这些断言**不是空转**：
+     * 机器人座位会走 `decideBot`（有决策记录），托管座位一次都没有。
+     */
+    private static void awayPlayTests() {
+        // ---------- ① 托管的那一家：只摸切 ----------
+        Table t = new Table("AWAYPLAY", "托管对局", Rules.defaults());
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        t.debugDeterministicSeed = true;
+        t.seedBase = 20260921L;
+        for (int i = 1; i < 4; i++) {
+            t.addBot(i);
+        }
+        // 0 号：有人在座 → 但连接断了（away）。不调 addBot，也不给 session。
+        t.seat(0).name = "掉线的人";
+        t.seat(0).away = true;
+        t.seat(0).uuid = "bbbbbbbb-0000-4000-8000-000000000000";
+        t.seat(0).ready = true;
+        final List<String> awayDiscards = new ArrayList<>();
+        final List<String> awayMelds = new ArrayList<>();
+        final List<Integer> awayChoices = new ArrayList<>();
+        t.debugEventTap = (to, ev) -> {
+            String name = Json.str(ev, "ev", "");
+            if ("discard".equals(name) && Json.i(ev, "seat", -1) == 0) {
+                awayDiscards.add(Json.str(ev, "tile", "") + "/" + Json.bool(ev, "tsumogiri", false));
+            }
+            if ("meld".equals(name) && Json.i(ev, "seat", -1) == 0) {
+                awayMelds.add(Json.str(ev, "kind", ""));
+            }
+            if ("ask".equals(name) && to == 0) {
+                awayChoices.add(1);      // 收到询问 = 服务端打算让他做决定
+            }
+        };
+        t.debugChoiceTap = (d, cmd) -> {
+            if (d.seat() == 0) {
+                awayChoices.add(2);      // 走了策略漏斗 = 代打
+            }
+        };
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 20260921L);
+        r.play();
+        check("托管对局：那一局确实打起来了（家 0 打出过牌）：" + awayDiscards.size(),
+                awayDiscards.size() > 0);
+        boolean allTsumogiri = true;
+        for (String s : awayDiscards) {
+            if (!s.endsWith("/true")) {
+                allTsumogiri = false;
+            }
+        }
+        check("托管对局：托管者的每一张牌都是**摸切**（" + awayDiscards.size() + " 张）", allTsumogiri);
+        eq("托管对局：托管者从不鸣牌（不吃碰杠）", awayMelds.size(), 0);
+        eq("托管对局：托管者既没收到询问、也没走代打漏斗", awayChoices.size(), 0);
+
+        // ---------- ② 对照组：同一格换成机器人 ----------
+        Table b = new Table("AWAYBOT", "机器人对局", Rules.defaults());
+        b.botDelayMs = 0;
+        b.roundDelayMs = 0;
+        b.debugDeterministicSeed = true;
+        b.seedBase = 20260921L;
+        for (int i = 0; i < 4; i++) {
+            b.addBot(i);
+        }
+        final List<Integer> botChoices = new ArrayList<>();
+        b.debugChoiceTap = (d, cmd) -> {
+            if (d.seat() == 0) {
+                botChoices.add(1);
+            }
+        };
+        Round rb = new Round(b, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 20260921L);
+        rb.play();
+        check("托管对局（对照）：机器人座位**确实会**走决策漏斗（否则上面那条是空转）："
+                + botChoices.size(), botChoices.size() > 0);
+    }
+
+    /**
+     * 「结束对局」投票：门槛算式、分母口径、通过/否决、冷却，以及**把牌局线程叫醒**。
+     *
+     * <p>需求原文：「如果有多于半数（不包括半数，不计数机器人或未在场的玩家）玩家同意结束对局，
+     * 则对局结束，否则对局继续，投票功能全员冷却5分钟（由服务端记时）」。
+     */
+    private static void voteTests() {
+        // ---------- ① 门槛：严格多于半数 ----------
+        eq("投票：1 人需要 1 票（1 > 0.5）", Table.votesNeeded(1), 1);
+        eq("投票：2 人需要 2 票（2 > 1）", Table.votesNeeded(2), 2);
+        eq("投票：3 人需要 2 票（2 > 1.5）", Table.votesNeeded(3), 2);
+        eq("投票：4 人需要 3 票（3 > 2）", Table.votesNeeded(4), 3);
+        eq("投票：半数**不算**通过（2 人 1 票、4 人 2 票）",
+                Table.votesNeeded(4) > 2, true);
+
+        java.net.ServerSocket ss = null;
+        List<Session> sessions = new ArrayList<>();
+        try {
+            Server server = new Server("127.0.0.1", 0);
+            ss = new java.net.ServerSocket(0);
+            Table t = new Table("VOTE", "投票桌", Rules.defaults());
+            t.playing = true;
+            for (int i = 0; i < 3; i++) {          // 三家真人 + 一家机器人（分母 = 3）
+                Session s = fakeSession(server, ss);
+                sessions.add(s);
+                t.seat(i).session = s;
+                t.seat(i).pid = s.pid;
+                t.seat(i).name = "V" + i;
+            }
+            t.addBot(3);
+            eq("投票：分母不数机器人", t.eligibleVoters().length, 3);
+
+            // ---------- ② 发起 → 表态 → 通过 ----------
+            t.requestVoteEnd(0);
+            check("投票：发起后进入进行中", t.voteRunning());
+            t.castVote(2, false);
+            check("投票：1 同意 1 反对（需要 2）还不到结论", t.voteRunning());
+            t.castVote(1, true);
+            check("投票：2/3 同意 = 通过", !t.voteRunning());
+            check("投票：通过后牌局标记为『投票结束』", t.voteEnded());
+            check("投票：通过后进入全员冷却", t.voteCooldownLeft() > 4 * 60_000L);
+
+            // 冷却期内谁都不能再发起
+            t.requestVoteEnd(1);
+            check("投票：冷却期内再发起会被拒（仍然没有进行中的投票）", !t.voteRunning());
+
+            // ---------- ③ 不可能够票 → 当场否决（不干等 60 秒） ----------
+            Table t2 = new Table("VOTE2", "投票桌2", Rules.defaults());
+            t2.playing = true;
+            for (int i = 0; i < 3; i++) {
+                Session s = fakeSession(server, ss);
+                sessions.add(s);
+                t2.seat(i).session = s;
+                t2.seat(i).pid = s.pid;
+                t2.seat(i).name = "W" + i;
+            }
+            t2.addBot(3);
+            t2.requestVoteEnd(0);
+            check("投票：第二次发起（另一桌，没有冷却）成功", t2.voteRunning());
+            t2.castVote(1, false);
+            t2.castVote(2, false);
+            check("投票：剩下的人全同意也不够 → 立刻否决（不等窗口到点）", !t2.voteRunning());
+            check("投票：否决后**不是**投票结束（牌局继续）", !t2.voteEnded());
+            check("投票：否决后同样进入冷却", t2.voteCooldownLeft() > 4 * 60_000L);
+
+            // ---------- ④ 不在场的人不参与：托管 / 机器人 / 观战 ----------
+            Table t3 = new Table("VOTE3", "投票桌3", Rules.defaults());
+            t3.playing = true;
+            for (int i = 0; i < 4; i++) {
+                Session s = fakeSession(server, ss);
+                sessions.add(s);
+                t3.seat(i).session = s;
+                t3.seat(i).pid = s.pid;
+                t3.seat(i).name = "X" + i;
+            }
+            t3.markAway(2);
+            t3.markAway(3);
+            eq("投票：托管的两家不算分母（4 人掉 2 人 → 2）", t3.eligibleVoters().length, 2);
+            t3.requestVoteEnd(0);
+            t3.castVote(2, true);      // 托管的人发投票：忽略
+            check("投票：托管者的表态被忽略（仍然只差 1 票）", t3.voteRunning());
+            t3.castVote(1, true);
+            check("投票：2 人里 2 票通过（分母口径 = 在场人数）", !t3.voteRunning() && t3.voteEnded());
+
+            // ---------- ⑤ 不在对局中不能发起 ----------
+            Table t4 = new Table("VOTE4", "投票桌4", Rules.defaults());
+            t4.playing = false;
+            Session s4 = fakeSession(server, ss);
+            sessions.add(s4);
+            t4.seat(0).session = s4;
+            t4.seat(0).pid = s4.pid;
+            t4.requestVoteEnd(0);
+            check("投票：不在对局中发起 → 不进入投票", !t4.voteRunning() && !t4.voteEnded());
+
+            // ---------- ⑥ **叫醒牌局线程**：投票通过必须立刻让等牌的那一方收工 ----------
+            Table t5 = new Table("VOTE5", "投票桌5", Rules.defaults());
+            t5.botDelayMs = 0;
+            t5.playing = true;
+            Session s5 = fakeSession(server, ss);
+            sessions.add(s5);
+            t5.seat(0).session = s5;
+            t5.seat(0).pid = s5.pid;
+            t5.seat(0).name = "Z0";
+            for (int i = 1; i < 4; i++) {
+                t5.addBot(i);
+            }
+            // 0 号是唯一在场的人：他一个人就有"多于半数"（1 > 0.5）→ 发起即通过。
+            // 牌局线程这边正阻塞在等 0 号出牌（30 秒超时）—— 必须被叫醒。
+            final Table t5f = t5;
+            Thread voter = new Thread(() -> {
+                try {
+                    Thread.sleep(120);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                t5f.requestVoteEnd(0);
+            }, "vote-thread");
+            voter.setDaemon(true);
+            long t0 = System.currentTimeMillis();
+            voter.start();
+            Map<String, Object> act = t5.awaitAction(0, 1L, 30_000L);
+            long elapsed = System.currentTimeMillis() - t0;
+            voter.join(3000);
+            check("投票：通过后**叫醒了**阻塞等牌的牌局线程（实测 " + elapsed + "ms，上限 30s）",
+                    elapsed < 5000);
+            eq("投票：收工时按「没有答复」处理（调用方走默认摸切）", act, null);
+            check("投票：收工时 voteEnded 为真", t5.voteEnded());
+        } catch (Exception e) {
+            check("投票用例本身抛异常：" + e, false);
+        } finally {
+            for (Session s : sessions) {
+                try {
+                    s.close();
+                } catch (RuntimeException ignored) {
+                    // 关闭失败无所谓
+                }
+            }
+            closeFakeClients();
+            if (ss != null) {
+                try {
+                    ss.close();
+                } catch (Exception ignored) {
+                    // 同上
+                }
+            }
+        }
     }
 
 }

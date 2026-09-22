@@ -32,9 +32,22 @@
     DEPLOY.md            部署细节：防火墙、systemd、WSL 端口转发、思考时间等
     logs/  run/          运行期产生（日志 / PID / 备份），升级时会保留
     replays/             对局记录（服务端写，回放界面读）
+    players/             玩家档案（uuid → 昵称/登录时间），升级时会保留，见下
 
-三、更新
---------
+三、身份与更新
+--------------
+
+**玩家身份（uuid）**：客户端第一次连上会拿到一个 uuid（存在它自己的 `settings.json` 里），
+服务端按 uuid 记一份档案（昵称、首次/最近登录时间、登录次数）。同一个 uuid = 同一个玩家：
+牌局中掉线的人只要用同一个 uuid 连回来，就会**接回原座位**（牌局不重开、手牌不重发）。
+超过 60 天没登录的档案会被自动清理。`players/` 是**要备份**的目录（里面有玩家身份），
+它和 `replays/` 一样在升级时原样保留。相关开关（跟在 `./start.sh` 后面透传）：
+
+    --player-dir <dir>     档案目录（默认 players）
+    --uuid-ttl-days <n>    多久没登录就清理（默认 60 天）
+    --no-player-store      不落盘（uuid 握手照常，只是服务端不记得人）
+
+**更新**：
 
     ./update.sh --check   # 只查有没有新版（不动任何东西）
     ./update.sh           # 装最新版；本来在跑就自动重启
@@ -51,3 +64,5 @@
 * 客户端连不上 → `./status.sh` 看端口；云主机还要放行安全组/防火墙（见 DEPLOY.md）。
 * 想开机自启 / 交给 systemd 管 → 见 DEPLOY.md 的 systemd 单元示例（
   `systemctl start mahjong` 那套；用 systemd 时就不必再用 start.sh 常驻了）。
+* 换了机器或重装了服务端之后"玩家身份没了" → 看看 `players/` 有没有跟过来（见上）。
+

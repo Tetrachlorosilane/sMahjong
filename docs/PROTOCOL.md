@@ -75,6 +75,42 @@
 
 ## 2. 客户端 → 服务端（`cmd`）
 
+### 2.0 身份（uuid）握手 —— 连接后的第一件小事
+
+```jsonc
+// 服务端 → 客户端：连接建立后**立即**发（不等 hello）
+{"ev":"uuid_ask"}
+
+// 客户端 → 服务端：收到 uuid_ask 后回；有记录就带上，没有就发空
+{"cmd":"uuid","uuid":"6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e"}
+{"cmd":"uuid"}                                    // 第一次玩：客户端没有记录
+
+// 服务端 → 客户端：最终身份
+{"ev":"uuid_ok","uuid":"6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e",
+ "issued":false,"new_player":false}
+```
+
+- `uuid` 的形状固定为 **36 字符小写 8-4-4-4-12 十六进制**（RFC 4122 文本形式，如
+  `6f1c1f0e-8f4a-4a1f-9d5f-2c3a4b5c6d7e`）。形状不对 = **当作"没有记录"**（服务端重新生成），
+  **不报错**。
+- `issued = true` 表示**这个 uuid 是服务端刚生成的**（客户端没给、或给的不合法）
+  → 客户端**必须**把它写进自己的持久化设置（`settings.json` 的 `uuid`），下次连接带上。
+  `issued = false` 表示客户端给的那个 uuid 被采纳（客户端不必改本地记录）。
+- `new_player = true` 表示**服务端此前没有这个 uuid 的档案**，刚为它建了一份初始档案
+  （新生成的 uuid 必然 `new_player = true`）。
+- `uuid` 命令在 `hello` **之前或之后**发都可以（它是 `hello` 之外**唯一**允许提前发的命令）；
+  服务端在两者都到手之后才记账（更新 `last_login`）并尝试接回座位。
+- **昵称与身份是两件事**：档案里记昵称（`hello.name`），但**一切显示仍以昵称为准**
+  （`seats[].name` / `chat.name`）；**报文里从不出现 uuid**。
+- **同一个 uuid = 同一个玩家**：若该 uuid 此刻正**掉线托管**在某个座位上（见 §3.13），
+  新连接会被**直接接回那个座位**：收到 `room_joined`（原座位号）+ 一条 `state` 快照，
+  不必重新入座。座位仍被别人占着（`session` 未断）时**不接回**，这条连接照常当新人。
+- **登录时间**：每次认领成功都会更新档案的 `last_login` 并 `logins + 1`；
+  服务端**定期清理 60 天未登录的档案**（`--uuid-ttl-days`，默认 60）。
+- **老两端兼容**：老服务端不认 `uuid` 命令 → 回 `unknown_cmd`（客户端忽略即可）；
+  老客户端不认 `uuid_ask` → 不回这条命令，服务端按"没有身份"继续（一切照旧）。
+  **没有 uuid 照样能玩** —— uuid 只是"跨连接认得同一个人"的凭据。
+
 ### 2.1 握手 / 大厅
 
 ```jsonc
@@ -206,6 +242,27 @@
 {"cmd":"rejoin","pid":12345,"token":"..."}   // 用 hello 回包给的 pid/token 重连
 ```
 
+### 2.5 结束对局投票（`vote_end` / `vote`）
+
+任何**在场玩家**（在座、非机器人、连接在线）都能在**对局进行中**发起一次「结束对局」投票：
+
+```jsonc
+{"cmd":"vote_end"}                 // 发起投票
+{"cmd":"vote","agree":true}        // 对**进行中**的投票表态（同意 / 不同意）
+```
+
+- 计票口径（**服务端算**，客户端只显示）：
+  - `total` = **在场人类玩家数** —— **不数机器人**，**不数掉线托管的玩家**（§3.13）；
+  - `need` = **严格多于半数** = `total / 2 + 1`（1 人 → 1；2 人 → 2；3 人 → 2；4 人 → 3）；
+  - `agree >= need` → **立即通过**；`agree + 未表态人数 < need` → **立即否决**（不干等）；
+    到 `deadline_ms`（60 秒）仍无结论 → 否决（**没表态视为不同意**）。
+- 通过 → **整场结束**：服务端随后广播 `game_end`，带 `"reason":"vote"`（见 §3.7）。
+- 否决 / 超时 → 对局**继续**，且投票功能**全员冷却 5 分钟**：这段时间里任何人发 `vote_end`
+  都会被回 `vote_denied`（带还要等多久），客户端据此把按钮置灰并显示倒计时。
+- **每人只算一次**（先到的那次算数，重复表态忽略）；不在场的人发 `vote` 一律忽略。
+- 不在对局中、已有投票进行中、冷却中 → `vote_denied`（见 §3.12）。
+- 投票**不影响任何规则判定**：期间照常摸打、照常鸣牌；牌局只在"通过"那一刻结束。
+
 ## 3. 服务端 → 客户端（`ev`）
 
 ### 3.1 通用
@@ -214,19 +271,22 @@
 {"ev":"error","code":"unknown_cmd","arg":"frobnicate"}   // arg 可选，永远是 ASCII
 {"ev":"pong"}
 {"ev":"hello_ok","pid":12345,"token":"...","name":"玩家名","ver":1}
+{"ev":"uuid_ask"}                                 // 连接后立即发（见 §2.0）
+{"ev":"uuid_ok","uuid":"...","issued":true,"new_player":true}
 {"ev":"rooms","rooms":[{"id":"AB12","name":"房间名","players":2,"seats":4,"playing":false}]}
 {"ev":"room_joined","room":"AB12","seat":0}      // 自己入座成功（随后必有一条 room）
 {"ev":"room","id":"AB12","name":"房间名","host":1,"playing":false,
  "rules":{...},
- "seats":[{"seat":0,"pid":12345,"name":"甲","ready":true,"bot":false,"score":25000},
-          {"seat":1,"pid":0,"name":"CPU-1","ready":true,"bot":true,"score":25000},
+ "seats":[{"seat":0,"pid":12345,"name":"甲","ready":true,"bot":false,"away":false,"score":25000},
+          {"seat":1,"pid":0,"name":"CPU-1","ready":true,"bot":true,"away":false,"score":25000},
           null, null]}
 {"ev":"left_room"}
 {"ev":"spectate","room":"AB12"}
 {"ev":"chat","seat":0,"name":"甲","text":"..."}
 ```
 
-`seats` 中 `null` 表示空位；机器人 `pid=0`、`bot=true`。
+`seats` 中 `null` 表示空位；机器人 `pid=0`、`bot=true`；
+`away=true` 表示这一家**掉线托管中**（座位仍占着、牌局照常推进，见 §3.13）。
 客户端可用 `hello_ok.pid` 在 `seats` 中匹配自己的座位，`room_joined` 是便捷通知。
 
 `error.code` 的取值（全部 ASCII，文案在客户端 `error.*`）：
@@ -470,9 +530,12 @@
 整场结束：
 
 ```jsonc
-{"ev":"game_end","scores":[41200,...],"ranking":[0,2,1,3],
+{"ev":"game_end","scores":[41200,...],"ranking":[0,2,1,3],"reason":"",
  "final":[{"seat":0,"name":"甲","score":41200,"point":53.6,"uma":30,"oka":20,"rank":1}, ...]}
 ```
+
+- `reason`：`""` = 正常打完（含击飞/和了止等规则性终局）；`"vote"` = **投票通过结束对局**（§2.5）。
+  老服务端不发这个字段 → 客户端按 `""` 处理。
 
 `point` = **精算点数** = `(score − 返点)/1000 + 马点(uma) + 头名赏(oka)`：
 
@@ -552,7 +615,11 @@
 
 与之相对的**公开信息**（允许下发）：四家牌河与副露、立直状态与供託、**已翻开**的宝牌指示牌、
 各家点数、剩余张数、`tsumogiri`（手切/摸切）、和牌后**和牌者**的手牌与（条件满足时的）里宝指示牌、
-流局时**仅听牌家**的手牌（`ryuukyoku.hands` 里未听牌家是 `null`）、`ryuukyoku.tenpai`。
+流局时**仅听牌家**的手牌（`ryuukyoku.hands` 里未听牌家是 `null`）、`ryuukyoku.tenpai`、
+**「谁掉线托管了」**（`room.seats[].away`）与**「谁投票同意了」**（`vote_update.agreed`）。
+
+> `uuid` **从不进任何下行报文**：它是身份凭据（拿到就能接走别人的座位），
+> 只在 §2.0 那条握手回包里发给**它自己的**主人。也不进回放（回放会被别人取走）。
 
 > 新增协议字段时先回答一句：**这条信息改过的客户端拿到会怎样？**
 > 只要涉及「牌山 / 他家手牌 / 未翻开的指示牌 / 他家振听」，就必须按座位单发或干脆不发。
@@ -653,6 +720,50 @@
   归属（谁拿走的）用每张牌底部的一条**归属色细线**表达，四家混排也认得出。
 - **回放动画**：只有"前进一个操作"播飞牌动画，其余跳转一律静默 —— 因为跳转 = 从小局开头重放，
   带动画就会把前面几巡的弃牌重打一遍。见 `DESIGN.md`「对局记录与回放」。
+
+### 3.12 结束对局投票（事件）
+
+```jsonc
+{"ev":"vote_start","by":1,"need":2,"total":3,"deadline_ms":60000}
+{"ev":"vote_update","agree":1,"need":2,"total":3,"agreed":[1],"declined":[]}
+{"ev":"vote_result","result":"passed","agree":2,"need":2,"total":3,
+ "reason":"enough","cooldown_ms":300000}
+{"ev":"vote_denied","reason":"cooldown","wait_ms":283000}
+```
+
+- `vote_start` **广播**给所有人（含观战者）：`by` = 发起人座位，`need` / `total` 见 §2.5。
+- `vote_update` 每次有人表态后广播：`agreed` / `declined` 是**座位数组**（公开信息）。
+- `vote_result` 是**结论**：`result ∈ {passed, rejected}`；
+  `reason ∈ {enough, impossible, timeout}`（够票 / 不可能够票 / 超时）；
+  `cooldown_ms` = **从这一刻起**的投票冷却时长（固定 `300000` = 5 分钟，见 §2.5）。
+  只有 `passed` 会跟着来一条 `game_end{"reason":"vote"}`（§3.7）。
+- `vote_denied` **只发给发起人**：`reason ∈ {cooldown, running, not_playing}`；
+  `cooldown` 时带 `wait_ms`（**服务端记时**，客户端只负责显示与置灰按钮）。
+- 投票期间对局**照常进行**；`deadline_ms` 到点服务端自动收口（`reason:"timeout"`）。
+
+### 3.13 掉线托管（`away`）—— **不换成机器人，只摸切**
+
+对局进行中有人掉线（连接断开）或主动 `leave_room` 时，服务端**不再**把那个座位换成机器人，
+而是标成**托管（`away`）**：
+
+| | 掉线托管的行为 |
+| --- | --- |
+| 座位住户 | **保留**（昵称 / `pid` / uuid 都在），`room.seats[].away = true`；座位**不会被别人抢走** |
+| 该家回合 | **自动摸切**（与服务端超时代打**同一条**路径：打出刚摸到的那张，`tsumogiri=true`） |
+| 鸣牌询问 | **一律不鸣**：服务端**不给这一家发 `ask`**（他拿不到吃/碰/杠/荣和的选项） |
+| 手切 / 立直 / 杠 | 都不会发生（没人在，只有"必须打一张"这一步会自动发生） |
+| 牌局 | **照常推进**到终局；掉线者的点数与牌河继续参与授受 |
+| **四人都掉线** | **依旧立即回收房间**（与"无人房间"同一条路径） |
+| 一小局 / 整场结束后 | 仍在托管中的座位被**释放**（否则一张打不完的桌子会永远卡着第四个位置） |
+
+- 客户端从 `room.seats[].away` 知道谁掉线了（座位行显示「（掉线）」）。
+- **托管的人回来**：用**同一个 uuid** 重新连接即**接回原座位**（§2.0），`away` 复位、
+  收到该座位的 `state` 快照；牌局不重开、手牌不重发。
+- ⚠ 「托管」是**刻意**与「机器人」区分开的：机器人会替玩家吃碰杠甚至胡牌，
+  那等于**替玩家做决定**；托管只做规则上**必须**发生的事（轮到你时必须打一张 → 摸切），
+  绝不替玩家鸣牌或和牌。
+- 房主掉线时，房主身份**转给仍在场的第一位真人**（否则留着一个没有连接的房主，
+  这桌再也没人能开局 / 加机器人）。四人全掉线则直接回收，没有转移这回事。
 
 ## 4. 座位与方向约定
 
@@ -775,9 +886,19 @@ M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文�
 java -jar mahjong-server.jar [--port 10086] [--host 0.0.0.0] [--verbose]
                              [--replay-dir replays] [--replay-max 50] [--replay-max-mb 96]
                              [--no-replay]
+                             [--player-dir players] [--uuid-ttl-days 60] [--no-player-store]
 ```
 
 - 启动后打印 `LISTENING <host>:<port>` 一行到 stdout（便于客户端/脚本探测）。
+- **玩家档案（uuid）默认开启**并落盘到 `--player-dir`（默认 `./players`，该目录不属于仓库、
+  `.gitignore` 已忽略）。文件是**一份 JSON**（`players.json`，原子写：先写 `.tmp` 再改名），
+  形如 `{"v":1,"players":{"<uuid>":{"uuid":...,"name":...,"created":...,"last_login":...,
+  "logins":...}}}`；**每条档案里认不出的键原样保留**（uuid 将来要当主键存更多东西，
+  向前兼容很重要）。
+- `--uuid-ttl-days <n>`：多久没登录就清理档案（默认 **60**，即需求里的 2 个月；`0` = 只保留
+  本进程登录过的那些，自检/运维用）。清理在**启动时**做一次，之后每 6 小时一次。
+- `--no-player-store` 关闭档案（uuid 握手照常工作 —— 服务端仍会生成并回发 uuid、
+  仍能按座位上的 uuid 接回座位，只是**不落盘**）。
 - **对局记录默认开启**并落盘到 `--replay-dir`（默认 `./replays`，该目录不属于仓库、
   `.gitignore` 已忽略）：场数 / 总字节双上限，超出按创建时间淘汰最旧的**并删文件**；
   `--no-replay` 关闭（此时 `replay_*` 命令一律回空/`replay_not_found`，且录制零开销）。

@@ -12,7 +12,7 @@
 namespace {
 
 /** 设置文件里我们**管**的键；其余键原样保留（见 Settings::extra）。 */
-const char* const kKnownKeys[] = {"host", "port", "name", "pack", "sfx", "sfx_volume"};
+const char* const kKnownKeys[] = {"host", "port", "name", "uuid", "pack", "sfx", "sfx_volume"};
 
 bool isKnownKey(const QString& k)
 {
@@ -39,6 +39,36 @@ bool hasControlChar(const QString& s)
         }
     }
     return false;
+}
+
+/**
+ * uuid 的形状：36 字符、位置 8/13/18/23 是 `-`、其余是十六进制。
+ *
+ * <p>与服务端 `PlayerStore.validUuid` **同一把尺子**（那边是权威；这边只是为了
+ * "设置文件被手改坏了"时不把垃圾发上去、也不把垃圾当成自己的身份留着）。
+ * 大小写都收：服务端反正会规范成小写。
+ */
+bool isUuidShape(const QString& s)
+{
+    if (s.size() != 36) {
+        return false;
+    }
+    for (int i = 0; i < 36; ++i) {
+        const QChar c = s.at(i);
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != QLatin1Char('-')) {
+                return false;
+            }
+            continue;
+        }
+        const bool hex = (c >= QLatin1Char('0') && c <= QLatin1Char('9'))
+                || (c >= QLatin1Char('a') && c <= QLatin1Char('f'))
+                || (c >= QLatin1Char('A') && c <= QLatin1Char('F'));
+        if (!hex) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /** 把一份默认设置写成文件（父目录不存在就建）。 */
@@ -95,6 +125,13 @@ void Settings::sanitize(QStringList* repaired)
     if (fix(hasControlChar(name) || codePointCount(name) > 24, "name")) {
         name = def.name;   // 空 = 用默认名
     }
+    // 身份：形状不对就**清空**（空 = "我还没有身份"，服务端会给一个并让我们保存）。
+    // ⚠ 不能"保留一个坏 uuid"：那会被原样发给服务端，而服务端会把它当"没有记录"、
+    //   再生成一个 —— 但客户端这边永远存着旧的坏值，每次连接都白跑一轮。
+    uuid = uuid.trimmed();
+    if (fix(!uuid.isEmpty() && !isUuidShape(uuid), "uuid")) {
+        uuid = def.uuid;
+    }
     pack = pack.trimmed();
     // ⚠ 材质包路径**不因为"文件不在"而清掉**：用户可能插着 U 盘、或盘符还没挂上。
     //   路径不可用时只是"回退默认素材"，设置在原地保留（材质包那层单独回报问题）。
@@ -124,6 +161,9 @@ Settings Settings::fromJson(const QJsonObject& o, QStringList* repaired)
         s.port = 0;   // 类型不对
     }
     s.name = o.value(QStringLiteral("name")).toString(s.name);
+    // 身份（uuid）：类型不对 → 空串（= 还没有身份）；形状不对由 sanitize 清掉
+    const QJsonValue uv = o.value(QStringLiteral("uuid"));
+    s.uuid = uv.isString() ? uv.toString() : QString();
     s.pack = o.value(QStringLiteral("pack")).toString(s.pack);
     // 音效：缺省开、音量 70。类型不对时用**缺省值**（sanitize 里登记为已修复）。
     {
@@ -153,6 +193,7 @@ QJsonObject Settings::toJson() const
     o.insert(QStringLiteral("host"), host);
     o.insert(QStringLiteral("port"), int(port));
     o.insert(QStringLiteral("name"), name);
+    o.insert(QStringLiteral("uuid"), uuid);
     o.insert(QStringLiteral("pack"), pack);
     o.insert(QStringLiteral("sfx"), sfx);
     o.insert(QStringLiteral("sfx_volume"), sfxVolume);

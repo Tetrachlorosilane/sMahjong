@@ -425,5 +425,21 @@
   "ui.main.shuffle_seats": "随机洗座",
   "ui.main.shuffle_seats_tip": "打乱四家座位（随机门风）；洗完所有人重新准备",
   "ui.main.take_seat": "坐这（%1）",
-  "ui.main.take_seat_tip": "与那一家的座位互换（门风就是座次：東=起家）"
+  "ui.main.take_seat_tip": "与那一家的座位互换（门风就是座次：東=起家）",
+  "ui.main.away_tag": "  [掉线] ",
+  "ui.main.identity_save_failed": "身份保存失败：%1",
+  "ui.main.identity_saved": "已保存身份，下次连接会自动认出你",
+  "ui.vote.agree": "同意",
+  "ui.vote.cooldown": "投票冷却中 · 剩 %1 秒",
+  "ui.vote.denied_cooldown": "投票冷却中，请稍后再试",
+  "ui.vote.denied_not_playing": "不在对局中，无法发起投票",
+  "ui.vote.denied_running": "已有投票正在进行",
+  "ui.vote.disagree": "不同意",
+  "ui.vote.end": "结束对局",
+  "ui.vote.end_tip": "发起投票结束本场：在场玩家超过半数同意即结束（不数机器人、不数掉线的人；由服务端计时，冷却 5 分钟）",
+  "ui.vote.idle": "可发起「结束对局」投票",
+  "ui.vote.passed": "投票通过，本场结束",
+  "ui.vote.rejected": "投票未通过（%1/%2 同意），本场继续",
+  "ui.vote.running": "投票中：同意 %1/%2（在场 %3 人） · 剩 %4 秒",
+  "ui.vote.started": "%1 发起了结束对局的投票"
 }

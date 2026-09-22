@@ -52,6 +52,25 @@ public:
     {
         return (seat >= 0 && seat < 4) ? m_takeSeatBtn[seat] : nullptr;
     }
+    /** 「结束对局」按钮（投票入口）；投票中的「同意 / 不同意」与状态行也一并给出。 */
+    QPushButton* voteEndButtonForTest() const { return m_voteEndBtn; }
+    QPushButton* voteAgreeButtonForTest() const { return m_voteAgreeBtn; }
+    QPushButton* voteDisagreeButtonForTest() const { return m_voteDisagreeBtn; }
+    QLabel* voteLabelForTest() const { return m_voteLabel; }
+    /** 当前持有的身份（uuid）：`uuid_ok{issued:true}` 之后应当被写进设置。 */
+    QString uuidForTest() const { return m_settings.uuid; }
+    /** 等待室的座位行（自检要看「掉线」标记有没有画进去）。 */
+    QLabel* seatLabelForTest(int seat) const
+    {
+        return (seat >= 0 && seat < 4) ? m_seatLabels[seat] : nullptr;
+    }
+    /**
+     * 当前显示的是哪一页（`"table"` / `"wait"` / `"other"`）。
+     *
+     * <p>用来钉住那条容易回归的行为：**对局进行中的 `room` 事件**（有人掉线托管时会广播一次）
+     * 不得把界面切回等待室 —— 否则四个人正在打牌时会突然看到"准备/开始游戏"按钮。
+     */
+    QString stackPageForTest() const;
 
     /**
      * 上电时把**持久化的个人设置**装进来：预填大厅的地址/端口/昵称，
@@ -67,8 +86,7 @@ private slots:
     void onDisconnected();
     void onNetError(const QString& msg);
     void onActionReady(const QJsonObject& action);
-    void onTileClicked(const QString& tile, int index);
-    /**
+    void onTileClicked(const QString& tile, int index);    /**
      * 点了某家的名牌：**观战时**把视角切到那一家（与回放界面同一条路径）。
      *
      * <p>实时对局里坐着的人点自己的名牌没有意义 —— 那时直接忽略。
@@ -119,6 +137,16 @@ private:
     void takeSeat(int seat);
     bool isHost() const;
 
+    // ---- 结束对局投票（服务端权威：计票与冷却都由它算，见 PROTOCOL §2.5/§3.12）----
+    /** 发 `vote_end`（冷却中/不在对局中时服务端会回 `vote_denied`，客户端只管显示）。 */
+    void requestVoteEnd();
+    /** 对进行中的投票表态（同意 / 不同意）。 */
+    void castVote(bool agree);
+    /** 按当前状态重画投票条：按钮可见性与倒计时文案。 */
+    void refreshVoteUi();
+    /** 把 `uuid_ok` 给的**身份**写进设置文件（`issued=true` 时必须存下来）。 */
+    void saveIdentity();
+
     /**
      * 打开回放窗口（懒建）：replayId 为空 = 只打开列表让用户挑。
      *
@@ -165,6 +193,24 @@ private:
     int m_myPid = 0;
     QJsonObject m_pendingHello;
     QString m_lastNetError;   // 连接失败提示去重
+    /** 哪几家正在**掉线托管**（来自 `room.seats[].away`）：分数栏要用它标出来。 */
+    bool m_away[4] = {false, false, false, false};
+
+    // 结束对局投票（与自动开关同一排，高度固定，免得整桌重新布局）
+    QWidget* m_voteBar = nullptr;
+    QPushButton* m_voteEndBtn = nullptr;
+    QPushButton* m_voteAgreeBtn = nullptr;
+    QPushButton* m_voteDisagreeBtn = nullptr;
+    QLabel* m_voteLabel = nullptr;
+    QTimer* m_voteTick = nullptr;         // 每秒刷一次倒计时（只影响显示）
+    bool m_inGame = false;                // 本场的对局是否进行中（`game_start` … `game_end`）
+    bool m_voteRunning = false;           // 服务端的投票进行中
+    bool m_voteVoted = false;             // 我已经表过态（发起人算已表态）
+    int m_voteAgree = 0;
+    int m_voteNeed = 0;
+    int m_voteTotal = 0;
+    qint64 m_voteDeadlineMs = 0;          // 投票截止（本地推算，仅用于倒计时显示）
+    qint64 m_voteCooldownUntilMs = 0;     // 冷却到期（本地推算，仅用于倒计时显示）
 
     // 自动模式
     bool m_resultOpen = false;    // 结算弹窗是否开着
