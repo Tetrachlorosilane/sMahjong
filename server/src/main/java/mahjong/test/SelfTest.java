@@ -2843,9 +2843,9 @@ public final class SelfTest {
     /**
      * 赤宝牌张数：默认 3 张；`rules.aka = 0` 时**整副牌山都不含赤五**。
      *
-     * <p>审计出来的问题正是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，
-     * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
-     * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
+     * <p>审计当时的现象是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，设 `aka = 0`
+     * 仍会发赤五；**现在已修好并由下面三条断言钉住**（`aka = 0` → 牌山无赤五、仍 136 张、每种 4 张）。
+     * ⚠ `aka = 4`（两张赤五筒）受牌 id 编码限制**仍不支持**（按 3 处理）—— 见 NOTES §10 已知限制。
      */
     private static void akaRuleTests() {
         int[] def = new mahjong.core.Wall(20240914L, Rules.defaults()).debugAllTiles();

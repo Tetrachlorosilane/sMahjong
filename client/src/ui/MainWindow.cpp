@@ -274,7 +274,7 @@ void MainWindow::buildTablePage()
     left->addWidget(m_autoBar);
     // 「结束对局」投票条：单独一行（在自动开关之下）。
     // ⚠ 这一条**恒定存在**（按钮只在牌局中可见，行本身不增删）：它与自动开关一起夹着牌桌，
-    //   一旦某一行按需出现/消失，整张牌桌的高度就会跳一下（见 AGENTS §6.2）。
+    //   一旦某一行按需出现/消失，整张牌桌的高度就会跳一下（见 AGENTS §6.2 的不变量）。
     m_voteBar = new QWidget(m_tablePage);
     {
         auto* voteRow = new QHBoxLayout(m_voteBar);
