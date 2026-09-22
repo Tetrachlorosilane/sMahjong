@@ -378,11 +378,14 @@ node tools\i18n-gen.mjs --check                           # 映射表 ↔ 语言
 **不要靠运气等牌**——用假服务端把客户端直接推进到目标状态，再截图看：
 
 ```powershell
-node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld|sfx|sfxburst
+node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld|sfx|sfxburst|vote
 # turn 自摸/立直/杠 · claim 荣和/碰/跳过 · note 无役提示 · river 横置顺延（顺带压测 5 张宝牌栏）
 # agari 结算 + round_wait(5000) 倒计时 · yakuman 须写「2倍役满」不得出现「0 番」
 # kan 「嶺上 M」跟着减（4→3→2） · twoturn 跨局首巡不得只剩 1 秒
 # sticks 立直棒按座位分布/供託居中 · hand2meld 自己 N 副露（`hand<N>[meld]`）
+# vote 结束对局投票的界面定点复现（2026-09）：开局 → 别家发起投票 → 票数更新；
+#      看「同意 / 不同意」是否出现并可点、状态行是否写"投票中：同意 1/2（在场 3 人）· 剩 N 秒"、
+#      「结束对局」是否在投票期间置灰。手动点「同意」脚本会回一条 vote_update（能肉眼验证"点完锁住"）
 # allmeld 四家都有副露 —— **副露界面两条口径的定点复现**：横置张与另两张**底边齐平**
 #         + 四角名牌互不重叠（`--shot` 后按列扫牌像素底边，全部落在同一 y 附近即齐平）
 # sfx / sfxburst —— **音效回归的场景驱动器**（配合 `MAHJONG_SFX_TRACE=1`）：
@@ -391,6 +394,9 @@ node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn
 client\dist\mahjong-client.exe --demo 127.0.0.1 10999 --bots 3 --no-answer `
     --shot client\build\shot.png --after 6
 ```
+
+> 假服务端现在也带**身份握手**（连接即发 `uuid_ask`，收到 `uuid` 回 `uuid_ok{issued:true}`）——
+> 于是 L4 顺带验证"客户端会把身份落盘"这条路径；不认这套的老服务端照样能跑（客户端只发一条 `uuid` 命令）。
 
 `--shot` 用 Qt 自己的 `grab()` 出图（不受屏幕裁剪影响；要看清细节就裁切放大）。
 
