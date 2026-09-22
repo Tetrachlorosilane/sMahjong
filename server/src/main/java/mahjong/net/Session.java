@@ -15,6 +15,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import mahjong.game.Table;
+import mahjong.player.PlayerStore;
 import mahjong.replay.ReplayRecorder;
 import mahjong.replay.ReplayStore;
 import mahjong.util.Json;
@@ -56,6 +57,20 @@ public final class Session {
     public volatile boolean spectator;
     public volatile boolean welcomed;
 
+    /**
+     * 这条连接的**身份**（uuid，见 `docs/PROTOCOL.md` §2.0）。
+     *
+     * <p>它由连接建立后的握手认领：客户端带上自己保存的那个，没有就由服务端生成并回发。
+     * 作用有两个：① 玩家档案的主键（登录时间/昵称，将来还有战绩）；
+     * ② **同一个 uuid 掉线重连时接回原座位**（见 {@link #tryResumeSeat}）。
+     * 没有 uuid 也能玩 —— 那只是"服务端不认得你是谁"。
+     */
+    public volatile String uuid;
+    /** `uuid` 是不是服务端生成的（要写进 `uuid_ok.issued`，客户端据此决定要不要保存）。 */
+    private boolean uuidIssued;
+    /** 身份认领只做一次（同一连接上重复发 `uuid` 直接忽略）。 */
+    private boolean uuidClaimed;
+
     public Session(Server server, Socket socket) throws IOException {
         this.server = server;
         this.socket = socket;
@@ -71,6 +86,9 @@ public final class Session {
         reader = new Thread(this::readLoop, "session-reader");
         reader.setDaemon(true);
         reader.start();
+        // 连接后**立刻**问身份（不等 hello）：客户端可能比我们更早知道 uuid（它存在设置文件里），
+        // 也可能第一次来、要我们生成一个。见 PROTOCOL §2.0。
+        send(Json.obj("ev", "uuid_ask"));
     }
 
     public void send(Map<String, Object> ev) {
@@ -263,11 +281,17 @@ public final class Session {
 
     private void handle(Map<String, Object> msg) {
         String cmd = Json.str(msg, "cmd", "");
-        if (!welcomed && !"hello".equals(cmd) && !"rejoin".equals(cmd)) {
+        // ⚠ `uuid` 是**唯一**允许在 hello 之前发的命令（服务端一accept 就问它，见 §2.0）：
+        //   客户端完全可能先把身份回过来、再发 hello。
+        if (!welcomed && !"hello".equals(cmd) && !"rejoin".equals(cmd) && !"uuid".equals(cmd)) {
             sendError("need_hello");
             return;
         }
         switch (cmd) {
+            case "uuid": {
+                claimUuid(Json.str(msg, "uuid", ""));
+                break;
+            }
             case "hello": {
                 if (welcomed) {
                     // 同一条连接上重复 hello 会换发新的 pid/token，而 Seat.pid 仍是旧的 →
@@ -283,6 +307,15 @@ public final class Session {
                 token = Long.toHexString(TOKEN_RNG.nextLong());
                 welcomed = true;
                 send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1));
+                // 身份这时候才算"人到齐"（uuid + 昵称）：第一次来的人在这里建档案，
+                // 早一步回过 uuid 的人在这里补上昵称、并试着接回掉线的座位。
+                if (uuid != null) {
+                    claimIdentity();
+                    PlayerStore store = PlayerStore.current();
+                    if (store != null) {
+                        store.rename(uuid, name);
+                    }
+                }
                 break;
             }
             case "rejoin": {
@@ -303,6 +336,10 @@ public final class Session {
                 pid = old.pid;
                 token = old.token;
                 name = old.name;
+                // 身份跟着走：同一个人换了条连接，档案与"接回座位"的能力都该保留
+                uuid = old.uuid;
+                uuidIssued = old.uuidIssued;
+                uuidClaimed = old.uuidClaimed;
                 server.replaceSession(old, this);
                 if (old.table != null) {
                     table = old.table;
@@ -314,6 +351,8 @@ public final class Session {
                         table.seat(seat).pid = pid;
                         table.seat(seat).name = name;
                         table.seat(seat).bot = false;
+                        table.seat(seat).uuid = uuid;
+                        table.seat(seat).away = false;
                     } else {
                         table.spectators.add(this);
                     }
@@ -355,6 +394,8 @@ public final class Session {
                     t.seat(0).session = this;
                     t.seat(0).pid = pid;
                     t.seat(0).name = name;
+                    t.seat(0).uuid = uuid;
+                    t.seat(0).away = false;
                     t.hostPid = pid;
                     // 补机器人数量必须钳制：`{"fill_bots":2147483647}` 会让这个循环空转
                     // 21 亿次（每次都要扫 4 个座位），一条 60 字节的报文就能把一个核占满几十秒（AUDIT F6）。
@@ -402,6 +443,8 @@ public final class Session {
                     t.seat(idx).session = this;
                     t.seat(idx).pid = pid;
                     t.seat(idx).name = name;
+                    t.seat(idx).uuid = uuid;
+                    t.seat(idx).away = false;
                     send(Json.obj("ev", "room_joined", "room", t.id, "seat", idx));
                     t.broadcastRoom();
                 }
@@ -420,14 +463,16 @@ public final class Session {
                     final int mine = t.seatOfSession(this) >= 0 ? t.seatOfSession(this) : seat;
                     if (mine >= 0 && mine < 4) {
                         if (t.playing) {
-                            t.seat(mine).session = null;
-                            t.seat(mine).bot = true;
-                            t.seat(mine).ready = true;
+                            // 牌局进行中主动退出 = **掉线托管**（不换机器人、不吃碰杠，只自动摸切）
+                            // —— 与真掉线走同一条路，见 PROTOCOL §3.13。
+                            t.markAway(mine);
                         } else {
                             t.seat(mine).session = null;
                             t.seat(mine).pid = 0;
                             t.seat(mine).name = "";
                             t.seat(mine).ready = false;
+                            t.seat(mine).away = false;
+                            t.seat(mine).uuid = null;
                         }
                     } else {
                         t.spectators.remove(this);
@@ -663,6 +708,27 @@ public final class Session {
                 t.submit(seat, msg);
                 break;
             }
+            case "vote_end": {
+                // 「结束对局」投票（见 PROTOCOL §2.5）：**在场玩家**才能发起。
+                // 计票口径（谁算数、几票通过）由 Table 算 —— 它才知道谁掉线托管了、
+                // 谁是机器人；这里只做"你有没有座位"这一层。
+                Table t = table;
+                if (t == null || seat < 0 || spectator) {
+                    sendError("no_room");
+                    return;
+                }
+                t.requestVoteEnd(seat);
+                break;
+            }
+            case "vote": {
+                Table t = table;
+                if (t == null || seat < 0 || spectator) {
+                    sendError("no_room");
+                    return;
+                }
+                t.castVote(seat, Json.bool(msg, "agree", false));
+                break;
+            }
             case "confirm": {
                 // 小局之间的「确认进入下一局」：投进该座位的收件箱，
                 // 由 Table 在局间等待（最多 5 秒）里读取。房间不在对局中时直接忽略。
@@ -676,6 +742,118 @@ public final class Session {
             }
             default:
                 sendError("unknown_cmd", cmd);
+        }
+    }
+
+    // ================================================================= 身份（uuid）
+
+    /**
+     * 处理客户端的 `uuid` 应答（`docs/PROTOCOL.md` §2.0）。
+     *
+     * <p>三条判据：
+     * <ul>
+     *   <li>形状不对 / 没给 = **当作"客户端没有记录"**，服务端生成一个（`issued = true`）——
+     *       不报错：老客户端与手改过的设置文件都不该把连接卡住；</li>
+     *   <li>同一条连接上**只认第一条**（重复发忽略），否则客户端可以在入座后换个身份重来；</li>
+     *   <li>认领之后（若 hello 已到）会尝试**接回掉线的座位**。</li>
+     * </ul>
+     */
+    private void claimUuid(String given) {
+        if (uuidClaimed) {
+            return;
+        }
+        String norm = PlayerStore.normalize(given);
+        if (norm == null) {
+            uuid = PlayerStore.newUuid();
+            uuidIssued = true;
+        } else {
+            uuid = norm;
+            uuidIssued = false;
+        }
+        claimIdentity();
+    }
+
+    /**
+     * 认领身份：**建档 + 更新登录时间**（`PlayerStore.touch`），回 `uuid_ok`，再试着接回座位。
+     *
+     * <p>幂等：同一个连接只做一次（`hello` 与 `uuid` 谁先到都由这里收口）。
+     * 档案库没装（`--no-player-store`）时**照常握手**，只是不落盘 —— uuid 的另一个用途
+     * （接回掉线的座位）不依赖档案库。
+     */
+    private void claimIdentity() {
+        if (uuid == null || uuidClaimed) {
+            return;
+        }
+        uuidClaimed = true;
+        boolean isNew = false;
+        PlayerStore store = PlayerStore.current();
+        if (store != null) {
+            // 昵称可能还没到（hello 后到）：先按空串记，hello 那边再补昵称。
+            PlayerStore.Login lg = store.touch(uuid, welcomed ? name : "",
+                    System.currentTimeMillis());
+            isNew = lg != null && lg.isNew;
+        }
+        send(Json.obj("ev", "uuid_ok", "uuid", uuid, "issued", uuidIssued, "new_player", isNew));
+        // 已经入座的人：把身份补写到座位上（uuid 可能比"入座"晚到 —— 他先点了建房间、
+        // 我们的 uuid_ask 才被答复）。没有这一步，"接回座位"就认不出他。
+        Table t = table;
+        if (t != null && seat >= 0) {
+            synchronized (t.roomLock()) {
+                if (t.seat(seat).session == this) {
+                    t.seat(seat).uuid = uuid;
+                }
+            }
+        }
+        tryResumeSeat();
+    }
+
+    /**
+     * 同一个 uuid = 同一个玩家：该 uuid 若正**掉线托管**在某个座位上，这条连接**接回那个座位**。
+     *
+     * <p>为什么需要它：掉线托管（§3.13）之后座位**保留**着，但客户端那侧是重新连的
+     * （旧连接已经不在 `sessions` 里，`rejoin` 的 pid/token 也随连接一起没了）——
+     * 没有这条路，托管出去的位置就再也回不来，玩家只能干看着自己的牌被别人摸切。
+     *
+     * <p>安全边界：只在**那个座位确实空着（托管中）**时才接 —— 原连接还在时
+     * 第二条连接**不会**把人家顶掉（uuid 是 128 位随机数，猜不到，但也别让"重放同一份
+     * 设置文件"变成踢人手段）。
+     */
+    private void tryResumeSeat() {
+        if (!welcomed || uuid == null || table != null || seat >= 0) {
+            return;
+        }
+        Table t = server.tableWithAwaySeat(uuid);
+        if (t == null) {
+            return;
+        }
+        final int idx = t.seatOfUuid(uuid);
+        if (idx < 0) {
+            return;
+        }
+        synchronized (t.roomLock()) {
+            Table.Seat st = t.seat(idx);
+            if (st.session != null || !st.away) {
+                return;                     // 判据要在锁里再看一次（并发下别把人家顶掉）
+            }
+            st.session = this;
+            st.away = false;
+            st.name = name;
+            // 沿用**原来的 pid**：房主身份、以及各家客户端里"我坐哪"都按 pid 认人
+            // （`Seat.pid` 是这座位的身份，换一个 pid 会让 `hostPid` 对不上）。
+            if (st.pid != 0) {
+                pid = st.pid;
+            } else {
+                st.pid = pid;
+            }
+            table = t;
+            seat = idx;
+            spectator = false;
+            send(Json.obj("ev", "room_joined", "room", t.id, "seat", idx));
+            t.broadcastRoom();
+            if (t.playing) {
+                send(t.stateFor(idx));      // 牌局没重开：手牌/牌河/点数原样补给他
+            }
+            Log.info("身份接回座位：" + uuid + " → 房间 " + t.id + " 座位 " + idx);
         }
     }
 }

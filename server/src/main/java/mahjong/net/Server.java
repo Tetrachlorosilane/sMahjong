@@ -53,6 +53,24 @@ public final class Server {
         return null;
     }
 
+    /**
+     * 找"这个 uuid 正掉线托管在哪张桌上"（找不到返回 {@code null}）。
+     *
+     * <p>用途：同一个 uuid = 同一个玩家 —— 他重连时应该**接回原座位**而不是从大厅重新入座
+     * （见 {@code Session.tryResumeSeat}）。房间数量是个位数，线性扫足够。
+     */
+    public Table tableWithAwaySeat(String uuid) {
+        if (uuid == null || uuid.isEmpty()) {
+            return null;
+        }
+        for (Table t : tables.values()) {
+            if (t.seatOfUuid(uuid) >= 0) {
+                return t;
+            }
+        }
+        return null;
+    }
+
     public void replaceSession(Session old, Session now) {
         sessions.remove(old);
         sessions.add(now);

@@ -35,8 +35,18 @@ public final class Table implements Runnable {
         public Session session;
         public long pid;
         public String name = "";
+        /** 这一格的 uuid（身份主键，来自 `Session.uuid`）；空 = 没有身份信息。 */
+        public volatile String uuid;
         public boolean bot;
         public boolean ready;
+        /**
+         * **掉线托管**：人不在（连接断了或主动退了），但座位**仍归他**。
+         *
+         * <p>与 `bot = true` 是两回事（PROTOCOL §3.13）：机器人会替玩家吃碰杠甚至和牌，
+         * 那等于**替玩家做决定**；托管只做规则上必须发生的事 —— 轮到他时必须打一张牌 →
+         * 自动摸切，鸣牌机会一律放过。牌局照常推进，人也随时能用同一个 uuid 接回来。
+         */
+        public volatile boolean away;
         public int score;
         /** 剩余总额外思考时长（毫秒）；每半庄开始时重置。 */
         public int timeBankMs;
@@ -49,7 +59,14 @@ public final class Table implements Runnable {
         }
 
         public boolean occupied() {
-            return bot || session != null;
+            // ⚠ 托管中的座位**算被占着**：不然它会立刻被 `firstEmptySeat` 交出去，
+            //   别人一进来就顶掉一个正在打牌的座位（人回来时无处可回）。
+            return bot || session != null || away;
+        }
+
+        /** 这一格现在**有没有人**（真人在线）。托管与机器人都算"没人操作"。 */
+        public boolean present() {
+            return session != null;
         }
     }
 
@@ -459,8 +476,13 @@ public final class Table implements Runnable {
         return replay;
     }
 
-    /** 录制器：整场一个（{@code playGame} 开头建、结束时落盘）。未启用回放时为 null。 */
-    private ReplayRecorder replay;
+    /**
+     * 录制器：整场一个（{@code playGame} 开头建、结束时落盘）。未启用回放时为 null。
+     *
+     * <p>`volatile`：它在牌桌线程里被建/被清空，但**聊天与投票事件是从各连接的读线程**
+     * 经 {@code broadcast} 读它的 —— 不这样写，那些线程可能读到一个半初始化或被清空的引用。
+     */
+    private volatile ReplayRecorder replay;
 
     /** 供 {@link Round} 在小局开头记下这一小局的牌山快照（见 {@code Replay.EV_ROUND}）。 */
     void noteRoundWall(String bakaze, int kyoku, int honba, int dealer, int[] wallOrder) {
@@ -569,6 +591,10 @@ public final class Table implements Runnable {
                                            java.util.Set<String> allowedTypes) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (true) {
+            // 投票通过：不必再等这一手（`wake()` 的哨兵会把 poll 叫醒，这里收口）
+            if (voteEnded) {
+                return null;
+            }
             if (seats[seat].bot || seats[seat].session == null) {
                 // 掉线转托管：立即按超时处理
                 return null;
@@ -627,6 +653,8 @@ public final class Table implements Runnable {
                         "name", s.name,
                         "ready", s.ready,
                         "bot", s.bot,
+                        // 掉线托管：座位仍被占着，但人不在（客户端显示「（掉线）」）
+                        "away", s.away,
                         "score", s.score));
             }
             broadcast(Json.obj(
@@ -771,10 +799,24 @@ public final class Table implements Runnable {
                 b.score = t;
                 break;
             }
-            default: {
+            case 5: {
                 int t = a.timeBankMs;
                 a.timeBankMs = b.timeBankMs;
                 b.timeBankMs = t;
+                break;
+            }
+            case 6: {
+                // 身份跟着人走：换座之后"用同一个 uuid 接回座位"必须还认得他
+                String t = a.uuid;
+                a.uuid = b.uuid;
+                b.uuid = t;
+                break;
+            }
+            default: {
+                // 托管状态也属于"住户信息"：把托管中的那家换到别处，托管要跟着走
+                boolean t = a.away;
+                a.away = b.away;
+                b.away = t;
                 break;
             }
         }
@@ -782,7 +824,7 @@ public final class Table implements Runnable {
 
     /** 只换住户、不动座位号的版本（洗座用；`swapSeats` 逐字段调用它）。 */
     private void swapFieldsOnly(int a, int b) {
-        for (int f = 0; f <= 5; f++) {
+        for (int f = 0; f <= 7; f++) {
             swapField(seats[a], seats[b], f);
         }
     }
@@ -798,6 +840,8 @@ public final class Table implements Runnable {
         s.pid = 0;
         s.ready = true;
         s.score = rules.startScore;
+        s.uuid = null;
+        s.away = false;
         int n = 1;
         for (Seat o : seats) {
             if (o.bot && o != s) {
@@ -813,6 +857,8 @@ public final class Table implements Runnable {
             seats[idx].pid = 0;
             seats[idx].name = "";
             seats[idx].ready = false;
+            seats[idx].uuid = null;
+            seats[idx].away = false;
         }
     }
 
@@ -830,18 +876,21 @@ public final class Table implements Runnable {
             cb.run();
     }
 
-    /** 玩家掉线：游戏中转为机器人代打。 */
+    /**
+     * 玩家掉线：牌局中转为**掉线托管**（不换机器人），等待室中直接放掉座位。
+     *
+     * <p>⚠ 这里曾经是"牌局中转 `bot = true`"（机器人代打）。用户口径改掉了那一条：
+     * 机器人会替玩家吃碰杠甚至和牌 —— 那是**替玩家做决定**；托管只自动摸切、不鸣牌，
+     * 而且座位保留着、人回来（同一个 uuid）就能接回去。见 PROTOCOL §3.13。
+     */
     public void onSessionClosed(Session session) {
         spectators.remove(session);
         for (Seat s : seats) {
             if (s.session == session) {
-                s.session = null;
                 if (playing) {
-                    s.bot = true;
-                    s.ready = true;
-                    s.name = s.name + "(托管)";
-                    Log.info("座位 " + s.index + " 掉线，转为机器人");
+                    markAway(s.index);
                 } else {
+                    s.session = null;
                     s.ready = false;
                 }
                 broadcastRoom();
@@ -849,6 +898,87 @@ public final class Table implements Runnable {
                 return;
             }
         }
+    }
+
+    /**
+     * 把某座位标成**掉线托管**（人不在，但座位留着）。
+     *
+     * <p>调用方：连接断开（{@link #onSessionClosed}）与牌局中主动退房（`Session.leave_room`）。
+     * 必须在 {@link #roomLock} 里改（座位住户是三处并发读的：牌桌线程按座位发报文、
+     * 等待室命令按 seatOfSession 反查）。
+     */
+    public void markAway(int seat) {
+        if (seat < 0 || seat > 3) {
+            return;
+        }
+        synchronized (roomLock) {
+            Seat s = seats[seat];
+            s.session = null;
+            s.away = true;
+            s.bot = false;      // **不换机器人**（用户明确要求）
+            s.ready = false;
+            Log.info("牌桌 " + id + " 座位 " + seat + " 掉线托管（自动摸切、不鸣牌）");
+            reassignHostLocked();
+        }
+    }
+
+    /**
+     * 房主掉线时把房主身份转给**仍在场的第一位真人**。
+     *
+     * <p>不转的话这桌就"死"了：`start_game` / `add_bot` / `shuffle_seats` 都要求
+     * `pid == hostPid`，而那个 pid 已经没有连接了 —— 三个人干看着一桌开不了下一局。
+     * 与之对照：牌局中房主掉线不转的话，本局打完就卡在"准备"那一步。
+     */
+    private void reassignHostLocked() {
+        for (Seat s : seats) {
+            if (s.pid == hostPid && s.session != null) {
+                return;                       // 房主还在
+            }
+        }
+        for (Seat s : seats) {
+            if (s.session != null) {
+                Log.info("牌桌 " + id + " 房主掉线，转给座位 " + s.index + "（" + s.name + "）");
+                hostPid = s.pid;
+                return;
+            }
+        }
+    }
+
+    /**
+     * 释放**仍在托管中**的座位（一律在整场结束后调用）。
+     *
+     * <p>为什么要释放：托管中的座位是"占着但没人"，如果不释放，一桌三个人 + 一个再也没回来的
+     * 位置就永远凑不齐"四家都在且都准备了"，既开不了下一局，房主也没法用 `add_bot` 补位
+     * （补位要求那一格是空的）。牌局已经打完，那个位置不再有"本局手牌"要保 —— 放掉最干净。
+     */
+    private void releaseAwaySeats() {
+        synchronized (roomLock) {
+            for (Seat s : seats) {
+                if (s.away) {
+                    Log.info("牌桌 " + id + " 释放托管座位 " + s.index + "（本场已结束）");
+                    s.away = false;
+                    s.session = null;
+                    s.pid = 0;
+                    s.name = "";
+                    s.uuid = null;
+                    s.ready = false;
+                }
+            }
+            reassignHostLocked();
+        }
+    }
+
+    /** 该 uuid 是不是正**托管**在某个座位上（返回座位号，-1 = 不是）。 */
+    public int seatOfUuid(String want) {
+        if (want == null || want.isEmpty()) {
+            return -1;
+        }
+        for (Seat s : seats) {
+            if (s.away && s.session == null && want.equals(s.uuid)) {
+                return s.index;
+            }
+        }
+        return -1;
     }
 
     // ------------------------------------------------------------- 主循环
@@ -893,6 +1023,8 @@ public final class Table implements Runnable {
                 }
                 // 收尾同样在锁里：`playing` 归位、把人类的 ready 清掉、再广播一次房间状态。
                 // 顺序不能反 —— 先广播再清 ready 的话，客户端会看到"还没打完却可以换座"的中间态。
+                // 托管中的座位到这里**释放**（人没回来就不再占位，房主可以补机器人/等人加进来）。
+                releaseAwaySeats();
                 synchronized (roomLock) {
                     playing = false;
                     for (Seat s : seats) {
@@ -928,6 +1060,7 @@ public final class Table implements Runnable {
     /** 跑完一整场（自测直接调用）。 */
     public void playGame() {
         playing = true;
+        voteEnded = false;          // 新的一场：清掉上一场的"投票结束"标志
         int[] scores = new int[4];
         for (int i = 0; i < 4; i++) {
             scores[i] = rules.startScore;
@@ -967,6 +1100,9 @@ public final class Table implements Runnable {
         broadcastRoom();
 
         boolean gameOver = false;
+        // 投票通过（`voteEnded`）= 整场结束。它可能在**任何**时刻发生（别的线程上），
+        // 所以下面每个能让出执行权的点之后都要看一眼。
+        boolean endedByVote = false;
         int handsPlayed = 0;
         while (!stop && !gameOver && (debugMaxHands <= 0 || handsPlayed < debugMaxHands)) {
             handsPlayed++;
@@ -985,11 +1121,17 @@ public final class Table implements Runnable {
                 // 四个客户端会一直挂在牌桌上等一个永远不会来的事件（AUDIT F1 的真实现象）。
                 // 这里把整场按异常终止收尾，客户端至少能拿到结算、体面退出。
                 Log.error("一局异常，按终局收尾", e);
-                sendGameEnd(scores);
+                sendGameEnd(scores, "");
                 saveReplay();
                 return;
             }
             currentRound = null;
+            // 投票通过：本局不算打完（没有 `round_end`），直接进终局路径。
+            if (res.voteEnded || voteEnded) {
+                endedByVote = true;
+                Log.info("牌桌 " + id + " 因投票结束对局（第 " + handsPlayed + " 小局中途）");
+                break;
+            }
             scores = r.scores;
             sticks = res.sticksLeft;
             for (int i = 0; i < 4; i++) {
@@ -1018,6 +1160,11 @@ public final class Table implements Runnable {
             awaitRoundConfirm();
             if (stop) {
                 return;
+            }
+            // 局间也可能被投票结束（`sleepMs` / `awaitRoundConfirm` 都会提前返回）
+            if (voteEnded) {
+                endedByVote = true;
+                break;
             }
             // 击飞
             if (rules.tobi) {
@@ -1088,7 +1235,8 @@ public final class Table implements Runnable {
             }
             lastScores = scores.clone();
         }
-        sendGameEnd(scores);
+        sendGameEnd(scores, endedByVote ? "vote" : "");
+        cancelVote();          // 还没收口的投票静默作废（game_end 已经说明一切）
         saveReplay();
     }
 
@@ -1121,7 +1269,7 @@ public final class Table implements Runnable {
         return l;
     }
 
-    private void sendGameEnd(int[] scores) {
+    private void sendGameEnd(int[] scores, String reason) {
         // 精算（点数 → 马点/头名赏 → 精算点数）是纯函数，放在 RoundScoring 里可单独单测：
         // 见 RoundScoring.settle 的注释与 docs/日本麻将.md §精算点数（2026-09-14 版）。
         RoundScoring.Settlement st = RoundScoring.settle(scores, rules);
@@ -1149,6 +1297,8 @@ public final class Table implements Runnable {
                 "scores", intList(scores),
                 "ranking", ranking,
                 "replay_id", replay == null ? "" : replay.id(),
+                // `""` = 正常打完；`"vote"` = 投票通过结束对局（PROTOCOL §3.7）
+                "reason", reason,
                 "final", finalList);
         // ⚠ 顺序：**先记并落盘，再下发**。客户端收到 `game_end` 就会在结算界面上给
         //   「看本局回放」按钮 —— 那一刻回放必须已经能取，否则用户点了就是"找不到该记录"。
@@ -1161,11 +1311,21 @@ public final class Table implements Runnable {
         Log.info("牌桌 " + id + " 终局：" + java.util.Arrays.toString(scores));
     }
 
-    private static void sleepMs(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+    /**
+     * 可被**投票打断**的 sleep：切片轮询，投票一通过就立刻返回。
+     *
+     * <p>局间那一停（默认 10 秒）+ 确认窗口（5 秒）最长 15 秒 —— 如果睡死，
+     * 玩家点「结束对局」之后还要等它睡完，卡片会一直停在结算界面上。
+     */
+    private void sleepMs(long ms) {
+        final long end = System.currentTimeMillis() + ms;
+        while (!stop && !voteEnded && System.currentTimeMillis() < end) {
+            try {
+                Thread.sleep(Math.min(100, Math.max(1, end - System.currentTimeMillis())));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
     }
 
@@ -1189,7 +1349,8 @@ public final class Table implements Runnable {
         }
         final long deadline = System.currentTimeMillis() + ROUND_CONFIRM_MS;
         broadcast(Json.obj("ev", "round_wait", "ms", ROUND_CONFIRM_MS));
-        while (!stopped() && System.currentTimeMillis() < deadline) {
+        // 投票通过时立刻收工（`sleepMs` 也会提前醒）
+        while (!stopped() && !voteEnded && System.currentTimeMillis() < deadline) {
             drainConfirm();
             if (allConfirmed()) {
                 return;
@@ -1238,6 +1399,291 @@ public final class Table implements Runnable {
         }
         return true;
     }
+
+    // ================================================================= 结束对局投票
+
+    /**
+     * 投票窗口（发起后最多这么多毫秒收口）与**全员冷却**（一次投票结束后这么久内不能再发起）。
+     *
+     * <p>冷却 5 分钟是需求原文（「投票功能全员冷却5分钟（由服务端记时）」）——
+     * 计时**只在服务端**，客户端拿到的只是"还要等多久"（`vote_denied.wait_ms` /
+     * `vote_result.cooldown_ms`），这样改系统时间/改客户端都动摇不了这条规则。
+     */
+    public static final long VOTE_WINDOW_MS = 60_000;
+    public static final long VOTE_COOLDOWN_MS = 5 * 60_000;
+
+    /** 投票状态锁：`vote_*` 命令跑在各连接自己的线程上（不是牌桌线程），所以要自己互斥。 */
+    private final Object voteLock = new Object();
+    private boolean voteRunning;
+    private final boolean[] voteAgreed = new boolean[4];
+    private final boolean[] voteAnswered = new boolean[4];
+    private long voteCooldownUntil;
+    private java.util.Timer voteTimer;
+    private java.util.TimerTask voteTask;
+    private volatile long voteOpenedAt;
+    /**
+     * **投票通过**：整场结束。牌局线程看到它就收工（见 `Round.play` 与 `playGame`）。
+     *
+     * <p>为什么是"标志 + 唤醒"而不是直接结束线程：投票发生在**别的线程**上，而牌局线程
+     * 此刻可能正阻塞在一次 `poll`/`sleep` 里等玩家出牌 —— 它必须能被叫醒，然后走**正常的**
+     * 收尾路径（广播 `game_end`、落盘回放），而不是被硬掐掉。
+     */
+    private volatile boolean voteEnded;
+
+    /** 投票是否通过（牌局线程在若干处检查它）。 */
+    public boolean voteEnded() {
+        return voteEnded;
+    }
+
+    /** 供自检/诊断：投票是否正在进行、冷却还剩多久。 */
+    public boolean voteRunning() {
+        synchronized (voteLock) {
+            return voteRunning;
+        }
+    }
+
+    public long voteCooldownLeft() {
+        synchronized (voteLock) {
+            return Math.max(0, voteCooldownUntil - System.currentTimeMillis());
+        }
+    }
+
+    /** 供自检：投票窗口是什么时候开的（0 = 没开过）。 */
+    public long voteOpenedAt() {
+        return voteOpenedAt;
+    }
+
+    /**
+     * 通过门槛：**严格多于半数**（需求原文「多于半数（不包括半数）」）。
+     *
+     * <p>`total / 2 + 1`：1 人 → 1、2 人 → 2、3 人 → 2、4 人 → 3。
+     * 抽成静态纯函数是为了能脱离牌桌逐格断言（见 `SelfTest.voteTests`）。
+     */
+    public static int votesNeeded(int total) {
+        return total / 2 + 1;
+    }
+
+    /**
+     * 投票的**分母**：在场人类玩家 —— **不数机器人**，**不数掉线托管的玩家**
+     * （需求原文：「不计数机器人或未在场的玩家」）。
+     */
+    public int[] eligibleVoters() {
+        List<Integer> l = new ArrayList<>();
+        for (Seat s : seats) {
+            if (s.bot || s.session == null) {
+                continue;
+            }
+            l.add(s.index);
+        }
+        int[] out = new int[l.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = l.get(i);
+        }
+        return out;
+    }
+
+    /** 发起「结束对局」投票（`Session` 的读线程调用）。 */
+    public void requestVoteEnd(int seat) {
+        if (seat < 0 || seat > 3) {
+            return;
+        }
+        synchronized (voteLock) {
+            final long now = System.currentTimeMillis();
+            if (!playing) {
+                denyVote(seat, "not_playing", 0);
+                return;
+            }
+            if (voteRunning) {
+                denyVote(seat, "running", 0);
+                return;
+            }
+            if (now < voteCooldownUntil) {
+                denyVote(seat, "cooldown", voteCooldownUntil - now);
+                return;
+            }
+            final int[] el = eligibleVoters();
+            if (!containsSeat(el, seat)) {
+                denyVote(seat, "not_playing", 0);
+                return;
+            }
+            voteRunning = true;
+            voteOpenedAt = now;
+            java.util.Arrays.fill(voteAgreed, false);
+            java.util.Arrays.fill(voteAnswered, false);
+            // **发起人算同意**：他点「结束对局」就是在表态（否则界面上会出现
+            // "我刚点了结束对局，却还要再点一次同意"的荒谬一步）。见 PROTOCOL §2.5。
+            voteAgreed[seat] = true;
+            voteAnswered[seat] = true;
+            final int total = el.length;
+            final int need = votesNeeded(total);
+            broadcast(Json.obj("ev", "vote_start", "by", seat,
+                    "need", need, "total", total, "deadline_ms", VOTE_WINDOW_MS));
+            Log.info("牌桌 " + id + " 结束对局投票开始（发起 " + seat
+                    + "，需要 " + need + "/" + total + "）");
+            scheduleVoteTimeout();
+            // 分母可能只有他一个人（1 人 + 3 机器人）：那就是**立刻通过**，
+            // 不必等满 60 秒、也不必让他再点一次。
+            int[] c = countsLocked(el);
+            if (c[0] >= need) {
+                finishVoteLocked("passed", "enough", c[0], need, total);
+            }
+        }
+    }
+
+    /** 对进行中的投票表态（`Session` 的读线程调用）。 */
+    public void castVote(int seat, boolean agree) {
+        if (seat < 0 || seat > 3) {
+            return;
+        }
+        synchronized (voteLock) {
+            if (!voteRunning) {
+                return;                     // 没有进行中的投票：静默忽略（可能刚被别人结束）
+            }
+            final int[] el = eligibleVoters();
+            if (!containsSeat(el, seat)) {
+                return;                     // 机器人 / 掉线托管 / 观战者：不参与计票
+            }
+            if (voteAnswered[seat]) {
+                return;                     // 只看第一次表态
+            }
+            voteAnswered[seat] = true;
+            voteAgreed[seat] = agree;
+            final int total = el.length;
+            final int need = votesNeeded(total);
+            int[] c = countsLocked(el);
+            broadcast(Json.obj("ev", "vote_update",
+                    "agree", c[0], "need", need, "total", total,
+                    "agreed", seatListLocked(el, true), "declined", seatListLocked(el, false)));
+            if (c[0] >= need) {
+                finishVoteLocked("passed", "enough", c[0], need, total);
+            } else if (c[0] + (total - c[1]) < need) {
+                // 剩下的全同意也不够了 → 当场否决，不为了等一个已经没意义的人而拖满窗口
+                finishVoteLocked("rejected", "impossible", c[0], need, total);
+            }
+        }
+    }
+
+    /** 投票窗口到点：没结论就是否决（没表态视为不同意）。 */
+    private void onVoteTimeout() {
+        synchronized (voteLock) {
+            if (!voteRunning) {
+                return;
+            }
+            int[] el = eligibleVoters();
+            int total = el.length;
+            int need = votesNeeded(total);
+            int[] c = countsLocked(el);
+            finishVoteLocked("rejected", "timeout", c[0], need, total);
+        }
+    }
+
+    /** 收口并广播结论（**必须在 voteLock 内调用**）。 */
+    private void finishVoteLocked(String result, String reason, int agree, int need, int total) {
+        voteRunning = false;
+        if (voteTask != null) {
+            voteTask.cancel();
+            voteTask = null;
+        }
+        voteCooldownUntil = System.currentTimeMillis() + VOTE_COOLDOWN_MS;
+        broadcast(Json.obj("ev", "vote_result",
+                "result", result, "agree", agree, "need", need, "total", total,
+                "reason", reason, "cooldown_ms", VOTE_COOLDOWN_MS));
+        Log.info("牌桌 " + id + " 结束对局投票：" + result + "（" + agree + "/" + total
+                + "，需要 " + need + "，" + reason + "）");
+        if ("passed".equals(result)) {
+            voteEnded = true;
+            wake();
+        }
+    }
+
+    /** 牌局结束时把还没收口的投票静默作废（不广播结论：`game_end` 已经说明一切）。 */
+    public void cancelVote() {
+        synchronized (voteLock) {
+            voteRunning = false;
+            if (voteTask != null) {
+                voteTask.cancel();
+                voteTask = null;
+            }
+            java.util.Arrays.fill(voteAnswered, false);
+            java.util.Arrays.fill(voteAgreed, false);
+        }
+    }
+
+    private void scheduleVoteTimeout() {
+        if (voteTimer == null) {
+            // 守护线程：它只按时间把投票收口，进程退出时不该被它拖住
+            voteTimer = new java.util.Timer("vote-timeout-" + id, true);
+        }
+        if (voteTask != null) {
+            voteTask.cancel();
+        }
+        voteTask = new java.util.TimerTask() {
+            @Override
+            public void run() {
+                onVoteTimeout();
+            }
+        };
+        voteTimer.schedule(voteTask, VOTE_WINDOW_MS);
+    }
+
+    /** `{同意数, 已表态数, 总数}`（**必须在 voteLock 内调用**）。 */
+    private int[] countsLocked(int[] el) {
+        int agree = 0;
+        int answered = 0;
+        for (int s : el) {
+            if (voteAgreed[s]) {
+                agree++;
+            }
+            if (voteAnswered[s]) {
+                answered++;
+            }
+        }
+        return new int[]{agree, answered, el.length};
+    }
+
+    private List<Object> seatListLocked(int[] el, boolean yes) {
+        List<Object> l = new ArrayList<>();
+        for (int s : el) {
+            if (voteAnswered[s] && voteAgreed[s] == yes) {
+                l.add(s);
+            }
+        }
+        return l;
+    }
+
+    private static boolean containsSeat(int[] el, int seat) {
+        for (int s : el) {
+            if (s == seat) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void denyVote(int seat, String reason, long waitMs) {
+        Map<String, Object> ev = Json.obj("ev", "vote_denied", "reason", reason);
+        if (waitMs > 0) {
+            ev.put("wait_ms", waitMs);
+        }
+        send(seat, ev);
+    }
+
+    /**
+     * 叫醒牌局线程（它可能正阻塞在等玩家出牌的 `poll` 上）。
+     *
+     * <p>投一个**不是动作**的哨兵消息进命令队列：`pollResponse` 立刻返回，两个等待循环
+     * （{@code Round} 的出牌与鸣牌段）都会看到「不是本次询问的答复」而继续，然后在循环开头
+     * 看到 {@link #voteEnded} 收工。座位号写 `-1`：不可能是任何座位的答复。
+     */
+    private void wake() {
+        if (!responses.offer(new Object[]{-1, WAKE_MSG})) {
+            // 队列满 = 牌局线程正在忙着消费（它没有卡在 poll 上），下次检查点自然会看到标志
+            Log.debug("投票唤醒消息未入队（队列已满），靠检查点收工");
+        }
+    }
+
+    /** 唤醒哨兵（不可变；`Round` 只会因为它"不是动作"而跳过）。 */
+    private static final Map<String, Object> WAKE_MSG = Json.obj("cmd", "__wake");
 
     /** 供重连使用的当前状态快照。 */
     public Map<String, Object> stateFor(int seat) {

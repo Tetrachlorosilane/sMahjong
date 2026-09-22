@@ -98,6 +98,7 @@ java -jar mahjong-server.jar --selftest
 | `run/backup/mahjong-server-<旧版本>.jar` | 升级前的 jar（回滚用） | 保留 |
 | `logs/` | 每次启动追加一个按日期的日志 | 保留 |
 | `replays/` | 对局记录（回放用，见 §3.3） | 保留 |
+| `players/players.json` | **玩家档案**（uuid → 昵称 / 首次与最近登录时间 / 登录次数，见 §3.4） | 保留（**要备份**） |
 
 ### 3.3 对局记录（回放）的磁盘占用
 
@@ -118,13 +119,32 @@ java -jar mahjong-server.jar --selftest
   ID 是随机 10 位字符串。**别把 replays 目录暴露成静态站点** —— 要分享就把 ID 给对方。
 - 想保留更久就调大 `--replay-max` / `--replay-max-mb`；两者谁先到按谁淘汰。
 
-### 3.4 全部命令行开关
+### 3.4 玩家档案（身份 / uuid）
+
+服务端默认把玩家身份落在 **`./players/players.json`**（相对启动目录；**一份 JSON**，原子写）：
+
+```bash
+--player-dir /var/lib/mahjong/players   # 换目录（systemd 里同样要给绝对路径）
+--uuid-ttl-days 60                      # 多久没登录就清理（默认 60 天 = 2 个月）
+--no-player-store                       # 不落盘（uuid 握手照常，只是服务端不记得人）
+```
+
+- 客户端第一次连上会拿到一个 uuid（存在它自己的 `settings.json` 里），之后**同一个 uuid = 同一个玩家**：
+  牌局中掉线重连会**接回原座位**。**昵称仍然按昵称显示**，uuid 只在握手时出现。
+- **这个目录要备份**：它是身份的唯一副本（丢了不影响对局，但老玩家会变成"新玩家"、
+  掉线回来也接不回座位）。`update.sh` 升级时**原样保留** `players/`。
+- 清理是**自动的**：启动时一次，之后每 6 小时一次（判据是"上次登录距今 > TTL"）。
+  `--uuid-ttl-days 0` 表示只保留本进程登录过的（调试用）。
+
+### 3.5 全部命令行开关
 
 ```bash
 java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要）
 --host 0.0.0.0 --port 10086                # 监听地址/端口
 --fast                                     # 缩短机器人思考与局间停顿（压测用）
 --no-replay                                # 不写对局记录
+--player-dir players --uuid-ttl-days 60    # 玩家档案（身份）目录与保留期，见 §3.4
+--no-player-store                          # 不落盘玩家档案
 --selftest                                 # 规则引擎自检后退出
 --selfplay N --workers K --policy a,b,c,d  # 自对弈 / 评测（训练接口，见 PROTOCOL §8）
 ```
@@ -140,7 +160,7 @@ REPO=you/sMahjong ./update.sh        # 换仓库（自建 fork）
 ```
 
 它做的事：查 GitHub Release → 比"版本 + **资产 sha256**"→ 下载 → 校验摘要（可选 `--sha256` 兜底）
-→ `unzip -t` 完整性 → 解包 → 备份旧 jar → 替换 jar/脚本/文档（保留 `logs/ run/ replays/`）→ 重启。
+→ `unzip -t` 完整性 → 解包 → 备份旧 jar → 替换 jar/脚本/文档（保留 `logs/ run/ replays/ players/`）→ 重启。
 
 ⚠ **为什么不能只比版本号**：本仓库修 bug 时**不换版本号、原地重发同名资产**
 （`v1.8.0` 就这样重发过两次）。所以 `update.sh` 还比 release 资产的`digest`，
@@ -178,7 +198,11 @@ Type=simple
 User=mahjong
 WorkingDirectory=/opt/mahjong
 Environment=JAVA_TOOL_OPTIONS=-Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8
-ExecStart=/usr/bin/java -jar /opt/mahjong/mahjong-server.jar --host 0.0.0.0 --port 10086
+ExecStart=/usr/bin/java -jar /opt/mahjong/mahjong-server.jar --host 0.0.0.0 --port 10086 \
+          --replay-dir /var/lib/mahjong/replays --player-dir /var/lib/mahjong/players
+# ⚠ 用绝对路径（不是工作目录下的 replays/ players/）：开 ProtectSystem 时只放行这两处，
+#   玩家档案与对局记录才不会因为目录不可写而静默丢（服务端只记日志、不会因此崩）
+StateDirectory=mahjong
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/mahjong/server.log
@@ -190,7 +214,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin mahjong
-sudo mkdir -p /var/log/mahjong && sudo chown mahjong /var/log/mahjong
+sudo mkdir -p /var/log/mahjong /var/lib/mahjong/replays /var/lib/mahjong/players
+sudo chown -R mahjong /var/log/mahjong /var/lib/mahjong
 sudo systemctl daemon-reload
 sudo systemctl enable --now mahjong
 sudo systemctl status mahjong
@@ -255,4 +280,7 @@ stream {
 | 中文日志乱码 | 脚本已带 `-Dstdout.encoding=UTF-8`；自己起 java 时手动加上 |
 | `update.sh` 说"已是最新"但确实修了 bug | 加 `--force`，或先 `./update.sh --check` 看资产摘要是否变了 |
 | 更新后行为没变 | `./status.sh` 看进程启动时间；systemd 场景别忘了 `systemctl restart mahjong` |
+| 老玩家回来变成"新玩家" / 掉线重连接不回座位 | 看 `players/players.json` 在不在、可不可写（§3.4）；换目录/换机器时把这个目录一起搬过去 |
+| 玩家档案一直不落盘 | 落盘有 **2 秒节流**（登录太密集时合并写），正常；退出/清理时都会补写。看日志有没有"落盘失败" |
+| 日志里出现「玩家档案过期清理」 | 正常：超过 `--uuid-ttl-days`（默认 60 天）没登录的记录被清掉了 |
 | 想改规则 | 建房间时客户端可传 `rules` 对象（见 `docs/PROTOCOL.md` §5），服务端逐项校验 |

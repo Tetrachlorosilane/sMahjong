@@ -138,6 +138,14 @@ public final class Round {
         public int winner = -1;
         public int loser = -1;
         public boolean tsumo;
+        /**
+         * **投票通过结束对局**（见 PROTOCOL §2.5）：本局没打完就收工了。
+         *
+         * <p>调用方（{@code Table.playGame}）看到它就**不进**"下一局"的轮转逻辑，
+         * 直接走终局路径（广播 {@code game_end}）。其余字段全部保持"未结算"的样子 ——
+         * 这一小局的收支**整局作废**（连立直棒都还停在上一局结算后的账上）。
+         */
+        public boolean voteEnded;
     }
 
     @SuppressWarnings("unchecked")
@@ -233,6 +241,10 @@ public final class Round {
             if (table.stopped()) {
                 return new Result();
             }
+            // 投票通过（结束对局）可能在上一手等待期间发生 —— 立刻收工。
+            if (table.voteEnded()) {
+                return voteResult();
+            }
             int drawn = -1;
             boolean isRinshan = false;
             boolean haitei = false;
@@ -279,6 +291,11 @@ public final class Round {
                 }
             }
             Map<String, Object> act = ask(turn, "turn", opts, turnExtra, drawn, isRinshan);
+            // 投票在"等这一手"的过程中通过 → 本局收工（`ask` 会被唤醒哨兵提前返回，
+            // 这里不把 null 当"玩家超时摸切"继续打下去，直接走终局路径）。
+            if (table.voteEnded()) {
+                return voteResult();
+            }
             String type = act == null ? "discard" : Json.str(act, "type", "discard");
 
             if ("tsumo".equals(type) && drawn >= 0) {
@@ -381,6 +398,9 @@ public final class Round {
 
             // ---------- 鸣牌询问
             Claim cl = claimPhase(turn, discardId, declareRiichi);
+            if (table.voteEnded()) {
+                return voteResult();            // 鸣牌窗口里投通过的：连鸣牌都不落地
+            }
             if (cl != null && cl.abortReason != null) {
                 return abort(cl.abortReason);      // 三家和了：中途流局
             }
@@ -434,6 +454,28 @@ public final class Round {
             }
             turn = cl.seat;
         }
+    }
+
+    /**
+     * 这一家是不是**掉线托管**（`docs/PROTOCOL.md` §3.13）。
+     *
+     * <p>判据是「没有连接**且**不是机器人」：牌局进行中不可能有真正的空位
+     * （开局要求四家都有人），所以这个组合只可能是托管。机器人不算托管 ——
+     * 它本来就该自己决定（吃碰杠、和牌都算它的本事）。
+     *
+     * <p>与托管相对的是"玩家人在但没答"：那走的是**超时代打**（也是摸切），
+     * 区别在于超时的人**仍然会收到鸣牌询问**（他可以吃碰），托管的人不会。
+     */
+    private boolean awaySeat(int seat) {
+        Table.Seat s = table.seat(seat);
+        return !s.bot && s.session == null;
+    }
+
+    /** 「结束对局」投票通过了：本局中途收工，由 `Table.playGame` 直接走终局路径。 */
+    private Result voteResult() {
+        Result r = new Result();
+        r.voteEnded = true;
+        return r;
     }
 
     /**
@@ -1314,6 +1356,13 @@ public final class Round {
                             Json.str(ev, "win_note", null)),
                     this, kind, options, ev));
         }
+        if (awaySeat(seat)) {
+            // **掉线托管**（PROTOCOL §3.13）：绝不代打 —— 只做规则上必须发生的那一步：
+            // 返回 null = "没有答复"，调用方按**默认摸切**处理（与超时代打同一条路径）。
+            // 机器人那一支会吃碰杠甚至和牌；托管不会（那等于替玩家做决定）。
+            sleepBot(seat);          // 保留同量级停顿：托管的一家不该把整桌节奏带飞
+            return null;
+        }
         table.send(seat, ev);
         // 只认本次询问真正给过的动作类型：被取消的鸣牌询问的迟到回包
         // （老客户端那条不带 ask_id 的 chi/pon）会被这里挡下，玩家照样拿到完整 deadline。
@@ -1565,6 +1614,11 @@ public final class Round {
         List<Integer> eligible = new ArrayList<>();
         for (int d = 1; d < 4; d++) {
             int s = (from + d) % 4;
+            if (awaySeat(s)) {
+                // 掉线托管：**一律不鸣**（也不下发询问）—— 需求原文「并不吃碰杠」。
+                // 连 `claimOptions`（含和了判定）都不跑：省掉一次纯浪费的 DFS。
+                continue;
+            }
             List<Map<String, Object>> o = claimOptions(s, from, tileId);
             optsBySeat.put(s, o);
             if (o.size() > 1 || (o.size() == 1 && !"pass".equals(o.get(0).get("type")))) {
@@ -1650,6 +1704,10 @@ public final class Round {
             globalDeadline = Math.max(globalDeadline, claimNow + seatDeadlineMs);
         }
         while (!asked.isEmpty()) {
+            // 投票通过：本局收工（下面那个 for 会把还没答的询问一律取消掉）
+            if (table.voteEnded()) {
+                break;
+            }
             // 收工判据（都答完 / 荣和者都答了 / **没人能压过已到手的最优** / 超时）
             // —— 纯函数，见 RoundClaims.shouldStop
             long remain = globalDeadline - System.currentTimeMillis();
