@@ -346,18 +346,6 @@ public final class Table implements Runnable {
     public java.util.function.BiConsumer<mahjong.ai.Decision, Map<String, Object>> debugChoiceTap;
 
     /**
-     * 按工厂给四个座位装策略（自对弈入口）。
-     *
-     * @param f        每局一份实例的工厂，见 {@link mahjong.ai.PolicyFactory}
-     * @param gameSeed 本局种子（用来重建确定性的随机源）
-     */
-    public void installPolicies(mahjong.ai.PolicyFactory f, long gameSeed) {
-        for (int i = 0; i < 4; i++) {
-            policy[i] = f == null ? null : f.create(i, gameSeed);
-        }
-    }
-
-    /**
      * 状态机 → 策略的**唯一**决策漏斗（自家回合与鸣牌段都汇到这里）。
      *
      * <p>返回值的形状与客户端回包一致；任何异常都兜底成内置机器人，绝不向上抛。

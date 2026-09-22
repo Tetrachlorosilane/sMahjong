@@ -41,9 +41,6 @@ public final class Tiles {
         return (k == AKA_M || k == AKA_P || k == AKA_S) && (id & 3) == 0;
     }
 
-    public static boolean isRedKind(int kind) {
-        return kind == AKA_M || kind == AKA_P || kind == AKA_S;
-    }
 
     /** id → "5m" / "0p" 等。 */
     public static String toStr(int id) {
@@ -115,14 +112,6 @@ public final class Tiles {
         return s != null && s.length() == 2 && s.charAt(0) == '0';
     }
 
-    /** 数字牌 0，风牌 1，三元牌 2。 */
-    public static int group(int kind) {
-        if (kind < 27) {
-            return 0;
-        }
-        return kind < 31 ? 1 : 2;
-    }
-
     /** 花色 0=m 1=p 2=s，字牌返回 -1。 */
     public static int suit(int kind) {
         return kind < 27 ? kind / 9 : -1;
@@ -191,13 +180,6 @@ public final class Tiles {
         return c;
     }
 
-    public static int[] countsFromIds(int[] ids) {
-        int[] c = new int[KIND_COUNT];
-        for (int id : ids) {
-            c[kind(id)]++;
-        }
-        return c;
-    }
 
     /** 计数数组求和。 */
     public static int sum(int[] c) {
@@ -206,18 +188,6 @@ public final class Tiles {
             s += v;
         }
         return s;
-    }
-
-    /** 计数数组 → 升序 kind 列表（重复展开）。 */
-    public static int[] expand(int[] c) {
-        int[] out = new int[sum(c)];
-        int p = 0;
-        for (int k = 0; k < KIND_COUNT; k++) {
-            for (int i = 0; i < c[k]; i++) {
-                out[p++] = k;
-            }
-        }
-        return out;
     }
 
     /** 中文名（日志/调试用）。 */

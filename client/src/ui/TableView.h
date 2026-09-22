@@ -126,15 +126,6 @@ public:
     /** 自检用：上一帧布局为牌河预留的行数（正常 3；某家超过 18 张时更大）。 */
     int riverRowsForTest() const { return m_layout.m_riverRows; }
 
-    /**
-     * 自检用：某家牌河第 index 张的**屏幕**矩形（与飞行动画终点同源）。
-     *
-     * <p>用来钉「牌河固定左缘」：先假定一行排满、算出最最左沿，所有行都从那里向右排 ——
-     * 所以**同一行第一张的左沿必须与已经打出了几张无关**（旧实现按本帧张数算，会整体漂移）。
-     * 需要先 `grab()` 触发一次 `computeLayout()`。
-     */
-    QRectF riverSlotForTest(int seat, int index) const;
-
     /** 自检用：按**方位**取牌河槽位（`pos` 同 `scoreBandForTest`：0=下自家 1=右 2=上 3=左）。 */
     QRectF riverSlotLocalForTest(int pos, int index) const;
 

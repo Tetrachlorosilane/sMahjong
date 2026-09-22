@@ -1,7 +1,6 @@
 package mahjong.replay;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -142,36 +141,8 @@ public final class Replay {
         return headerJson();
     }
 
-    /** 按小局切分：第 i 个小局的条目区间 {@code [rounds[i], rounds[i+1])}。 */
-    public int roundOf(int entryIndex) {
-        int r = 0;
-        for (int i = 0; i < rounds.size(); i++) {
-            if (rounds.get(i) <= entryIndex) {
-                r = i;
-            } else {
-                break;
-            }
-        }
-        return r;
-    }
-
     public int count() {
         return entries.size();
-    }
-
-    /**
-     * 从 {@code from} 取 {@code count} 条（分块取，客户端不必一次性拉完整场）。
-     *
-     * <p>越界一律钳制而不是报错：客户端翻页时正好赶上最后一页是常态。
-     */
-    public List<Object> sliceJson(int from, int count) {
-        int lo = Math.max(0, Math.min(from, entries.size()));
-        int hi = Math.max(lo, Math.min(lo + Math.max(0, count), entries.size()));
-        List<Object> out = new ArrayList<>(hi - lo);
-        for (int i = lo; i < hi; i++) {
-            out.add(entries.get(i).toJson());
-        }
-        return out;
     }
 
     /** 牌山的**形状**：4 行 × 34 列（{@code index -> row/col}，见 PROTOCOL §3.11）。 */
@@ -181,15 +152,5 @@ public final class Replay {
 
     public static int wallCol(int index) {
         return index / 4;
-    }
-
-    /** 供自检：把整场按"牌 → 去处"重建一遍时用的可变状态（见 SelfTest.replayTests）。 */
-    public Map<String, Object> statsJson() {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("entries", entries.size());
-        m.put("rounds", rounds.size());
-        m.put("walls", walls.size());
-        m.put("truncated", truncated);
-        return m;
     }
 }

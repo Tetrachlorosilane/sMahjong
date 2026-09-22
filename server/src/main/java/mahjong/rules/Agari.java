@@ -43,19 +43,7 @@ public final class Agari {
         /** 供 Evaluator 填入副露引用。 */
         public final Meld[] setMeld = new Meld[4];
 
-        public int quadCount() {
-            int n = 0;
-            for (int i = 0; i < nSets; i++) {
-                if (setType[i] == SET_QUAD) {
-                    n++;
-                }
-            }
-            return n;
-        }
 
-        public boolean hasWinTileInSet() {
-            return winSet >= 0;
-        }
 
         public Form copy() {
             Form f = new Form();
@@ -302,24 +290,6 @@ public final class Agari {
     public static List<Integer> waits(int[] counts13, int meldCount) {
         List<Integer> out = new ArrayList<>();
         int[] c = counts13.clone();
-        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-            if (c[k] >= 4) {
-                continue;
-            }
-            c[k]++;
-            if (isAgari(c, meldCount)) {
-                out.add(k);
-            }
-            c[k]--;
-        }
-        return out;
-    }
-
-    /** 计算 14 张手牌（含和了牌）的全部听牌种类——用于已经和了的牌型反推。 */
-    public static List<Integer> waitsOfWin(int[] counts14, int meldCount, int winKind) {
-        List<Integer> out = new ArrayList<>();
-        int[] c = counts14.clone();
-        c[winKind]--;
         for (int k = 0; k < Tiles.KIND_COUNT; k++) {
             if (c[k] >= 4) {
                 continue;

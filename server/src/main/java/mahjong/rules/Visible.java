@@ -99,14 +99,6 @@ public final class Visible {
         return out;
     }
 
-    /** 单个牌种的剩余张数（下限 0）。 */
-    public static int unseenOf(int[] visible, int kind) {
-        if (kind < 0 || kind >= Tiles.KIND_COUNT) {
-            return 0;
-        }
-        return Math.max(0, 4 - (visible == null ? 0 : visible[kind]));
-    }
-
     public static int total(int[] counts) {
         int n = 0;
         if (counts != null) {

@@ -421,10 +421,11 @@ mahjong/
 └─ tools/              联调与静态检查：e2e-test / timeout / clock / firstturn / riichi-stale /
                        claim-priority / discard-align / seat-swap / utf8 / replay-test /
                        selfplay-check(训练数据集校验，见 §6.5) / check-i18n / i18n-scan / i18n-map
-                       + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server
+                       + i18n-apply + i18n-gen（见 §6）/ qt-provision.ps1 / mock-server / fetch-url
                        / gen-tile-placeholders / inline-svg-style / dump-otf-features
-                       / gen-sfx + gen-sfx-qrc（见 §9.3）/ package-release.ps1（发布打包，见 §9.5）
-                       / gh-push-payload.ps1（git 通道不通时的 REST 推送载荷，见 §9.5）
+                       / gen-sfx + gen-sfx-qrc（见 §9.3）
+                       / package-release.ps1 + make-zip.mjs（发布打包，见 §9.5）
+                       / deadcode-scan.mjs（无用函数扫描，见 §6.7）
 ```
 
 ---
@@ -843,6 +844,28 @@ mahjong/
 
 ---
 
+### 6.7 无用代码清理（可重复的判据）
+
+**`node tools/deadcode-scan.mjs [java|cpp]`** 扫出"只在声明/定义处出现"的函数 —— 2026-09 的一次全仓清理
+就是靠它：服务端删了 **27** 个（私有 helper + 一批没人调的公开 API：`Table.installPolicies`、
+`Tiles.group/expand/countsFromIds/isRedKind`、`Agari.quadCount/hasWinTileInSet/waitsOfWin`、
+`Replay.roundOf/sliceJson/statsJson`、`Policies.asAction/scripted/describe` …），客户端删了 **9** 个
+（`TableModel.askOptions/askTotalMs/askFrom/askTile/lastErrorText`、`TableView.riverSlotForTest`
+—— 它被 `riverSlotLocalForTest` 取代、`WallView.setRound`、`Theme.categoryDir`、`ReplayModel.roundLabel`），
+同时清掉 6 条随之失效的 `import`。
+
+⚠ 它给的是**候选**，不是判决书 —— 反射、宏、Qt 元对象（信号槽）、虚函数/接口实现、以及"故意留给外部使用者"
+的公开 API 都会漏判。删之前按这个顺序过一遍：
+
+1. 读一眼那段代码，确认没有副作用（初始化、注册、JNI/反射入口）；
+2. `override` / `virtual` / `signals:` / `slots:` / `Q_INVOKABLE` 段里的一律**别删**；
+3. **文档里写成契约的不删**：例 `Visible.unseen` 只被 PROTOCOL §8 的观测字段表引用（代码里没人调），
+   那也算"在用"，扫描器照样会报它 —— 这类要**留着并在代码注释里写清为什么**；
+4. 删完**编译 + 跑对应层自检**（服务端 `--selftest`、客户端 `--selftest`）—— 这一步才是判据：
+   有测试引用就会被抓出来（本次清理后 L1 1173/1170… 全绿、L2 769/0 全绿，说明删的都是真没人用的）。
+
+顺带：`server/build/unused-imports.mjs` 一类的临时脚本不必进仓库；真正可复用的（扫描器）放 `tools/`。
+
 ## 7. 常见症状 → 先查哪里
 
 > **最常查的 5 条**：编译/链接失败 · 手牌数量对不上（`tsumogiri`）· 一人牌河两张横置（`discard.sideways`）·
@@ -1034,7 +1057,30 @@ mahjong/
 | 包 | 内容 | 要点 |
 | --- | --- | --- |
 | `sMahjong-client-v<版本>-win64.zip` | `client\dist` 全部内容 **去掉 `settings.json`** + 自带 `README.txt` | 自带 Qt 运行时与 `licenses\`（LGPLv3 要求），解压即用 |
-| `sMahjong-server-v<版本>.zip` | `mahjong-server.jar` + `build.sh`/`run.sh` + `DEPLOY.md` + `README.txt` | 目标机只要 JDK 17+ |
+| `sMahjong-server-v<版本>.zip` | **一层版本目录** `sMahjong-server-v<版本>/`：`mahjong-server.jar` + `VERSION` + `start.sh`/`stop.sh`/`restart.sh`/`status.sh`/`update.sh`（来自 `server\pack\`）+ `DEPLOY.md` + `README.txt` | 目标机只要 JDK 17+；`./start.sh` 起，`./update.sh` 自更新 |
+
+**服务端包的结构是 2026-09 重构过的**（用户点名："release 里服务端内容结构不合理"）：
+
+- 旧结构把 `build.sh` / `run.sh` / jar / README **平铺在 zip 根**。问题是 ① 包里**没有源码**，
+  `build.sh` 根本跑不起来（纯误导）② 解压即散落一地。现在：**不带 `build.sh`**（要构建请克隆源码），
+  换成五个运维脚本，且**包内一层版本目录**（解压不会污染当前目录，也便于并存/回滚）。
+- 脚本模板在 `server\pack\`（**随仓库版本管理**，改脚本 = 改仓库），由 `package-release.ps1` 拷进包：
+  - `start.sh` 后台启动（`nohup` + PID 写 `run/`、日志写 `logs/`，幂等：已在跑就不重复起）；
+  - `stop.sh` 优雅停止（SIGTERM → 最多 20s → SIGKILL；`--force` 直接杀）；
+  - `restart.sh` / `status.sh`（状态含进程/端口/版本/日志尾）；
+  - `update.sh` **自动获取并安装更新**：查 GitHub Release → 比 **tag + 资产 sha256**
+    （本仓库会**同 tag 原地重发**，只比版本号会永远停在"已是最新"）→ 下载 → 校验摘要 →
+    `unzip -t` → 备份旧 jar 到 `run/backup/` → 替换（保留 `logs/ run/ replays/`）→ 需要时重启。
+    `--check` 只看不装，`--tag` 指定版本，`--force` 重装。解析逻辑用真 API 响应验证过
+    （`tag_name` 与**本资产**的 `digest` 都能取到）。
+- ⚠ **`.sh` 的可执行位必须写进 zip**：PowerShell 的 `Compress-Archive`（.NET `ZipArchive`）把条目的
+  `versionMadeBy` 写成 0（FAT），Linux 侧**忽略**权限位 → 解压后 `.sh` 全是 0644、
+  `./start.sh` 报 Permission denied（实测 bsdtar 显示 `-rw-rw-r--`）。
+  所以服务端包改由 **`tools/make-zip.mjs`** 手写（`versionMadeBy = Unix(3)` + `externalAttrs` 高位 = 0755）。
+  自检方式：`tar -tvf release\sMahjong-server-v<版本>.zip` 里 `.sh` 必须是 `-rwxr-xr-x`。
+- 脚本本身**用 LF 写**（`.gitattributes` 已保证），发布包里再核对一次没有 CRLF（有的话 Linux 上直接
+  `bad interpreter`）。本机没有可用的 bash（`bash.exe` 是 WSL 存根、Git bash 起不来），所以脚本是
+  **静态审查 + 解析逻辑对着真 API 验证**，没在真 Ubuntu 上跑过 —— 目标机第一次跑请看 `./status.sh` 与日志。
 
 - ⚠ **版本号有两处，脚本会两边一起核对**：`client/CMakeLists.txt` 的 `project(... VERSION)` 与
   `client/src/main.cpp` 的 `setApplicationVersion()`。不一致直接报错 —— 「包名 v1.6.0、程序自称 1.5.0」
@@ -1051,12 +1097,18 @@ mahjong/
   与 `tag_name`** 才会重新发布并关联（URL 变回 `/releases/download/<tag>/…`）。
   完整链路：`DELETE` tag → `POST` tag（指向新提交）→ `DELETE` 旧资产 → 上传新资产
   → `PATCH {draft:false, tag_name, body}`。别漏最后一步，否则 release 会静默变成草稿（只有自己看得见）。
-- **提交推送**：优先 `gh` / git 通道；**git 通道不通时**（本机实测：broker 到 `github.com:443` 被拦，
-  `git push` / `ls-remote` 都失败，而 `api.github.com` 通）走 **dsh-github 插件的 REST 通道** +
-  `tools\gh-push-payload.ps1` 生成 blobs/tree/commit/ref 载荷（脚本会**自算 commit sha** 与本地比对）。
-  三条硬要求：`bodyFile` 用**绝对路径**；`PATCH /git/refs/…` 的 body 也走文件（内联字符串会被当字符串发走、
-  422 `is not an object`）；提交对象的 message **必须带尾随换行**，否则远端 commit sha 与本地不同
-  （内容一样、对象不一样 → 本地与远端分叉）。
+- **提交推送**：优先 **dsh-github 插件**（本机 `git push` 不通：schannel 取不到凭据 /
+  broker 到 `github.com:443` 被拦，而 `api.github.com` 通）。**首选工具 `github_commit_files`**
+  —— 一次调用提交任意多个文件（内部就是 blob → tree → commit → ref），比逐个 `POST /git/blobs` 少 N 倍往返；
+  它支持 `mode`（100644/100755/120000）、`delete[]`、`normalizeEol`，并在更新 ref 后回读 sha 校验。
+  其余场景用 `github_request`（任意 REST）、`github_upload_release_asset`（资产二进制走
+  `uploads.github.com`，与 `api.github.com` 是**两个 origin**）。
+  ⚠ 三条仍在的硬要求：`bodyFile` 用**绝对路径**；`PATCH /git/refs/…` 的 body 也走文件
+  （内联字符串会被当字符串发走、422 `is not an object`）；提交对象的 message **必须带尾随换行**，
+  否则远端 commit sha 与本地不同（内容一样、对象不一样 → 本地区远端分叉）。
+  ⚠ **旧的三件套已删**（`gh-push-payload.ps1` / `make-gh-tree-payload.mjs` / `push-github-api.mjs`）：
+  它们是"插件还没有 `github_commit_files`"时代的绕路（自己拼 base64、自己算 commit sha），
+  现在用插件一次调用即可，留着只会让人以为必须那么干。
 - **`client\dist` 与 release 的关系**：`dist` 只在 `-Deploy` 时更新，所以**发布前先看客户端源码有没有
   在 v<上个版本> 之后改过**（`git diff --name-only v1.6.0..HEAD -- client/`）—— 改过就必须重出 `dist`，
   否则包里是旧 exe（2026-09 档 C 发布时就撞到：LobbyDialog / TableModel 变了而 dist 还是旧的）。

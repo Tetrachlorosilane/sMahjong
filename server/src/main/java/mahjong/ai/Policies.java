@@ -1,11 +1,9 @@
 package mahjong.ai;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
 
 import mahjong.bot.Bot;
-import mahjong.util.Json;
 
 /** 内置策略与适配器（训练接口的"标准件"）。 */
 public final class Policies {
@@ -77,21 +75,6 @@ public final class Policies {
         };
     }
 
-    /**
-     * {@link Policy} → {@link ActionPolicy}：把任意策略的选择翻成动作键（记录标签用）。
-     *
-     * <p>翻不出来（认不出的回包）返回 {@code null}。
-     */
-    public static ActionPolicy asAction(Policy p) {
-        return d -> Action.fromCmd(p.decide(d));
-    }
-
-    /** 固定动作序列（测试/复现特定局面用）；越界后回落到内置机器人。 */
-    public static ActionPolicy scripted(List<Action> actions) {
-        final int[] i = {0};
-        return d -> i[0] < actions.size() ? actions.get(i[0]++) : null;
-    }
-
     // ------------------------------------------------------------------ 工厂
 
     /** 每局一个策略实例（并行自对弈下"同 seed 可复现"的前提，见 {@link PolicyFactory}）。 */
@@ -126,10 +109,5 @@ public final class Policies {
             default:
                 throw new IllegalArgumentException("未知策略名: " + name);
         }
-    }
-
-    /** 记录一条决策（供轨迹写入器解释策略选择）。 */
-    public static String describe(Map<String, Object> cmd) {
-        return Json.write(cmd);
     }
 }

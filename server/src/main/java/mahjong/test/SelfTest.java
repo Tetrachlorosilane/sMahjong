@@ -4059,18 +4059,6 @@ public final class SelfTest {
         return c;
     }
 
-    /** 选项列表里有哪些 `type`（失败信息里打出来，省得靠猜）。 */
-    private static String optionTypes(List<Map<String, Object>> options) {
-        StringBuilder sb = new StringBuilder();
-        for (Map<String, Object> o : options) {
-            if (sb.length() > 0) {
-                sb.append('/');
-            }
-            sb.append(o.get("type"));
-        }
-        return sb.toString();
-    }
-
     /** 选项列表里有没有这一种（服务端下发的 `type`）。 */
     private static Map<String, Object> findType(List<Map<String, Object>> options, String type) {
         for (Map<String, Object> o : options) {
@@ -5458,23 +5446,4 @@ public final class SelfTest {
         return false;
     }
 
-    /** 供调试：打印一手牌的评价。 */
-    public static void dump(String hand, String win, boolean tsumo) {
-        Evaluator.HandScore s = evalClosed(hand, win, tsumo, 1, 0, 0);
-        System.out.println("手牌: " + hand + " 和了牌: " + win);
-        System.out.println("  役: " + yakuNames(s));
-        System.out.println("  番=" + s.han + " 符=" + s.fu + " 基本点=" + s.base
-                + " 役满=" + s.yakuman + " valid=" + s.valid + " (" + s.reason + ")");
-    }
-
-    /** 供调试：统计向听。 */
-    public static void dumpShanten(String hand) {
-        int[] c = counts(hand);
-        System.out.println(hand + " → 向听 " + Shanten.min(c, 0)
-                + " 听牌 " + Agari.waits(c, 0));
-    }
-
-    static Map<String, Object> unusedMeld() {
-        return new Meld(Meld.Kind.PON, new int[]{0, 0, 0}, 0, 0).toJson();
-    }
 }

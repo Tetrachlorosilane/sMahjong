@@ -134,9 +134,4 @@ public final class Shanten {
         }
         return s;
     }
-
-    /** 是否听牌（向听 0）——不检查役种。 */
-    public static boolean isTenpai(int[] counts, int meldCount) {
-        return min(counts, meldCount) <= 0;
-    }
 }

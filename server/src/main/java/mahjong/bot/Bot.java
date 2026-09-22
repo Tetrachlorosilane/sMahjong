@@ -1042,22 +1042,7 @@ public final class Bot {
         return fb;
     }
 
-    private static int[] countsWithout(Round r, int seat, int removeId) {
-        int[] c = new int[Tiles.KIND_COUNT];
-        boolean removed = false;
-        for (int id : r.hand[seat]) {
-            if (!removed && id == removeId) {
-                removed = true;
-                continue;
-            }
-            c[Tiles.kind(id)]++;
-        }
-        return c;
-    }
 
-    private static int currentShanten(Round r, int seat) {
-        return Shanten.min(r.concealCounts(seat), r.melds[seat].size());
-    }
 
     // ------------------------------------------------------------- 鸣牌
 

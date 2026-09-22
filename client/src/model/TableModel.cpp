@@ -425,10 +425,6 @@ QString TableModel::askKind() const
     return m_ask.value(QStringLiteral("kind")).toString();
 }
 
-QVector<QJsonObject> TableModel::askOptions() const
-{
-    return proto::parseAsk(m_ask).options;
-}
 
 qint64 TableModel::askRemainMs() const
 {
@@ -439,20 +435,8 @@ qint64 TableModel::askRemainMs() const
     return m_askDeadlineAbs - QDateTime::currentMSecsSinceEpoch();
 }
 
-qint64 TableModel::askTotalMs() const
-{
-    return m_askTotalMs;
-}
 
-int TableModel::askFrom() const
-{
-    return m_ask.value(QStringLiteral("from")).toInt(-1);
-}
 
-QString TableModel::askTile() const
-{
-    return m_ask.value(QStringLiteral("tile")).toString();
-}
 
 void TableModel::clearAsk()
 {
@@ -462,10 +446,6 @@ void TableModel::clearAsk()
     m_askTotalMs = 0;
 }
 
-QString TableModel::lastErrorText() const
-{
-    return m_error.value(QStringLiteral("msg")).toString();
-}
 
 void TableModel::syncNamesFromSeats(const QJsonArray& seats)
 {

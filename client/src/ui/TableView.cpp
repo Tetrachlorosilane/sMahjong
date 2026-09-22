@@ -438,12 +438,6 @@ int TableView::riverRowCountForTest(int tiles)
     return TableLayout::riverRowsFor(tiles);
 }
 
-QRectF TableView::riverSlotForTest(int seat, int index) const
-{
-    // 与飞行动画终点同源（都是 m_layout.riverSlotScreen）——
-    // 「牌河固定左缘」这条不变量就是对它断言：同一行第一张的左沿必须与已打出张数无关。
-    return riverSlotScreen(seat, index);
-}
 
 QRectF TableView::riverSlotLocalForTest(int pos, int index) const
 {

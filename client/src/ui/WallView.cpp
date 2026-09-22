@@ -75,12 +75,6 @@ void WallView::setState(ReplayModel* model, int round, int step)
     update();
 }
 
-void WallView::setRound(int round)
-{
-    m_round = round;
-    rebuild();
-    update();
-}
 
 WallView::Fate WallView::fateOfTakenTile(const ReplayModel::Round& r,
                                          const QVector<ReplayModel::WallSlot>& wallSlots,

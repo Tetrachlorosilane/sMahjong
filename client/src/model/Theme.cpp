@@ -191,10 +191,6 @@ QByteArray Theme::readFile(const QString& rel) const
 #endif
 }
 
-QString Theme::categoryDir(const QString& key) const
-{
-    return m_dirs.value(key);
-}
 
 QString Theme::firstFileIn(const QString& dir, const QStringList& exts) const
 {

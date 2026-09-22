@@ -327,14 +327,6 @@ int ReplayModel::prevRoundStart(int index) const
     return roundStart(round - 1);
 }
 
-QString ReplayModel::roundLabel(int round) const
-{
-    if (round < 0 || round >= m_rounds.size()) {
-        return QString();
-    }
-    const Round& r = m_rounds.at(round);
-    return lang::t(QStringLiteral("ui.replay.round_label")).arg(r.bakaze).arg(r.kyoku);
-}
 
 QString ReplayModel::roundText(int round) const
 {

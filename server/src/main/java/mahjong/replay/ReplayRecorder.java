@@ -1,7 +1,6 @@
 package mahjong.replay;
 
 import java.security.SecureRandom;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -185,18 +184,5 @@ public final class ReplayRecorder {
     /** 供自检：直接看记录（不落盘）。 */
     public Replay peek() {
         return replay;
-    }
-
-    /** 供自检：把一条聊天正文按字节上限裁剪（防止 body 里塞超长文本）。 */
-    public static List<Object> clampChat(List<Object> text) {
-        List<Object> out = new ArrayList<>(text.size());
-        for (Object o : text) {
-            String s = String.valueOf(o);
-            if (s.length() > MAX_CHAT_BYTES) {
-                s = s.substring(0, MAX_CHAT_BYTES);
-            }
-            out.add(s);
-        }
-        return out;
     }
 }
