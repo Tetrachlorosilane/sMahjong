@@ -76,6 +76,8 @@ public final class SelfTest {
         paymentTests();
         notenPenaltyTests();
         fourKanAbortTests();
+        fourKanAbortOrderTests();
+        kyuushuCansTests();
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
@@ -1955,6 +1957,192 @@ public final class SelfTest {
         ml.kanByPlayer[0] = 2;
         ml.kanByPlayer[1] = 2;
         check("M.League 2 家共开 4 次杠 → 不流局（无中途流局）", !ml.fourKanAbortNow());
+    }
+
+    /**
+     * **S-58 的时序**：四杠散了成立时，流局必须判在「鸣牌落地」**之前**。
+     *
+     * <p>为什么不能靠模拟撞：一局里凑齐"2 家各开 2 次杠 + 第 4 次杠的岭上舍张正好被鸣"
+     * 在随机对局里撞不到 —— `kanLimitTests` 那 116 局里单局最多 3 次杠、开满 4 次的是 **0 局**
+     * （teacher 本来就会主动避让"第 4 个杠会打散本局"）。所以这里用**注入策略**把局面摆出来：
+     * <ol>
+     *   <li>{@code Decision.round} 是**活的那一局**，策略在自家第一个回合直接把
+     *       {@code kanCount / kanByPlayer} 摆成「2 家各 2 次杠」—— 判据只看这两个计数，
+     *       与 {@link #fourKanAbortTests} 摆的是同一份状态；</li>
+     *   <li>那一手**故意打出一张"别人手里正好有一对"的牌**（手里的牌随便挑，四种手牌都读得到）
+     *       → 下一瞬间**一定**有人能碰，于是"要鸣这张"与"四杠散了成立"同时出现；</li>
+     *   <li>鸣牌段由同一条策略答 {@code pon}（荣和一律 {@code pass} —— 荣和会走和了路径，
+     *       把这一刻盖过去，那不是本条要测的东西）。</li>
+     * </ol>
+     *
+     * <p>旧实现（AUDIT S-58）把收尾判据放在 {@code cl == null} 分支里：鸣牌一旦成立就先
+     * {@code applyMeld}（广播 + 移牌）再流局 —— 客户端/回放看到的是"碰完立刻流局"。
+     * 所以断言就是「这一局里 {@code meld} 报文与副露都必须为 0」；**红证**：把
+     * {@code Round.play()}` 里那句 {@code fourKanAbortNow()} 挪到 {@code applyMeld} 之后
+     * 立刻转红（`meld` 报文 8 条、副露 8 处）。
+     */
+    private static void fourKanAbortOrderTests() {
+        final int[] staged = {0};              // 摆了几局「2 家各 2 次杠」
+        final int[] aborts = {0};              // 其中真的判成四杠散了的局数
+        final int[] claimed = {0};             // 舍张真的被鸣（pon/chi 被答复）的局数 —— 非空转判据
+        final int[] meldsInAbortHand = {0};    // 流局那一局里出现过的 meld 报文（必须 0）
+        final int[] meldsAtAbort = {0};        // 流局那一刻四家名下的副露总数（必须 0）
+        final boolean[] armed = {true};
+        final boolean[] claimedNow = {false};
+        final boolean[] meldNow = {false};
+        final mahjong.game.Round[] live = {null};
+
+        mahjong.ai.Policy rig = d -> {
+            live[0] = d.round;
+            if ("claim".equals(d.kind)) {
+                for (Map<String, Object> o : d.options) {
+                    Object ty = o.get("type");
+                    if ("pon".equals(ty)) {
+                        claimedNow[0] = true;
+                        return Json.obj("type", "pon");
+                    }
+                    if ("chi".equals(ty)) {
+                        List<Object> sets = Json.list(o, "sets");
+                        if (sets != null && !sets.isEmpty()) {
+                            claimedNow[0] = true;
+                            return Json.obj("type", "chi", "tiles", new ArrayList<>(Json.asArr(sets.get(0))));
+                        }
+                    }
+                }
+                return Json.obj("type", "pass");       // 荣和也 pass：和了路径会盖过这一刻
+            }
+            if (!"turn".equals(d.kind) || !armed[0]) {
+                return null;                           // 其余一律交回内置 teacher
+            }
+            armed[0] = false;
+            // ① 摆出「本局已有 4 次杠、分属两家」—— 与 fourKanAbortTests 摆的是同一份判据状态
+            d.round.kanCount = 4;
+            d.round.kanByPlayer[0] = 2;
+            d.round.kanByPlayer[2] = 2;
+            staged[0]++;
+            // ② 打一张「别人手里正好有一对」的牌 → 保证这一瞬间一定有人能碰
+            int me = d.seat();
+            for (int id : d.round.hand[me]) {
+                int kind = Tiles.kind(id);
+                for (int other = 0; other < 4; other++) {
+                    if (other == me) {
+                        continue;
+                    }
+                    int same = 0;
+                    for (int oid : d.round.hand[other]) {
+                        if (Tiles.kind(oid) == kind) {
+                            same++;
+                        }
+                    }
+                    if (same >= 2) {
+                        return Json.obj("type", "discard", "tile", Tiles.toStr(id), "tsumogiri", false);
+                    }
+                }
+            }
+            return null;                               // 手里没有被碰得到的牌（罕见）：本局不计入 claimed
+        };
+
+        try {
+            for (int game = 0; game < 8; game++) {
+                Table t = new Table("FOURKAN" + game, "四杠散了时序桌", preset("tenhou"));
+                t.botDelayMs = 0;
+                t.roundDelayMs = 0;
+                t.debugDeterministicSeed = true;
+                t.debugMaxHands = 1;
+                t.seedBase = 71000L + game * 977L;
+                armed[0] = true;
+                claimedNow[0] = false;
+                meldNow[0] = false;
+                for (int i = 0; i < 4; i++) {
+                    t.policy[i] = rig;
+                    t.addBot(i);
+                }
+                t.debugEventTap = (recipient, ev) -> {
+                    String name = String.valueOf(ev.get("ev"));
+                    if ("round_start".equals(name)) {
+                        armed[0] = true;
+                        claimedNow[0] = false;
+                        meldNow[0] = false;
+                    } else if ("meld".equals(name)) {
+                        meldNow[0] = true;
+                    } else if ("ryuukyoku".equals(name) && "four_kans".equals(Json.str(ev, "reason", ""))) {
+                        aborts[0]++;
+                        if (claimedNow[0]) {
+                            claimed[0]++;
+                        }
+                        if (meldNow[0]) {
+                            meldsInAbortHand[0]++;
+                        }
+                        mahjong.game.Round r = live[0];
+                        if (r != null) {
+                            for (int s = 0; s < 4; s++) {
+                                meldsAtAbort[0] += r.melds[s].size();
+                            }
+                        }
+                    }
+                };
+                t.playGame();
+            }
+        } catch (RuntimeException e) {
+            failures.add("四杠散了时序自测异常: " + e);
+            fail++;
+            return;
+        }
+
+        System.out.println("  [覆盖] 四杠散了时序：摆了 " + staged[0] + " 局「2 家各 2 次杠」，其中 "
+                + claimed[0] + " 局的舍张真的被鸣，判成流局 " + aborts[0] + " 局");
+        check("四杠散了：摆出 4 次杠的局面（非空转）", staged[0] > 0);
+        check("四杠散了：那一刻真的有人鸣牌（否则这条断言测不到时序）", claimed[0] > 0);
+        check("四杠散了：判据成立即流局（" + aborts[0] + "/" + staged[0] + "）", aborts[0] == staged[0]);
+        check("⚠ S-58 时序：四杠散了时鸣牌**绝不落地**（meld 报文 " + meldsInAbortHand[0]
+                        + " 条 / 副露 " + meldsAtAbort[0] + " 处，都必须为 0）",
+                meldsInAbortHand[0] == 0 && meldsAtAbort[0] == 0);
+    }
+
+    /**
+     * `round_start.cans.kyuushu` 不许说谎（AUDIT S-23）：它必须与 `turnOptions` 下发 `kyuushu`
+     * 选项**同一份判据**，差的只是时点 —— 报文发在"配牌之后、第一巡询问之前"，那时庄家的第 14 张
+     * 已经到手、`playerDraws` 却还是 0。老实现把这一侧写死 `false`，等于当场否认一件
+     * 下一瞬间就会发生的事（真到那一巡 `turnOptions` 就会给选项）。
+     *
+     * <p>两侧都钉：够 9 种幺九 → 报文说可以 **且** 选项真的给；只有 8 种 / 规则关掉 / 还没轮到 → 都不给。
+     */
+    private static void kyuushuCansTests() {
+        final String yaochu10 = "1m9m1p9p1s9s1z2z3z4z2m3m4m";   // 13 张 = 10 种幺九 + 3 张普通
+        final String yaochu8 = "1m9m1p9p1s9s1z2z2m3m4m5m6m";     // 13 张 = 8 种幺九 + 5 张普通
+
+        mahjong.game.Round r = newRound(preset("tenhou"));        // 《天凤》有九种九牌流局
+        int d = r.dealer;
+        r.hand[d].addAll(parse(yaochu10));
+        check("cans.kyuushu：庄家手里够 9 种幺九 → 报文说他能宣（老实现写死 false）",
+                cansBool(r.debugRoundStartEvent(d), "kyuushu"));
+        // 同一把尺子的另一侧：轮到第一巡（主循环里 playerDraws 已 +1）时，选项里必须有 kyuushu
+        r.playerDraws[d] = 1;
+        check("同一份判据：轮到第一巡时 turnOptions 确实下发 kyuushu 选项",
+                r.debugTurnOptionTypes(d, -1).contains("kyuushu"));
+
+        mahjong.game.Round r8 = newRound(preset("tenhou"));
+        r8.hand[r8.dealer].addAll(parse(yaochu8));
+        check("cans.kyuushu：只有 8 种幺九 → 报文说不行（与选项同源）",
+                !cansBool(r8.debugRoundStartEvent(r8.dealer), "kyuushu"));
+
+        mahjong.game.Round ro = newRound(preset("tenhou"));
+        int other = (ro.dealer + 1) % 4;
+        ro.hand[other].addAll(parse(yaochu10));
+        check("cans.kyuushu：非庄家在第一巡之前 → false（他的第一巡还没到）",
+                !cansBool(ro.debugRoundStartEvent(other), "kyuushu"));
+
+        mahjong.game.Round ml = newRound(preset("mleague"));      // M.League 无中途流局
+        ml.hand[ml.dealer].addAll(parse(yaochu10));
+        check("cans.kyuushu：规则关掉九种九牌 → 无论牌型都不给",
+                !cansBool(ml.debugRoundStartEvent(ml.dealer), "kyuushu"));
+    }
+
+    /** 读 `round_start.cans.<key>`（报文里是嵌套对象）。 */
+    @SuppressWarnings("unchecked")
+    private static boolean cansBool(Map<String, Object> ev, String key) {
+        Object cans = ev.get("cans");
+        return cans instanceof Map && Boolean.TRUE.equals(((Map<String, Object>) cans).get(key));
     }
 
     // ------------------------------------------- M.League 规则取舍（docs/日本麻将.md 2026-09 版）

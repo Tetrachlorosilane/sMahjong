@@ -2453,8 +2453,8 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("443"),
-                QStringLiteral("语言文件条目数（新增 key 必须同步这条断言）"));
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("442"),
+                QStringLiteral("语言文件条目数（新增/删除 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
         check(!lang::t(QStringLiteral("ui.lobby.preset")).isEmpty()
@@ -2480,7 +2480,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("319"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("318"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 结束对局投票 / 掉线托管：这两族同样是"漏一条 key 就会显示裸键"，
         // 所以除了上面那条总数断言，再把**用得着的几条**逐条点名（占位符也点）。

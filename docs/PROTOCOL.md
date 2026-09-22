@@ -315,7 +315,9 @@
  "dora_indicators":["5m"],         // 表宝牌指示牌
  "tiles_left":70,                  // 牌山剩余可摸数
  "dead_wall_left":4,               // 剩余**岭上**牌数（杠后从王牌摸的就是它，见 §3.4）
- "cans":{"riichi":true,"kyuushu":false}   // 本局开局能力（仅供参考）
+ "cans":{"riichi":true,"kyuushu":false}   // 本局开局能力（仅供参考）：kyuushu = 该家
+                                          // **第一次被问到**时能不能宣九种九牌 —— 与 `ask` 里
+                                          // 下发 `kyuushu` 选项同一判据；庄家起手那张算他的第一巡
 }
 ```
 

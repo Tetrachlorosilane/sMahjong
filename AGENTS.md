@@ -203,7 +203,7 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1268 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1277 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
