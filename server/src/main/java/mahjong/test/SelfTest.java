@@ -76,6 +76,8 @@ public final class SelfTest {
         paymentTests();
         notenPenaltyTests();
         fourKanAbortTests();
+        fourKanAbortOrderTests();
+        kyuushuCansTests();
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
@@ -95,6 +97,9 @@ public final class SelfTest {
         handEvalTests();
         teacherTests();
         trainingInterfaceTests();
+        obsFeaturesTests();
+        neuralForwardTests();
+        hybridPolicyTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
         if (fail > 0) {
@@ -1957,6 +1962,192 @@ public final class SelfTest {
         check("M.League 2 家共开 4 次杠 → 不流局（无中途流局）", !ml.fourKanAbortNow());
     }
 
+    /**
+     * **S-58 的时序**：四杠散了成立时，流局必须判在「鸣牌落地」**之前**。
+     *
+     * <p>为什么不能靠模拟撞：一局里凑齐"2 家各开 2 次杠 + 第 4 次杠的岭上舍张正好被鸣"
+     * 在随机对局里撞不到 —— `kanLimitTests` 那 116 局里单局最多 3 次杠、开满 4 次的是 **0 局**
+     * （teacher 本来就会主动避让"第 4 个杠会打散本局"）。所以这里用**注入策略**把局面摆出来：
+     * <ol>
+     *   <li>{@code Decision.round} 是**活的那一局**，策略在自家第一个回合直接把
+     *       {@code kanCount / kanByPlayer} 摆成「2 家各 2 次杠」—— 判据只看这两个计数，
+     *       与 {@link #fourKanAbortTests} 摆的是同一份状态；</li>
+     *   <li>那一手**故意打出一张"别人手里正好有一对"的牌**（手里的牌随便挑，四种手牌都读得到）
+     *       → 下一瞬间**一定**有人能碰，于是"要鸣这张"与"四杠散了成立"同时出现；</li>
+     *   <li>鸣牌段由同一条策略答 {@code pon}（荣和一律 {@code pass} —— 荣和会走和了路径，
+     *       把这一刻盖过去，那不是本条要测的东西）。</li>
+     * </ol>
+     *
+     * <p>旧实现（AUDIT S-58）把收尾判据放在 {@code cl == null} 分支里：鸣牌一旦成立就先
+     * {@code applyMeld}（广播 + 移牌）再流局 —— 客户端/回放看到的是"碰完立刻流局"。
+     * 所以断言就是「这一局里 {@code meld} 报文与副露都必须为 0」；**红证**：把
+     * {@code Round.play()}` 里那句 {@code fourKanAbortNow()} 挪到 {@code applyMeld} 之后
+     * 立刻转红（`meld` 报文 8 条、副露 8 处）。
+     */
+    private static void fourKanAbortOrderTests() {
+        final int[] staged = {0};              // 摆了几局「2 家各 2 次杠」
+        final int[] aborts = {0};              // 其中真的判成四杠散了的局数
+        final int[] claimed = {0};             // 舍张真的被鸣（pon/chi 被答复）的局数 —— 非空转判据
+        final int[] meldsInAbortHand = {0};    // 流局那一局里出现过的 meld 报文（必须 0）
+        final int[] meldsAtAbort = {0};        // 流局那一刻四家名下的副露总数（必须 0）
+        final boolean[] armed = {true};
+        final boolean[] claimedNow = {false};
+        final boolean[] meldNow = {false};
+        final mahjong.game.Round[] live = {null};
+
+        mahjong.ai.Policy rig = d -> {
+            live[0] = d.round;
+            if ("claim".equals(d.kind)) {
+                for (Map<String, Object> o : d.options) {
+                    Object ty = o.get("type");
+                    if ("pon".equals(ty)) {
+                        claimedNow[0] = true;
+                        return Json.obj("type", "pon");
+                    }
+                    if ("chi".equals(ty)) {
+                        List<Object> sets = Json.list(o, "sets");
+                        if (sets != null && !sets.isEmpty()) {
+                            claimedNow[0] = true;
+                            return Json.obj("type", "chi", "tiles", new ArrayList<>(Json.asArr(sets.get(0))));
+                        }
+                    }
+                }
+                return Json.obj("type", "pass");       // 荣和也 pass：和了路径会盖过这一刻
+            }
+            if (!"turn".equals(d.kind) || !armed[0]) {
+                return null;                           // 其余一律交回内置 teacher
+            }
+            armed[0] = false;
+            // ① 摆出「本局已有 4 次杠、分属两家」—— 与 fourKanAbortTests 摆的是同一份判据状态
+            d.round.kanCount = 4;
+            d.round.kanByPlayer[0] = 2;
+            d.round.kanByPlayer[2] = 2;
+            staged[0]++;
+            // ② 打一张「别人手里正好有一对」的牌 → 保证这一瞬间一定有人能碰
+            int me = d.seat();
+            for (int id : d.round.hand[me]) {
+                int kind = Tiles.kind(id);
+                for (int other = 0; other < 4; other++) {
+                    if (other == me) {
+                        continue;
+                    }
+                    int same = 0;
+                    for (int oid : d.round.hand[other]) {
+                        if (Tiles.kind(oid) == kind) {
+                            same++;
+                        }
+                    }
+                    if (same >= 2) {
+                        return Json.obj("type", "discard", "tile", Tiles.toStr(id), "tsumogiri", false);
+                    }
+                }
+            }
+            return null;                               // 手里没有被碰得到的牌（罕见）：本局不计入 claimed
+        };
+
+        try {
+            for (int game = 0; game < 8; game++) {
+                Table t = new Table("FOURKAN" + game, "四杠散了时序桌", preset("tenhou"));
+                t.botDelayMs = 0;
+                t.roundDelayMs = 0;
+                t.debugDeterministicSeed = true;
+                t.debugMaxHands = 1;
+                t.seedBase = 71000L + game * 977L;
+                armed[0] = true;
+                claimedNow[0] = false;
+                meldNow[0] = false;
+                for (int i = 0; i < 4; i++) {
+                    t.policy[i] = rig;
+                    t.addBot(i);
+                }
+                t.debugEventTap = (recipient, ev) -> {
+                    String name = String.valueOf(ev.get("ev"));
+                    if ("round_start".equals(name)) {
+                        armed[0] = true;
+                        claimedNow[0] = false;
+                        meldNow[0] = false;
+                    } else if ("meld".equals(name)) {
+                        meldNow[0] = true;
+                    } else if ("ryuukyoku".equals(name) && "four_kans".equals(Json.str(ev, "reason", ""))) {
+                        aborts[0]++;
+                        if (claimedNow[0]) {
+                            claimed[0]++;
+                        }
+                        if (meldNow[0]) {
+                            meldsInAbortHand[0]++;
+                        }
+                        mahjong.game.Round r = live[0];
+                        if (r != null) {
+                            for (int s = 0; s < 4; s++) {
+                                meldsAtAbort[0] += r.melds[s].size();
+                            }
+                        }
+                    }
+                };
+                t.playGame();
+            }
+        } catch (RuntimeException e) {
+            failures.add("四杠散了时序自测异常: " + e);
+            fail++;
+            return;
+        }
+
+        System.out.println("  [覆盖] 四杠散了时序：摆了 " + staged[0] + " 局「2 家各 2 次杠」，其中 "
+                + claimed[0] + " 局的舍张真的被鸣，判成流局 " + aborts[0] + " 局");
+        check("四杠散了：摆出 4 次杠的局面（非空转）", staged[0] > 0);
+        check("四杠散了：那一刻真的有人鸣牌（否则这条断言测不到时序）", claimed[0] > 0);
+        check("四杠散了：判据成立即流局（" + aborts[0] + "/" + staged[0] + "）", aborts[0] == staged[0]);
+        check("⚠ S-58 时序：四杠散了时鸣牌**绝不落地**（meld 报文 " + meldsInAbortHand[0]
+                        + " 条 / 副露 " + meldsAtAbort[0] + " 处，都必须为 0）",
+                meldsInAbortHand[0] == 0 && meldsAtAbort[0] == 0);
+    }
+
+    /**
+     * `round_start.cans.kyuushu` 不许说谎（AUDIT S-23）：它必须与 `turnOptions` 下发 `kyuushu`
+     * 选项**同一份判据**，差的只是时点 —— 报文发在"配牌之后、第一巡询问之前"，那时庄家的第 14 张
+     * 已经到手、`playerDraws` 却还是 0。老实现把这一侧写死 `false`，等于当场否认一件
+     * 下一瞬间就会发生的事（真到那一巡 `turnOptions` 就会给选项）。
+     *
+     * <p>两侧都钉：够 9 种幺九 → 报文说可以 **且** 选项真的给；只有 8 种 / 规则关掉 / 还没轮到 → 都不给。
+     */
+    private static void kyuushuCansTests() {
+        final String yaochu10 = "1m9m1p9p1s9s1z2z3z4z2m3m4m";   // 13 张 = 10 种幺九 + 3 张普通
+        final String yaochu8 = "1m9m1p9p1s9s1z2z2m3m4m5m6m";     // 13 张 = 8 种幺九 + 5 张普通
+
+        mahjong.game.Round r = newRound(preset("tenhou"));        // 《天凤》有九种九牌流局
+        int d = r.dealer;
+        r.hand[d].addAll(parse(yaochu10));
+        check("cans.kyuushu：庄家手里够 9 种幺九 → 报文说他能宣（老实现写死 false）",
+                cansBool(r.debugRoundStartEvent(d), "kyuushu"));
+        // 同一把尺子的另一侧：轮到第一巡（主循环里 playerDraws 已 +1）时，选项里必须有 kyuushu
+        r.playerDraws[d] = 1;
+        check("同一份判据：轮到第一巡时 turnOptions 确实下发 kyuushu 选项",
+                r.debugTurnOptionTypes(d, -1).contains("kyuushu"));
+
+        mahjong.game.Round r8 = newRound(preset("tenhou"));
+        r8.hand[r8.dealer].addAll(parse(yaochu8));
+        check("cans.kyuushu：只有 8 种幺九 → 报文说不行（与选项同源）",
+                !cansBool(r8.debugRoundStartEvent(r8.dealer), "kyuushu"));
+
+        mahjong.game.Round ro = newRound(preset("tenhou"));
+        int other = (ro.dealer + 1) % 4;
+        ro.hand[other].addAll(parse(yaochu10));
+        check("cans.kyuushu：非庄家在第一巡之前 → false（他的第一巡还没到）",
+                !cansBool(ro.debugRoundStartEvent(other), "kyuushu"));
+
+        mahjong.game.Round ml = newRound(preset("mleague"));      // M.League 无中途流局
+        ml.hand[ml.dealer].addAll(parse(yaochu10));
+        check("cans.kyuushu：规则关掉九种九牌 → 无论牌型都不给",
+                !cansBool(ml.debugRoundStartEvent(ml.dealer), "kyuushu"));
+    }
+
+    /** 读 `round_start.cans.<key>`（报文里是嵌套对象）。 */
+    @SuppressWarnings("unchecked")
+    private static boolean cansBool(Map<String, Object> ev, String key) {
+        Object cans = ev.get("cans");
+        return cans instanceof Map && Boolean.TRUE.equals(((Map<String, Object>) cans).get(key));
+    }
+
     // ------------------------------------------- M.League 规则取舍（docs/日本麻将.md 2026-09 版）
 
     /**
@@ -2720,6 +2911,25 @@ public final class SelfTest {
         eq("副露赤宝：手里赤五+两张普通五 → 碰**两种取法**都下发", ponVariants, 2);
         check("副露赤宝：不用赤五那一条在（tiles=[5m,5m]）", sawPlain);
         check("副露赤宝：用赤五那一条也在（tiles=[0m,5m]）", sawRed);
+        // 这两条取法在**动作空间**里必须是两个不同的动作：旧写法把它们折成同一个裸 pon，
+        // 于是 legal 出现重复键、chosen_index 无从分辨（`selfplay-check` 报的
+        // 「legal 里有重复动作」就是这条，2026-09）。
+        mahjong.ai.Observation oc = mahjong.ai.Observation.ofClaim(c, 1, opts, 0,
+                Tiles.toStr(called5), null);
+        eq("副露赤宝：legal 的键不许有重复（取法已进键）",
+                new java.util.LinkedHashSet<>(oc.legalKeys()).size(), oc.legalKeys().size());
+        boolean sawPlainPonKey = false;
+        boolean sawRedPonKey = false;
+        for (mahjong.ai.Action a : oc.legal) {
+            if ("pon:5m+5m".equals(a.key())) {
+                sawPlainPonKey = true;
+            }
+            if ("pon:5m+0m".equals(a.key())) {
+                sawRedPonKey = true;
+            }
+        }
+        check("副露赤宝：两条取法各有自己的键（pon:5m+5m / pon:5m+0m）",
+                sawPlainPonKey && sawRedPonKey);
         // 默认取法（老客户端 / 机器人不带 `tiles`）必须**普通牌优先**
         int[] auto = c.debugPickAuto(1, Tiles.AKA_M, 2);
         eq("副露赤宝：默认取牌的张数", auto.length, 2);
@@ -2734,6 +2944,282 @@ public final class SelfTest {
         eq("副露赤宝：赤五+一张普通五 → 两张都得用上", forced.length, 2);
         check("副露赤宝：这时候赤五在里面（没有它凑不出碰）", Tiles.isRedId(forced[0])
                 || Tiles.isRedId(forced[1]));
+    }
+
+    /**
+     * 派生特征（{@link mahjong.ai.mahjong.ai.ObsFeatures}）的 **golden 对拍**。
+     *
+     * <p>为什么这条最要紧：训练读的是**离线轨迹里的 obs JSON**，而推理拿的是**内存里的局面**。
+     * 两条通路必须算出同一份派生块 —— 差别只该在"怎么把数据填进 {@code View}"
+     * （`visible` 用服务端给的还是自己重算、`turn` 怎么算、副露怎么还原、rivers 从哪来）。
+     * 这里逐个元素比，并且**故意制造一个红证**（改掉 obs 里的 `total_discards` → 两条通路必须立刻分开），
+     * 免得"对拍"变成空转。
+     */
+    private static void obsFeaturesTests() {
+        Round r = newRound();
+        r.debugSetup();
+        // 造一个"有副露 + 别人立直 + 牌河里有现物"的局面：这样两套危险度、副露还原、rivers 都被走到
+        r.hand[0].clear();
+        int[] mine = {Tiles.id(0, 0), Tiles.id(0, 1), Tiles.id(0, 2),      // 1m1m1m
+                      Tiles.id(10, 0), Tiles.id(11, 0), Tiles.id(12, 0),   // 2p3p4p
+                      Tiles.id(22, 0), Tiles.id(22, 1),                    // 5s5s
+                      Tiles.id(33, 0)};                                    // 7z（等着摸成对）
+        for (int id : mine) {
+            r.hand[0].add(id);
+        }
+        r.melds[0].add(new Meld(Meld.Kind.PON,
+                new int[]{Tiles.id(33, 0), Tiles.id(33, 1), Tiles.id(33, 2)}, -1, Tiles.id(33, 0)));
+        r.riichi[1] = true;
+        r.discards[1].add(Tiles.id(0, 3));                                // 1m 现物（对家）
+        r.discards[2].add(Tiles.id(4, 0));
+        r.discards[2].add(Tiles.id(13, 1));
+        r.discards[0].add(Tiles.id(20, 0));
+
+        int drawn = r.debugOpeningTile();
+        List<Map<String, Object>> opts = r.debugTurnOptions(0, drawn);
+        mahjong.ai.Observation obs = mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null);
+        Map<String, Object> json = obs.toJson();
+
+        mahjong.ai.ObsFeatures.View fromObs = mahjong.ai.ObsFeatures.ofObs(json);
+        mahjong.ai.ObsFeatures.View fromRound = mahjong.ai.ObsFeatures.ofRound(r, 0, "turn");
+        boolean viewOk = java.util.Arrays.equals(fromObs.hand, fromRound.hand)
+                && java.util.Arrays.equals(fromObs.visible, fromRound.visible)
+                && java.util.Arrays.equals(fromObs.riichi, fromRound.riichi)
+                && fromObs.turn == fromRound.turn
+                && fromObs.seat == fromRound.seat
+                && fromObs.meldCount() == fromRound.meldCount()
+                && fromObs.dora.equals(fromRound.dora);
+        for (int s = 0; s < 4 && viewOk; s++) {
+            viewOk = java.util.Arrays.equals(fromObs.rivers[s], fromRound.rivers[s]);
+        }
+        check("派生特征：obs 通路与 Round 通路的视图逐项一致"
+                + "（meldCount=" + fromObs.meldCount() + "/" + fromRound.meldCount()
+                + "，turn=" + fromObs.turn + "/" + fromRound.turn
+                + "，dora=" + fromObs.dora + "/" + fromRound.dora
+                + "，hand? " + java.util.Arrays.equals(fromObs.hand, fromRound.hand)
+                + "，visible? " + java.util.Arrays.equals(fromObs.visible, fromRound.visible)
+                + "，riichi? " + java.util.Arrays.equals(fromObs.riichi, fromRound.riichi)
+                + "）", viewOk);
+
+        int[] decObs = mahjong.ai.ObsFeatures.perDecision(fromObs);
+        int[] decRound = mahjong.ai.ObsFeatures.perDecision(fromRound);
+        check("派生特征：逐决策块（2×34 危险度）逐元素一致",
+                java.util.Arrays.equals(decObs, decRound));
+        boolean candOk = true;
+        boolean nonZero = false;
+        for (String key : obs.legalKeys()) {
+            int[] a = mahjong.ai.ObsFeatures.perCandidate(fromObs, key);
+            int[] b = mahjong.ai.ObsFeatures.perCandidate(fromRound, key);
+            if (!java.util.Arrays.equals(a, b)) {
+                candOk = false;
+                failures.add("派生特征逐候选不一致: " + key + " " + java.util.Arrays.toString(a)
+                        + " vs " + java.util.Arrays.toString(b));
+            }
+            for (int x : a) {
+                if (x != 0) {
+                    nonZero = true;
+                }
+            }
+        }
+        check("派生特征：每个合法候选的 8 个量逐元素一致（候选数 " + obs.legalKeys().size() + "）", candOk);
+        check("派生特征：候选侧不是全 0（打牌候选真的算出了向听/进张）", nonZero);
+        boolean rangeOk = true;
+        for (int v : decObs) {
+            if (v < 0 || v > 100) {
+                rangeOk = false;
+            }
+        }
+        for (String key : obs.legalKeys()) {
+            int[] a = mahjong.ai.ObsFeatures.perCandidate(fromObs, key);
+            if (a[0] < -1 || a[0] > 8 || a[1] < 0 || a[2] < 0 || a[5] > 34) {
+                rangeOk = false;
+            }
+        }
+        check("派生特征：取值都在合理范围内（危险度 0..100、向听 -1..8）", rangeOk);
+
+        // 红证：把 obs 里的 total_discards 改掉 → `turn` 变 → 危险度必须跟着变（两条通路立刻分开）
+        int before = Json.i(json, "total_discards", 0);
+        json.put("total_discards", before < 36 ? 68 : 0);
+        int[] decObsChanged = mahjong.ai.ObsFeatures.perDecision(mahjong.ai.ObsFeatures.ofObs(json));
+        check("派生特征：红证 —— 改掉 obs 的 total_discards 后两条通路必须分开",
+                !java.util.Arrays.equals(decObsChanged, decRound));
+        json.put("total_discards", before);
+        check("派生特征：红证之后把 obs 还原，两条通路又一致",
+                java.util.Arrays.equals(mahjong.ai.ObsFeatures.perDecision(mahjong.ai.ObsFeatures.ofObs(json)), decRound));
+        check("派生特征：布局自述带版本号（Java/Python 两侧照它对齐）",
+                mahjong.ai.ObsFeatures.describe().contains("perDecision=" + mahjong.ai.ObsFeatures.PER_DECISION)
+                        && mahjong.ai.ObsFeatures.describe().contains("perCandidate=" + mahjong.ai.ObsFeatures.PER_CANDIDATE));
+
+        // ---- 鸣牌决策也要对拍：`chi` 合成面子必须用到 `called_tile`
+        //（漏了那张 → `doraCount` 少算 —— golden 对拍第一版就是这样红的）
+        Round r2 = newRound();
+        r2.debugSetup();
+        r2.hand[1].clear();
+        r2.hand[1].add(Tiles.id(19, 0));                       // 2s
+        r2.hand[1].add(Tiles.id(20, 0));                       // 3s
+        for (int id : new int[]{Tiles.id(0, 0), Tiles.id(0, 1), Tiles.id(4, 0), Tiles.id(4, 1),
+                Tiles.id(9, 0), Tiles.id(9, 1), Tiles.id(18, 0), Tiles.id(18, 1),
+                Tiles.id(27, 0), Tiles.id(27, 1), Tiles.id(31, 0)}) {
+            r2.hand[1].add(id);
+        }
+        int called = Tiles.id(21, 0);                          // 4s：2s3s 可以吃
+        List<Map<String, Object>> copts = r2.debugClaimOptions(1, 0, called);
+        mahjong.ai.Observation cobs = mahjong.ai.Observation.ofClaim(
+                r2, 1, copts, 0, Tiles.toStr(called), null);
+        Map<String, Object> cjson = cobs.toJson();
+        mahjong.ai.ObsFeatures.View cvObs = mahjong.ai.ObsFeatures.ofObs(cjson);
+        mahjong.ai.ObsFeatures.View cvRound =
+                mahjong.ai.ObsFeatures.ofRound(r2, 1, "claim", Tiles.toStr(called));
+        check("派生特征（鸣牌）：逐决策块逐元素一致",
+                java.util.Arrays.equals(mahjong.ai.ObsFeatures.perDecision(cvObs),
+                        mahjong.ai.ObsFeatures.perDecision(cvRound)));
+        boolean claimOk = true;
+        int chiSeen = 0;
+        for (String key : cobs.legalKeys()) {
+            int[] a = mahjong.ai.ObsFeatures.perCandidate(cvObs, key);
+            int[] b = mahjong.ai.ObsFeatures.perCandidate(cvRound, key);
+            if (!java.util.Arrays.equals(a, b)) {
+                claimOk = false;
+                failures.add("派生特征（鸣牌）逐候选不一致: " + key + " "
+                        + java.util.Arrays.toString(a) + " vs " + java.util.Arrays.toString(b));
+            }
+            if (key.startsWith("chi:")) {
+                chiSeen++;
+            }
+        }
+        check("派生特征（鸣牌）：候选逐元素一致（候选 " + cobs.legalKeys().size()
+                + "，其中吃 " + chiSeen + " 条）", claimOk && chiSeen > 0);
+    }
+
+    /** golden 夹具的魔数（"MJGF"，与 `export.py` 的 `GOLDEN_MAGIC` 同值）。 */
+    private static final int GOLDEN_MAGIC = 0x4D4A4746;
+
+    /**
+     * **B 形态的 golden 对拍**：Python 导出的夹具（`python/tests/golden/forward.bin`）里带着
+     * 小网络的权重、若干真实 obs/legal，以及 Python 侧算出的 state/cand/logits。
+     * 这里逐元素核对 Java 的"特征拼装 + 手写前向"——**这是训练与推理是同一个东西的唯一保证**。
+     *
+     * <p>夹具不在就**跳过**（规则引擎自检不该因为少一个可选文件而红），但会在输出里留一行提示。
+     * 红证：把输出层的一个权重 +1 → logits 必须跟着变（否则"对拍"可能是空转）。
+     */
+    private static void neuralForwardTests() {
+        java.nio.file.Path fx = null;
+        for (String cand : new String[]{"python/tests/golden/forward.bin",
+                "../python/tests/golden/forward.bin", "../../python/tests/golden/forward.bin"}) {
+            if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
+                fx = java.nio.file.Path.of(cand);
+                break;
+            }
+        }
+        if (fx == null) {
+            System.out.println("（提示）神经网络 golden 夹具不在，跳过 B 形态对拍："
+                    + "python/tests/golden/forward.bin");
+            return;
+        }
+        byte[] raw;
+        try {
+            raw = java.nio.file.Files.readAllBytes(fx);
+        } catch (java.io.IOException e) {
+            check("读 golden 夹具", false);
+            return;
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int magic = bb.getInt();
+        int ver = bb.getInt();
+        int nCases = bb.getInt();
+        int weightsLen = bb.getInt();
+        bb.getInt();                                       // 保留位
+        check("golden 夹具魔数（MJGF）", magic == GOLDEN_MAGIC);
+        eq("golden 夹具格式版本", ver, mahjong.ai.NeuralPolicy.FORMAT_VERSION);
+        eq("golden 夹具的特征维度（state/cand）",
+                mahjong.ai.Features.STATE + "/" + mahjong.ai.Features.CAND,
+                "607/96");
+        byte[] wbytes = new byte[weightsLen];
+        bb.get(wbytes);
+        mahjong.ai.NeuralPolicy net = null;
+        try {
+            net = mahjong.ai.NeuralPolicy.loadBytes(wbytes, "golden");
+        } catch (java.io.IOException e) {
+            failures.add("golden 权重加载失败：" + e.getMessage());
+        }
+        check("golden 权重能被 NeuralPolicy 加载（维度与 Features 对得上）", net != null);
+        if (net == null) {
+            return;
+        }
+        float maxStateErr = 0f;
+        float maxCandErr = 0f;
+        float maxLogitErr = 0f;
+        int argmaxOk = 0;
+        Map<String, Object> firstJson = null;
+        List<String> firstKeys = null;
+        for (int c = 0; c < nCases; c++) {
+            int obsLen = bb.getInt();
+            byte[] obsBytes = new byte[obsLen];
+            bb.get(obsBytes);
+            Map<String, Object> json = Json.asObj(Json.parse(new String(obsBytes,
+                    java.nio.charset.StandardCharsets.UTF_8)));
+            int nLegal = bb.getShort() & 0xFFFF;
+            List<String> keys = new ArrayList<>();
+            for (int i = 0; i < nLegal; i++) {
+                int kl = bb.getShort() & 0xFFFF;
+                byte[] kb = new byte[kl];
+                bb.get(kb);
+                keys.add(new String(kb, java.nio.charset.StandardCharsets.UTF_8));
+            }
+            mahjong.ai.ObsFeatures.View v = mahjong.ai.ObsFeatures.ofObs(json);
+            float[] state = mahjong.ai.Features.state(json, v);
+            for (int i = 0; i < state.length; i++) {
+                maxStateErr = Math.max(maxStateErr, Math.abs(state[i] - bb.getFloat()));
+            }
+            float[][] cand = mahjong.ai.Features.candidates(v, keys);
+            for (float[] row : cand) {
+                for (int i = 0; i < row.length; i++) {
+                    maxCandErr = Math.max(maxCandErr, Math.abs(row[i] - bb.getFloat()));
+                }
+            }
+            float[] logits = net.logits(json, keys);
+            int best = 0;
+            float bestVal = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < logits.length; i++) {
+                float want = bb.getFloat();
+                maxLogitErr = Math.max(maxLogitErr, Math.abs(logits[i] - want));
+                if (want > bestVal) {
+                    bestVal = want;
+                    best = i;
+                }
+            }
+            int mine = 0;
+            for (int i = 0; i < logits.length; i++) {
+                if (logits[i] > logits[mine]) {
+                    mine = i;
+                }
+            }
+            if (mine == best) {
+                argmaxOk++;
+            }
+            if (firstJson == null) {
+                firstJson = json;
+                firstKeys = keys;
+            }
+        }
+        check("golden：状态向量逐元素一致（最大误差 " + maxStateErr + "）", maxStateErr < 1e-4f);
+        check("golden：候选向量逐元素一致（最大误差 " + maxCandErr + "）", maxCandErr < 1e-4f);
+        check("golden：前向 logits 逐元素一致（最大误差 " + maxLogitErr + "）", maxLogitErr < 1e-4f);
+        eq("golden：每条的 argmax 与 Python 一致", argmaxOk, nCases);
+
+        // 红证：输出偏置整体 +1 → 每条 logit 必须恰好 +1（用偏置而不是随机权重：
+        // ReLU 下有死单元，扰动它们不会改变输出，会让红证假绿）
+        mahjong.ai.NeuralPolicy broken = net.debugOutputBiasShift(1.0f);
+        float[] a = net.logits(firstJson, firstKeys);
+        float[] b = broken.logits(firstJson, firstKeys);
+        boolean shifted = a.length > 0 && a.length == b.length;
+        for (int i = 0; i < a.length && shifted; i++) {
+            if (Math.abs((b[i] - a[i]) - 1.0f) > 1e-3f) {
+                shifted = false;
+            }
+        }
+        check("golden：红证 —— 输出偏置 +1 后每条 logit 恰好 +1（对拍不是空转）", shifted);
     }
 
     /**
@@ -2843,9 +3329,9 @@ public final class SelfTest {
     /**
      * 赤宝牌张数：默认 3 张；`rules.aka = 0` 时**整副牌山都不含赤五**。
      *
-     * <p>审计出来的问题正是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，
-     * 设 `aka = 0` 仍会发赤五、仍记赤宝牌番数（AGENTS §8 那句"0 或 3 张"对 0 不成立）。
-     * 换掉赤五不能改变牌张构成，所以顺带钉住"每种牌恒 4 张"。
+     * <p>审计当时的现象是"注释与实现不一致"：`Rules.akaKinds()` 全仓无调用者，设 `aka = 0`
+     * 仍会发赤五；**现在已修好并由下面三条断言钉住**（`aka = 0` → 牌山无赤五、仍 136 张、每种 4 张）。
+     * ⚠ `aka = 4`（两张赤五筒）受牌 id 编码限制**仍不支持**（按 3 处理）—— 见 NOTES §10 已知限制。
      */
     private static void akaRuleTests() {
         int[] def = new mahjong.core.Wall(20240914L, Rules.defaults()).debugAllTiles();
@@ -4859,6 +5345,67 @@ public final class SelfTest {
             }
         }
         check("动作键解析往返（含赤五/摸切/吃/杠）", parseOk);
+        // ---------- ①b 取法进键：碰 / 大明杠的两三种取法是**不同的合法动作**
+        // 手里同时有赤五与普通五时服务端会各下发一条（PROTOCOL §3.6 / §8.3）。旧写法把它们
+        // 折成同一个裸 `pon` → legal 里出现重复键、chosen_index 无从分辨（`selfplay-check` 抓到的）。
+        List<Map<String, Object>> akaCallOpts = new ArrayList<>();
+        akaCallOpts.add(Json.obj("type", "pon", "tiles", Json.arr("5p", "5p")));
+        akaCallOpts.add(Json.obj("type", "pon", "tiles", Json.arr("0p", "5p")));
+        akaCallOpts.add(Json.obj("type", "kan", "kans", Json.arr(
+                Json.obj("kind", "daiminkan", "tile", "5s",
+                        "tiles", Json.arr("5s", "5s", "0s")))));
+        akaCallOpts.add(Json.obj("type", "pass"));
+        List<mahjong.ai.Action> varied = mahjong.ai.Action.enumerate(akaCallOpts);
+        eq("取法选项展开成四条（2 碰 + 1 大明杠 + 过）", varied.size(), 4);
+        eq("取法不同 → 键必须不同",
+                new java.util.LinkedHashSet<>(varied.stream().map(mahjong.ai.Action::key)
+                        .collect(java.util.stream.Collectors.toList())).size(), varied.size());
+        eq("碰键带取法（按槽位升序归一：普通五在前）", varied.get(1).key(), "pon:5p+0p");
+        eq("碰是参数化动作（不在固定头里）", varied.get(0).index(), -1);
+        eq("大明杠键带三张取法", varied.get(2).key(), "kan:daiminkan:5s+5s+0s");
+        boolean akaParseOk = true;
+        for (mahjong.ai.Action a : varied) {
+            mahjong.ai.Action back = mahjong.ai.Action.parse(a.key());
+            if (back == null || !a.key().equals(back.key())) {
+                akaParseOk = false;
+                failures.add("取法键解析往返失败: " + a.key());
+            }
+        }
+        check("取法键解析往返（碰 / 大明杠）", akaParseOk);
+        eq("裸 pon 回包 resolve 到默认取法那一条（普通五优先）",
+                mahjong.ai.Action.resolve(Json.obj("type", "pon"), varied).key(), "pon:5p+5p");
+        eq("带取法的回包 resolve 到指定那一条",
+                mahjong.ai.Action.resolve(mahjong.ai.Action.pon(List.of("0p", "5p")).toCmd(),
+                        varied).key(), "pon:5p+0p");
+        check("碰的回包带 tiles（服务端照它取牌）",
+                Json.write(varied.get(1).toCmd()).contains("[\"5p\",\"0p\"]"));
+        // 其余动作**不许**宽松匹配：认不出就打回（宁可"无标签"，也别写错标签）
+        check("打牌回包不在 legal 里时 resolve 返回 null",
+                mahjong.ai.Action.resolve(Json.obj("type", "discard", "tile", "1z"), varied) == null);
+
+        // ---------- ①c 顺位点（P0 评测口径）：settle 的 point **恒守恒**，取整到 0.1 分也不破坏
+        // 这两条不变式正是 tools/selfplay-check.mjs 独立复核的那两条（评测结论的地基）。
+        int[] p0Scores = {53600, 28600, 20000, -2200};       // 文档 §精算点数 的例子
+        for (String preset : new String[]{"mleague", "tenhou", "majsoul"}) {
+            Rules rr = Rules.defaults();
+            rr.applyPreset(preset);
+            RoundScoring.Settlement st = RoundScoring.settle(p0Scores, rr);
+            double sum = 0;
+            int best = 0;
+            for (int i = 0; i < 4; i++) {
+                sum += st.point[i];
+                if (st.point[i] > st.point[best]) {
+                    best = i;
+                }
+            }
+            check("顺位点之和恒为 0（" + preset + "，" + sum + "）", Math.abs(sum) < 1e-9);
+            eq("顺位点最高的座位就是 1 位（" + preset + "）", st.rank[best], 0);
+            double rounded = 0;
+            for (Object o : mahjong.train.SelfPlay.rankPointList(st.point)) {
+                rounded += ((Number) o).doubleValue();
+            }
+            check("取整到 0.1 分后仍守恒（" + preset + "，" + rounded + "）", Math.abs(rounded) < 1e-9);
+        }
         // 从选项展开动作集：这是"合法动作 + 掩码"的唯一来源
         List<Map<String, Object>> demoOpts = new ArrayList<>();
         demoOpts.add(Json.obj("type", "discard", "tiles", Json.arr("1m", "9p")));
@@ -5023,6 +5570,163 @@ public final class SelfTest {
         mahjong.train.SelfPlay.PolicyStat st = sum.byPolicy.get("teacher");
         check("按策略聚合了逐手统计", st != null && st.seatHands == 4 * sum.hands);
         check("和了率在 0..1 之间", st.winRate() >= 0 && st.winRate() <= 1);
+    }
+
+    // ------------------------------------------------------------- P5b 混合（teacher 先验）
+
+    /** 从 golden 夹具里**只取权重**（P5b 断言拿它当"学生"；夹具不在就返回 null = 跳过）。 */
+    private static mahjong.ai.NeuralPolicy loadGoldenNet() {
+        for (String cand : new String[]{"python/tests/golden/forward.bin",
+                "../python/tests/golden/forward.bin", "../../python/tests/golden/forward.bin"}) {
+            java.nio.file.Path p = java.nio.file.Path.of(cand);
+            if (!java.nio.file.Files.isRegularFile(p)) {
+                continue;
+            }
+            try {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer
+                        .wrap(java.nio.file.Files.readAllBytes(p))
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                if (bb.getInt() != GOLDEN_MAGIC) {
+                    return null;
+                }
+                bb.getInt();                                   // 版本
+                bb.getInt();                                   // 用例数
+                int len = bb.getInt();
+                bb.getInt();                                   // 保留位
+                byte[] w = new byte[len];
+                bb.get(w);
+                return mahjong.ai.NeuralPolicy.loadBytes(w, "golden(混合断言)");
+            } catch (Exception e) {
+                failures.add("混合断言：读 golden 权重失败 " + e.getMessage());
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 混合断言专用的探针：与 {@link #runProbe} 同构，但
+     * ① 记录**解析后**的动作键（`Action.resolve` 把裸 `pon` 这类"部分指定"的回包落到**实际执行**
+     *    的那一条）—— 否则"两个策略行为相同"会被回包写法差异误判成不同（同一个碰，一个写 `pon`、
+     *    一个写 `pon:5m+5m`）；
+     * ② 可选地抓每次决策（{@code Decision} + 老师在该信息集的动作），供 α 扫描用。
+     */
+    private static GameProbe hybridProbe(long seed, mahjong.ai.Policy policy,
+                                         List<Object[]> decisions) {
+        Table t = new Table("HYBRID", "混合探针", Rules.defaults());
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        t.debugDeterministicSeed = true;
+        t.debugMaxHands = PROBE_HANDS;
+        t.seedBase = seed;
+        GameProbe p = new GameProbe();
+        for (int i = 0; i < 4; i++) {
+            t.policy[i] = policy;
+            t.addBot(i);
+        }
+        t.debugChoiceTap = (d, cmd) -> {
+            mahjong.ai.Action a = mahjong.ai.Action.resolve(cmd, d.legal());
+            p.choices.add(d.kind + "|" + (a == null ? "<非法回包>" : a.key()));
+            if (decisions != null) {
+                mahjong.ai.Action teacher = null;
+                try {
+                    teacher = mahjong.ai.Action.resolve(
+                            Bot.decide(d.round, d.obs.seat, d.kind, d.options, d.extra), d.legal());
+                } catch (RuntimeException e) {
+                    teacher = null;                            // 老师算不出来 = 这一条没有先验
+                }
+                if (teacher != null) {
+                    decisions.add(new Object[]{d, teacher});
+                }
+            }
+        };
+        t.playGame();
+        for (int i = 0; i < 4; i++) {
+            p.finalScores[i] = t.seat(i).score;
+        }
+        return p;
+    }
+
+    /**
+     * **P5b 混合（teacher 先验）**：`net:<权重文件>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`。
+     *
+     * <p>四条判据 —— 前三条是**可证的性质**，第四条防"空转"：
+     * <ol>
+     *   <li><b>α=0 与纯网络逐决策相同</b>（加 0 不改变任何比较），决策序列与终局分数都一样；</li>
+     *   <li><b>α 极大 ⇒ 逐决策等同老师</b>（上位集合性质）：整局决策序列 + 终局分数与 `teacher`
+     *       完全一致 —— 这是"混合永远不会比老师更差"的机器可验证形式；</li>
+     *   <li><b>老师一致率随 α 单调不减</b>，且 α=1e9 时 = 1；任何 α 都不产生非法动作；</li>
+     *   <li><b>非空转对照</b>：同一个网络**不加先验**时，同一探针上与 teacher 的决策序列必须**有差异**
+     *       —— 否则"两边都等于 teacher"根本证明不了先验在起作用。</li>
+     * </ol>
+     *
+     * <p>权重取自仓库内的 golden 夹具（小网络），所以本组**不依赖 T 盘**；夹具不在就跳过。
+     */
+    private static void hybridPolicyTests() {
+        mahjong.ai.NeuralPolicy net = loadGoldenNet();
+        if (net == null) {
+            System.out.println("（提示）golden 权重不在，跳过 P5b 混合策略断言");
+            return;
+        }
+        final long seed = 20260101L;
+        List<Object[]> decisions = new ArrayList<>();
+        GameProbe pure = hybridProbe(seed, mahjong.ai.Policies.fromAction(net), null);
+        GameProbe h0 = hybridProbe(seed, mahjong.ai.Policies.hybrid(net, 0f), null);
+        GameProbe hInf = hybridProbe(seed, mahjong.ai.Policies.hybrid(net, 1e9f), null);
+        GameProbe teach = hybridProbe(seed, mahjong.ai.Policies.TEACHER, decisions);
+
+        eq("混合：α=0 与纯网络的决策序列逐条相同",
+                String.join("\n", h0.choices), String.join("\n", pure.choices));
+        eq("混合：α=0 与纯网络的终局分数相同",
+                Json.write(Json.intList(h0.finalScores)), Json.write(Json.intList(pure.finalScores)));
+        eq("混合：α=1e9 的决策序列与 teacher 完全一致（上位集合性质）",
+                String.join("\n", hInf.choices), String.join("\n", teach.choices));
+        eq("混合：α=1e9 的终局分数与 teacher 相同",
+                Json.write(Json.intList(hInf.finalScores)), Json.write(Json.intList(teach.finalScores)));
+        int diff = 0;
+        for (int i = 0; i < Math.min(pure.choices.size(), teach.choices.size()); i++) {
+            if (!pure.choices.get(i).equals(teach.choices.get(i))) {
+                diff++;
+            }
+        }
+        check("混合：非空转对照 —— 纯网络在同一探针上与 teacher 有差异（实际 " + diff + " / "
+                + pure.choices.size() + " 处）", diff > 0);
+
+        // α 扫描：真实决策 + 老师动作 → 一致率必须单调不减、末端 = 1、全程不给非法动作
+        float[] grid = {0f, 0.25f, 0.5f, 1f, 2f, 4f, 8f, 1e9f};
+        double prev = -1;
+        boolean mono = true;
+        int illegal = 0;
+        StringBuilder curve = new StringBuilder();
+        for (float alpha : grid) {
+            int agree = 0;
+            for (Object[] o : decisions) {
+                mahjong.ai.Decision d = (mahjong.ai.Decision) o[0];
+                mahjong.ai.Action t = (mahjong.ai.Action) o[1];
+                mahjong.ai.Action pick = net.chooseWithPrior(d, t, alpha);
+                if (pick == null || !d.isLegal(pick)) {
+                    illegal++;
+                }
+                if (pick != null && t.key().equals(pick.key())) {
+                    agree++;
+                }
+            }
+            double rate = decisions.isEmpty() ? 0 : agree / (double) decisions.size();
+            curve.append(alpha >= 1e8 ? "∞→" : String.format("%.2f→", alpha))
+                    .append(String.format("%.3f ", rate));
+            if (rate < prev - 1e-9) {
+                mono = false;
+            }
+            prev = rate;
+        }
+        check("混合：老师一致率随 α 单调不减（" + curve.toString().trim() + "）", mono);
+        check("混合：α=1e9 时老师一致率 = 1", Math.abs(prev - 1.0) < 1e-9);
+        eq("混合：任何 α 都不产生非法动作（" + decisions.size() + " 条决策 × " + grid.length
+                + " 个 α）", illegal, 0);
+        // 证据留在 L1 输出里（成功路径不打印断言细节，但这条曲线是选 α 的依据）
+        System.out.println("  P5b 混合：α 曲线 " + curve.toString().trim()
+                + "；非空转对照：纯网 vs teacher 在探针上差 " + diff + " / " + pure.choices.size()
+                + " 处，决策 " + decisions.size() + " 条");
     }
 
     // ------------------------------------------------------------- 王牌 / 岭上

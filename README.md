@@ -209,5 +209,7 @@ M.League 与一般规则主要差在这几处：
 ---
 
 > **这份文档是给玩家看的。** 想自己编译、改代码、跑测试，或了解架构与协议：
-> `AGENTS.md`（开发手册，先看这份）、`docs/DESIGN.md`（设计）、`docs/PROTOCOL.md`（协议）、
-> `docs/DEPLOY.md`（部署）、`client/README.md`（客户端构建细节）、`docs/AUDIT.md`（审计与修复清单）。
+> `AGENTS.md`（**开发手册，先看这份**：铁律 / 构建 / 验证 / 约定）、
+> `NOTES.md`（**开发细节分册**：完整案例与红证、几何推导、全量症状表、已知限制）、
+> `docs/DESIGN.md`（设计）、`docs/PROTOCOL.md`（协议）、`docs/DEPLOY.md`（部署）、
+> `client/README.md`（客户端构建细节）、`docs/AUDIT.md`（审计与修复清单）。

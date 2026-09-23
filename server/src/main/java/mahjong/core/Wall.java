@@ -32,7 +32,7 @@ import java.util.Random;
  * <p>岭上只有 {@link #RINSHAN_TILES} 张，因此**一局最多开 4 次杠**；这条规则的两个闸门
  * （{@code rinshanLeft() > 0} 且 {@code kanCount < 4}）在 {@code Round.canKan()} 里合流。
  *
- * <p>非线程安全：一局只由一张牌桌的线程串行推进（见 AGENTS §6「服务端并发模型」）。
+ * <p>非线程安全：一局只由一张牌桌的线程串行推进（见 AGENTS §6.4 ⑥ 服务端并发模型）。
  */
 public final class Wall {
 
@@ -96,7 +96,7 @@ public final class Wall {
      * 判役只按 kind 看，客户端也只按牌码显示 —— 于是**"看到的"与"计分的"一致**，
      * 不会出现"画着赤五却不给赤宝牌番数"的那种自相矛盾。
      *
-     * <p>`aka == 4`（两张赤五筒）用这套编码表达不了，仍按 3 张处理（见 AGENTS §8）。
+     * <p>`aka == 4`（两张赤五筒）用这套编码表达不了，仍按 3 张处理（见 NOTES §10 已知限制）。
      */
     private static void stripRedFives(int[] tiles, Rules rules) {
         if (rules == null || rules.aka > 0) {

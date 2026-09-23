@@ -1,0 +1,257 @@
+# 训练侧（Python）—— 环境与纪律
+
+这里是 `docs/TRAINING.md` 的**可执行部分**：只放源码与环境说明，**不放数据、不放环境**。
+
+- **训练数据一律在 T 盘**：`T:\mahjong-training\`（卷标 `TrainingData`）——见 TRAINING §0.1.1。
+- **`.venv` / uv 缓存 / uv 的 Python 安装目录都在本目录**（都已 gitignore）——
+  受限沙箱下 uv 的默认目录（`%LOCALAPPDATA%`）**会被拒**，所以必须显式指到仓库内。
+- 服务端仍然是**零第三方依赖**的 Java：Python 只负责训练，权重导出后由**纯 Java 手写前向**加载
+  （TRAINING §2、`AGENTS.md` §6.5）。**改产出格式要三处一起改**（`TraceRecorder` / `PROTOCOL §8.4` /
+  `tools/selfplay-check.mjs`）。
+
+---
+
+## 一、装环境（一次性，约 3 分钟 + 约 6 GB 磁盘）
+
+```powershell
+cd C:\Users\HP\source\games\mahjong
+
+# uv 的两个默认目录在工作区外，受限沙箱下会被拒 → 指到仓库内（.gitignore 已收录）
+$env:UV_CACHE_DIR          = "$PWD\.uv-cache"
+$env:UV_PYTHON_INSTALL_DIR = "$PWD\.uv-python"
+
+uv venv --python 3.12 python\.venv
+uv pip install --python python\.venv\Scripts\python.exe torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python python\.venv\Scripts\python.exe numpy
+```
+
+实测装出来的是 **CPython 3.12.13 + torch 2.11.0+cu128 + numpy 2.5.3**。
+为什么要 cu128：本机是 **RTX 5060 Laptop（Blackwell，sm_120）**，CUDA 12.8 之前的轮子里没有它的内核。
+
+> 系统 Python 是 3.14，**不要**直接用它装 torch（没有官方 wheel）；一律用 `python\.venv\Scripts\python.exe`。
+
+## 二、自检（每次换机器 / 升级驱动后跑一次）
+
+```powershell
+python\.venv\Scripts\python.exe python\verify_env.py
+```
+
+它逐项验证**"装上了"之外的东西**，并打印可抄进文档的基线：
+
+| 组 | 验什么 |
+| --- | --- |
+| Python / torch / GPU | 版本、`+cu128`、`cuda.is_available()`、**capability sm_120 在内核列表里**（否则会 `no kernel image`）、GPU 上真的做一次 matmul |
+| 显存预算 | `mem_get_info()`：总/别家占用/留给训练的量（目标自己 ≤4.5 GB） |
+| 训练吞吐 | 0.57M 参数 / batch 4096 的 fwd+bwd 步频与峰值显存 |
+| **GPU ≤80%** | 未节流的均值与瞬时峰值；再跑一段**带占空比节流**的，判据"最近 3 秒均值 ≤80%" |
+| **CPU ≤75%** | `torch.set_num_threads(4)` 生效；提醒 `--workers` 默认 32 会越界（本机上限 24） |
+| 采集器 | `server/build/mahjong-server.jar` 在不在（轨迹靠它产） |
+| **数据盘** | 数据根存在、六个子目录、**可写探针**（写→删）、剩余 ≥10 GB |
+
+判据：每项 `PASS/WARN/FAIL` + 末尾 `VERIFY PASS/FAIL`（退出码）。**只有真问题才 FAIL**：
+- 受限沙箱里"写 T 盘被拒"是 **WARN** —— 但它正是 `SelfPlay` **静默不落盘**（只打一条 WARN 就继续跑）
+  的那条闸门，所以采集前必须看到这一项是 PASS。
+
+本机当前结果：**19 通过 / 1 警告 / 0 失败**（那条警告就是沙箱写 T 盘）。
+
+Python 侧另有一份**单元自检**（统计口径 / 配对评测 / 两条纪律，28 项）：
+
+```powershell
+python\.venv\Scripts\python.exe python\selfcheck.py     # 期望 SELFCHECK PASS
+```
+
+> ⚠ 两条本机环境事实（都实测踩过，别重踩）：
+> ① **`tempfile` 不可用**：系统临时目录不可写，且 `tempfile.mkdtemp` / `TemporaryDirectory`
+>    建出来的目录**自己也写不进去**（在里面再 `mkdir` → `WinError 5`）→ scratch 一律用工作区内的
+>    `python\.tmp\`（已 gitignore），手写 `Path.mkdir(parents=True)`；
+> ② **numpy 要单独装**（`torch` 不会带它，而特征/评测都要用）。
+
+## 二·五、评测（P0：顺位点 + 配对显著性）
+
+```powershell
+# 单次 run：各策略指标 + 95% 自助法置信区间 + **组内配对检验**（同一副牌山比不同策略）
+python\.venv\Scripts\python.exe -m mahjong_ml.eval T:\mahjong-training\raw\run-001
+
+# 两次 run：**按 (seed, 座位) 配对**比较两个不同策略（比较 网络 vs teacher 的正解）
+python\.venv\Scripts\python.exe -m mahjong_ml.eval <dirA> <dirB> --labels net,teacher
+```
+
+- 指标默认**顺位点**（`rank_points`），也可 `--metric place`（取负，正=更好）。
+- 统计口径：自助法 10000 次（**固定种子 → 同输入同结果**）+ **符号检验**精确 p 值，
+  并按实测 `sd(Δ)` 反推"还要打多少场才能检出 Δ"（TRAINING §7 的样本量表由此落地）。
+- **读法**：CI 跨 0 或 p ≥ 0.05 → **证不出差别**。实测过一次反面教材：`first vs random` 24 场
+  Δ=+3.45 看着"更强"，配对后 95%CI=[−5.60,+12.55]、p=0.471 —— 纯噪声。
+
+## 三、三条硬约束（细节见 TRAINING §0.1）
+
+| # | 约束 | 怎么守 |
+| --- | --- | --- |
+| ① | 数据只落 T 盘 | 唯一数据根 `T:\mahjong-training\`；`raw ≤30 GB`、`compact ≤10 GB`、`ckpt+league ≤3 GB`、`logs ≤1 GB`，任何时刻留 ≥10 GB |
+| ② | GPU ≤80% | **时间平均**口径；`GpuMonitor` + `DutyCycle`（占空比节流，实测把稳态均值压到 46%，吞吐代价约 21%）。⛔ 不用 `nvidia-smi -lgc` 锁频（全局设置） |
+| ③ | CPU ≤75% 的核 | 采集 `--workers 24`（**必须显式**）、训练 `torch.set_num_threads(4)`、**生成与训练不并行**（24+4 > 24） |
+
+## 四、采集一条命令（示例）
+
+```powershell
+# ⚠ 在受限沙箱里，子进程写 T: 会被拒 → 这一步请在**普通 shell**里跑（或放宽权限的会话）
+java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar `
+     --selfplay 2000 --workers 24 --rotate --sample 4 `
+     --seed 20260101 --out T:\mahjong-training\raw\run-001
+
+node tools\selfplay-check.mjs T:\mahjong-training\raw\run-001   # 必须 DATASET PASS 才拿去训练
+```
+
+实测吞吐：`--workers 24` → **1.95 场/秒**（≈7.0k 场/小时 ≈ 7.8 GB/小时，`--sample 1`）。
+
+## 四·五、训练流水线（P1 行为克隆）
+
+```powershell
+cd C:\Users\HP\source\games\mahjong
+
+# ① 派生特征富化：给每个 g*.jsonl 生成 g*.feat.bin（**轨迹格式不变**）
+#    向听/进张/听牌形/逐张危险度由 Java 的权威实现算 —— 不在 Python 里再写一份（必然漂移）
+java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar `
+     --features T:\mahjong-training\raw\bc-001 --workers 24
+
+# ② 轨迹 → 紧凑数组（按整场切训练/验证；**缺 sidecar 会报错**而不是悄悄填 0）
+python\.venv\Scripts\python.exe -m mahjong_ml.dataset build `
+    T:\mahjong-training\raw\bc-001 T:\mahjong-training\compact\bc-001
+
+# ③ 行为克隆训练（checkpoint 落 T 盘 ckpt/，配额闸门在 paths.allocate 里）
+python\.venv\Scripts\python.exe -m mahjong_ml.bc `
+    --data T:\mahjong-training\compact\bc-001 --label bc-002 --epochs 60
+```
+
+特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
+
+| 段 | 维度 | 由谁算 |
+| --- | --- | --- |
+| 状态（obs 原始字段） | 539 | Python `features.py` |
+| 状态（派生危险度 `danger_worst` + `danger_riichi`） | **68** | **Java** `ObsFeatures.perDecision`（sidecar） |
+| 候选（类型 / 牌码 / 取法 / 摸切 / 杠种…） | 88 | Python |
+| 候选（向听 / 进张 / 听牌形 / 宝牌） | **8** | **Java** `ObsFeatures.perCandidate`（sidecar） |
+| **合计** | **607 / 96** | 特征版本 **v2** |
+
+# ③ 看指标 / 复现：metrics.json 里带 args、特征版本、数据 meta、每 epoch 的 train/val
+```
+
+**评一个已有 checkpoint**（DAgger 对比、换数据集复评都靠它 —— 不用重训即可同尺子比较）：
+
+```powershell
+python\.venv\Scripts\python.exe -m mahjong_ml.bc eval `
+    --data T:\mahjong-training\compact\bc-001 --ckpt T:\mahjong-training\ckpt\bc-002\model.pt
+# → top-1 / 类型 / nll + **同粒度基线**（首合法、多数类型），带 n 与 split
+```
+
+## 四·六、DAgger 一轮（P2：让学生暴露自己的状态分布）
+
+```powershell
+# 一条命令跑完：采集（学生坐 2 席、逐场轮转，学生座位额外记老师动作）
+#   → --features 富化 → selfplay-check 校验 → 建混合集/评测集 → 重训 → 无泄漏对比
+python\.venv\Scripts\python.exe -m mahjong_ml.dagger `
+    --student T:\mahjong-training\ckpt\bc-002 `
+    --bc-src T:\mahjong-training\raw\bc-001 --bc-compact T:\mahjong-training\compact\bc-001 `
+    --label bc-003 --round 1 --games 300 --workers 24 --epochs 60
+# 断点续跑：--skip-collect / --skip-features / --skip-validate（数据已采好时）
+# 报告：T:\mahjong-training\ckpt\bc-003\dagger-r1.json（含 leak_check 与按场聚类 CI）
+```
+
+三条**必须守住**的口径（理由都写进了脚本注释与 `TRAINING.md` §4 P2 / §7）：
+
+- **对比只在"两个模型都没训过"的场次上做**：先建混合集，再从它的 **val 切分**里挑评测集
+  （`val_frac=1.0` 建成全 val 的紧凑集）。直接在 `compact/dagger-rN` 的 val 上比会大面积撞上
+  混合集的**训练**切分 —— 那是泄漏，不是进步。跑的时候有硬闸门：评测集混进训练场直接退出。
+- **显著性按场聚类**（配对 bootstrap 的 cluster = 场号）：一局里的决策高度相关，逐行 bootstrap
+  会把 CI 缩到假显著（`selfcheck.py` 里有这条红证）。
+- **离线一致率 ≠ 变强**：它只说"更像老师"。强度只能由 `eval.py` 的实战顺位检验给出。
+
+
+三件事值得留意：
+
+- **特征规格只有一份**：`mahjong_ml/features.py`（v2：`state_dim()=607`、`cand_dim()=96`）。
+  打印分段偏移用 `python -m mahjong_ml.features`。**派生量由 Java 算**（`ObsFeatures`），
+  两侧由 `SelfTest.obsFeaturesTests`（obs 通路 == Round 通路，带红证）与 `python/selfcheck.py`
+  （sidecar 格式契约、缺 sidecar 必须报错）钉住。
+- **验证集是整场切出来的**（`--val-frac` / `--split-seed` 决定，与数据量无关）：
+  按决策随机切会把同一场的后续信息漏进验证集，指标虚高。
+- **指标一定同时看"同粒度基线"**：模型报的 `val top1`（精确动作）要和"总是选第一个合法动作"比，
+  类型准确率要和"多数动作类型"比 —— 拿精确动作去比类型基线是自欺欺人。
+
+纪律（§0.1）：训练脚本自己封线程（`torch.set_num_threads(4)`）与压 GPU（`DutyCycle`），
+**生成与训练不并行**（24 + 4 > 24 会越界）。
+
+## 四·七、P5b 混合（teacher 先验）的 α 选择
+
+服务端策略串 `net:<net.bin>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`（`PROTOCOL.md` §8.4）。
+**α 不要照抄**——它绑定网络的 logit 尺度（未训练的网 α=0.25 就 100% 让位）。先量"让位曲线"：
+
+```powershell
+python\.venv\Scripts\python.exe -m mahjong_ml.hybrid `
+    --ckpt T:\mahjong-training\ckpt\bc-003\model.pt `
+    --data T:\mahjong-training\compact\dagger-r1 --target 0.95
+# 输出：margin 中位/p90、各 α 的让位比例、推荐 α（= 让位首次达标的最小值）
+# 例（bc-003）：中位 −4.08 / p90 0.63；α=0.25→87.8% α=1→91.7% α=2→94.8% α=4→97.7% → 推荐 α=4
+```
+
+⚠ 它只回答「让位多少」（数据结构上唯一的真值就是老师，让位即"对"），**不回答「是不是更强」**——
+强弱只能用同牌山配对实战：`java -jar … --selfplay N --rotate --policy "net:…@1,net:…,…"` 再
+`python -m mahjong_ml.eval <run dir>`。**评测跑记得 `--sample 64`**（只写 ~11 行/场，
+summary 与配对检验不受影响；实测吞吐瓶颈是**每文件开销**，不是字节数）。
+
+**已测（round 1）**：`hybrid@1` − 纯网（2400 场）= **+1.95 顺位点**（95% CI [−0.21, +4.10]，p=0.045，
+胜 1248/负 1149）；`hybrid@1` − `teacher`（1200 场）= **+1.20**（CI [−1.76, +4.12]，**p=0.977，胜 600 负 598**）
+→ 三臂点估计都在 ±2 顺位点内、**CI 全跨 0**：**机制正确且可证安全，但强度效应未确立**
+（`eval.py` 的尺子：检出 Δ=2 约需 2700 场）。⚠ α=1 时 91.7% 的决策本来就听老师，
+所以天花板就是老师 —— 想更强得靠 P3 的价值信号，混合则留作在线 RL 的**保底**。
+
+
+
+- ✅ **P0 评测口径**：服务端 `SelfPlay` 的顺位点指标（`avg_rank_points` / `per_game[].rank_points`）
+  + `mahjong_ml/eval.py`（配对显著性）+ `paths.py` / `guard.py` 两条纪律。
+- ✅ **P1 行为克隆冒烟**：`features.py`（唯一规格）/ `dataset.py`（按整场切分，内存映射）/
+  `nets.py`（候选打分头）/ `bc.py`（封线程 + GPU 节流 + checkpoint 落 T 盘）。
+  - **v1（只吃 obs 原始字段，539+88）**：val top-1 **0.616**（峰值 @ep40；随机 0.116 / 首合法基线 0.156），
+    类型准确率 0.977（同粒度基线 0.755）；同 seed 两次训练 `model.pt` **sha256 相同**。
+  - **v2（接上 Java 算的派生特征，607+96）**：val top-1 **0.795**（@ep60，nll 1.24 → 0.63）
+    —— **同数据、同超参，唯一变量是特征：+0.176 绝对（+28%）**。
+- ✅ **派生特征**：`server/.../ai/ObsFeatures.java`（权威实现）+ `--features` 富化 CLI（写 sidecar，
+  轨迹契约不变）。两侧由 `SelfTest.obsFeaturesTests`（obs 通路 == Round 通路 + 红证，连抓 3 个真 bug）
+  与 `python/selfcheck.py`（sidecar 格式契约、缺 sidecar 必须报错）钉住。
+- ✅ **P2 DAgger 一轮（结论：无可测增益，已裁定）**：`--teacher-label`（学生座位额外记老师动作）+
+  `dagger.py`（采集→富化→校验→受控建集→重训→**多臂对比**）。一轮实测（学生状态 / 老师状态的无泄漏评测集）：
+
+  | 臂 | 训练行数 | 学生状态 top-1 | 老师状态 top-1 |
+  | --- | --- | --- | --- |
+  | 基线 `bc-002` | 250,000（BC，建集时截断） | 0.7893 | 0.7924 |
+  | DAgger `bc-003` | 441,981（BC + 学生轨迹） | 0.8602 | 0.8564 |
+  | **配量对照 `bc-005`** | **441,981**（BC + 纯 teacher，`--control-max-decisions` 裁到同量） | **0.8653** | **0.8607** |
+  | 未配量对照 `bc-004` | 478,041（多 8.2%，仅参考） | 0.8676 | 0.8691 |
+
+  **Δ dagger − control（严格同量）= −0.0051，95% CI −0.0127..+0.0019（跨 0）→ 没有可测增益。**
+  ⚠ 口径教训：未配量那版的 −0.0074（CI 不含 0）**不能**读成"DAgger 有害" —— 那对照臂多训了 8.2% 行。
+  主因是**数据量**（BC-only 250k → 0.789、442k → 0.865、478k → 0.868）；与学生分布本来就贴近老师
+  （基线在学生状态上只掉 0.003）一致 —— **不再迭代 DAgger**，优先加数据（纯 teacher 轨迹最便宜）、
+  加容量/正则，或 P5b 混合（有保底）。
+- ✅ **P5b 混合（teacher 先验）已落地**：策略串 `net:<net.bin>@<α>`（`PROTOCOL.md` §8.4），
+  α 用 `python -m mahjong_ml.hybrid` 的"让位曲线"来选；`SelfTest.hybridPolicyTests` 钉住
+  **上位集合性质**（α 极大 ⇒ 整局决策序列与 teacher 完全一致）。配对实战一轮：
+  `hybrid@1` − 纯网 = +1.95 顺位点（CI [−0.21,+4.10]，p=0.045）、`hybrid@1` − teacher = +1.20
+  （CI [−1.76,+4.12]，p=0.977 打平）→ **机制可证安全，强度效应未确立**（天花板 = teacher）。
+  → 混合留作在线 RL 的**保底**；继续提强度要走 **P3（价值/胜负信号）**。
+- ⏳ **下一步**：**P3 离线 RL（IQL / CQL）** —— 加 value head，用现成的 44 万条带奖励决策离线训练；
+  拿到 V/Q 之后才谈 P4 在线自对弈（现在缺的是"改进算子"，不是对局能力）；P5 联赛需要对手池 + Elo。
+- ✅ **B 形态（进程内推理）**：`export.py` 导出纯 Java 可读的二进制权重，
+  服务端 `--policy net:<net.bin>` 直接让网络打（零 socket、零第三方依赖）：
+
+  ```powershell
+  python\.venv\Scripts\python.exe -m mahjong_ml.export weights `
+      --ckpt T:\mahjong-training\ckpt\bc-002\model.pt --out T:\mahjong-training\ckpt\bc-002\net.bin
+  java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar --selfplay 24 --workers 24 --rotate `
+       --policy "net:T:\mahjong-training\ckpt\bc-002\net.bin,teacher,teacher,teacher" `
+       --seed 4242 --out T:\mahjong-training\raw\net-smoke
+  ```
+
+  一致性由 **golden 夹具**钉住：`python -m mahjong_ml.export golden --trace <dir> --out python\tests\golden\forward.bin`
+  生成（小网络 + 真实 obs + Python 侧 state/cand/logits），`SelfTest.neuralForwardTests` 读它逐元素对拍
+  （<1e-4）+ 红证。⚠ 实测：网络打一场约比 teacher 慢 **3 倍**（推进它是纯 Java 手写 + 每候选都要算派生量），
+  所以大规模自对弈要按 `~0.7 场/秒`（24 workers）规划。

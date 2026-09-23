@@ -10,6 +10,7 @@ import java.util.Map;
 
 import mahjong.ai.Action;
 import mahjong.ai.Decision;
+import mahjong.bot.Bot;
 import mahjong.game.Round;
 import mahjong.game.Table;
 import mahjong.util.Json;
@@ -43,6 +44,8 @@ final class TraceRecorder {
     private final boolean keepDecisions;
     private final String[] labels;
     private final int startScore;
+    /** DAgger：对学生座位**额外**记一次"老师在同一 obs 上会怎么打"。 */
+    private final boolean teacherLabel;
 
     /** 决策行（待回填）。 */
     private final List<Map<String, Object>> decisions = new ArrayList<>();
@@ -61,6 +64,13 @@ final class TraceRecorder {
 
     TraceRecorder(int gameIndex, long seed, Path dir, String[] labels, int startScore,
                   int sampleEvery, boolean recordClaims, boolean keepDecisions) {
+        this(gameIndex, seed, dir, labels, startScore, sampleEvery, recordClaims, keepDecisions,
+                false);
+    }
+
+    TraceRecorder(int gameIndex, long seed, Path dir, String[] labels, int startScore,
+                  int sampleEvery, boolean recordClaims, boolean keepDecisions,
+                  boolean teacherLabel) {
         this.gameIndex = gameIndex;
         this.seed = seed;
         this.dir = dir;
@@ -69,9 +79,15 @@ final class TraceRecorder {
         this.sampleEvery = Math.max(1, sampleEvery);
         this.recordClaims = recordClaims;
         this.keepDecisions = keepDecisions;
+        this.teacherLabel = teacherLabel;
         for (int i = 0; i < 4; i++) {
             runningScores[i] = startScore;
         }
+    }
+
+    /** 这个座位的策略本来就是 teacher / 内置机器人时不必再标一遍：它的 `chosen` 就是老师动作。 */
+    private static boolean isTeacherPolicy(String label) {
+        return label == null || label.equalsIgnoreCase("teacher") || label.equalsIgnoreCase("bot");
     }
 
     /** 小局结算行（统计用）。 */
@@ -99,7 +115,10 @@ final class TraceRecorder {
         if (!recordClaims && "claim".equals(d.kind)) {
             return;
         }
-        final Action a = Action.fromCmd(cmd);
+        // `resolve` 而不是 `fromCmd`：策略可以回**部分指定**的包（裸 pon / 不带 tiles 的大明杠），
+        // 而服务端按"普通牌优先"的默认取法执行 —— 那正是本次 legal 里的第一条。
+        // 记成裸键会与 legal（只含带取法的键）对不上（PROTOCOL §8.3 的裸 pon 规则）。
+        final Action a = Action.resolve(cmd, d.obs.legal);
         if (a == null) {
             // 认不出的回包**不编造标签**（宁可少一条样本）
             return;
@@ -117,6 +136,17 @@ final class TraceRecorder {
                 "chosen", a.key(),
                 "chosen_index", d.obs.indexOf(a),
                 "obs", d.obs.toJson());
+        // DAgger（`--teacher-label`）：对**学生**座位再问一次老师"这一手你会怎么打"。
+        // 座位本身就是 teacher 时不必问（`chosen` 已经是老师动作，见 isTeacherPolicy）。
+        // ⚠ 这会多跑一次 `Bot.decide`：只在采集时开、且只对学生座位付出这个代价。
+        if (teacherLabel && !isTeacherPolicy(labels[d.obs.seat])) {
+            Action t = Action.resolve(
+                    Bot.decide(d.round, d.obs.seat, d.kind, d.options, d.extra), d.obs.legal);
+            if (t != null) {
+                row.put("teacher", t.key());
+                row.put("teacher_index", d.obs.indexOf(t));
+            }
+        }
         decisions.add(row);
     }
 

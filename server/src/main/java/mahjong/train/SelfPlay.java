@@ -15,6 +15,7 @@ import mahjong.ai.Policies;
 import mahjong.ai.PolicyFactory;
 import mahjong.core.Rules;
 import mahjong.game.Round;
+import mahjong.game.RoundScoring;
 import mahjong.game.Table;
 import mahjong.util.Json;
 import mahjong.util.Log;
@@ -64,6 +65,8 @@ public final class SelfPlay {
         public boolean recordClaims = true;
         /** 每场最多打几个小局（0 = 打完整场；冒烟测试用）。 */
         public int maxHands;
+        /** DAgger：对学生座位额外记一次老师的动作（`teacher` / `teacher_index`）。 */
+        public boolean teacherLabel;
     }
 
     /** 单个策略的统计（按策略标签聚合，跨座位）。 */
@@ -77,9 +80,23 @@ public final class SelfPlay {
         public int dealIns;
         public long deltaSum;
         public long winScoreSum;
+        /** **顺位点**（精算点数）之和 —— 顺位意识的唯一可测口径，见 {@link #avgRankPoints()}。 */
+        public double rankPointSum;
 
         public double avgPlace() {
             return games == 0 ? 0 : (double) placeSum / games;
+        }
+
+        /**
+         * 平均**顺位点**（精算点数）：`(点数 − 返点)/1000 + 马点 + 头名赏`，由生产的
+         * {@link RoundScoring#settle} 算出（**不在这里重写公式**，同点拆分口径也一并继承）。
+         *
+         * <p>为什么必须补这个指标：`avg_place` 只看名次，**测不出顺位意识** ——
+         * 领先时少赢一把、把放铳率压下去，在和了率与平均顺位上都要吃亏，但顺位点才是这项运动的记分。
+         * （见 `docs/TRAINING.md` §4 P0 与 `docs/DESIGN.md`「档 C 的收尾」。）
+         */
+        public double avgRankPoints() {
+            return games == 0 ? 0 : rankPointSum / games;
         }
 
         public double winRate() {
@@ -135,6 +152,8 @@ public final class SelfPlay {
         int ryukyoku;
         int[] finalScores;
         List<Object> placement;
+        /** 四家的**顺位点**（精算点数，按座位索引）—— 顺位意识的评测口径。 */
+        double[] rankPoints;
         String[] labels;
         List<Map<String, Object>> hands;
     }
@@ -222,6 +241,7 @@ public final class SelfPlay {
                     "policies", List.of(row.labels),
                     "final_scores", Json.intList(row.finalScores),
                     "placement", row.placement,
+                    "rank_points", rankPointList(row.rankPoints),
                     "hands", row.hands.size(),
                     "ryukyoku", row.ryukyoku));
             // 顺位按策略标签累计
@@ -229,6 +249,7 @@ public final class SelfPlay {
                 PolicyStat st = s.byPolicy.get(row.labels[i]);
                 st.games++;
                 st.placeSum += ((Number) row.placement.get(i)).intValue();
+                st.rankPointSum += row.rankPoints[i];      // 顺位点按**座位**索引（见 Settlement 的注释）
             }
             // 逐手把"和了 / 放铳 / 收支"记到对应策略上
             for (Map<String, Object> h : row.hands) {
@@ -287,7 +308,7 @@ public final class SelfPlay {
             t.addBot(i);
         }
         TraceRecorder rec = new TraceRecorder(g, seed, outDir, labels, rules.startScore,
-                c.sampleEvery, c.recordClaims, outDir != null);
+                c.sampleEvery, c.recordClaims, outDir != null, c.teacherLabel);
         t.debugChoiceTap = rec::onChoice;
         t.debugEventTap = (recipient, ev) -> rec.onEvent(recipient, ev, t);
         t.playGame();
@@ -307,7 +328,19 @@ public final class SelfPlay {
             row.finalScores[i] = t.seat(i).score;
         }
         row.placement = TraceRecorder.placementOf(row.finalScores);
+        // 顺位点：**复用生产的精算**（同点拆分/马点/头名赏一把尺子），不在这里另写一份公式
+        RoundScoring.Settlement settle = RoundScoring.settle(row.finalScores, rules);
+        row.rankPoints = settle.point.clone();
         return row;
+    }
+
+    /** 顺位点 → JSON 数组（**按 0.1 分取整**：与界面显示精度一致，也避免浮点噪声写进数据集）。 */
+    public static List<Object> rankPointList(double[] pts) {
+        List<Object> out = new ArrayList<>(pts.length);
+        for (double p : pts) {
+            out.add(Math.round(p * 10) / 10.0);
+        }
+        return out;
     }
 
     /** 人类可读汇总（CLI）。 */
@@ -321,12 +354,12 @@ public final class SelfPlay {
         sb.append(String.format("   流局率 %.1f%%   平均每场 %.1f 小局%n",
                 100 * s.ryukyokuRate(), s.handsPerGame()));
         sb.append("---------------------------------------------------------------------------\n");
-        sb.append(String.format("%-10s %6s %10s %9s %9s %10s %10s%n",
-                "策略", "场数", "平均顺位", "和了率", "放铳率", "平均收支", "平均打点"));
+        sb.append(String.format("%-10s %6s %10s %11s %9s %9s %10s %10s%n",
+                "策略", "场数", "平均顺位", "平均顺位点", "和了率", "放铳率", "平均收支", "平均打点"));
         for (Map.Entry<String, PolicyStat> e : s.byPolicy.entrySet()) {
             PolicyStat st = e.getValue();
-            sb.append(String.format("%-10s %6d %10.3f %8.1f%% %8.1f%% %10.0f %10.0f%n",
-                    e.getKey(), st.games, st.avgPlace(), 100 * st.winRate(),
+            sb.append(String.format("%-10s %6d %10.3f %11.2f %8.1f%% %8.1f%% %10.0f %10.0f%n",
+                    e.getKey(), st.games, st.avgPlace(), st.avgRankPoints(), 100 * st.winRate(),
                     100 * st.dealInRate(), st.avgDelta(), st.avgWinScore()));
         }
         return sb.toString();
@@ -352,6 +385,7 @@ public final class SelfPlay {
                     "games", st.games,
                     "seat_hands", st.seatHands,
                     "avg_place", st.avgPlace(),
+                    "avg_rank_points", st.avgRankPoints(),
                     "win_rate", st.winRate(),
                     "deal_in_rate", st.dealInRate(),
                     "avg_delta", st.avgDelta(),

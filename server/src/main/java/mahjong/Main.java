@@ -39,7 +39,10 @@ public final class Main {
         int selfplaySample = 1;
         boolean selfplayClaims = true;
         int selfplayHands = 0;
+        boolean selfplayTeacherLabel = false;
         String preset = null;
+        // ---- 训练接口（派生特征富化）：见 mahjong.train.TraceFeatures
+        String featuresDir = null;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--port":
@@ -103,6 +106,12 @@ public final class Main {
                         selfplay = Integer.parseInt(args[++i]);
                     }
                     break;
+                case "--features":
+                    // 训练接口：给轨迹目录补派生特征 sidecar（`g*.feat.bin`），轨迹本身不动
+                    if (i + 1 < args.length) {
+                        featuresDir = args[++i];
+                    }
+                    break;
                 case "--seed":
                     if (i + 1 < args.length) {
                         selfplaySeed = Long.parseLong(args[++i]);
@@ -134,6 +143,10 @@ public final class Main {
                 case "--no-claims":
                     selfplayClaims = false;
                     break;
+                case "--teacher-label":
+                    // DAgger：对学生座位额外记一次老师的动作（`teacher` / `teacher_index`）
+                    selfplayTeacherLabel = true;
+                    break;
                 case "--hands":
                     if (i + 1 < args.length) {
                         selfplayHands = Integer.parseInt(args[++i]);
@@ -157,8 +170,7 @@ public final class Main {
             int code = SelfTest.run();
             System.exit(code);
         }
-        if (selfplay >= 0) {
-            // 自对弈**不装回放库**：训练局没必要占 replay 配额（ReplayStore.current() 为 null
+        if (selfplay >= 0) {            // 自对弈**不装回放库**：训练局没必要占 replay 配额（ReplayStore.current() 为 null
             // 时 Table 的录制开销为零）。
             mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
             cfg.games = selfplay;
@@ -172,6 +184,7 @@ public final class Main {
             cfg.sampleEvery = selfplaySample;
             cfg.recordClaims = selfplayClaims;
             cfg.maxHands = selfplayHands;
+            cfg.teacherLabel = selfplayTeacherLabel;
             cfg.preset = preset;
             Log.quiet = !Log.verbose;
             mahjong.train.SelfPlay.Summary sum;
@@ -186,6 +199,20 @@ public final class Main {
             mahjong.train.SelfPlay.writeSummary(sum, selfplayOut);
             if (selfplayOut != null) {
                 System.out.println("轨迹目录：" + java.nio.file.Path.of(selfplayOut).toAbsolutePath());
+            }
+            System.exit(0);
+        }
+        if (featuresDir != null) {
+            // 离线富化：给轨迹补派生特征 sidecar（`g*.feat.bin`）—— 轨迹格式不变，可重跑可缓存
+            Log.quiet = !Log.verbose;
+            try {
+                mahjong.train.TraceFeatures.Report rep =
+                        mahjong.train.TraceFeatures.run(featuresDir, selfplayWorkers);
+                System.out.print(rep);
+            } catch (java.io.IOException e) {
+                Log.error("派生特征富化失败", e);
+                System.exit(2);
+                return;
             }
             System.exit(0);
         }
@@ -255,12 +282,15 @@ public final class Main {
         System.out.println("  --selfplay <n>     跑 n 场半庄（4 个机器人座位；不监听端口）");
         System.out.println("  --seed <n>         基准种子（默认 20260101；同种子逐事件可复现）");
         System.out.println("  --workers <k>      并行线程数（默认 = CPU 核数；不影响结果）");
-        System.out.println("  --policy a,b,c,d   四家策略：teacher|first|pass|random（默认全 teacher）");
+        System.out.println("  --policy a,b,c,d   四家策略：teacher|first|pass|random|net:<权重文件>[@<α>]"
+                + "（默认全 teacher）");
         System.out.println("  --rotate           按局轮转座位（评测用：每个策略把四个座位都坐一遍）");
         System.out.println("  --out <dir>        轨迹输出（每场 g<序号>.jsonl + summary.json）");
         System.out.println("  --sample <k>       每 k 次决策记 1 条（默认 1 = 全记）");
         System.out.println("  --no-claims        不记录鸣牌决策");
         System.out.println("  --hands <n>        每场最多打 n 个小局（0 = 完整半庄；冒烟测试用）");
         System.out.println("  --preset <name>    规则预设：mleague|tenhou|majsoul|custom");
+        System.out.println("  --teacher-label    DAgger：对学生座位额外记一次老师的动作（teacher/teacher_index）");
+        System.out.println("  --features <dir>   给轨迹目录补**派生特征** sidecar（g*.feat.bin；轨迹本身不动）");
     }
 }

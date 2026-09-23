@@ -613,7 +613,7 @@ public final class Round {
                 "dora_indicators", kindsToStrs(doraIndicators()),
                 "tiles_left", tilesLeft(),
                 "dead_wall_left", deadWallLeft(),
-                "cans", Json.obj("riichi", canRiichiAny(s), "kyuushu", false));
+                "cans", Json.obj("riichi", canRiichiAny(s), "kyuushu", canKyuushuAtStart(s)));
         // 庄家的第 14 张（配牌时就入手、第一巡不再摸）必须**点名**告诉客户端是哪一张。
         // `hand` 是**已排序**的 14 张，客户端从里面挑不出"刚摸到的那张"：它若按"最后一张"
         // 认，就会拿排序最大的那张当摸牌位 —— 与服务端的 `openingTile` 几乎总是不同一张，
@@ -979,6 +979,30 @@ public final class Round {
         return n;
     }
 
+    /**
+     * 这一家**现在**（这一巡的询问已经发出）能不能宣告九种九牌。
+     *
+     * <p>与 {@link #roundStartEvent} 里的 `cans.kyuushu` 是**同一份判据的两个时点**（AUDIT S-23）：
+     * 老实现把报文那一侧写死 `false`，于是"再过一瞬间就会下发 `kyuushu` 选项"的那一刻，
+     * 报文却说他不能宣 —— 字段成了谎话。两个时点的差别只有 `playerDraws`（见下）。
+     */
+    private boolean canKyuushu(int seat) {
+        return rules.kyuushuAbort && !anyCall && playerDraws[seat] == 1 && countYaochuKinds(seat) >= 9;
+    }
+
+    /**
+     * `round_start.cans.kyuushu`：**本局第一次被问到**时能不能宣。
+     *
+     * <p>⚠ 时点差别：`round_start` 发在"配牌之后、第一巡询问之前"，庄家的第 14 张（`openingTile`）
+     * 已经到手，但 `playerDraws` 要到 {@code play()} 主循环里才 +1 —— 所以庄家要用
+     * "0 次摸牌**也算**第一巡"来表达；其余三家的第一巡还没到，这里就是 false
+     * （他们真到那一巡时，`turnOptions` 照样会给选项）。
+     */
+    private boolean canKyuushuAtStart(int seat) {
+        return rules.kyuushuAbort && !anyCall && countYaochuKinds(seat) >= 9
+                && (playerDraws[seat] == 1 || (seat == dealer && playerDraws[seat] == 0));
+    }
+
     // ================================================================= 选项
 
     /**
@@ -1078,7 +1102,7 @@ public final class Round {
         if (!kans.isEmpty()) {
             opts.add(Json.obj("type", "kan", "kans", kans));
         }
-        if (rules.kyuushuAbort && !anyCall && playerDraws[seat] == 1 && countYaochuKinds(seat) >= 9) {
+        if (canKyuushu(seat)) {
             opts.add(Json.obj("type", "kyuushu"));
         }
         return opts;

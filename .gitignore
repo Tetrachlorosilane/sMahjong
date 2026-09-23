@@ -96,3 +96,16 @@ desktop.ini
 release/
 *.zip
 
+# ---------------------------------------------------------------------------
+# 训练侧（python/，见 docs/TRAINING.md）：只进源码，不进环境与数据
+#   · .venv 是 uv 建的本地环境；· uv 的缓存/Python 安装目录在受限沙箱下**必须是仓库内路径**
+#     （默认 %LOCALAPPDATA%\uv\cache 会被拒，见 TRAINING §1）；
+#   · 训练数据一律在 T 盘（§0.1.1），**不进仓库**。
+# ---------------------------------------------------------------------------
+python/.venv/
+.uv-cache/
+.uv-python/
+python/.tmp/
+python/**/__pycache__/
+python/**/*.pyc
+

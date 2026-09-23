@@ -1,0 +1,19 @@
+[project]
+name = "mahjong-ml"
+version = "0.1.0"
+description = "立直麻将训练侧：轨迹 → 特征 → 行为克隆 / 自对抗进化（离线，服务端仍是零依赖 Java）"
+requires-python = ">=3.12"
+# 只钉"需要什么"，不钉死小版本；实测组合见 python/README.md（torch 2.11.0+cu128 / numpy 2.5.3）
+dependencies = ["torch", "numpy"]
+
+# Blackwell（RTX 5060, sm_120）需要 CUDA ≥12.8 的轮子 —— 走 PyTorch 官方 cu128 索引。
+# uv 用法：
+#   $env:UV_CACHE_DIR="$PWD\..\.uv-cache"; $env:UV_PYTHON_INSTALL_DIR="$PWD\..\.uv-python"
+#   uv venv --python 3.12 .venv ; uv sync          # 或 uv pip install -e . 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }

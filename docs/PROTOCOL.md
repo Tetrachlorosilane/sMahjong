@@ -315,7 +315,9 @@
  "dora_indicators":["5m"],         // 表宝牌指示牌
  "tiles_left":70,                  // 牌山剩余可摸数
  "dead_wall_left":4,               // 剩余**岭上**牌数（杠后从王牌摸的就是它，见 §3.4）
- "cans":{"riichi":true,"kyuushu":false}   // 本局开局能力（仅供参考）
+ "cans":{"riichi":true,"kyuushu":false}   // 本局开局能力（仅供参考）：kyuushu = 该家
+                                          // **第一次被问到**时能不能宣九种九牌 —— 与 `ask` 里
+                                          // 下发 `kyuushu` 选项同一判据；庄家起手那张算他的第一巡
 }
 ```
 
@@ -936,12 +938,15 @@ java -jar mahjong-server.jar [--port 10086] [--host 0.0.0.0] [--verbose]
 > 并在客户端补上 `illegal_action` 的文案与处理（**当前 `error.*` 词表里没有这个码**，
 > 客户端收到 `error` 也不会去清询问栏 —— 服务端并没有重发 ask，清了只会让玩家点不动）。
 > 鸣牌段的现状不同：**类型不属于本次询问下发过的 `option.type` 的回包会被直接丢弃**
-> （这是识别「没有 `ask_id` 的废包」的唯一判据，见 §2.2 与 `AGENTS.md` §2.3-10）。
+> （这是识别「没有 `ask_id` 的废包」的唯一判据，见 §2.2 与 `AGENTS.md` §2.3-10、`NOTES.md` §2.3-10）。
 
 ## 8. 训练接口（离线自对弈 / 机器学习）
 
 这一节**不是网络协议**：它描述服务端为「训练一个基于机器学习的电脑玩家」暴露的进程内 API 与命令行，
 外加**产出的数据格式**（那部分是被离线消费的契约，所以必须写在这里）。
+
+> 📄 **本节是接口契约（唯一权威）**。至于"怎么用这些接口训出一个模型"——阶段计划、模型与特征设计、
+> 算力预算、每阶段的验收判据 —— 见 **`docs/TRAINING.md`**（规划文档，尚未实施）。
 
 训练侧有两种接法，各自的权威性来源不同：
 
@@ -1047,9 +1052,23 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `discard:<码>` | 打牌。**只给牌码**：同码牌物理等价，服务端 `pickDiscardId` 按牌码取牌 |
 | `discard:<码>/tsumogiri` | 同上并声明摸切（可选；不声明即走纯牌码查找） |
 | `riichi:<码>` | 立直宣言（`<码>` 是宣言牌） |
-| `kan:ankan\|kakan\|daiminkan:<码>` | 杠 |
+| `pon:<码>+<码>` | 碰。两张 = **从手里取哪两张**（按槽位升序；`0p` 表示用赤五） |
+| `kan:ankan:<码>` / `kan:kakan:<码>` | 暗杠 / 加杠 |
+| `kan:daiminkan:<码>+<码>+<码>` | 大明杠。三张 = **从手里取哪三张**（按槽位升序） |
 | `chi:<码>+<码>` | 吃（两张按牌种升序） |
-| `tsumo` / `ron` / `pon` / `pass` / `kyuushu` | 无参数动作 |
+| `tsumo` / `ron` / `pass` / `kyuushu` | 无参数动作 |
+| `pon`（**兼容形态**） | 不带取法的裸 `pon`：只在**老客户端报文 / 老数据集**里出现。服务端仍然接受它（按默认取法执行），但**轨迹里不会记成裸键**（见下），`selfplay-check.mjs` 也**不再放行**这种键 —— 旧数据集作废、要重采 |
+
+> ⚠ **为什么碰 / 大明杠必须带取法**：手里同时有赤五与普通五时，服务端会为"用普通五"与"用赤五"
+> 各下发一条选项（`tiles` 不同，见 §3.6），**它们是两个不同的合法动作**。旧的动作空间把两者都折成
+> 裸 `pon` → `legal` 里出现**重复键**、`chosen_index` 无从分辨（2026-09 由
+> `tools/selfplay-check.mjs` 的"`legal` 里有重复动作"抓出来）。现在键里带上那两张/三张牌码，
+> 与 `chi:<码>+<码>` 同一套写法。
+>
+> **裸 `pon` 的解析规则（唯一）**：策略若回一条不带 `tiles` 的 `{"type":"pon"}`（老客户端 / 内置机器人），
+> 服务端按 **"普通牌优先"的默认取法**执行（`Round.pickAuto`）——**恰好是本次 `legal` 里第一条 pon**。
+> 轨迹记录因此把"策略回包"解析成**实际执行的那一个动作**（`Action.resolve`），而不是记成裸键
+> （见 §8.4 的 `chosen`）。
 
 **固定头**（`Action.index()`，`Action.FIXED_ACTIONS = 79`）—— 喂给定长输出的网络用：
 
@@ -1057,11 +1076,12 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | --- | --- |
 | `0..36` | 打牌（37 个槽：34 种牌 + 赤 `0m`/`0p`/`0s`） |
 | `37..73` | 立直宣言（同 37 个槽） |
-| `74` / `75` / `76` / `77` / `78` | `tsumo` / `ron` / `pon` / `pass` / `kyuushu` |
+| `74` / `75` / `77` / `78` | `tsumo` / `ron` / `pass` / `kyuushu` |
+| `76` | **保留**（历史上是 `pon`）—— 现在 `pon` 是参数化动作，`index()` 返回 `-1` |
 
-`chi` 与 `kan` 是**参数化**的（一次询问里最多各几种），没有固定下标：做法是「按本次 `legal`
-枚举 + 掩码」，标识仍用动作键。牌码 → 槽位：34 种牌按 `kind` 排，赤五另占 `34`/`35`/`36`
-（`Action.tileIndex` / `Action.tileCode`）。
+`pon` / `chi` / `kan` 都是**参数化**的（一次询问里最多各有几种取法），没有固定下标：
+做法是「按本次 `legal` 枚举 + 掩码」，标识仍用动作键。牌码 → 槽位：34 种牌按 `kind` 排，
+赤五另占 `34`/`35`/`36`（`Action.tileIndex` / `Action.tileCode`）。
 
 ### 8.4 自对弈 / 评测命令行
 
@@ -1075,7 +1095,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--selfplay <n>` | 跑 n 场半庄（**不监听端口**，4 个机器人座位） |
 | `--seed <n>` | 基准种子；第 g 场种子 = `SelfPlay.seedFor(seed, g)`（SplitMix，**与并行度无关**） |
 | `--workers <k>` | 并行线程数（默认 = CPU 核数；**不改变结果**） |
-| `--policy a,b,c,d` | 四家策略：`teacher`（内置机器人）/ `first` / `pass` / `random` |
+| `--policy a,b,c,d` | 四家策略：`teacher`（内置机器人）/ `first` / `pass` / `random` / **`net:<权重文件>`**（进程内神经网络）/ **`net:<权重文件>@<α>`**（P5b 混合，老师先验权重 α，见下） |
 | `--rotate` | 按局轮转座位：同一批牌山下让每个策略把四个座位都坐一遍（**配对评测务必开**） |
 | `--out <dir>` | 轨迹输出（每场 `g<序号>.jsonl` + `summary.json`） |
 | `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
@@ -1089,19 +1109,77 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 
 | 行 | 内容 |
 | --- | --- |
-| `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, final_scores, placement}` |
+| `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, final_scores, placement}`，`--teacher-label` 时**另带** `teacher` / `teacher_index` |
 | `hand` | `{hand_no, hand, round, scores_after, delta, agari, abortive, reason, renchan, winner, loser, tsumo, nagashi, tenpai}` |
 | `game` | `{game, seed, policies, start_score, hands, decisions, sampled_every, final_scores, placement}` |
 
 - `chosen_index` = 该动作在本次 `legal` 里的下标 —— 直接就是「枚举 + 掩码」策略头的监督信号。
+- `chosen` = **实际执行**的那个动作键：策略若回的是"部分指定"的包（裸 `pon`、不带 `tiles` 的
+  大明杠），记的是**服务端默认取法对应的那一条**（§8.3 的裸 `pon` 规则），所以 `chosen` 一定
+  `∈ legal`、`chosen_index` 一定对得上，且**不会**出现"记了裸键、执行了另一条"的错位。
 - **奖励是事后回填的**：决策发生时还不知道这一手 / 这一场的结果，所以 `hand_delta`（本小局四家收支）、
   `hand_winner`/`hand_loser`、`placement`（整场顺位）是在小局 / 整场结束时补进去的。
 - `placement` 恒为 `1..4` 的一个排列：**同点按座次先后**（M.League 起家优先）拆开 ——
   否则「平均顺位」会被同点挤掉一个名次。
-- `summary.json` 含 `by_policy`（`avg_place` / `win_rate` / `deal_in_rate` / `avg_delta` / `avg_win_score`）
-  与 `per_game`（每场种子 + 四家顺位）—— 后者是配对显著性检验的输入。
+- `summary.json` 含 `by_policy`（`avg_place` / **`avg_rank_points`** / `win_rate` / `deal_in_rate` /
+  `avg_delta` / `avg_win_score`）与 `per_game`（每场种子 + 四家顺位 + **四家顺位点 `rank_points`**）
+  —— 后者是配对显著性检验的输入。
+- **顺位点**（精算点数）= `(点数 − 返点)/1000 + 马点 + 头名赏`，**由生产的 `RoundScoring.settle` 算**
+  （同点拆分/并列口径一并继承，不另写一份公式），恒有 **`Σ rank_points == 0`**（马点之和为 0、
+  头名赏正好抵消返点与配给原点的差）。⚠ `avg_place` **测不出顺位意识**（领先时少赢一把、压住放铳率，
+  在和了率与平均顺位上都要吃亏），所以评测**必须同时报 `avg_rank_points`**
+  （`docs/TRAINING.md` §4 的 P0；`tools/selfplay-check.mjs` 会独立复核上述两条不变式）。
 - 单核实测：**约 3.6 秒一场半庄**（约 13 小局 / 800 次决策）≈ 220 决策/秒；
   训练接口本身的开销是 **1.0 µs/决策**（记录时 10.5 µs，主要花在 JSON 上）。
+
+**派生特征富化（另一个命令，`--selfplay` 之后跑）**：
+
+```bash
+java -jar mahjong-server.jar --features <轨迹目录> [--workers 24]
+```
+
+给目录里每个 `g<序号>.jsonl` 生成同名 `g<序号>.feat.bin`（**轨迹格式完全不变**）。
+派生量（逐张危险度 68 维 + 逐候选 8 个量）由服务端的权威实现
+（`mahjong/ai/ObsFeatures.java` → `HandEval` / `Danger`）算，**刻意不在 Python 里再写一份** ——
+两套实现必然漂移（`docs/TRAINING.md` §3.4）。格式见该类 javadoc；Python 侧读它的是
+`python/mahjong_ml/dataset.py`，契约由 `python/selfcheck.py` 与 `SelfTest.obsFeaturesTests` 两侧钉住
+（后者是「obs 通路 == Round 通路」的逐元素 golden 对拍，带红证）。
+
+**进程内神经网络策略（B 形态）**：
+
+```bash
+# ① Python 导出纯 Java 可读的权重（定长小端；格式见 python/mahjong_ml/export.py）
+python -m mahjong_ml.export weights --ckpt <model.pt> --out <net.bin>
+# ② 服务端直接把它当一家策略（可与其他策略任意混搭，支持 --rotate）
+java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
+     --policy net:<net.bin>,teacher,teacher,teacher --out <dir>
+```
+
+- 前向是**纯 Java 手写**（`mahjong/ai/NeuralPolicy.java`：trunk 两层 ReLU + 逐候选打分头），
+  **零第三方依赖**、无 socket 往返；特征拼装在 `mahjong/ai/Features.java`（与
+  `python/mahjong_ml/features.py` 同规格：state 607 = 539 基础 + 68 派生，cand 96 = 88 + 8）。
+- **加载失败/魔数不对/特征维度不符** → **构造期**就抛错（不会打到一半才发现），
+  运行期动作仍过 `Policies.fromAction` 的三道保护（非法动作 / `null` / 异常一律退回内置 teacher）。
+- **一致性**由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具
+  （`python/tests/golden/forward.bin`）逐元素钉住（容差 1e-4）+ 一条红证。
+
+**P5b 混合（teacher 先验）**：策略串写成 `net:<权重文件>@<α>`（α 缺省 0 = 纯网络），
+语义是 `argmax(student(obs) + α · 1[该候选 == 老师在本信息集的动作])`。
+
+```bash
+# α=0 与不加 @ 逐决策相同；α 足够大 ⇒ 逐决策等同 teacher（上位集合性质，可证）
+java -jar mahjong-server.jar --selfplay 300 --workers 24 --rotate \
+     --policy "net:<net.bin>@2,net:<net.bin>@2,teacher,teacher" --out <dir>
+```
+
+- **为什么加在 logit 上**：α 极大时 argmax 必然是老师那一条 → `hybrid(@∞) ≡ teacher` 是**构造出来的**，
+  不是"大概会"；而 α=0 时连浮点路径都不变（加 0 不改变比较结果）。
+- ⚠ 它是 **`Policy` 级组合**（与 `teacher` 同级），**不是 `ActionPolicy`**：老师先验要调
+  `Bot.decide(Round, …)`，而 `ActionPolicy` 是**故意拿不到 `Round`** 的（AGENTS §6.5 反作弊口径）。
+  网络本身仍只看 `Observation`；老师只用 `Round` 的公开辅助方法 —— 两侧都没开新的作弊口子。
+- 兜底：网络非法/`null`/抛异常 → 用老师这一次的回包（不再多算一遍）。
+- 回归：`SelfTest.hybridPolicyTests`（α=0 逐决策等价、α=∞ 与 teacher **整局决策序列相同**、
+  老师一致率随 α 单调不减、任何 α 都不给非法动作，外加"纯网 ≠ teacher"的非空转对照）。
 
 ### 8.5 数据集校验
 
@@ -1110,7 +1188,15 @@ node tools/selfplay-check.mjs <dir>
 ```
 
 **独立实现**（不是把 Java 断言翻译一遍）逐行核对：观测字段白名单（防泄漏）、
-`chosen ∈ legal` 且 `chosen_index` 对得上、暗牌张数 = `13 − 3×副露 + (自家回合 ? 1 : 0)`、
+`chosen ∈ legal` 且 `chosen_index` 对得上、**`legal` 里不许有重复动作**（键必须唯一 ——
+碰/大明杠的取法已进键，见 §8.3）、动作键文法（`discard|riichi|pon|kan|chi|…` 的完整文法见脚本内正则）、
+暗牌张数 = `13 − 3×副露 + (自家回合 ? 1 : 0)`、
 `visible` = 牌河 + 副露 + 宝牌、`hand_red` 与 `hand` 不矛盾、小局收支账（`scores_after` 链、
-`delta` 为 1000 的整数倍、和了者收支为正）、`placement` 与终局分数一致、
+`delta` 为 1000 的整数倍、和了者收支为正）、**终局账**（终局分数 = 末局 `scores_after` +
+末局 `round.riichi_sticks × 1000`，且这批**余棒只归末局第 1 位**、按 100 点为单位平分、
+尾数归更接近起家者 —— 见 `DESIGN.md`「终局与精算」）、`placement` 与终局分数一致、
 `summary.json` 与逐场数据一致。退出码 0/1。
+
+⚠ **采样（`--sample k`）必须被校验器建模**：`--sample k` 只记每 k 次决策里的 1 条，一局 60 次决策在
+k=64 时只剩 0～1 条 —— 那不是脏数据。所以 `game.sampled_every > 1` 时"每小局至少 4 次决策"这条
+**不适用**（只保留"整场不能被采空"），k=1 时仍是严格红线（AUDIT S-75）。

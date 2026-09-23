@@ -385,7 +385,7 @@ void TableView::paintCenter(QPainter& p)
     }
 }
 
-// 宝牌指示牌：画在**风盘内**、対面点数下方那一行（见 AGENTS §6「风盘尺寸由内容反推」）
+// 宝牌指示牌：画在**风盘内**、対面点数下方那一行（见 AGENTS §6.2「风盘尺寸由内容反推」）
 void TableView::paintDoraPanel(QPainter& p)
 {
     const QStringList dora = m_model->doraIndicators();

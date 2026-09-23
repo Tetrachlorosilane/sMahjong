@@ -35,22 +35,6 @@ QString joinTiles(const QStringList& tiles)
 }
 
 /**
- * 这一组牌码里有没有**赤五**，有就返回那个码（`0m`/`0p`/`0s`）。
- *
- * <p>用来区分「副露赤宝选择」下发的多条同名选项：服务端会给
- * `tiles:["5p","5p"]`（不用赤）与 `tiles:["0p","5p"]`（用赤）各一条，
- * 按钮文案必须让玩家看出哪条会用掉赤五（报障：副露无法区分红五与普通五）。
- */
-QString akaCodeIn(const QStringList& tiles)
-{
-    for (const QString& t : tiles) {
-        if (mj::isRedTile(t))
-            return t;
-    }
-    return QString();
-}
-
-/**
  * 按动作种类给按钮上色的样式表（用户要求：「附录提示不明显，增大按钮或添加不同按钮颜色
  * 或按钮颜色闪烁」）。
  *
