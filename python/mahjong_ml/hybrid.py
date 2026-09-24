@@ -1,7 +1,7 @@
 """P5b 混合（teacher 先验）的 **α 选择**：离线"让位曲线"（`docs/TRAINING.md` §4 P5b）。
 
-    python -m mahjong_ml.hybrid --ckpt T:\\mahjong-training\\ckpt\\bc-003\\model.pt \\
-                                --data T:\\mahjong-training\\compact\\dagger-r1
+    python -m mahjong_ml.hybrid --ckpt S:\\mahjong-training\\ckpt\\bc-003\\model.pt \\
+                                --data S:\\mahjong-training\\compact\\dagger-r1
 
 服务端侧的策略是 `net:<权重文件>@<α>` = `argmax(student(obs) + α · 1[该候选 == 老师动作])`
 （`docs/PROTOCOL.md` §8.4）。α 是"多听老师"的旋钮，但**没有一个通用的好值** ——

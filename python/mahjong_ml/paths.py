@@ -1,8 +1,13 @@
 """数据根与配额闸门 —— `docs/TRAINING.md` §0.1.1 的可执行版本（约束 ①）。
 
-**唯一数据根 = `T:\\mahjong-training\\`**（卷标 `TrainingData`）。仓库里不留训练数据。
+**唯一数据根 = `S:\\mahjong-training\\`**（卷标 `Silicon_files`）。仓库里不留训练数据。
 本模块存在的理由是一条实测教训：`SelfPlay` 建不出目录时**只打一条 WARN 就继续跑**，
 采集"看起来成功"却一个文件都没有 —— 所以**落盘前必须由这里显式闸门**，失败就抛异常（不要静默降级）。
+
+⚠ **2026-09 从 `T:\\mahjong-training\\`（卷标 TrainingData）迁到这里**：T 盘扛不住自对弈的
+**每文件开销**（实测：把每场轨迹从 1.1 MB 压到 21 KB，吞吐**一点没变**，都是 0.7 场/秒左右，
+而且 java 只占 ~15/24 核 —— 瓶颈是"每场一个文件"这件事，不是字节数）。S 盘同一批数据
+robocopy 迁移后逐文件校验一致（数量/字节/SHA256）。详见 `docs/TRAINING.md` §0.1.1 的迁移记录。
 
     from mahjong_ml import paths
     paths.ensure_root()                     # 建六个子目录；不可写 → DataRootError
@@ -18,7 +23,8 @@ from pathlib import Path
 
 # ------------------------------------------------------------------ 常量（与 §0.1.1 表一致）
 
-DATA_ROOT = Path(os.environ.get("MAHJONG_DATA_ROOT", r"T:\mahjong-training"))
+#: 可用 `MAHJONG_DATA_ROOT` 覆盖（跨机器/换盘时只改环境变量，不动代码）。
+DATA_ROOT = Path(os.environ.get("MAHJONG_DATA_ROOT", r"S:\mahjong-training"))
 
 SUBDIRS = ("raw", "compact", "ckpt", "league", "logs", "probe")
 

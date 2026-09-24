@@ -60,6 +60,64 @@ def build(state_dim: int, cand_dim: int, *, hidden: int = 256, head: int = 128) 
     return CandidateScorer(state_dim, cand_dim, hidden=hidden, head=head)
 
 
+class CriticScorer(nn.Module):
+    """P3（离线 RL）的**价值网络**：共享 trunk + 逐候选 Q 头 + 状态 V 头。
+
+    `Q(s,a)` 用与 `CandidateScorer` **同样的候选打分结构**（所以"一手值多少点"这件事
+    是按候选算的，天然对齐 `chosen_index`）；`V(s)` 是 trunk 上的一个小 MLP（只吃 state），
+    IQL 的 expectile 回归学的就是它。**两者共享 trunk** —— 这是 IQL 的常见做法，
+    也让 V 顺带把 state 表示训好。
+
+    ⚠ 量纲：目标一律是**千点**（`rewards.POINTS_PER_UNIT`），所以 Q/V 的正常范围是 ±10 上下，
+    不是 ±30000。别把原始点数直接喂进来（回归会炸）。
+    """
+
+    def __init__(self, state_dim: int, cand_dim: int, hidden: int = 256, head: int = 128,
+                 trunk_layers: int = 2) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        in_dim = state_dim
+        for _ in range(trunk_layers):
+            layers += [nn.Linear(in_dim, hidden), nn.ReLU()]
+            in_dim = hidden
+        self.trunk = nn.Sequential(*layers)
+        self.q_head = nn.Sequential(
+            nn.Linear(hidden + cand_dim, head), nn.ReLU(),
+            nn.Linear(head, 1),
+        )
+        self.v_head = nn.Sequential(
+            nn.Linear(hidden, head), nn.ReLU(),
+            nn.Linear(head, 1),
+        )
+        self.state_dim = state_dim
+        self.cand_dim = cand_dim
+        self.hidden = hidden
+        self.head_dim = head                       # 与 CandidateScorer 同名，便于两处共用导出逻辑
+        self.trunk_layers = trunk_layers
+
+    def q_values(self, state: torch.Tensor, cand: torch.Tensor,
+                 mask: torch.Tensor | None = None) -> torch.Tensor:
+        """`[B, L]`：每个合法候选的 Q（非法位置填 `-inf`，与打分头同一约定）。"""
+        h = self.trunk(state)
+        h = h.unsqueeze(1).expand(-1, cand.size(1), -1)
+        q = self.q_head(torch.cat([h, cand], dim=-1)).squeeze(-1)
+        if mask is not None:
+            q = q.masked_fill(~mask, float("-inf"))
+        return q
+
+    def v_values(self, state: torch.Tensor) -> torch.Tensor:
+        """`[B]`：状态价值（IQL 的 expectile 目标）。"""
+        return self.v_head(self.trunk(state)).squeeze(-1)
+
+    def n_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+
+def build_critic(state_dim: int, cand_dim: int, *, hidden: int = 256, head: int = 128,
+                 ) -> CriticScorer:
+    return CriticScorer(state_dim, cand_dim, hidden=hidden, head=head)
+
+
 def export_weights(model: CandidateScorer) -> dict:
     """导出**纯 Java 前向**要用的权重（名字 ↔ 形状一一对应，Java 侧照抄即可）。
 

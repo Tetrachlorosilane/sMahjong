@@ -3,7 +3,7 @@
 只做**离线**的事：读服务端产出的轨迹 → 特征 → 训练 → 导出权重。
 服务端（Java）保持零第三方依赖，推理用纯 Java 手写前向（见 `docs/TRAINING.md` §2）。
 
-三条硬约束（§0.1）在 `paths`（数据只落 T 盘）与 `guard`（CPU ≤75% 核 / GPU ≤80%）里落地。
+三条硬约束（§0.1）在 `paths`（数据只落 S 盘）与 `guard`（CPU ≤75% 核 / GPU ≤80%）里落地。
 """
 
 import sys as _sys

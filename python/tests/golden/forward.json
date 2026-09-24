@@ -7,7 +7,7 @@
   "feature_version": 2,
   "derived_version": 1,
   "bytes": 135078,
-  "trace": "T:\\mahjong-training\\raw\\bc-001",
+  "trace": "S:\\mahjong-training\\raw\\bc-001",
   "seed": 20260101,
   "case_kinds": [
     "turn",

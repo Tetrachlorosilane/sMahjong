@@ -10,7 +10,8 @@
     见 §5）。切分只由 `--split-seed` 决定，**与数据量无关** → 可复现。
 
 产出（`<输出目录>/`）：
-    train.npz / val.npz   定长数组（`state` / `cand` / `n_legal` / `label` / `hand_delta` / `game`）
+    train.npz / val.npz   定长数组（`state` / `cand` / `n_legal` / `label` / `hand_delta` / `game`
+                          + P3 的 `file` / `hand_no` / `seat` / `placement` / `is_student`，见 `RL_COLUMNS`）
     meta.json             特征版本、维度、文件清单、切分参数、条数 —— 复现与排错都靠它
 """
 
@@ -30,6 +31,16 @@ MAX_LEGAL = 64
 
 #: 派生特征 sidecar 的魔数（Java `mahjong.train.TraceFeatures` 写）。
 SIDECAR_MAGIC = 0x4D4A4654          # "MJFT"
+
+#: P3（离线 RL）需要的额外列 —— 紧凑集里**没有它们就组不出转移**：
+#:   · `file`      **切分内**的文件序号（0..n-1；`game` 在每个文件里都从 0 开始、跨来源会撞车）
+#:   · `hand_no`   小局序号（同一小局内的决策才构成一条 episode）
+#:   · `seat`      行动座位（`delta` 是四家的收支，得知道读哪一家）
+#:   · `placement` 该座位的终局顺位 1..4（整场奖励；**-1 = 未知**，组转移时剔除而不是当第 0 名）
+#:   · `is_student` 这一行是不是学生策略打的（teacher 与学生数据混着训时的 off-policy 诊断）
+#: ⚠ 旧紧凑集没有这些列 → `load_split` 容忍缺失（返回 None），但 **P3 必须重新 build 一次**。
+RL_COLUMNS = {"file": np.int32, "hand_no": np.int16, "seat": np.int8,
+              "placement": np.int8, "is_student": np.uint8}
 
 
 # ------------------------------------------------------------------ 读
@@ -169,6 +180,8 @@ def _write_split(files: list[Path], n: int, lmax: int, out_npz: Path, dtype,
         np.save(out_npz.with_suffix(".label.npy"), np.zeros((0,), np.int16))
         np.save(out_npz.with_suffix(".delta.npy"), np.zeros((0, 4), np.int32))
         np.save(out_npz.with_suffix(".game.npy"), np.zeros((0,), np.int32))
+        for name, dt in RL_COLUMNS.items():
+            np.save(out_npz.with_suffix(f".{name}.npy"), np.zeros((0,), dt))
         return 0, 0
     state = np.lib.format.open_memmap(out_npz.with_suffix(".state.npy"), mode="w+",
                                       dtype=dtype, shape=(n, features.state_dim()))
@@ -182,10 +195,14 @@ def _write_split(files: list[Path], n: int, lmax: int, out_npz: Path, dtype,
                                       dtype=np.int32, shape=(n, 4))
     game = np.lib.format.open_memmap(out_npz.with_suffix(".game.npy"), mode="w+",
                                      dtype=np.int32, shape=(n,))
+    # P3（离线 RL）要的列：**没有它们就组不出转移**（见 `rewards.py` 的 docstring）
+    rl = {name: np.lib.format.open_memmap(out_npz.with_suffix(f".{name}.npy"), mode="w+",
+                                          dtype=dt, shape=(n,))
+          for name, dt in RL_COLUMNS.items()}
     base = features.cand_dim() - features.DERIVED_CANDIDATE
     i = 0
     used_teacher = 0
-    for f in files:
+    for file_id, f in enumerate(files):
         sc_path = sidecar_path(f)
         sc = None
         if sc_path.is_file():
@@ -241,9 +258,21 @@ def _write_split(files: list[Path], n: int, lmax: int, out_npz: Path, dtype,
                 hd = row.get("hand_delta")
                 delta[i] = hd if isinstance(hd, list) and len(hd) == 4 else [0, 0, 0, 0]
                 game[i] = int(row.get("game", -1))
+                seat_i = int(row.get("seat", -1))
+                rl["file"][i] = file_id
+                rl["hand_no"][i] = int(row.get("hand_no", -1))
+                rl["seat"][i] = seat_i
+                # 该座位的**终局顺位**（1..4）：整场奖励（P3 的终局项）。缺字段就填 -1（"未知"，
+                # 组转移时会被剔除 —— 不能拿 0 冒充"第 0 名"）
+                pl = row.get("placement")
+                rl["placement"][i] = int(pl[seat_i]) if isinstance(pl, list) and len(pl) == 4 \
+                    and 0 <= seat_i < 4 else -1
+                # 这一行是**学生策略**打的吗（P3 的 off-policy 诊断要用：teacher 数据与学生数据混着训）
+                pol = str(row.get("policy", ""))
+                rl["is_student"][i] = 1 if pol.startswith("net:") else 0
                 i += 1
                 row_idx += 1
-    for m in (state, cand, n_legal, label, delta, game):
+    for m in (state, cand, n_legal, label, delta, game, *rl.values()):
         m.flush()
     return i, used_teacher
 
@@ -301,6 +330,8 @@ def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: 
         "max_decisions": max_decisions,
         "train_decisions": written_train,
         "val_decisions": written_val,
+        # 这份紧凑集带了哪些 P3 列（旧数据集没有 → 读回来是 None，P3 会要求重建）
+        "rl_columns": sorted(RL_COLUMNS),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                        encoding="utf-8")
@@ -317,15 +348,26 @@ def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: 
 # ------------------------------------------------------------------ 读回（训练用）
 
 def load_split(out_dir: str | Path, split: str) -> dict:
-    """读回一份切分（`train` / `val`）—— 用**内存映射**，训练时不会把整份数据读进 RAM。"""
+    """读回一份切分（`train` / `val`）—— 用**内存映射**，训练时不会把整份数据读进 RAM。
+
+    P3 的列（{@link RL_COLUMNS}）**旧数据集里没有** → 这里容忍缺失并返回 `None`，
+    调用方（`rewards.py`）见到 `None` 时会明确报错告诉你要重建，而不是悄悄当 0 用。
+    """
     out_dir = Path(out_dir)
     mm = lambda tag: np.load(out_dir / f"{split}.{tag}.npy", mmap_mode="r")   # noqa: E731
     meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
     if meta["feature_version"] != features.FEATURE_VERSION:
         raise ValueError(f"数据集特征版本 {meta['feature_version']} != 代码 "
                          f"{features.FEATURE_VERSION} —— 特征变了要重建数据集")
-    return {"state": mm("state"), "cand": mm("cand"), "n_legal": mm("nlegal"),
-            "label": mm("label"), "delta": mm("delta"), "game": mm("game"), "meta": meta}
+    out = {"state": mm("state"), "cand": mm("cand"), "n_legal": mm("nlegal"),
+           "label": mm("label"), "delta": mm("delta"), "game": mm("game"), "meta": meta,
+           # ⚠ 把切分名带上：`rewards.py` 要用它去 meta 里取 `train_files_path` / `val_files_path`
+           #   （拿全路径才能把每一行对回 run 目录的 summary.json 读顺位点）
+           "split": split}
+    for name in RL_COLUMNS:
+        p = out_dir / f"{split}.{name}.npy"
+        out[name] = mm(name) if p.is_file() else None
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -333,8 +375,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("cmd", choices=["build", "info"])
     ap.add_argument("src", help="轨迹目录（g*.jsonl）或已建好的数据集目录（info）")
     ap.add_argument("out", nargs="?", help="build 的输出目录")
-    ap.add_argument("--src", action="append", default=[],
-                    help="**再加一个**来源目录（可重复；DAgger 把学生状态并进 BC 数据用）")
+    ap.add_argument("--src", action="append", default=[], dest="src_extra",
+                    help="**再加一个**来源目录（可重复；DAgger 把学生状态并进 BC 数据用）"
+                         "—— ⚠ dest 必须与位置参数 `src` **分开**：同名时 argparse 会把追加"
+                         "作用在这个字符串上（`'str' object has no attribute 'append'`），"
+                         "于是这个选项**静默不可用**（2026-09 修）")
     ap.add_argument("--label-source", default="auto", choices=["auto", "chosen", "teacher"],
                     help="auto（默认）= 有 teacher_index 就用它（DAgger 标注），否则用 chosen_index")
     ap.add_argument("--val-frac", type=float, default=0.1)
@@ -345,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "build":
-        srcs = [args.src] + list(args.src)
+        srcs = [args.src] + list(args.src_extra)
         out = args.out or (args.src + "-compact")
         build(srcs, out, val_frac=args.val_frac, split_seed=args.split_seed,
               max_decisions=args.max_decisions, label_source=args.label_source,

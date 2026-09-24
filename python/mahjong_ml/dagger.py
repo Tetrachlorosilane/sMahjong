@@ -1,7 +1,7 @@
 """P2 · DAgger 一轮（`docs/TRAINING.md` §4 P2）—— 一条命令跑完：采集 → 派生特征 → 校验 → 建数据集 → 重训 → 对比。
 
-    python -m mahjong_ml.dagger --student T:\\mahjong-training\\ckpt\\bc-002 \\
-                                --bc-src T:\\mahjong-training\\raw\\bc-001 --label bc-003 \\
+    python -m mahjong_ml.dagger --student S:\\mahjong-training\\ckpt\\bc-002 \\
+                                --bc-src S:\\mahjong-training\\raw\\bc-001 --label bc-003 \\
                                 --round 1 --games 300 --workers 24
 
 **为什么要有这个脚本**（而不是把几条命令抄进文档）：
@@ -12,7 +12,7 @@
   · 对比必须**同一批学生状态**上做：基线与新模型都评 `compact/dagger-rN` 的 val 切分；
     显著性用**按场聚类**的配对 bootstrap（同场决策不独立，逐行 CI 会假窄）。
   · 三条硬约束（§0.1）落在每一步：java 侧 `--workers`（CPU）、`bc.train` 里的 `guard`（GPU/线程）、
-    数据只落 T 盘（`paths`，配额闸门在里面）。
+    数据只落 S 盘（`paths`，配额闸门在里面）。
 
 断点续跑：`--skip-collect` / `--skip-features` / `--skip-validate`（重训与对比总会重做）。
 """
@@ -172,7 +172,7 @@ def _split_files_of(compact_dir: Path, split: str) -> list[Path]:
     if key in meta:
         return [Path(p) for p in meta[key]]
     # ⚠ `src` 在**更早的**数据集里是**一个字符串**（多来源合并之后才改成列表）—— 两种都要认，
-    #   否则 `for s in "T:\\..."` 会逐字符去 glob（报"T 里没有 g*.jsonl"，那种错最费时间）
+    #   否则 `for s in "S:\\..."` 会逐字符去 glob（报"S 里没有 g*.jsonl"，那种错最费时间）
     srcs = meta["src"]
     srcs = [srcs] if isinstance(srcs, str) else list(srcs)
     files = ds.trace_files_multi([Path(s) for s in srcs])

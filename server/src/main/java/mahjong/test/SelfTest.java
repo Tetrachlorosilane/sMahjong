@@ -5660,7 +5660,7 @@ public final class SelfTest {
      *       —— 否则"两边都等于 teacher"根本证明不了先验在起作用。</li>
      * </ol>
      *
-     * <p>权重取自仓库内的 golden 夹具（小网络），所以本组**不依赖 T 盘**；夹具不在就跳过。
+     * <p>权重取自仓库内的 golden 夹具（小网络），所以本组**不依赖 S 盘**；夹具不在就跳过。
      */
     private static void hybridPolicyTests() {
         mahjong.ai.NeuralPolicy net = loadGoldenNet();

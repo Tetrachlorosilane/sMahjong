@@ -43,6 +43,8 @@ from mahjong_ml import bc, dataset as ds, features, guard, nets, paths   # noqa:
 from mahjong_ml import eval as ml_eval                    # noqa: E402
 from mahjong_ml import dagger                             # noqa: E402
 from mahjong_ml import hybrid as hyb                      # noqa: E402
+from mahjong_ml import offline_rl, rewards                # noqa: E402
+from mahjong_ml import awr                                # noqa: E402
 import torch                                              # noqa: E402
 
 fails: list[str] = []
@@ -281,6 +283,10 @@ for g in range(2):                                        # 两场，每场 2 �
                    "policy": "teacher", "kind": "turn",
                    "legal": ["discard:1m", "pass"], "chosen": "discard:1m", "chosen_index": 0,
                    "hand_delta": [100, -100, 0, 0], "obs": _fake_obs(["discard:1m", "pass"])}
+            if g == 0:                       # 第 0 场给顺位；第 1 场**故意不给** → 读回来必须是 -1
+                row["placement"] = [3, 1, 4, 2]
+            if g == 1 and i == 0:            # 一行是"学生策略"打的 → is_student=1
+                row["policy"] = "net:T:\\x\\net.bin"
             if i == 1:                       # 第 2 条带 DAgger 标注：老师会 pass（与 chosen 不同）
                 row["teacher"] = "pass"
                 row["teacher_index"] = 1
@@ -382,6 +388,30 @@ eq("val_frac=1.0 → 全部当验证集（评测集里一条训练样本都不�
    (m_eval["train_decisions"], m_eval["val_decisions"], len(m_eval["train_files"])), (0, 4, 0))
 ok(ds.load_split(droot / "compact-eval", "val")["state"].shape[0] == 4,
    "全 val 的紧凑集能读回（dagger 的无泄漏对比就建在它上面）")
+# ---- P3 的列：没有它们组不出转移（file 分文件、hand_no 分小局、seat 决定读 delta 的哪一家）
+eq("meta 声明带了哪些 P3 列", build_meta["rl_columns"], sorted(ds.RL_COLUMNS))
+tr_rl, val_rl = tr, ds.load_split(droot / "compact", "val")
+pl_all = [int(x) for x in np.asarray(tr_rl["placement"]).tolist()] \
+    + [int(x) for x in np.asarray(val_rl["placement"]).tolist()]
+eq("P3 列 placement = 该座位的顺位（seat=0 → placement[0]=3）",
+   sorted(x for x in pl_all if x != -1), [3, 3])
+eq("P3 列 placement 缺字段 = -1（**不是 0** —— 0 会被当成「第 0 名」）",
+   sorted(x for x in pl_all if x == -1), [-1, -1])
+eq("P3 列 is_student：只有 net: 开头的行算学生（teacher 行不算）",
+   int(np.asarray(tr_rl["is_student"]).sum() + np.asarray(val_rl["is_student"]).sum()), 1)
+eq("P3 列 hand_no / seat 落盘",
+   (sorted(set(int(x) for x in np.asarray(tr_rl["hand_no"]).tolist())),
+    sorted(set(int(x) for x in np.asarray(tr_rl["seat"]).tolist()))), ([1], [0]))
+many = scratch("dataset-files")           # 4 个文件 → 一个切分里就有 2 个文件，才测得出 file 编号
+for k in range(4):
+    shutil.copy(src / "g0.jsonl", many / f"g{k}.jsonl")
+    shutil.copy(src / "g0.feat.bin", many / f"g{k}.feat.bin")
+m_many = ds.build(many, many / "compact", val_frac=0.5, split_seed=0, quiet=True)
+trm = ds.load_split(many / "compact", "train")
+eq("P3 列 file：**切分内**独立编号 0..n-1（每个切分都从 0 开始，不与别的切分共用编号）",
+   sorted(set(int(x) for x in np.asarray(trm["file"]).tolist())), [0, 1])
+eq("P3 列 file 覆盖该切分的全部文件（2 场 → 2 个编号，各 2 条）",
+   [int(np.sum(np.asarray(trm["file"]) == k)) for k in (0, 1)], [2, 2])
 
 print("== 网络（候选打分头）==")
 net = nets.build(feat.state_dim(), feat.cand_dim(), hidden=32, head=16)
@@ -535,6 +565,176 @@ try:                                    # 标签必须是候选下标：越界�
     ok(False, "标签越界必须报错")
 except ValueError as e:
     ok("标签越界" in str(e), "标签越界时报错（不是拿别的列当老师）", str(e)[:40])
+
+print("== P3 离线 RL：转移组装与价值校准 ==")
+
+
+def _rl_split(file, hand, seat, delta, **kw):
+    """造一份"只给 P3 需要的列"的切分（不需要真的建数据集 → 自检是秒级的）。"""
+    n = len(file)
+    return {"state": np.zeros((n, feat.state_dim()), np.float16),
+            "cand": np.zeros((n, 2, feat.cand_dim()), np.uint8),
+            "n_legal": np.full(n, 2, np.int16), "label": np.zeros(n, np.int16),
+            "delta": np.asarray(delta, np.int32), "game": np.zeros(n, np.int32),
+            "file": np.asarray(file, np.int32), "hand_no": np.asarray(hand, np.int16),
+            "seat": np.asarray(seat, np.int8),
+            "placement": np.asarray(kw.get("placement", [-1] * n), np.int8),
+            "is_student": np.asarray(kw.get("student", [0] * n), np.uint8),
+            "meta": {"feature_version": feat.FEATURE_VERSION}}
+
+
+# 座位 0 在小局 0 打了 2 手（第 2 条是末决策），座位 1 打了 1 手；第 4 条是**另一场**的同一 (小局,座位)
+D = [8000, -8000, 0, 0]
+sp = _rl_split([0, 0, 0, 1], [0, 0, 0, 0], [0, 1, 0, 0], [D, D, D, D], placement=[3, 1, 2, 4])
+tr2 = rewards.transitions(sp, rank_weight=0.0)
+eq("转移：同家同小局的链（第 0 条 → 第 2 条；第 3 条是另一场 → 不连）",
+   list(map(int, tr2["nxt"])), [2, -1, -1, -1])
+eq("转移：done = 本小局该家最后一条", list(map(bool, tr2["done"])), [False, True, True, True])
+eq("转移：奖励只在末决策（千点）—— 座位 0 赢 8、座位 1 输 8",
+   [round(float(x), 4) for x in tr2["reward"]], [0.0, -8.0, 8.0, 8.0])
+eq("转移：return-to-go 与末决策奖励同值（γ=1 且只有一个非零奖励）",
+   [round(float(x), 4) for x in tr2["ret"]], [8.0, -8.0, 8.0, 8.0])
+eq("转移：奖励读的是**行动那一家**的收支（座位 1 → delta[1]）",
+   round(float(tr2["ret"][1]), 4), -8.0)
+eq("转移：episode 数（三组：f0h0s0 / f0h0s1 / f1h0s0）", tr2["stats"]["episodes"], 3)
+eq("转移：学生行占比、赢/输占比",
+   (tr2["stats"]["student_row_frac"], tr2["stats"]["win_frac"], tr2["stats"]["deal_in_frac"]),
+   (0.0, 0.75, 0.25))
+sp_stu = _rl_split([0], [0], [0], [[1000, 0, 0, 0]], student=[1])
+eq("转移：is_student 从行里读（net: 打的才算）",
+   rewards.transitions(sp_stu, rank_weight=0.0)["stats"]["student_row_frac"], 1.0)
+try:                                    # 旧数据集没有这些列 → 必须**明确报错**而不是猜
+    rewards.transitions({"state": np.zeros((1, feat.state_dim()), np.float16),
+                         "delta": np.zeros((1, 4), np.int32),
+                         "file": None, "hand_no": None, "seat": None,
+                         "placement": None, "is_student": None})
+    ok(False, "缺 P3 列时必须报错")
+except ValueError as e:
+    ok("缺 P3 需要的列" in str(e) and "重新" in str(e),
+       "缺 P3 列时报错并告诉你要重建", str(e)[:60])
+try:                                    # 座位越界要说出来（否则会读到别家的收支）
+    rewards.hand_delta_of_seat(_rl_split([0], [0], [7], [[0, 0, 0, 0]]))
+    ok(False, "seat 越界必须报错")
+except ValueError as e:
+    ok("seat 越界" in str(e), "seat 越界时报错（不读错别家的收支）", str(e)[:40])
+
+# ---- 校准：与两个同粒度基线一起看
+v_perfect = np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0])
+ret_p = np.array([5.0, 5.0, 5.0, 1.0, 1.0, 1.0])
+ep_p = np.array([0, 0, 0, 1, 1, 1])
+c_perfect = offline_rl.calibration(v_perfect, ret_p, ep_p)
+eq("校准：完美预测 → MAE 0 且赢过两个基线",
+   (c_perfect["mae"], c_perfect["beats_zero"], c_perfect["beats_const"]), (0.0, True, True))
+eq("校准：完美预测的小局级 MAE = 0", c_perfect["ep_mae"], 0.0)
+c_zero = offline_rl.calibration(np.zeros(6), ret_p, ep_p)
+eq("校准：恒预测 0 的 MAE 正好等于 mae_zero（基线不是摆设）",
+   (c_zero["mae"], c_zero["mae"]), (c_zero["mae_zero"], c_zero["mae_zero"]))
+ok(c_zero["beats_zero"] is False, "恒预测 0 不能号称赢过恒预测 0")
+ret_flat = np.array([2.0, 2.0, 4.0, 4.0])
+c_const = offline_rl.calibration(np.full(4, 3.0), ret_flat, np.array([0, 0, 1, 1]))
+eq("校准：恒预测均值 → mae == mae_const 且不算赢",
+   (round(c_const["mae"], 6), round(c_const["mae_const"], 6), c_const["beats_const"]),
+   (1.0, 1.0, False))
+c_bad = offline_rl.calibration(-ret_flat, ret_flat, np.array([0, 0, 1, 1]))
+ok(c_bad["pearson"] == -1.0 and c_bad["spearman"] == -1.0,
+   "校准：完全反向预测 → 相关系数 -1（不是「看起来还行」的 MAE）",
+   f"pearson={c_bad['pearson']}")
+eq("校准：分箱可靠性曲线的箱数 ≤ bins 且 pred/actual 都在", len(c_perfect["reliability"]) > 0
+   and {"bin", "n", "pred", "actual"} <= set(c_perfect["reliability"][0]), True)
+ok(offline_rl._pearson(np.array([1.0, 2.0, 3.0]), np.array([1.0, 4.0, 9.0])) > 0.9
+   and offline_rl._spearman(np.array([1.0, 2.0, 3.0]), np.array([1.0, 4.0, 9.0])) == 1.0,
+   "秩相关：单调非线性 → Spearman 恰好 1（Pearson < 1）")
+
+print("== P3 判据②：AWR 的权重与有效样本量 ==")
+w1 = awr.weights_from_adv(np.array([0.0, 1.0, -1.0]), beta=3.0, w_max=100.0)
+ok(abs(w1[1] / w1[0] - np.exp(3.0)) < 1e-9 and abs(w1[2] / w1[0] - np.exp(-3.0)) < 1e-9,
+   "权重 = exp(β·A)：两两比值精确（整体尺度不影响归一化后的梯度）", f"{w1}")
+ok(abs(float(awr.weights_from_adv(np.array([0.0, 50.0]), beta=3.0, w_max=20.0).max())
+       - 20.0) < 1e-9,
+   "权重上限被 clip 住（先夹指数再 exp ⇒ w_max 真的绑得上；靠浮点相等会假红）")
+eq("极端优势不会溢出成 inf/nan",
+   bool(np.isfinite(awr.weights_from_adv(np.array([0.0, 1e6, -1e6]), 3.0, 1e9)).all()), True)
+eq("ESS：等权时 = 样本数", round(awr.ess(np.ones(100)), 6), 100.0)
+eq("ESS：全权重集中在一个样本上 = 1", round(awr.ess(np.array([1.0, 0.0, 0.0])), 6), 1.0)
+adv_grid = np.linspace(-3.0, 3.0, 1000)
+e1, e5 = awr.ess(awr.weights_from_adv(adv_grid, 1.0, 1e9)), \
+    awr.ess(awr.weights_from_adv(adv_grid, 5.0, 1e9))
+ok(e5 < e1, "β 越大 ESS 越小（这是选 β 的护栏：ESS 塌了就说明只有极少数决策在说话）",
+   f"ESS(β=1)={e1:.0f} > ESS(β=5)={e5:.0f}")
+
+print("== P3 整场顺位点终局项 ==")
+# 纯函数：整场奖励只记在「本场最后一小局 × 该家最后一次决策」上
+sp2 = _rl_split([0, 0, 0, 0], [0, 1, 1, 1], [0, 0, 1, 0], [[1000, 0, 0, 0]] * 4)
+tm = rewards.terminal_mask(sp2)
+ok(list(map(bool, tm)) == [False, False, True, True],
+   "整场奖励记在末小局里**每家各自**的最后一次决策上（行序：第 2 条是座位 1、第 3 条是座位 0）",
+   f"{list(map(bool, tm))}")
+ok(list(map(bool, rewards.terminal_mask(_rl_split([0, 1], [0, 2], [0, 0],
+                                                  [[0, 0, 0, 0]] * 2)))) == [True, True],
+   "每个文件各自算自己那场的末小局（file=0 的末小局是 0、file=1 的是 2）")
+# 端到端：紧凑集 meta 的全路径 → run 目录 summary.json 的 per_game[].rank_points[seat]
+rpdir = scratch("rank-pts")
+run = rpdir / "raw" / "run-x"
+run.mkdir(parents=True, exist_ok=True)
+for g in (0, 1):
+    with (run / f"g{g}.jsonl").open("w", encoding="utf-8") as fh:
+        for i in range(2):
+            row = {"type": "decision", "game": g, "hand_no": 0, "step": i, "seat": 0,
+                   "policy": "teacher", "kind": "turn", "placement": [2, 1, 4, 3],
+                   "legal": ["discard:1m", "pass"], "chosen": "discard:1m", "chosen_index": 0,
+                   "hand_delta": [100, -100, 0, 0], "obs": _fake_obs(["discard:1m", "pass"])}
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_sidecar(run / f"g{g}.jsonl", [{"danger": DANGER, "cand": CAND0} for _ in range(2)])
+(run / "summary.json").write_text(json.dumps({
+    "games": 2, "hands": 2, "per_game": [
+        {"game": 0, "rank_points": [61.6, 15.8, -10.0, -30.0]},
+        {"game": 1, "rank_points": [5.0, 10.0, -5.0, -10.0]}]}, ensure_ascii=False),
+    encoding="utf-8")
+ds.build(run, rpdir / "compact", val_frac=0.5, split_seed=0, label_source="auto", quiet=True)
+sp_rp = ds.load_split(rpdir / "compact", "train")
+sp_rp["meta"]["train_files_path"] = [str(run / "g0.jsonl")]      # 单文件切分：钉住映射
+rp_rows = rewards.rank_points_by_row(sp_rp)
+eq("顺位点按 (file → run 目录 → 场序号 → seat) 对到行上：seat=0 的场 0 = 61.6",
+   [round(float(x), 2) for x in rp_rows], [61.6, 61.6])
+tr_rp = rewards.transitions(sp_rp, rank_weight=1.0)
+eq("顺位点进 return-to-go（千点量纲，不再除以 1000）",
+   [round(float(x), 2) for x in tr_rp["ret"]], [61.7, 61.7])
+eq("整场项只落在末决策那条转移上（小局收支 + 顺位点）",
+   [round(float(x), 2) for x in tr_rp["reward"]], [0.0, 61.7])
+eq("λ=0 时回到第一轮的口径（只有小局收支）",
+   [round(float(x), 2) for x in rewards.transitions(sp_rp, rank_weight=0.0)["ret"]],
+   [0.1, 0.1])
+try:            # ① 轨迹在、但那个 run 目录没有 summary.json → 报错并说清（不能悄悄当 0）
+    nosum = rpdir / "raw" / "no-summary"
+    nosum.mkdir(parents=True, exist_ok=True)
+    (nosum / "g0.jsonl").write_text("", encoding="utf-8")
+    sp_gone = dict(sp_rp)
+    sp_gone["meta"] = dict(sp_rp["meta"], train_files_path=[str(nosum / "g0.jsonl")])
+    rewards.rank_points_by_row(sp_gone)
+    ok(False, "缺 summary.json 时必须报错")
+except FileNotFoundError as e:
+    ok("summary.json" in str(e), "轨迹在但缺 summary.json 时报错", str(e)[:60])
+try:            # ② 轨迹本身不在（且按数据根重映射也找不到）→ 报错，别退化成"顺位点=0"
+    sp_miss = dict(sp_rp)
+    sp_miss["meta"] = dict(sp_rp["meta"],
+                           train_files_path=[str(rpdir / "raw" / "ghost" / "g0.jsonl")])
+    rewards.rank_points_by_row(sp_miss)
+    ok(False, "轨迹不在时必须报错")
+except FileNotFoundError as e:
+    ok("重映射" in str(e), "轨迹不在时报错（不悄悄当成 0）", str(e)[:60])
+# 迁盘遗留：meta 里记的是**旧数据根**的路径时，按当前数据根重映射（原路径存在就不动）
+sp_old = dict(sp_rp)
+sp_old["meta"] = dict(sp_rp["meta"],
+                      train_files_path=[str(run / "g0.jsonl").replace("S:\\", "T:\\")])
+eq("迁盘前的紧凑集（meta 里是旧根 T:）按当前数据根重映射后照样读得到顺位点",
+   [round(float(x), 2) for x in rewards.rank_points_by_row(sp_old)], [61.6, 61.6])
+try:                                    # 路径里根本没有 `raw/` 段 → 无法重映射，必须报错
+    sp_bad = dict(sp_rp)
+    sp_bad["meta"] = dict(sp_rp["meta"], train_files_path=["Z:\\nowhere\\g0.jsonl"])
+    rewards.rank_points_by_row(sp_bad)
+    ok(False, "无法重映射时必须报错")
+except FileNotFoundError as e:
+    ok("无法按数据根重映射" in str(e), "无法重映射时报错（不悄悄当成 0）", str(e)[:50])
 
 # ---------------------------------------------------------------- 汇总
 

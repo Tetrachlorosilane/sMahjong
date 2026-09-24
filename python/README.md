@@ -2,7 +2,10 @@
 
 这里是 `docs/TRAINING.md` 的**可执行部分**：只放源码与环境说明，**不放数据、不放环境**。
 
-- **训练数据一律在 T 盘**：`T:\mahjong-training\`（卷标 `TrainingData`）——见 TRAINING §0.1.1。
+- **训练数据一律在 S 盘**：`S:\mahjong-training\`（卷标 `Silicon_files`）——见 TRAINING §0.1.1。
+  ⚠ 2026-09 从 `T:\mahjong-training\`（TrainingData）迁来：T 的**每文件开销**顶不住自对弈吞吐
+  （实测把每场轨迹压到 1/50 大小，吞吐一点没变）。默认值在 `mahjong_ml/paths.py`，
+  可用环境变量 `MAHJONG_DATA_ROOT` 覆盖。
 - **`.venv` / uv 缓存 / uv 的 Python 安装目录都在本目录**（都已 gitignore）——
   受限沙箱下 uv 的默认目录（`%LOCALAPPDATA%`）**会被拒**，所以必须显式指到仓库内。
 - 服务端仍然是**零第三方依赖**的 Java：Python 只负责训练，权重导出后由**纯 Java 手写前向**加载
@@ -49,12 +52,13 @@ python\.venv\Scripts\python.exe python\verify_env.py
 | **数据盘** | 数据根存在、六个子目录、**可写探针**（写→删）、剩余 ≥10 GB |
 
 判据：每项 `PASS/WARN/FAIL` + 末尾 `VERIFY PASS/FAIL`（退出码）。**只有真问题才 FAIL**：
-- 受限沙箱里"写 T 盘被拒"是 **WARN** —— 但它正是 `SelfPlay` **静默不落盘**（只打一条 WARN 就继续跑）
+- 受限沙箱里"写 S 盘被拒"是 **WARN** —— 但它正是 `SelfPlay` **静默不落盘**（只打一条 WARN 就继续跑）
   的那条闸门，所以采集前必须看到这一项是 PASS。
 
-本机当前结果：**19 通过 / 1 警告 / 0 失败**（那条警告就是沙箱写 T 盘）。
+本机当前结果（迁 S 盘后）：**20 通过 / 0 警告 / 0 失败**（此前那条警告是"受限沙箱写数据盘被拒"；
+数据根换到 S 盘、且会话放开写权限后不再出现）。
 
-Python 侧另有一份**单元自检**（统计口径 / 配对评测 / 两条纪律，28 项）：
+Python 侧另有一份**单元自检**（统计口径 / 配对评测 / 两条纪律 / 特征 / 数据集 / 网络 / BC / DAgger / 混合 / P3 的转移与校准，**157 项**）：
 
 ```powershell
 python\.venv\Scripts\python.exe python\selfcheck.py     # 期望 SELFCHECK PASS
@@ -70,7 +74,7 @@ python\.venv\Scripts\python.exe python\selfcheck.py     # 期望 SELFCHECK PASS
 
 ```powershell
 # 单次 run：各策略指标 + 95% 自助法置信区间 + **组内配对检验**（同一副牌山比不同策略）
-python\.venv\Scripts\python.exe -m mahjong_ml.eval T:\mahjong-training\raw\run-001
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\run-001
 
 # 两次 run：**按 (seed, 座位) 配对**比较两个不同策略（比较 网络 vs teacher 的正解）
 python\.venv\Scripts\python.exe -m mahjong_ml.eval <dirA> <dirB> --labels net,teacher
@@ -86,19 +90,19 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval <dirA> <dirB> --labels net,te
 
 | # | 约束 | 怎么守 |
 | --- | --- | --- |
-| ① | 数据只落 T 盘 | 唯一数据根 `T:\mahjong-training\`；`raw ≤30 GB`、`compact ≤10 GB`、`ckpt+league ≤3 GB`、`logs ≤1 GB`，任何时刻留 ≥10 GB |
+| ① | 数据只落 S 盘 | 唯一数据根 `S:\mahjong-training\`；`raw ≤30 GB`、`compact ≤10 GB`、`ckpt+league ≤3 GB`、`logs ≤1 GB`，任何时刻留 ≥10 GB |
 | ② | GPU ≤80% | **时间平均**口径；`GpuMonitor` + `DutyCycle`（占空比节流，实测把稳态均值压到 46%，吞吐代价约 21%）。⛔ 不用 `nvidia-smi -lgc` 锁频（全局设置） |
 | ③ | CPU ≤75% 的核 | 采集 `--workers 24`（**必须显式**）、训练 `torch.set_num_threads(4)`、**生成与训练不并行**（24+4 > 24） |
 
 ## 四、采集一条命令（示例）
 
 ```powershell
-# ⚠ 在受限沙箱里，子进程写 T: 会被拒 → 这一步请在**普通 shell**里跑（或放宽权限的会话）
+# ⚠ 在受限沙箱里，子进程写数据盘（S:）会被拒 → 这一步请在**普通 shell**里跑（或放宽权限的会话）
 java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar `
      --selfplay 2000 --workers 24 --rotate --sample 4 `
-     --seed 20260101 --out T:\mahjong-training\raw\run-001
+     --seed 20260101 --out S:\mahjong-training\raw\run-001
 
-node tools\selfplay-check.mjs T:\mahjong-training\raw\run-001   # 必须 DATASET PASS 才拿去训练
+node tools\selfplay-check.mjs S:\mahjong-training\raw\run-001   # 必须 DATASET PASS 才拿去训练
 ```
 
 实测吞吐：`--workers 24` → **1.95 场/秒**（≈7.0k 场/小时 ≈ 7.8 GB/小时，`--sample 1`）。
@@ -111,15 +115,15 @@ cd C:\Users\HP\source\games\mahjong
 # ① 派生特征富化：给每个 g*.jsonl 生成 g*.feat.bin（**轨迹格式不变**）
 #    向听/进张/听牌形/逐张危险度由 Java 的权威实现算 —— 不在 Python 里再写一份（必然漂移）
 java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar `
-     --features T:\mahjong-training\raw\bc-001 --workers 24
+     --features S:\mahjong-training\raw\bc-001 --workers 24
 
 # ② 轨迹 → 紧凑数组（按整场切训练/验证；**缺 sidecar 会报错**而不是悄悄填 0）
 python\.venv\Scripts\python.exe -m mahjong_ml.dataset build `
-    T:\mahjong-training\raw\bc-001 T:\mahjong-training\compact\bc-001
+    S:\mahjong-training\raw\bc-001 S:\mahjong-training\compact\bc-001
 
-# ③ 行为克隆训练（checkpoint 落 T 盘 ckpt/，配额闸门在 paths.allocate 里）
+# ③ 行为克隆训练（checkpoint 落 S 盘 ckpt/，配额闸门在 paths.allocate 里）
 python\.venv\Scripts\python.exe -m mahjong_ml.bc `
-    --data T:\mahjong-training\compact\bc-001 --label bc-002 --epochs 60
+    --data S:\mahjong-training\compact\bc-001 --label bc-002 --epochs 60
 ```
 
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
@@ -139,7 +143,7 @@ python\.venv\Scripts\python.exe -m mahjong_ml.bc `
 
 ```powershell
 python\.venv\Scripts\python.exe -m mahjong_ml.bc eval `
-    --data T:\mahjong-training\compact\bc-001 --ckpt T:\mahjong-training\ckpt\bc-002\model.pt
+    --data S:\mahjong-training\compact\bc-001 --ckpt S:\mahjong-training\ckpt\bc-002\model.pt
 # → top-1 / 类型 / nll + **同粒度基线**（首合法、多数类型），带 n 与 split
 ```
 
@@ -149,11 +153,11 @@ python\.venv\Scripts\python.exe -m mahjong_ml.bc eval `
 # 一条命令跑完：采集（学生坐 2 席、逐场轮转，学生座位额外记老师动作）
 #   → --features 富化 → selfplay-check 校验 → 建混合集/评测集 → 重训 → 无泄漏对比
 python\.venv\Scripts\python.exe -m mahjong_ml.dagger `
-    --student T:\mahjong-training\ckpt\bc-002 `
-    --bc-src T:\mahjong-training\raw\bc-001 --bc-compact T:\mahjong-training\compact\bc-001 `
+    --student S:\mahjong-training\ckpt\bc-002 `
+    --bc-src S:\mahjong-training\raw\bc-001 --bc-compact S:\mahjong-training\compact\bc-001 `
     --label bc-003 --round 1 --games 300 --workers 24 --epochs 60
 # 断点续跑：--skip-collect / --skip-features / --skip-validate（数据已采好时）
-# 报告：T:\mahjong-training\ckpt\bc-003\dagger-r1.json（含 leak_check 与按场聚类 CI）
+# 报告：S:\mahjong-training\ckpt\bc-003\dagger-r1.json（含 leak_check 与按场聚类 CI）
 ```
 
 三条**必须守住**的口径（理由都写进了脚本注释与 `TRAINING.md` §4 P2 / §7）：
@@ -187,8 +191,8 @@ python\.venv\Scripts\python.exe -m mahjong_ml.dagger `
 
 ```powershell
 python\.venv\Scripts\python.exe -m mahjong_ml.hybrid `
-    --ckpt T:\mahjong-training\ckpt\bc-003\model.pt `
-    --data T:\mahjong-training\compact\dagger-r1 --target 0.95
+    --ckpt S:\mahjong-training\ckpt\bc-003\model.pt `
+    --data S:\mahjong-training\compact\dagger-r1 --target 0.95
 # 输出：margin 中位/p90、各 α 的让位比例、推荐 α（= 让位首次达标的最小值）
 # 例（bc-003）：中位 −4.08 / p90 0.63；α=0.25→87.8% α=1→91.7% α=2→94.8% α=4→97.7% → 推荐 α=4
 ```
@@ -204,12 +208,57 @@ summary 与配对检验不受影响；实测吞吐瓶颈是**每文件开销**�
 （`eval.py` 的尺子：检出 Δ=2 约需 2700 场）。⚠ α=1 时 91.7% 的决策本来就听老师，
 所以天花板就是老师 —— 想更强得靠 P3 的价值信号，混合则留作在线 RL 的**保底**。
 
+## 四·八、P3 离线 RL（IQL → AWR）
+
+```powershell
+# ① 数据集必须带 P3 的列（file/hand_no/seat/placement/is_student）——旧数据集读回来是 None，会明确报错
+python\.venv\Scripts\python.exe -m mahjong_ml.dataset build S:\mahjong-training\raw\bc-001 `
+    S:\mahjong-training\compact\rl-001 --src S:\mahjong-training\raw\dagger-01 `
+    --src S:\mahjong-training\raw\control-r1 --val-frac 0.1 --split-seed 20260401
+
+# ② 学价值（IQL）：expectile V + 单动作 Bellman Q + Polyak；**按验证 MAE 选最优 epoch 落盘**
+python\.venv\Scripts\python.exe -m mahjong_ml.offline_rl `
+    --data S:\mahjong-training\compact\rl-001 --label iql-002 --epochs 40 --lr 5e-4 --eval-every 2
+
+# ③ 判据①：校准报告（含**恒 0 / 恒均值**同粒度基线；恒均值的常数取训练集均值，不吃验证集信息）
+python\.venv\Scripts\python.exe -m mahjong_ml.offline_rl --data S:\mahjong-training\compact\rl-001 `
+    --eval-only --ckpt S:\mahjong-training\ckpt\iql-002\model.pt
+
+# ④ 判据②：优势加权 BC（AWR）+ 行为锚定；β 越大越激进，**看 ESS**（塌了就不可信）
+python\.venv\Scripts\python.exe -m mahjong_ml.awr --data S:\mahjong-training\compact\rl-001 `
+    --critic S:\mahjong-training\ckpt\iql-002\model.pt `
+    --init S:\mahjong-training\ckpt\bc-003\model.pt --label awr-001 --beta 3 --bc-anchor 0.2
+
+# ⑤ 判据②的实战检验（离线 top-1 **不是**判据）：导出 net.bin → 同牌山配对 → eval
+python\.venv\Scripts\python.exe -m mahjong_ml.export weights `
+    --ckpt S:\mahjong-training\ckpt\awr-001\model.pt --out S:\mahjong-training\ckpt\awr-001\net.bin
+java -jar server\build\mahjong-server.jar --selfplay 2400 --workers 24 --rotate --sample 64 `
+     --seed 888001 --out S:\mahjong-training\raw\awr-vs-bc `
+     --policy "net:…awr-001\net.bin,net:…bc-003\net.bin,net:…awr-001\net.bin,net:…bc-003\net.bin"
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\awr-vs-bc
+```
+
+**MDP 口径**（权威在 `rewards.py` 的 docstring）：一条 episode = 某家在一小局里的全部决策；
+只有该家末决策吃 `hand_delta[seat]`；γ=1 ⇒ `V(s)` = "本小局还能再赚多少点"，与 teacher 那三个
+粗模型同量纲。**终局顺位这一轮不进奖励**（另一套量纲，且精算在 Java 里，不在 Python 重写）。
+⚠ P3 的列是 2026-09 才加的：旧紧凑集（`bc-001`/`mix-r1`/`dagger-r1`…）**没有**，`rewards.py`
+会明确要求重建 —— 不会拿 `game` 冒充 `file`（那个跨来源会撞车）。
+
+**一轮实测（2026-09，`rl-001` = 622,472 条 / 57,355 条 episode）**：
+
+| 判据 | 结果 |
+| --- | --- |
+| ① 价值校准（`iql-002`，λ=0，按 MAE 回滚 ep6） | 行级 MAE **3.0266** < 恒0 3.0634；**小局级 Pearson +0.396** → 通过但很弱 |
+| ① 价值校准（`iql-004`，λ=1 加顺位点，按小局级 ρ 回滚 ep40） | 小局级 ρ **+0.554**（有收支的小局 +0.577）但行级 MAE 6.399 **打不过**恒 0 的 6.241 → **排序口径通过、逐点口径不通过**；分箱可靠性两端尚可（−6.9→−11.1、+13.9→+13.2）、**中间 8 箱压平**（预测 −0.4…+2.6 对实际 −1.2…+0.0，偏乐观） |
+| ⚠ 两条训练陷阱 | ①验证指标在中段后持续恶化（λ=0：ep6 的 3.0266 → ep40 的 3.4709）→ 必须**按指标回滚最优 epoch**；②**MAE 与排序能力会选出不同的模型**（MAE 选中的 ep4 ρ=0.20，ρ 选中的 ep40 ρ=0.55）→ `--select-metric` 要跟用途走 |
+| ② 策略改进（`awr-001` λ=0 critic / `awr-002` λ=1 critic，ESS≈14%） | 同牌山配对：**AWR−BC = +0.92（p=0.391）/ +1.27（p=0.094）**；**AWR−teacher = −1.16（p=0.977）/ −1.66（p=0.885）** → **仍未显著**（要钉住 +1.3 需 ~2700 场/臂） |
+
 
 
 - ✅ **P0 评测口径**：服务端 `SelfPlay` 的顺位点指标（`avg_rank_points` / `per_game[].rank_points`）
   + `mahjong_ml/eval.py`（配对显著性）+ `paths.py` / `guard.py` 两条纪律。
 - ✅ **P1 行为克隆冒烟**：`features.py`（唯一规格）/ `dataset.py`（按整场切分，内存映射）/
-  `nets.py`（候选打分头）/ `bc.py`（封线程 + GPU 节流 + checkpoint 落 T 盘）。
+  `nets.py`（候选打分头）/ `bc.py`（封线程 + GPU 节流 + checkpoint 落 S 盘）。
   - **v1（只吃 obs 原始字段，539+88）**：val top-1 **0.616**（峰值 @ep40；随机 0.116 / 首合法基线 0.156），
     类型准确率 0.977（同粒度基线 0.755）；同 seed 两次训练 `model.pt` **sha256 相同**。
   - **v2（接上 Java 算的派生特征，607+96）**：val top-1 **0.795**（@ep60，nll 1.24 → 0.63）
@@ -245,10 +294,10 @@ summary 与配对检验不受影响；实测吞吐瓶颈是**每文件开销**�
 
   ```powershell
   python\.venv\Scripts\python.exe -m mahjong_ml.export weights `
-      --ckpt T:\mahjong-training\ckpt\bc-002\model.pt --out T:\mahjong-training\ckpt\bc-002\net.bin
+      --ckpt S:\mahjong-training\ckpt\bc-002\model.pt --out S:\mahjong-training\ckpt\bc-002\net.bin
   java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar --selfplay 24 --workers 24 --rotate `
-       --policy "net:T:\mahjong-training\ckpt\bc-002\net.bin,teacher,teacher,teacher" `
-       --seed 4242 --out T:\mahjong-training\raw\net-smoke
+       --policy "net:S:\mahjong-training\ckpt\bc-002\net.bin,teacher,teacher,teacher" `
+       --seed 4242 --out S:\mahjong-training\raw\net-smoke
   ```
 
   一致性由 **golden 夹具**钉住：`python -m mahjong_ml.export golden --trace <dir> --out python\tests\golden\forward.bin`

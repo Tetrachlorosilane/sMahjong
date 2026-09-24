@@ -4,11 +4,11 @@
     python\\.venv\\Scripts\\python.exe python\\verify_env.py
 
 做三件事：① 校验**硬件与依赖**真的可用（不是"装上了"）；② 把**训练环境三条硬约束**
-（数据只落 T 盘 / GPU ≤80% / CPU ≤75% 的核）量出**本机实际数字**并验证机制有效；
+（数据只落 S 盘 / GPU ≤80% / CPU ≤75% 的核）量出**本机实际数字**并验证机制有效；
 ③ 打印一份可抄进文档的基线（显存预算、训练吞吐、GPU 利用率与节流效果、线程数）。
 
 判据风格与仓库一致：每项 PASS/WARN/FAIL，末尾汇总；**只有真问题才 FAIL**（退出码 1）：
-受限沙箱下写 T 盘被拒、瞬时利用率打满这类是 WARN + 说明，不算环境坏。
+受限沙箱下写数据盘被拒、瞬时利用率打满这类是 WARN + 说明，不算环境坏。
 
 ⚠ 节流与采样的**实现只在 `mahjong_ml/guard.py` 一处**（本脚本 import 它，不另写一份）：
    见 §0.1.3 —— 判据口径是**时间平均**（实测瞬时峰值 98%、均值 36%），
@@ -35,12 +35,13 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # 让 `mahjong_ml` 可导入
 from mahjong_ml import guard                      # noqa: E402
+from mahjong_ml import paths                      # noqa: E402
 from mahjong_ml.guard import DutyCycle, GpuMonitor  # noqa: E402
 
 # ---------------------------------------------------------------- 约束参数（与 TRAINING §0.1 对齐）
 
-DATA_ROOT = Path(os.environ.get("MAHJONG_DATA_ROOT", r"T:\mahjong-training"))
-DATA_SUBDIRS = ("raw", "compact", "ckpt", "league", "logs", "probe")
+DATA_ROOT = paths.DATA_ROOT          # ⚠ 复用 `paths` 的常量（**不在这里再抄一份默认值** ——
+DATA_SUBDIRS = ("raw", "compact", "ckpt", "league", "logs", "probe")   # 抄一份就会两处漂移）
 MIN_FREE_GB = 10.0                 # §0.1.1
 GPU_UTIL_LIMIT = guard.GPU_UTIL_LIMIT
 CPU_CORE_RATIO = guard.CPU_CORE_RATIO
@@ -225,13 +226,13 @@ def check_generator() -> None:
     if jar.is_file():
         age_h = (time.time() - jar.stat().st_mtime) / 3600
         rec("PASS", f"mahjong-server.jar 就绪（{jar.stat().st_size/1024:.0f} KB，{age_h:.1f} 小时前构建）",
-            "采集：--selfplay N --workers 24 --rotate --sample 4 --out T:\\mahjong-training\\raw\\<标签>")
+            "采集：--selfplay N --workers 24 --rotate --sample 4 --out S:\\mahjong-training\\raw\\<标签>")
     else:
         rec("FAIL", "找不到 server/build/mahjong-server.jar", "先跑 pwsh -File server\\build.ps1")
 
 
 def check_data_root() -> None:
-    print("== 数据盘（T 盘 / TrainingData）==")
+    print("== 数据盘（S 盘 / Silicon_files）==")
     if not DATA_ROOT.exists():
         rec("FAIL", f"数据根不存在：{DATA_ROOT}")
         return

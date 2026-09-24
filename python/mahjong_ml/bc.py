@@ -1,10 +1,10 @@
 """P1 行为克隆（`docs/TRAINING.md` §4 P1）：以 teacher 的轨迹为标签，训一个候选打分网络。
 
-    python -m mahjong_ml.bc --data T:\\mahjong-training\\compact\\bc-001 \\
-                            --out T:\\mahjong-training\\ckpt\\bc-001 --epochs 3
+    python -m mahjong_ml.bc --data S:\\mahjong-training\\compact\\bc-001 \\
+                            --out S:\\mahjong-training\\ckpt\\bc-001 --epochs 3
 
 要守住的东西：
-  · **三条硬约束**（§0.1）：`guard.apply_cpu_limit` 封线程、`DutyCycle` 压 GPU、checkpoint 落 T 盘
+  · **三条硬约束**（§0.1）：`guard.apply_cpu_limit` 封线程、`DutyCycle` 压 GPU、checkpoint 落 S 盘
     （`paths.allocate("ckpt", …)`，配额闸门在它里面）；
   · **可复现**：索引打乱用固定种子的 `np.random.default_rng`（不用 DataLoader 的多进程），
     同 `--seed` 同数据 → 同指标；
@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ckpt", default=None, help="eval 模式：要评的 model.pt")
     ap.add_argument("--split", default="val", choices=["train", "val"], help="eval 模式评哪个切分")
     ap.add_argument("--out", default=None, help="（保留）checkpoint 目录；缺省由 paths 按 label 分配")
-    ap.add_argument("--label", default="bc-smoke", help="checkpoint 子目录名（T 盘 ckpt/ 下）")
+    ap.add_argument("--label", default="bc-smoke", help="checkpoint 子目录名（S 盘 ckpt/ 下）")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch", type=int, default=4096)
     ap.add_argument("--lr", type=float, default=1e-3)

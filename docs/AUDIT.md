@@ -434,7 +434,28 @@
 
 > 本节记录 **2026-09-15「回放渲染与视角」这一轮**的验证（上一轮「对局记录回放」见 §4.1）。
 
-**2026-09 训练轮 P5b（teacher 先验混合，S-75）**：
+**2026-09 训练轮 P3（离线 RL：IQL → AWR）+ 数据盘迁移（T: → S:）**：
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **1325 项全绿**（本轮未改 Java，数目不变） |
+| Python 自检 | `python\.venv\Scripts\python.exe python\selfcheck.py` | **157 项 / 0 失败**（126 → +31：P3 五列与 file 编号、转移/奖励口径、校准指标与两个基线、AWR 权重与 ESS） |
+| 环境自检 | `python verify_env.py`（迁盘后） | **VERIFY PASS：20 通过 / 0 警告 / 0 失败**（旧的那条警告是"沙箱写数据盘被拒"，换 S 盘后消失） |
+| **数据盘迁移** | `robocopy /E /COPY:DAT /MT:16` + 逐目录核对 + 抽样 SHA256 | raw 6430/1318.2 MB、compact 88/7374.3 MB、ckpt 15/7.7 MB、probe 50/54.5 MB **四项全等**，抽样哈希全一致；迁完在 S 上端到端验证（写探针 → 采集 12 场 → `selfplay-check` **DATASET PASS**）；T 盘删空（**删 6123 个文件花 35 分钟**）只留 `MOVED-TO-S.txt` |
+| 迁移后吞吐（干净 400 场对照） | 不落盘 / 写 C: / 写 S: | **1.44 / 1.23 / 1.42 场/秒** —— 写 S: 几乎免费，写工作区盘反而 −15%；当年的 −41% 是 T 盘的问题 |
+| P3 数据集 | `dataset build <三源> compact/rl-001 --val-frac 0.1` | 训练 **622,472** 条（1260 场）/ 验证 **69,607** 条（140 场），12 分 38 秒；新增 `file`/`hand_no`/`seat`/`placement`/`is_student` 五列 |
+| **判据① 价值校准** | `offline_rl --epochs 40 --lr 5e-4`（IQL τ=0.7 γ=1） | 最优 **ep6**：行级 MAE **3.0266** < 恒0 3.0634 / 恒均值 3.0638；**小局级 Pearson +0.396**（有收支的小局 +0.418）；⚠ ep40 恶化到 3.4709 → 已改为**按验证 MAE 回滚最优 epoch** |
+| 判据② 策略改进（离线侧） | `awr --critic iql-002 --init bc-003 --beta 3 --bc-anchor 0.2 --epochs 20` | **ESS 568/4096 ≈ 14%**（权重集中度可接受）；val top-1 0.9049 → 0.9028（**离线一致性不是判据**，符合预期） |
+| 判据② 实战 | `--selfplay 2400 --rotate --sample 64` + `mahjong_ml.eval` | **`AWR − BC = +0.92`**（95% CI [−1.21, +3.03]，p=0.391，胜 1221/负 1178）→ **未确立**（CI 宽 ±2.1，检出该量级需 ~2686 场） |
+| **判据① 价值校准（第二轮：加整场顺位点项）** | `offline_rl --rank-weight 1 --select-metric val_ep_pearson --label iql-004` | 回归 std 3→**14.15**（名次成为主导项）；**小局级 ρ +0.554**（有收支的小局 +0.577，优于 λ=0 的 +0.396），但**行级 MAE 6.399 打不过恒 0 的 6.241**（小局级 MAE 6.273 则赢 6.325）→ **排序口径通过、逐点口径不通过** |
+| ⚠ 本轮最值钱的一条方法学发现 | 「按验证 MAE 选最优 epoch」对 AWR 是**错的选择标准**：`iql-003` 里 MAE 选中的 ep4 小局级 ρ 只有 **+0.20**，而 ρ 最高的 ep40 是 **+0.55**（MAE 反而更差）。原因是 MAE 奖励"缩到均值附近"的保守模型，而 AWR 用 `Q−V` 的**排序** | 已加 `--select-metric {val_mae,val_pearson,val_ep_pearson}`；顺位点目标把排序能力从 ρ 0.396 提到 **0.554** |
+| 迁盘遗留修复 | 迁盘前建的 `rl-001` meta 里记的还是 `T:\…` | `rewards._resolve_trace_path` 在原路径不存在时按**当前数据根重映射**，找不到就报错（绝不悄悄当 0）；`selfcheck.py` 覆盖 4 种情形（重映射成功 / 缺 summary / 轨迹不在 / 无 `raw/` 段） |
+| 判据② 实战（第二轮，顺位点 critic） | `--selfplay 2400 --policy "net:awr-002,net:bc-003,…"` + `eval` | **`AWR-002 − BC = +1.27`**（95% CI [−0.79, +3.39]，**p=0.094**，胜 1241/负 1158）→ 比第一轮（+0.92，p=0.39）**更大**，仍未到显著（需 ~2700 场） |
+| 判据② 实战（第二轮对照） | `--selfplay 1200 --policy "net:awr-002,teacher,…"` + `eval` | **`AWR-002 − teacher = −1.66`**（CI [−4.59, +1.31]，p=0.885，胜 597/负 603）→ 与 teacher 打平 |
+| 汇总裁定 | 四组配对 + 之前的尺子（`BC − teacher ≈ −1.6`、`hybrid@1 − BC ≈ +1.95`） | **全部落在 ±2 顺位点内、CI 全跨 0** ⇒ 到 P3 为止**没有任何改动被实战证明变强**；离线口径（更像老师 / 排序更准）与实战强度是三件事 |
+| 本轮踩到并修掉的三个坑 | ① 只存"最后一个 epoch"（实测 ep6 最优 3.0266 → ep40 恶化 3.4709）；② `w=clip(exp(βA),0,w_max)` 写成"先减最大值再 exp" ⇒ `w_max` 永远绑不上（绑不上的旋钮比没有更坏）；③ 校准的"恒均值"基线若用验证集自身均值，基线自己吃了验证集信息 | 三条都已在代码里落地：`offline_rl.py` 按验证 MAE **回滚最优 epoch**；`awr.weights_from_adv` 改为**先夹指数再 exp**；`calibration(const=训练集均值)`；并各有 `selfcheck.py` 断言 |
+
+下面是更早一轮（2026-09 训练轮 P5b：teacher 先验混合）：
 
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
@@ -447,7 +468,7 @@
 | 离线 α 扫描 | `python -m mahjong_ml.hybrid --ckpt bc-003 --data compact/dagger-r1` | n=16,092；margin 中位 **−4.08** / p90 **0.63**；让位 α=0.25→87.8%、α=1→91.7%、α=2→94.8%、α=4→97.7%、α=32→100%（推荐 α=4） |
 | 吞吐实测 | 2400 场 `hybrid@1` vs 纯网（sample 64，24 workers） | **0.695 场/秒**（按文件时间戳算，含 JVM 启动）；`--sample 64` 把轨迹从 1.1 MB/场压到 21 KB/场但**吞吐不变** → 瓶颈是**每文件开销**（java 只占 ~15/24 核） |
 | 配对实战 A | `--selfplay 2400 --rotate --sample 64 --policy "net@1,net,net@1,net"` + `mahjong_ml.eval` | **Δ = +1.95 顺位点**（95% CI [−0.21, +4.10]，p=0.045，胜 1248/负 1149/平 3，sd(Δ)=53.11）；2400 场 / 54 分 02 秒（0.74 场/秒）→ **弱正向信号，CI 恰好跨 0** |
-| 配对实战（整批校验） | `node tools\selfplay-check.mjs T:\...\raw\hybrid-vs-net` | **DATASET PASS**：2400 场 / 27,554 小局 / 25,007 条决策全合法（混合策略 2400 场不给非法动作 + S-75 的采样口径在规模上成立） |
+| 配对实战（整批校验） | `node tools\selfplay-check.mjs S:\...\raw\hybrid-vs-net` | **DATASET PASS**：2400 场 / 27,554 小局 / 25,007 条决策全合法（混合策略 2400 场不给非法动作 + S-75 的采样口径在规模上成立） |
 | 配对实战 B | `--selfplay 1200 --rotate --sample 64 --policy "net@1,teacher,net@1,teacher"` + `mahjong_ml.eval` | **Δ = +1.20 顺位点**（95% CI [−1.76, +4.12]，p=0.977，胜 600/负 598/平 2）；1200 场 / 1019.7 s（**1.18 场/秒** —— 两席是便宜的 teacher）→ **与 teacher 完全打平** |
 | 裁定 | 三臂点估计都在 ±2 顺位点内、CI 全跨 0 | 可下的结论：**混合机制正确且可证安全**（上位集合 + 2400 场零非法动作 + DATASET PASS），但**强度效应未确立**；天花板 = teacher（α=1 已让位 91.7%），要更强得靠 P3 的价值信号 |
 
@@ -456,7 +477,7 @@
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
 | L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **1317 项全绿**（含 `--teacher-label` 落盘后的训练接口不变式） |
-| 数据集校验（**独立实现**） | `node tools\selfplay-check.mjs T:\mahjong-training\raw\dagger-01`（与 `raw\control-r1`） | 两批都 **DATASET PASS**（208,909 / 203,652 条决策；新增的 `teacher ∈ legal` 与 `teacher_index == indexOf(teacher)` 校验一并生效） |
+| 数据集校验（**独立实现**） | `node tools\selfplay-check.mjs S:\mahjong-training\raw\dagger-01`（与 `raw\control-r1`） | 两批都 **DATASET PASS**（208,909 / 203,652 条决策；新增的 `teacher ∈ legal` 与 `teacher_index == indexOf(teacher)` 校验一并生效） |
 | Python 自检 | `python\.venv\Scripts\python.exe python\selfcheck.py` | **116 项 / 0 失败**（新增：`eval` 子命令与 `evaluate` 同源、逐行预测与聚合 top-1 同源、**聚类 bootstrap 红证**（逐行 lo=0.05 vs 按场 lo=0.00）、多臂对比结构、旧 meta 全路径回退的**正证+红证**、`val_frac=1.0` 全 val 评测集、训练/验证全路径不相交） |
 | 采集吞吐（实测） | `--selfplay 300 --workers 24 --rotate --teacher-label` | 300 场 / 3424 小局 / **389 s = 0.77 场/秒**（纯 teacher 对照批 **0.98 场/秒** → DAgger 多付约 1.3～1.8×） |
 | 富化 | `--features <dir>` | 208,909 条决策 / 262 s / sidecar 41 MB（对照批 203,652 条 / 260 s） |
