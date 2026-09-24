@@ -204,7 +204,7 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1277 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1340 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
@@ -552,6 +552,11 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   先验要调 `Bot.decide(Round, …)`，而 `ActionPolicy` 是故意拿不到 `Round` 的（反作弊口径）；
   ③ α 随**训练过的网**的 logit 尺度走，别照抄常数（未训练的网 α=0.25 就 100% 让位）——
   用 `python -m mahjong_ml.hybrid` 量"让位曲线"再选。回归：`SelfTest.hybridPolicyTests`。
+- **P4 探索口**：策略串 `net:<权重文件>[@<α>][#<T>]` = 按温度从 `softmax(logits/T)` 采样
+  （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
+  （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另两条硬口径：**λ=1**（奖励只在
+  末决策记一次，λ<1 是系统性偏差；λ=1 时 GAE 恰好塌成 `A=R−V`）、**优势只在 `is_student==1` 的行上
+  归一化**（对手行不进策略损失）。回归：`SelfTest.samplingPolicyTests` + `python/selfcheck.py` 的 P4 组。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
 ### 6.6 teacher（内置机器人）的五层取舍
 

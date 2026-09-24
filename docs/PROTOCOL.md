@@ -1181,6 +1181,28 @@ java -jar mahjong-server.jar --selfplay 300 --workers 24 --rotate \
 - 回归：`SelfTest.hybridPolicyTests`（α=0 逐决策等价、α=∞ 与 teacher **整局决策序列相同**、
   老师一致率随 α 单调不减、任何 α 都不给非法动作，外加"纯网 ≠ teacher"的非空转对照）。
 
+**P4 探索（温度采样）**：策略串写成 `net:<权重文件>[@<α>][#<T>]`（两个后缀都可省；T 缺省 0 = 贪心），
+语义是在上面的 `logits` 上再按温度采样：`a ~ softmax(logits / T)`。
+
+```bash
+# T=0（或省略 #T）与原来逐决策相同；T 越大越接近均匀抽样
+java -jar mahjong-server.jar --selfplay 300 --workers 24 --rotate \
+     --policy "net:<net.bin>#1.0,net:<net.bin>#1.0,teacher,teacher" --out <dir>
+```
+
+- **为什么需要它**：PPO / A2C 这类**同策略**算法要求行为策略**随机**。`net:` 原来只会 argmax，
+  采出来的数据全落在"贪心那一条"上，重要性权重 `π_new/π_old` 没有支撑集（离线 RL 不受影响 ——
+  它直接取数据里那个动作的优势）。这既是 P4 的前置，也是 P5 联赛"噪声自对弈"的同一个口子。
+- **可复现**：随机源按 `(seat, gameSeed)` 派生（`Policies.mixSeed`，SplitMix 混合）、**每局新建**，
+  所以并行度与局序都不影响同一 seed 的轨迹 —— 与 `random` 基线同一条纪律（AGENTS §6.5）。
+  ⚠ 混合而不是 `gameSeed*31+seat`：相邻 gameSeed（自对弈就是逐场 +1）在 `java.util.Random`
+  里只差一个常数偏移，头几个输出相关性明显，会让"每局的探索模式长得一样"。
+- **文法顺序固定**：`@α` 在前、`#T` 在后（Windows 路径里可能带 `#`，这样解析才唯一）。
+  温度写错（`#abc`）或 `#` 后空着，都在**构造期**抛错 —— **不会**静默退回贪心。
+- 回归：`SelfTest.samplingPolicyTests` —— 分布对拍（两候选 = `sigmoid(d/T)`、同分候选 χ²、
+  T→0⁺ 逐条退化成 argmax）、非贪心比例随 T 单调不减、随机源可复现、`T=0`/缺省与贪心逐决策相同、
+  `α=1e9` 时采样仍逐决策等同 `teacher`、整局零非法动作，外加两条非空转对照。
+
 ### 8.5 数据集校验
 
 ```bash

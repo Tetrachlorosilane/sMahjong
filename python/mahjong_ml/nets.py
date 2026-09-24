@@ -118,6 +118,45 @@ def build_critic(state_dim: int, cand_dim: int, *, hidden: int = 256, head: int 
     return CriticScorer(state_dim, cand_dim, hidden=hidden, head=head)
 
 
+class ValueNet(nn.Module):
+    """P4（在线 RL）的**状态价值网络**：只有 trunk + V 头（不像 `CriticScorer` 那样还带 Q 头）。
+
+    为什么另起一个而不是复用 `CriticScorer`：在线 PPO 的优势只用 `V(s)`，Q 头**没有任何梯度来源**
+    —— 挂在里面只会白算一半参数，还让"这份 checkpoint 是给谁用的"变含糊。
+
+    ⚠ **它不导出到 Java**：线上策略只认 `CandidateScorer`（`export.weights` 的契约），
+    V 只活在训练侧（优势估计 / 诊断）。所以这个类的存在**没有**动 `NeuralPolicy.java` 一行。
+
+    ⚠ 量纲同 `CriticScorer`：目标是**千点**（`rewards.POINTS_PER_UNIT`），正常范围 ±10 上下。
+    """
+
+    def __init__(self, state_dim: int, hidden: int = 256, head: int = 128,
+                 trunk_layers: int = 2) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        in_dim = state_dim
+        for _ in range(trunk_layers):
+            layers += [nn.Linear(in_dim, hidden), nn.ReLU()]
+            in_dim = hidden
+        self.trunk = nn.Sequential(*layers)
+        self.v_head = nn.Sequential(nn.Linear(hidden, head), nn.ReLU(), nn.Linear(head, 1))
+        self.state_dim = state_dim
+        self.hidden = hidden
+        self.head_dim = head
+        self.trunk_layers = trunk_layers
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """`[B]`：状态价值（千点）。"""
+        return self.v_head(self.trunk(state)).squeeze(-1)
+
+    def n_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+
+def build_value(state_dim: int, *, hidden: int = 256, head: int = 128) -> ValueNet:
+    return ValueNet(state_dim, hidden=hidden, head=head)
+
+
 def export_weights(model: CandidateScorer) -> dict:
     """导出**纯 Java 前向**要用的权重（名字 ↔ 形状一一对应，Java 侧照抄即可）。
 

@@ -263,7 +263,50 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\awr-v
 
 
 
+## 四·九、P4 在线自对弈（PPO + 联赛）
+
+**三个模块**：`ppo.py`（PPO 训练）/ `online.py`（世代循环 + 联赛阶梯）/ `league.py`（Plackett-Luce Elo + 对手池加权采样）。
+
+```powershell
+# 0) P4 的前置是 Java 侧的**探索口**：`net:<权重>[@<α>][#<T>]` = 从 softmax(logits/T) 采样。
+#    T 省略/0 = argmax（与加这个语法之前逐决策相同）；随机源按 (seat, gameSeed) 派生 ⇒ 同种子可复现。
+#    PPO 是同策略算法，没有它数据就全落在"贪心那一条"上（重要性权重没有支撑集）。
+
+# 1) 世代循环：每代 [采集(2 席自己 + 2 席联赛对手) → --features → 紧凑集 → PPO → 导出 net.bin]
+python\.venv\Scripts\python.exe -m mahjong_ml.online run `
+    --init S:\mahjong-training\ckpt\awr-002\model.pt `
+    --init-value S:\mahjong-training\ckpt\iql-004\model.pt `
+    --label ppo --generations 4 --gen-games 1500 --temp 1.0 --epochs 4 --workers 20
+
+# 2) 阶梯（判据在这里，不在训练日志里）：每代一跑 net:gNN,teacher,first,random 出 Elo + 脚本基线，
+#    另跑一批 **2+2**（net×2 vs teacher×2）给顺位点的逐场配对 CI
+python\.venv\Scripts\python.exe -m mahjong_ml.online ladder --label ppo --generations 4 `
+    --games 1200 --pair-games 800
+
+# 3) 也可以只跑一代 PPO（数据必须是**当前网络**采的；--temp 必须等于采集时用的 #<T>）
+python\.venv\Scripts\python.exe -m mahjong_ml.ppo --data S:\mahjong-training\compact\ppo-g01 `
+    --init S:\mahjong-training\ckpt\awr-002\model.pt --temp 1.0 --label ppo-g01 --epochs 4
+```
+
+口径与坑（细节见 `NOTES.md` §6.5、判据见 `TRAINING.md` §4 P4）：
+**λ=1**（奖励只在末决策记一次，λ<1 是系统性偏差）· 优势**只在学生行**归一化 ·
+价值头冷启动自 P3 的 IQL critic（只取 `trunk.* + v_head.*`）· 策略损失只算学生行、价值损失用全部行 ·
+**价值头不导出到 Java**（线上仍只认 `CandidateScorer`，`NeuralPolicy.java` 一行没动）·
+阶梯 run 是一席对一席（实测 `sd(Δ)≈80`），**配对判据只在 2+2 那批读**（`sd(Δ)≈53`）。
+
+**一轮实测（2026-09，4 代 × 1500 场采集，每代 ~26 分钟）**：
+
+| 判据 | 结果 |
+| --- | --- |
+| ① Elo（每代 1200 场，四代结构相同的阶梯 run） | **四代彼此不可区分、无单调趋势**：`g04−g01 = +0.058`（p=0.51）、`g02−g01 = +0.065`（p=0.44）、`g03−g01 = +0.016`（p=0.85）⇒ **"Elo 单调上升"不成立** |
+| ② 2+2 头对头（每代 800 场，顺位点配对） | `g01/g02/g03/g04 − teacher` = **+2.33 / −0.02 / +2.47 / +0.83**，95%CI **全部跨 0**（p 0.157~0.750）⇒ 与 `teacher` 仍**分不出胜负** |
+| ③ 对脚本基线不掉 | `first` θ=−2.516 / `random` θ=−2.566（vs 网络 ≥ +1.02、teacher +0.840）⇒ **没有过拟合到自己策略的迹象** ✓ |
+| 为什么没涨（可测） | 每代只改 **~2.5%** 决策（相邻代贪心一致率 0.973~0.975），四代累计 4.9%；训练日志 **KL≈0.006/代**（早停阈值 0.03 未触发）⇒ 步长太小，Elo 在 1200 场/代下分辨不出 |
+| 副产品：**判据① 价值校准** | 在线价值头**四代单调变好**：MAE 5.750→5.403（全部 < 常数基线）、逐点 ρ 0.599→**0.723**、小局级 ρ 0.663→**0.765** ⇒ **首次三项全过**（P3 的 `iql-004` 逐点 MAE 6.399 > 6.241 不过） |
+| ⚠ 配额副作用 | 四代紧凑集把 `compact` 顶过 10 GB ⇒ **`compact/rl-001` 被滚动淘汰**（`raw` 三个来源还在，重建 ≈13 分钟，命令见 `AUDIT.md` §4 的 P4 轮） |
+
 - ✅ **P0 评测口径**：服务端 `SelfPlay` 的顺位点指标（`avg_rank_points` / `per_game[].rank_points`）
+
   + `mahjong_ml/eval.py`（配对显著性）+ `paths.py` / `guard.py` 两条纪律。
 - ✅ **P1 行为克隆冒烟**：`features.py`（唯一规格）/ `dataset.py`（按整场切分，内存映射）/
   `nets.py`（候选打分头）/ `bc.py`（封线程 + GPU 节流 + checkpoint 落 S 盘）。
@@ -295,8 +338,12 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\awr-v
   `hybrid@1` − 纯网 = +1.95 顺位点（CI [−0.21,+4.10]，p=0.045）、`hybrid@1` − teacher = +1.20
   （CI [−1.76,+4.12]，p=0.977 打平）→ **机制可证安全，强度效应未确立**（天花板 = teacher）。
   → 混合留作在线 RL 的**保底**；继续提强度要走 **P3（价值/胜负信号）**。
-- ⏳ **下一步**：**P3 离线 RL（IQL / CQL）** —— 加 value head，用现成的 44 万条带奖励决策离线训练；
-  拿到 V/Q 之后才谈 P4 在线自对弈（现在缺的是"改进算子"，不是对局能力）；P5 联赛需要对手池 + Elo。
+- ⏳ **下一步**：**P4 在线自对弈（PPO）第一轮已落地并给出结论**（见 §四·九）——
+  **Elo 没有单调上升**（四代不可区分），**与 `teacher` 的 2+2 头对头仍分不出胜负**，
+  但**在线价值头四代单调变好且首次过判据①**。下一轮的顺序：**先量策略位移**（一致率矩阵，30 秒）
+  → 再定 `lr`/epoch/代数（现在每代只改 2.5% 决策，加代数只是给噪声加样本）。
+  **P5 联赛**仍只是最小可用子集（对手池 + 加权采样 + Plackett-Luce Elo），
+  PSRO-lite 的"最佳响应 + 多样性下限"还没做。
 - ✅ **B 形态（进程内推理）**：`export.py` 导出纯 Java 可读的二进制权重，
   服务端 `--policy net:<net.bin>` 直接让网络打（零 socket、零第三方依赖）：
 

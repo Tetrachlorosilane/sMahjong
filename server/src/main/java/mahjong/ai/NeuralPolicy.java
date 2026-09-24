@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import mahjong.util.Log;
 
@@ -250,6 +251,17 @@ public final class NeuralPolicy implements ActionPolicy {
         if (priorIndex >= 0 && priorIndex < out.length && alpha > 0f) {
             out[priorIndex] += alpha;
         }
+        return argmaxOf(out);
+    }
+
+    /**
+     * 取最大值下标；并列取**最小下标**。
+     *
+     * <p>⚠ 从 {@link #chooseIndex} 里原样抽出来的那段循环 —— 抽它只是为了让"采样"与"贪心"共用
+     * 一份兜底路径，**行为必须逐位不变**（原来是"严格大于才更新"，所以并列天然取最小下标；
+     * 别改成随机破平或 `>=`）。
+     */
+    private static int argmaxOf(float[] out) {
         int best = -1;
         float bestVal = Float.NEGATIVE_INFINITY;
         for (int i = 0; i < out.length; i++) {
@@ -259,6 +271,90 @@ public final class NeuralPolicy implements ActionPolicy {
             }
         }
         return best;
+    }
+
+    /**
+     * **按温度采样的决策**（P4 在线自对弈 RL 的探索口，见 `docs/TRAINING.md` §4 P4）：
+     * `logits = student(obs) + α·1[老师那条]` → 从 `softmax(logits / T)` 里抽一条。
+     *
+     * <p>`T <= 0` 时**逐决策与 {@link #chooseWithPrior} 完全相同**（走同一条 argmax 路径，
+     * 连浮点比较都一模一样）—— 这就是"加这个语法之前"的默认行为，既有轨迹一位不变。
+     *
+     * <p>⚠ 随机源由**调用方**给：{@link Policies#net(String, float, float)} 在**每局**用
+     * `(seat, gameSeed)` 派生一个新 {@link Random}。自对弈"同种子逐事件可复现"这条硬性质
+     * （AGENTS §6.5）就靠它 —— 跨局共享一个 RNG、或按 worker 线程共享，都会破坏它。
+     *
+     * @param temp 采样温度（logit 单位）。T→0⁺ 趋近贪心；T 越大越接近均匀抽样
+     */
+    public Action chooseSampled(Decision d, Action teacher, float alpha, float temp, Random rng) {
+        List<Action> legal = d.legal();
+        if (legal.isEmpty()) {
+            return Action.of(Action.PASS);
+        }
+        int prior = (teacher == null || alpha <= 0f) ? -1 : d.obs.indexOf(teacher);
+        int pick = sampleIndex(d.obs.toJson(), d.obs.legalKeys(), prior, alpha, temp, rng);
+        return pick < 0 ? Action.of(Action.PASS) : legal.get(pick);
+    }
+
+    /**
+     * 带先验的**温度采样**（golden 夹具与自检直接喂 json+keys，不必造 {@link Observation}）。
+     *
+     * @param temp {@code <= 0} ⇒ 与 {@link #chooseIndex} 完全同一条路径（argmax）
+     */
+    public int sampleIndex(Map<String, Object> json, List<String> keys, int priorIndex, float alpha,
+                           float temp, Random rng) {
+        float[] out = logits(json, keys);
+        if (priorIndex >= 0 && priorIndex < out.length && alpha > 0f) {
+            out[priorIndex] += alpha;
+        }
+        if (!(temp > 0f)) {
+            return argmaxOf(out);
+        }
+        return sampleSoftmax(out, temp, rng);
+    }
+
+    /**
+     * 从 `softmax(logits / temp)` 采一个下标（数值稳定版：**先减去最大值**再 exp）。
+     *
+     * <p>为什么不用 Gumbel-max：这条路径要能在自检里被"逐概率对拍"（两候选差 d 时非贪心比例
+     * ≈ sigmoid(d/T)），累积分布反变换最直白、也最容易验证。
+     *
+     * <p>兜底：全 `-inf`（不可能走到，但 mask 约定允许）/ NaN / 和为 0 时**退回 argmax** ——
+     * 采样参数写错不该变成"随机乱打"。
+     */
+    public static int sampleSoftmax(float[] logits, float temp, Random rng) {
+        int n = logits.length;
+        if (n == 0) {
+            return -1;
+        }
+        float max = Float.NEGATIVE_INFINITY;
+        for (float v : logits) {
+            if (v > max) {
+                max = v;
+            }
+        }
+        double[] w = new double[n];
+        double sum = 0;
+        for (int i = 0; i < n; i++) {
+            double e = Math.exp((logits[i] - (double) max) / temp);
+            if (Double.isNaN(e)) {
+                e = 0;                                  // -inf - (-inf) = NaN：当成权重 0
+            }
+            w[i] = e;
+            sum += e;
+        }
+        if (!(sum > 0)) {
+            int fb = argmaxOf(logits);
+            return fb < 0 ? 0 : fb;                     // 全 NaN 时 argmaxOf 给 -1：退回第 0 条
+        }
+        double r = rng.nextDouble() * sum;
+        for (int i = 0; i < n; i++) {
+            r -= w[i];
+            if (r <= 0) {
+                return i;
+            }
+        }
+        return n - 1;                                   // 浮点尾巴：返回最后一条
     }
 
     /**

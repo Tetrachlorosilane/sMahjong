@@ -100,6 +100,7 @@ public final class SelfTest {
         obsFeaturesTests();
         neuralForwardTests();
         hybridPolicyTests();
+        samplingPolicyTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
         if (fail > 0) {
@@ -5727,6 +5728,302 @@ public final class SelfTest {
         System.out.println("  P5b 混合：α 曲线 " + curve.toString().trim()
                 + "；非空转对照：纯网 vs teacher 在探针上差 " + diff + " / " + pure.choices.size()
                 + " 处，决策 " + decisions.size() + " 条");
+    }
+
+    // ------------------------------------------------------------- P4 探索（温度采样）
+
+    /**
+     * 把 golden 夹具里的**权重块**抽出来落到临时文件。
+     *
+     * <p>为什么要落盘：`Policies.byName("net:&lt;路径&gt;…")` 收的是**路径**（自对弈线上就是这么写的），
+     * 而下面的断言要连**字符串文法**一起测 —— 只测 {@link mahjong.ai.NeuralPolicy} 的方法会漏掉解析层
+     * （P5b 那次就是靠 `byName` 才发现 `@` 解析的边界问题）。临时文件用完即删，不进仓库、不依赖 S 盘。
+     */
+    private static java.nio.file.Path goldenNetFile() {
+        for (String cand : new String[]{"python/tests/golden/forward.bin",
+                "../python/tests/golden/forward.bin", "../../python/tests/golden/forward.bin"}) {
+            java.nio.file.Path p = java.nio.file.Path.of(cand);
+            if (!java.nio.file.Files.isRegularFile(p)) {
+                continue;
+            }
+            try {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer
+                        .wrap(java.nio.file.Files.readAllBytes(p))
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                if (bb.getInt() != GOLDEN_MAGIC) {
+                    return null;
+                }
+                bb.getInt();                                   // 版本
+                bb.getInt();                                   // 用例数
+                int len = bb.getInt();
+                bb.getInt();                                   // 保留位
+                byte[] w = new byte[len];
+                bb.get(w);
+                java.nio.file.Path tmp = java.nio.file.Files.createTempFile("mahjong-golden-", ".bin");
+                java.nio.file.Files.write(tmp, w);
+                tmp.toFile().deleteOnExit();
+                return tmp;
+            } catch (Exception e) {
+                failures.add("采样断言：抽 golden 权重失败 " + e.getMessage());
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 采样断言专用的探针：与 {@link #hybridProbe} 同构，但按 {@link mahjong.ai.PolicyFactory} 的契约
+     * **每个座位一份实例**（`create(seat, gameSeed)`）—— P4 的采样策略就是这么用的，
+     * 而"同种子可复现"恰恰依赖这一点（跨座位共享一个 RNG 会让流长度随决策数漂）。
+     */
+    private static GameProbe factoryProbe(long seed, mahjong.ai.PolicyFactory factory) {
+        Table t = new Table("SAMPLE", "采样探针", Rules.defaults());
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        t.debugDeterministicSeed = true;
+        t.debugMaxHands = PROBE_HANDS;
+        t.seedBase = seed;
+        GameProbe p = new GameProbe();
+        for (int i = 0; i < 4; i++) {
+            t.policy[i] = factory.create(i, seed);             // 探针里"本局种子"就是 seed
+            t.addBot(i);
+        }
+        t.debugChoiceTap = (d, cmd) -> {
+            mahjong.ai.Action a = mahjong.ai.Action.resolve(cmd, d.legal());
+            p.choices.add(d.kind + "|" + (a == null ? "<非法回包>" : a.key()));
+        };
+        t.playGame();
+        for (int i = 0; i < 4; i++) {
+            p.finalScores[i] = t.seat(i).score;
+        }
+        return p;
+    }
+
+    /**
+     * **P4 在线 RL 的探索口**：`net:&lt;权重文件&gt;[@&lt;α&gt;][#&lt;T&gt;]` —— 按温度 T 从
+     * `softmax(logits / T)` 采样（`docs/PROTOCOL.md` §8.4）。
+     *
+     * <p>为什么 P4 非要这个口子：PPO 是**同策略**算法，行为策略必须是随机的；以前
+     * `net:` 只会 argmax，采出来的数据全在"贪心那条"上，重要性权重根本没有支撑集。
+     *
+     * <p>六组判据（前面是可证的数学性质，后面防"看起来在探索、其实没动"）：
+     * <ol>
+     *   <li><b>T ≤ 0 / 省略 ⇒ 逐决策与贪心完全相同</b>（走同一条 argmax 路径）——
+     *       既有轨迹一个字节都不变；</li>
+     *   <li><b>累积分布的边界是精确的</b>（r* = 1/(1+e^(d/T))：把随机源钉死 → 采样退化成确定函数，
+     *       所以这条判据**不靠统计涨落**），同分候选等概率（4 路 χ²），
+     *       T→0⁺ 在随机 logit 上逐条退化成 argmax；</li>
+     *   <li><b>偏离贪心的比例随 T 单调不减</b>（温度确实是"温度"）；</li>
+     *   <li><b>随机源按 (seat, gameSeed) 派生</b>：同 seed 序列逐元素相同，不同 seat 不同流；</li>
+     *   <li><b>端到端可复现 + 非空转对照</b>：同一副牌山下跑两遍采样策略的决策序列逐条相同；
+     *       而 T=1 与 T=0 的序列**必须不同**（否则"探索"是假的）；</li>
+     *   <li><b>不给非法动作</b>：4 座 × 整局采样，探针一次都没看到非法回包；且 α 极大时
+     *       采样也退化成老师（先验的上位集合性质在采样下依然成立）。</li>
+     * </ol>
+     */
+    private static void samplingPolicyTests() {
+        java.nio.file.Path wf = goldenNetFile();
+        if (wf == null) {
+            System.out.println("（提示）golden 权重不在，跳过 P4 采样断言");
+            return;
+        }
+        final int trials = 20000;
+
+        // ① 逆变换的边界**精确**对拍：把随机源钉死，采样就退化成确定函数
+        //    w = {1, e^{d/T}}，sum = 1 + e^{d/T} ⇒ 边界 r* = 1/sum：r ≤ r* 取下标 0，否则取 1
+        final float d = 0.5f;
+        final float temp = 1f;
+        double sum = 1.0 + Math.exp(d / temp);
+        double edge = 1.0 / sum;
+        double[] rProbe = {0.0, edge - 1e-9, edge + 1e-9, 1.0 - 1e-12};
+        int wrong = 0;
+        StringBuilder edgeLog = new StringBuilder();
+        for (int i = 0; i < rProbe.length; i++) {
+            int got = mahjong.ai.NeuralPolicy.sampleSoftmax(new float[]{0f, d}, temp,
+                    new FixedRandom(rProbe[i]));
+            edgeLog.append(String.format("r=%.6f→%d ", rProbe[i], got));
+            if (got != i / 2) {
+                wrong++;
+            }
+        }
+        eq("采样：累积分布边界精确（r* = 1/(1+e^(d/T)) = " + String.format("%.6f", edge) + "；"
+                + edgeLog.toString().trim() + "）", wrong, 0);
+
+        // ①b 频率粗检（阈值 0.02 ≈ 20,000 次下的 5.8σ）：抓"符号/尺度写错"这类真错，
+        //    不抓统计涨落 —— 精确判据在上面那条，统计量只当参考打进日志
+        java.util.Random rng = new java.util.Random(20260101L);
+        double worstZ = 0;
+        double maxAbs = 0;
+        StringBuilder curve = new StringBuilder();
+        float[][] cases = {{0.5f, 1f}, {1.5f, 0.75f}, {-2f, 2f}, {0f, 3f}};
+        for (float[] c : cases) {
+            int hit = 0;
+            for (int i = 0; i < trials; i++) {
+                if (mahjong.ai.NeuralPolicy.sampleSoftmax(new float[]{0f, c[0]}, c[1], rng) == 1) {
+                    hit++;
+                }
+            }
+            double p = hit / (double) trials;
+            double want = 1.0 / (1.0 + Math.exp(-c[0] / c[1]));
+            double sigma = Math.sqrt(want * (1 - want) / trials);
+            double z = Math.abs(p - want) / sigma;
+            curve.append(String.format("d=%.1f T=%.2f→%.4f(解析 %.4f, %.1fσ) ", c[0], c[1], p, want, z));
+            worstZ = Math.max(worstZ, z);
+            maxAbs = Math.max(maxAbs, Math.abs(p - want));
+        }
+        check("采样：两候选频率 = sigmoid(d/T)（" + trials + " 次/例，|Δp| ≤ 0.02）；"
+                + curve.toString().trim(), maxAbs <= 0.02);
+
+        // ② 均匀性（同分候选）：4 路 χ²，df=3 的 99.9% 分位 ≈ 16.27
+        int[] cnt = new int[4];
+        for (int i = 0; i < trials; i++) {
+            cnt[mahjong.ai.NeuralPolicy.sampleSoftmax(new float[]{1f, 1f, 1f, 1f}, 1f, rng)]++;
+        }
+        double chi = 0;
+        for (int c : cnt) {
+            chi += Math.pow(c - trials / 4.0, 2) / (trials / 4.0);
+        }
+        check("采样：同分候选等概率（4 路 χ²=" + String.format("%.2f", chi) + " < 16.27，df=3）",
+                chi < 16.27);
+
+        // ③ T→0⁺ 退化成 argmax（随机 logit 向量上逐条对拍）
+        int bad = 0;
+        int nvec = 200;
+        for (int i = 0; i < nvec; i++) {
+            float[] v = new float[1 + rng.nextInt(8)];
+            for (int j = 0; j < v.length; j++) {
+                v[j] = (float) (rng.nextGaussian() * 2);
+            }
+            int arg = 0;
+            for (int j = 1; j < v.length; j++) {
+                if (v[j] > v[arg]) {
+                    arg = j;
+                }
+            }
+            if (mahjong.ai.NeuralPolicy.sampleSoftmax(v, 1e-6f, rng) != arg) {
+                bad++;
+            }
+        }
+        eq("采样：T→0⁺ 退化成 argmax（" + nvec + " 个随机 logit 向量）", bad, 0);
+
+        // ④ 温度单调：**偏离贪心**的比例随 T 不减（logits {0, 1.2} ⇒ 下标 1 才是贪心那条）
+        float[] tGrid = {0.05f, 0.2f, 0.5f, 1f, 2f, 5f, 20f};
+        double prev = -1;
+        boolean mono = true;
+        StringBuilder tcurve = new StringBuilder();
+        for (float temp2 : tGrid) {
+            int hit = 0;
+            for (int i = 0; i < 4000; i++) {
+                if (mahjong.ai.NeuralPolicy.sampleSoftmax(new float[]{0f, 1.2f}, temp2, rng) == 0) {
+                    hit++;
+                }
+            }
+            double p = hit / 4000.0;
+            tcurve.append(String.format("%.2f→%.3f ", temp2, p));
+            if (p < prev - 0.02) {
+                mono = false;
+            }
+            prev = p;
+        }
+        check("采样：偏离贪心的比例随 T 单调不减（" + tcurve.toString().trim() + "）", mono);
+
+        // ⑤ 随机源：同 (seat, gameSeed) 同一条流；不同 seat 不同流
+        byte[] s1 = new byte[600];
+        byte[] s2 = new byte[600];
+        byte[] s3 = new byte[600];
+        float[] probe = {0f, 0.8f, 0.2f, -0.5f};
+        for (int k = 0; k < 2; k++) {
+            java.util.Random r = new java.util.Random(
+                    mahjong.ai.Policies.mixSeed(20260101L, k == 0 ? 0 : 1));
+            for (int i = 0; i < s1.length; i++) {
+                byte v = (byte) mahjong.ai.NeuralPolicy.sampleSoftmax(probe, 1f, r);
+                if (k == 0) {
+                    s1[i] = v;
+                } else {
+                    s3[i] = v;
+                }
+            }
+        }
+        java.util.Random again = new java.util.Random(mahjong.ai.Policies.mixSeed(20260101L, 0));
+        for (int i = 0; i < s2.length; i++) {
+            s2[i] = (byte) mahjong.ai.NeuralPolicy.sampleSoftmax(probe, 1f, again);
+        }
+        check("采样：同 (seat,gameSeed) 的随机源逐元素可复现", java.util.Arrays.equals(s1, s2));
+        check("采样：不同 seat 的随机源不是同一条流（非空转对照）", !java.util.Arrays.equals(s1, s3));
+
+        // ⑥ 字符串文法：坏温度必须**构造期**报错，不能静默当贪心
+        String errTemp = null;
+        try {
+            mahjong.ai.Policies.byName("net:" + wf.toAbsolutePath() + "#abc");
+        } catch (IllegalArgumentException e) {
+            errTemp = e.getMessage();
+        }
+        check("采样：温度写错时构造期报错（不是静默贪心）—— " + errTemp,
+                errTemp != null && errTemp.contains("温度"));
+        String errEmpty = null;
+        try {
+            mahjong.ai.Policies.byName("net:" + wf.toAbsolutePath() + "#");
+        } catch (IllegalArgumentException e) {
+            errEmpty = e.getMessage();
+        }
+        check("采样：`#` 后面空着也算错（路径里带 # 不会被误当成温度）", errEmpty != null);
+
+        // ⑦ 端到端：同一副牌山、同一 seed 下比对四种写法
+        final long seed = 20260101L;
+        String base = "net:" + wf.toAbsolutePath();
+        GameProbe pure = factoryProbe(seed, mahjong.ai.Policies.byName(base));
+        GameProbe t0 = factoryProbe(seed, mahjong.ai.Policies.byName(base + "#0"));
+        GameProbe t1a = factoryProbe(seed, mahjong.ai.Policies.byName(base + "#1.0"));
+        GameProbe t1b = factoryProbe(seed, mahjong.ai.Policies.byName(base + "#1.0"));
+        GameProbe inf = factoryProbe(seed, mahjong.ai.Policies.byName(base + "@1e9#1.0"));
+        GameProbe teach = factoryProbe(seed, mahjong.ai.Policies.teacher());
+        eq("采样：T=0（或省略 #T）与贪心的决策序列逐条相同",
+                String.join("\n", t0.choices), String.join("\n", pure.choices));
+        eq("采样：同一 seed 跑两遍，采样策略的决策序列逐条相同（可复现）",
+                String.join("\n", t1b.choices), String.join("\n", t1a.choices));
+        eq("采样：α 极大 + 采样 ⇒ 逐决策等同老师（上位集合性质在采样下仍成立）",
+                String.join("\n", inf.choices), String.join("\n", teach.choices));
+        int diffT = 0;
+        for (int i = 0; i < Math.min(pure.choices.size(), t1a.choices.size()); i++) {
+            if (!pure.choices.get(i).equals(t1a.choices.get(i))) {
+                diffT++;
+            }
+        }
+        check("采样：非空转对照 —— T=1 与 T=0 在同一副牌山上决策不同（实际 " + diffT + " / "
+                + pure.choices.size() + " 处）", diffT > 0);
+        int illegal = 0;
+        for (String s : t1a.choices) {
+            if (s.contains("<非法回包>")) {
+                illegal++;
+            }
+        }
+        eq("采样：整局 4 座 × T=1 一次都没给非法动作（" + t1a.choices.size() + " 条决策）", illegal, 0);
+        eq("采样：采样式整局点数守恒", t1a.sum(), pure.sum());
+
+        System.out.println("  P4 采样：偏离贪心比例 " + tcurve.toString().trim()
+                + "；T=1 与贪心的决策差异 " + diffT + " / " + pure.choices.size() + " 处；"
+                + "频率最大偏差 " + String.format("%.4f", maxAbs) + "（" + String.format("%.1fσ", worstZ) + "）");
+    }
+
+    /**
+     * 随机源可注入的 {@link java.util.Random}：让"采样"在自检里变成**确定函数**。
+     *
+     * <p>为什么要这个：`java.util.Random` 不可预知 → 采样断言只能做成统计检验，而 20,000 次下
+     * 仍有 ~1% 的概率在 3σ 外（本组第一版就撞上过一次 4.3σ，差点把正确的实现判成错的）。
+     * 把 `nextDouble()` 钉死以后，"累积分布边界在哪"这条判据变成**精确**的，
+     * 统计检验降级为粗检（只抓符号/尺度写错），两者各司其职。
+     */
+    private static final class FixedRandom extends java.util.Random {
+        private final double value;
+
+        FixedRandom(double value) {
+            this.value = value;
+        }
+
+        @Override
+        public double nextDouble() {
+            return value;
+        }
     }
 
     // ------------------------------------------------------------- 王牌 / 岭上

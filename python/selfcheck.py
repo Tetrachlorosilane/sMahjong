@@ -45,6 +45,8 @@ from mahjong_ml import dagger                             # noqa: E402
 from mahjong_ml import hybrid as hyb                      # noqa: E402
 from mahjong_ml import offline_rl, rewards                # noqa: E402
 from mahjong_ml import awr                                # noqa: E402
+from mahjong_ml import league as ml_league                  # noqa: E402
+from mahjong_ml import ppo                                # noqa: E402
 import torch                                              # noqa: E402
 
 fails: list[str] = []
@@ -815,6 +817,205 @@ eq("随机效应：只有一批时不给假 CI（df=0）",
    bool(np.isnan(ml_eval.random_effects([{"delta": 1.0, "se": 0.5}])["tau"])), True)
 eq("required_n：Δ 越大所需场次越少（单调）",
    ml_eval.required_n(53.0, 4.0) < ml_eval.required_n(53.0, 2.0), True)
+
+# ---------------------------------------------------------------- P4：PPO 的数学与联赛
+
+# ① `logprobs` 就是 log-softmax（掩码位置概率恒 0）—— PPO 的比率全靠它，先钉住这一条
+_net = nets.build(3, 2, hidden=4, head=4)
+_state = torch.zeros(2, 3)
+_cand = torch.zeros(2, 3, 2)
+_mask = torch.tensor([[True, True, False], [True, True, True]])
+_lp = ppo.logprobs(_net, _state, _cand, _mask, 1.0)
+ok(torch.all(torch.isfinite(_lp[_mask])), "PPO：合法候选的 log 概率有限")
+ok(bool((_lp[~_mask] == float("-inf")).all()), "PPO：掩码位置 = -inf（softmax 后概率恒 0）")
+eq("PPO：logp 的指数在合法候选上求和 = 1", round(float(_lp[0][:2].exp().sum()), 6), 1.0)
+ok(abs(float(ppo.chosen_logprob(_lp, torch.tensor([1, 2]))[0]) - float(_lp[0, 1])) < 1e-9,
+   "PPO：chosen_logprob 取的就是数据里那个动作（不是 argmax）")
+
+# ② 熵：均匀 2 候选 = ln2；掩码位置不参与 —— 且**反向不能是 NaN**
+#    （`0·log 0` 那个经典坑：前向看着对、反向把整批梯度污染）
+_lpu = ppo.logprobs(_net, _state, _cand, _mask, 1.0)
+ent = ppo.entropy_of(_lpu, _mask)
+ok(ent.requires_grad, "PPO：熵对 logits 可导（会被加进损失）")
+ent.sum().backward()
+ok(all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in _net.parameters()),
+   "PPO：熵的反向梯度有限（掩码位置的 0·(-inf) 不许变成 NaN）", "")
+_net.zero_grad()
+# 真·均匀 logp（不是"把 logp 清零"—— 那是个非法分布，测出来的熵恒 0）
+_log2 = float(np.log(2))
+_uniform = torch.tensor([[-_log2, -_log2, float("-inf")], [0.0, float("-inf"), float("-inf")]])
+ent2 = ppo.entropy_of(_uniform, torch.tensor([[True, True, False], [True, False, False]]))
+ok(abs(float(ent2[0]) - _log2) < 1e-6 and abs(float(ent2[1])) < 1e-6,
+   "PPO：同分 n 个候选的熵 = ln n（2 个 → ln2；1 个 → 0）",
+   f"ent={float(ent2[0]):.6f}/{float(ent2[1]):.6f}")
+
+# ③ GAE：`rewards.py` 的口径（γ=1、整条 episode 只有末决策有奖励）+ **λ=1** 时必须塌成 R − V
+#    ⚠ 只有 λ=1 才等价：λ<1 时前几步的 A 会被"剩余步数"衰减（对单点奖励就是一种系统性偏差），
+#    所以 ppo.py 的默认就是 λ=1（TD(1) = 蒙特卡洛）。这条断言把这个默认值钉住。
+_rew = np.array([0.0, 0.0, 3.0, 0.0, 0.0, -1.0])       # 两条 episode（0→1→2 与 3→4→5）
+_nxt = np.array([1, 2, -1, 4, 5, -1])
+_v = np.array([0.5, -0.2, 1.0, 2.0, 0.0, -0.5])
+_adv, _vt = ppo.gae(_rew, _nxt, _v, gamma=1.0, lam=1.0)
+eq("PPO：γ=1 + 末决策单点奖励 + λ=1 ⇒ GAE 塌成 R − V（逐条）",
+   [round(float(x), 6) for x in _adv], [2.5, 3.2, 2.0, -3.0, -1.0, -0.5])
+eq("PPO：value_target = advantage + V（TD(λ) 回报估计）",
+   [round(float(x), 6) for x in _vt], [3.0, 3.0, 3.0, -1.0, -1.0, -1.0])
+_adv_lam = ppo.gae(_rew, _nxt, _v, gamma=1.0, lam=0.5)[0]
+ok(abs(float(_adv_lam[0]) - 0.4) < 1e-9 and abs(float(_adv_lam[0]) - 2.5) > 1e-3,
+   "PPO：λ<1 时**不再**等于 R − V（所以默认值只能是 1；这条防「λ 被悄悄改回 0.95」）",
+   f"A0(λ=.5)={float(_adv_lam[0]):+.4f}（手算 δ0+0.5·(δ1+0.5·δ2) = −0.7+0.5·2.2）"
+   f" vs A0(λ=1)=+2.5000")
+_adv2, _ = ppo.gae(_rew, _nxt, _v, gamma=0.5, lam=1.0)   # 折扣真的生效（否则上面那条可能是巧合）
+ok(abs(float(_adv2[0]) - 0.25) < 1e-9,
+   "PPO：γ<1 时按 (γ·V_next − V) + γλ·A_next 递推（手算 A0 = δ0 + 0.5·A1 = −0.6 + 0.85）",
+   f"A0={float(_adv2[0]):+.4f} 期望 +0.2500")
+
+# ④ 优势只在**学生行**上归一化（对手行不进策略损失，混进来会把尺度带跑）
+_adv_raw = np.array([10.0, -10.0, 0.5, 0.7])
+_stu = np.array([True, True, False, False])
+_an = ppo.normalize_adv(_adv_raw, _stu)
+ok(abs(float(_an[_stu].mean())) < 1e-6 and abs(float(_an[_stu].std()) - 1.0) < 1e-6,
+   "PPO：优势归一化只按学生行（学生行均值 0 / std 1）")
+ok(bool(np.sign(_an[2] - _an[3]) == np.sign(_adv_raw[2] - _adv_raw[3])),
+   "PPO：优势归一化是同一个线性变换（对手之间的次序不许被改）")
+
+# ⑤ 裁剪的**方向**要能看出"梯度被切断"：ratio 越过上界后代理目标变成常数
+_surr = torch.min(torch.tensor([3.0]) * 2.0,
+                  torch.clamp(torch.tensor([3.0]), 0.8, 1.2) * 2.0)
+eq("PPO：正优势 + ratio 越过上界 ⇒ 代理目标被夹在 (1+ε)·A（梯度为 0）",
+   round(float(_surr), 6), round(1.2 * 2.0, 6))
+_surr_neg = torch.min(torch.tensor([0.1]) * -2.0,
+                      torch.clamp(torch.tensor([0.1]), 0.8, 1.2) * -2.0)
+eq("PPO：负优势 + ratio 越过下界 ⇒ 同样被夹住（两个方向都要防）",
+   round(float(_surr_neg), 6), round(0.8 * -2.0, 6))
+eq("PPO：clip_fraction 数的是 |ratio−1|>ε 的比例",
+   ppo.clip_fraction(np.array([0.5, 1.0, 1.3]), 0.2), 2 / 3)
+eq("PPO：approx_kl 同号同量纲（ratio=1 时恒 0）",
+   round(ppo.approx_kl(np.array([0.0, 0.0]), np.array([0.0, 0.0])), 9), 0.0)
+
+# ⑥ 联赛：短名要认得出五种文法（`#T` 与目录名里带 `@` 的路径都不能被误切）
+eq("联赛：short_name 认五种文法",
+   [ml_league.short_name("teacher"), ml_league.short_name("first"),
+    ml_league.short_name(r"net:S:\x\ckpt\awr-002\net.bin"),
+    ml_league.short_name(r"net:S:\x\ckpt\awr-002\net.bin@2"),
+    ml_league.short_name(r"net:S:\x\ckpt\awr-002\net.bin@2#1.5")],
+   ["teacher", "first", "awr-002", "awr-002@2", "awr-002@2#1.5"])
+
+# ⑦ Plackett-Luce：解析梯度必须**与数值差分一致**。
+#    ⚠ 这条是防"任务书里那行简写复辟"的：`∂ℓ/∂θ_{p_j} += 1 − e^{θ_{p_j}}/S_j` 只对第 1 名成立，
+#    按它实现时真值处梯度 ≈ +0.5（压根不驻点）、2000 场也恢复不出 θ。
+#    ℓ 这里**独立重写一遍**（自检不复用被测实现，才有资格当判据）。
+def _pl_loglik(theta: np.ndarray, idx: np.ndarray) -> float:
+    total = 0.0
+    for row in idx:
+        z = theta[row]
+        for j in range(len(row)):
+            m = float(z[j:].max())
+            total += float(z[j]) - (m + float(np.log(np.exp(z[j:] - m).sum())))
+    return total
+
+
+_rng = np.random.default_rng(7)
+_theta = _rng.normal(0, 0.5, 4)
+_idx = np.array([[0, 1, 2, 3], [1, 0, 3, 2], [2, 3, 0, 1], [3, 2, 1, 0]], dtype=np.intp)
+_g = ml_league._lik_grad_sum(_theta, _idx, 4)
+_num = np.zeros(4)
+for _i in range(4):
+    _p, _m = _theta.copy(), _theta.copy()
+    _p[_i] += 1e-6
+    _m[_i] -= 1e-6
+    _num[_i] = (_pl_loglik(_p, _idx) - _pl_loglik(_m, _idx)) / 2e-6
+ok(float(np.max(np.abs(_g - _num))) < 1e-4,
+   "联赛：PL 解析梯度 == 数值差分（简写那版在这里会差 0.5）",
+   f"最大偏差 {float(np.max(np.abs(_g - _num))):.2e}")
+
+# ⑧ 合成数据恢复 + 红证：等 θ 时**不许**造出显著差异（SE 不能靠撑大来好看）
+def _synth_pl(theta_true: dict[str, float], n: int, seed: int) -> list:
+    names = list(theta_true)
+    rng = np.random.default_rng(seed)
+    th = np.array([theta_true[n] for n in names])
+    out = []
+    for _ in range(n):
+        left = list(range(len(names)))
+        order = []
+        for _j in range(len(names)):
+            z = th[left]
+            p = np.exp(z - z.max())
+            p = p / p.sum()
+            k = int(rng.choice(len(left), p=p))
+            order.append(names[left[k]])
+            left.pop(k)
+        out.append(ml_league.Game(players=order, run="synth"))
+    return out
+
+
+_real = {"a": 0.8, "b": 0.25, "c": -0.25, "d": -0.8}
+_fit = ml_league.plackett_luce(_synth_pl(_real, 600, 11))
+ok([p for p, _, _, _ in ml_league.ladder(_fit)] == ["a", "b", "c", "d"],
+   "联赛：600 场合成数据恢复出真值排序",
+   " / ".join(f"{p}:{_fit.theta[p]:+.2f}" for p in _fit.players))
+_ci = ml_league.pl_ci(_synth_pl(_real, 600, 11), n_boot=40, seed=3)
+ok(all(_ci[p][0] <= _real[p] <= _ci[p][1] for p in _real),
+   "联赛：四个真值都落在 95%CI 内", str({p: (round(_ci[p][0], 2), round(_ci[p][1], 2)) for p in _real}))
+_flat = ml_league.plackett_luce(_synth_pl({p: 0.0 for p in _real}, 600, 12))
+ok(all(_flat.theta[p] - 1.96 * _flat.se[p] < 0 < _flat.theta[p] + 1.96 * _flat.se[p]
+       for p in _flat.players),
+   "联赛红证：等 θ 时四个 CI **全部跨 0**（SE 没有被人为压小）",
+   str({p: round(_flat.theta[p], 2) for p in _flat.players}))
+
+# ⑨ 采样权重：**比 focus 强的对手权重更大**（负号写反就会变成"专挑软柿子"）、Σw=1、floor 抬底
+_sw = ml_league.select_weights(_fit, focus="c", floor=0.1, exponent=1.0)
+ok(_sw["a"] > _sw["b"] > _sw["c"] and _sw["c"] < _sw["d"] + 1e-12 or _sw["a"] > _sw["d"],
+   "联赛：θ 越高的对手采样权重越大（「谁克我就多跟它打」）",
+   str({k: round(v, 3) for k, v in _sw.items()}))
+eq("联赛：采样权重归一（Σ=1）", round(sum(_sw.values()), 9), 1.0)
+ok(min(_sw.values()) >= 0.1 / 4 - 1e-12,
+   "联赛：floor 抬底生效（最弱的对手也有 ≥ floor/N 的份额）", f"min={min(_sw.values()):.4f}")
+_r1 = ml_league.sample_opponents(_sw, 3, rng=np.random.default_rng(5))
+_r2 = ml_league.sample_opponents(_sw, 3, rng=np.random.default_rng(5))
+eq("联赛：不放回抽样同 seed 逐元素可复现", _r1, _r2)
+ok(len(set(_r1)) == 3 and "c" not in ml_league.sample_opponents(_sw, 3, rng=np.random.default_rng(9),
+                                                         exclude="c"),
+   "联赛：不放回、且 exclude 的对手抽不到", str(_r1))
+ok(ml_league.sample_opponents({"a": 1.0, "b": 0.0}, 1, rng=np.random.default_rng(1)) == ["a"],
+   "联赛：权重为 0 的对手抽不到（即使它排在后面对手池里）")
+ok(ml_league.sample_opponents({"a": 1.0}, 5, rng=np.random.default_rng(1)) == ["a"],
+   "联赛：对手不足 k 个时能抽几个给几个（不报错、不重复）")
+
+# ⑩ θ 差必须用**配对** bootstrap（同一次重抽内做减法）。⚠ 这条的动机是实战里看到的：
+#    四个网络共享**同一个** teacher 估计，"四个都高于老师"看着像 4 份独立证据，
+#    其实可能只是 1 份锚点偏移 —— 配对重抽把那件事算进 CI 里。
+_pairs = _synth_pl({"teacher": 0.0, "g1": 0.35, "g2": 0.0}, 1200, 21)
+_pd = ml_league.pl_ci_diff(_pairs, "g1", "teacher", n_boot=60, seed=5)
+ok(_pd["ci"][0] > 0 and _pd["p"] < 0.05,
+   "联赛：真差 +0.35 的配对 θ CI 排除 0",
+   f"Δ={_pd['delta']:+.3f} CI=[{_pd['ci'][0]:+.3f},{_pd['ci'][1]:+.3f}] p={_pd['p']:.3f}")
+# 红证/校准：**报告的区间**必须不窄于真实抽样散度。实测（40 个真值全 0 的合成集）：
+#   · 数值 Hessian 的 `Fit.se` **低估** Δ̂ 的采样 SD（n=400 时低估 ~40%、n=1200 时 ~18%）——
+#     它是渐近口径，小样本下不够用；
+#   · 而**自助法**的区间与实测 SD 基本吻合（n=1200：自助半宽 0.106 vs 真 SD 0.0516×1.96=0.101）。
+# 所以"判据"必须用 `pl_ci_diff`（自助法配对），`format_ladder` 里那列 Δ 半宽只当粗略参考。
+_base = ml_league.plackett_luce(_pairs)
+_hw_hess = 1.96 * ((_base.se["g1"] ** 2 + _base.se["teacher"] ** 2) ** 0.5)
+_bd = ml_league.pl_ci_diff(_pairs, "g1", "teacher", n_boot=60, seed=5)
+_hw_boot = (_bd["ci"][1] - _bd["ci"][0]) / 2
+ok(_hw_boot > _hw_hess,
+   "联赛：配对自助法区间比 Hessian 口径**宽**（Hessian 的 SE 是渐近口径、小样本会低估）",
+   f"自助半宽 {_hw_boot:.3f} > Hessian 半宽 {_hw_hess:.3f}")
+_sd_est = 0.0
+for _s in range(1, 9):                                    # 8 个种子实测 Δ̂ 的散度（便宜版校准）
+    _f = ml_league.plackett_luce(_synth_pl({"a": 0.0, "b": 0.0, "c": 0.0}, 400, 300 + _s))
+    _d = _f.theta["b"] - _f.theta["a"]
+    _sd_est += _d * _d
+_sd_est = (_sd_est / 7) ** 0.5
+ok(_sd_est > 0.5 * (_base.se["g1"] ** 2 + _base.se["teacher"] ** 2) ** 0.5,
+   "联赛红证：真值全 0 时实测 Δ̂ 散度与报告 SE **同量级**（SE 不是被压小一个数量级）",
+   f"实测 SD≈{_sd_est:.4f} vs 报告 SE≈{(_base.se['g1'] ** 2 + _base.se['teacher'] ** 2) ** 0.5:.4f}")
+_names, _th = ml_league.boot_thetas(_pairs, n_boot=60, seed=5)
+_med = float(np.median(_th[:, _names.index("g1")] - _th[:, _names.index("teacher")]))
+ok(_th.shape == (60, 3) and abs(_med - _pd["delta"]) < 0.02,
+   "联赛：`boot_thetas` 一次重抽供多对比较复用，且与 `pl_ci_diff` 同源（不是两套统计）",
+   f"抽样矩阵 {_th.shape}，中位差 {_med:+.3f} vs 点估计 {_pd['delta']:+.3f}")
 
 # ---------------------------------------------------------------- 汇总
 

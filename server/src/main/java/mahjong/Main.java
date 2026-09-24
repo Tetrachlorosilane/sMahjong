@@ -282,7 +282,7 @@ public final class Main {
         System.out.println("  --selfplay <n>     跑 n 场半庄（4 个机器人座位；不监听端口）");
         System.out.println("  --seed <n>         基准种子（默认 20260101；同种子逐事件可复现）");
         System.out.println("  --workers <k>      并行线程数（默认 = CPU 核数；不影响结果）");
-        System.out.println("  --policy a,b,c,d   四家策略：teacher|first|pass|random|net:<权重文件>[@<α>]"
+        System.out.println("  --policy a,b,c,d   四家策略：teacher|first|pass|random|net:<权重文件>[@<α>][#<T>]"
                 + "（默认全 teacher）");
         System.out.println("  --rotate           按局轮转座位（评测用：每个策略把四个座位都坐一遍）");
         System.out.println("  --out <dir>        轨迹输出（每场 g<序号>.jsonl + summary.json）");
