@@ -77,8 +77,11 @@ v = np.array([1.0, 2, 3, 4, 5, 6, 7, 8])
 c1, c2 = ml_eval.bootstrap_ci(v), ml_eval.bootstrap_ci(v)
 ok(c1 == c2, "自助法置信区间可复现（同输入 → 同结果）", f"{c1} == {c2}")
 ok(c1[0] <= v.mean() <= c1[1], "置信区间包含样本均值", f"{c1} ∋ {v.mean()}")
-ok(ml_eval.required_n(32.0, 2.0) == 984, "样本量反推：sd=32、Δ=2 → 984 场",
+ok(ml_eval.required_n(32.0, 2.0) == 2010, "样本量反推：sd=32、Δ=2 → 2010 场（α=0.05、功效 80%）",
    f"got={ml_eval.required_n(32.0, 2.0)}")
+ok(ml_eval.required_n(32.0, 2.0, power=0.5) == 984,
+   "同一输入按 **50% 功效** 才是 984 场（旧口径 —— 就是它把所需场次低估了一半）",
+   f"got={ml_eval.required_n(32.0, 2.0, power=0.5)}")
 ok(ml_eval.required_n(32.0, 4.0) < ml_eval.required_n(32.0, 2.0), "Δ 越大 → 需要的场次越少")
 eq("Δ=0 时不给出场次（避免除零）", ml_eval.required_n(32.0, 0.0), 0)
 
@@ -735,6 +738,83 @@ try:                                    # 路径里根本没有 `raw/` 段 → �
     ok(False, "无法重映射时必须报错")
 except FileNotFoundError as e:
     ok("无法按数据根重映射" in str(e), "无法重映射时报错（不悄悄当成 0）", str(e)[:50])
+
+print("== P0 评测：合并多次独立 run（把效应钉到显著）==")
+
+
+def _fake_run(path, seed_base, diffs, label_a="net:A", label_b="net:B"):
+    """造一次 run 的 per_game：A 坐 0/2、B 坐 1/3，逐场差值 = `diffs[i]`（单位：顺位点）。
+
+    ⚠ 每席给 `dz/2`：`per_game_series` 对同一策略占的**多席取平均**，所以两席各 dz/2 才让
+    整场差值恰好等于 dz（这一点第一次写测试时就搞错了 —— 差值被放大成 2dz）。
+    """
+    per_game = []
+    for i, dz in enumerate(diffs):
+        half = dz / 2.0
+        per_game.append({"game": i, "seed": seed_base * 1000 + i,
+                         "policies": [label_a, label_b, label_a, label_b],
+                         "rank_points": [half, -half, half, -half], "placement": [1, 2, 1, 2]})
+    return ml_eval.Run(path=Path(path), games=len(diffs), hands=len(diffs), seed_base=seed_base,
+                       workers=1, by_policy={}, per_game=per_game)
+
+
+r1 = _fake_run("run-a", 1, [10.0, 20.0])
+r2 = _fake_run("run-b", 2, [-5.0, 15.0, 5.0])
+pooled, per = ml_eval.pool_diffs([r1, r2], "net:A", "net:B", "rank_points")
+eq("合并：样本量 = 各 run 之和", pooled.size, 5)
+eq("合并：逐 run 摘要（n 与 Δ）",
+   [(x["n"], round(x["delta"], 3)) for x in per], [(2, 15.0), (3, 5.0)])
+eq("合并：均值 = 全部逐场差的均值",
+   round(float(pooled.mean()), 6), round((10 + 20 - 5 + 15 + 5) / 5, 6))
+p_ok = ml_eval._paired_from_diffs("net:A", "net:B", "rank_points", pooled)
+eq("合并：CI 由同一套自助法给出（不是另写一套统计）", (p_ok.n, p_ok.win, p_ok.lose), (5, 4, 1))
+eq("单个 run 的配对检验还是原来那条路（合并模式不改变它）",
+   ml_eval.paired_test(ml_eval.per_game_series(r1, "net:A", "rank_points"),
+                       ml_eval.per_game_series(r1, "net:B", "rank_points"),
+                       "net:A", "net:B", "rank_points").n, 2)
+try:            # 红证：两次 run 若共用牌山（seed 相同），合并会把同一副牌数两遍 ⇒ 必须报错
+    ml_eval.pool_diffs([r1, _fake_run("run-c", 1, [1.0, 2.0])], "net:A", "net:B", "rank_points")
+    ok(False, "牌山重叠时必须报错")
+except ValueError as e:
+    ok("牌山重叠" in str(e) and "两遍" in str(e),
+       "两次 run 共用一个 seed 时报错（不许把同一副牌重复计入）", str(e)[:60])
+eq("标签子串能解析成完整标签", ml_eval.resolve_label(r1, "A"), "net:A")
+try:            # 子串命中多个时必须报错，不许猜（猜错会把两个策略的号混在一起算）
+    ml_eval.resolve_label(r1, "net:")
+    ok(False, "子串命中多个策略时必须报错")
+except ValueError as e:
+    ok("命中" in str(e), "标签子串命中不唯一时报错（不猜）", str(e)[:50])
+# ⚠ 样本量反推的口径：只用 z_{α/2} 是 **50% 功效**（效应正好压在临界线上），会低估约一半
+n50 = ml_eval.required_n(53.0, 2.0, power=0.5)
+n80 = ml_eval.required_n(53.0, 2.0)
+ok(abs(n80 / n50 - 2.0432) < 0.001 and n80 > n50,
+   "required_n 默认按 **80% 功效**（(1.96+0.84)²/1.96² ≈ 2.04 倍于 50% 功效的场次）",
+   f"50% → {n50} 场，80% → {n80} 场")
+# run 级随机效应：批间散度要真的进 CI（同质时不该变宽，异质时必须变宽）
+same = [{"delta": 1.0, "se": 0.5}, {"delta": 1.0, "se": 0.5}, {"delta": 1.0, "se": 0.5}]
+re_same = ml_eval.random_effects(same)
+ok(re_same["tau"] == 0.0 and abs(re_same["mu"] - 1.0) < 1e-9,
+   "随机效应：三批完全相同 → τ=0 且点估计不变", f"τ={re_same['tau']} μ={re_same['mu']}")
+het = [{"delta": 1.0, "se": 0.5}, {"delta": 0.9, "se": 0.5}, {"delta": 3.2, "se": 0.5}]
+re_het = ml_eval.random_effects(het)
+fixed_w = 1.0 / (0.5 ** 2)
+fixed_mu = sum(r["delta"] * fixed_w for r in het) / (3 * fixed_w)
+fixed_se = float(np.sqrt(1.0 / (3 * fixed_w)))
+ok(re_het["tau"] > 0 and (re_het["ci"][1] - re_het["ci"][0]) > 2 * 1.96 * fixed_se,
+   "随机效应：批间散度大 → τ>0 且 CI 明显宽于逐场口径（不许把不确定性说窄）",
+   f"τ={re_het['tau']:.2f} 逐场半宽={1.96 * fixed_se:.2f} RE半宽={(re_het['ci'][1] - re_het['ci'][0]) / 2:.2f}")
+# ⚠ 各批 SE **相等**时两种口径的点估计必然相同（权重都是常数）——要测"权重被 τ² 改过"，必须让 SE 不等
+het2 = [{"delta": 1.0, "se": 0.3}, {"delta": 2.0, "se": 0.8}, {"delta": 4.0, "se": 1.2}]
+w2 = [1.0 / r["se"] ** 2 for r in het2]
+fixed2 = sum(r["delta"] * wi for r, wi in zip(het2, w2)) / sum(w2)
+re2 = ml_eval.random_effects(het2)
+ok(abs(re2["mu"] - fixed2) > 1e-6,
+   "随机效应：SE 不等时 τ² 会改写权重 ⇒ 点估计与逐场口径不同",
+   f"RE={re2['mu']:.3f} vs 逐场={fixed2:.3f}")
+eq("随机效应：只有一批时不给假 CI（df=0）",
+   bool(np.isnan(ml_eval.random_effects([{"delta": 1.0, "se": 0.5}])["tau"])), True)
+eq("required_n：Δ 越大所需场次越少（单调）",
+   ml_eval.required_n(53.0, 4.0) < ml_eval.required_n(53.0, 2.0), True)
 
 # ---------------------------------------------------------------- 汇总
 

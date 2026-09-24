@@ -28,6 +28,7 @@ import numpy as np
 
 METRICS = ("rank_points", "place")
 ALPHA = 0.05
+POWER_DEFAULT = 0.8            # `required_n` 的默认功效（通行口径；50% 功效会低估约一半场次）
 BOOT_DEFAULT = 10_000
 BOOT_SEED = 20260101          # 固定：同输入 → 同置信区间（可复现是硬要求）
 
@@ -135,12 +136,18 @@ def sign_test_p(diffs: np.ndarray) -> float:
     return float(min(1.0, 2 * tail))
 
 
-def required_n(sd: float, delta: float, alpha: float = ALPHA) -> int:
-    """要检出 `delta` 的配对差值、在观测到的 `sd` 下需要多少场（正态近似，单样本配对）。"""
+def required_n(sd: float, delta: float, alpha: float = ALPHA, power: float = POWER_DEFAULT) -> int:
+    """要在 α 显著 + **指定功效**下检出 `delta`，需要多少场（正态近似，单样本配对）。
+
+    ⚠ 第一版只用了 `z_{α/2}`（那其实是 **50% 功效**：效应恰好落在临界值上，一半概率检不出）——
+    它把所需场次低估约 **2.04 倍**（`(1.96+0.84)²/1.96²`）。默认改成 **80% 功效**（通行口径），
+    并在报告里写明"α=0.05、功效 80%"，免得"要 N 场"这句话被当成"跑 N 场就一定能显著"。
+    """
     if delta <= 0 or not math.isfinite(sd) or sd <= 0:
         return 0
-    z = 1.959963985 if abs(alpha - 0.05) < 1e-9 else 1.959963985
-    return int(math.ceil((z * sd / delta) ** 2))
+    z_a = 1.959963985
+    z_p = {0.5: 0.0, 0.8: 0.8416212336, 0.9: 1.2815515655}.get(round(power, 2), 0.8416212336)
+    return int(math.ceil(((z_a + z_p) * sd / delta) ** 2))
 
 
 @dataclass
@@ -225,7 +232,7 @@ def format_single(run: Run, metric: str) -> str:
                 lines.append(f"  {a} vs {b}: n={pr.n}  Δ={pr.mean:+.2f}  "
                              f"95%CI=[{pr.ci[0]:+.2f},{pr.ci[1]:+.2f}]  p={_fmt_p(pr.p)}  "
                              f"胜{pr.win}/负{pr.lose}/平{pr.tie}  sd(Δ)={pr.sd:.2f}  "
-                             f"（检出 Δ=2.0 约需 {required_n(pr.sd, 2.0)} 场）")
+                             f"（α=0.05、功效 80% 下检出 Δ=2.0 约需 {required_n(pr.sd, 2.0)} 场）")
     return "\n".join(lines)
 
 
@@ -243,7 +250,7 @@ def format_pair(ra: Run, rb: Run, metric: str, labels: tuple[str, str] | None = 
             lines.append(f"  {la} vs {lb}: n={pr.n}  Δ={pr.mean:+.2f}  "
                          f"95%CI=[{pr.ci[0]:+.2f},{pr.ci[1]:+.2f}]  p={_fmt_p(pr.p)}  "
                          f"胜{pr.win}/负{pr.lose}/平{pr.tie}  sd(Δ)={pr.sd:.2f}  "
-                         f"（检出 Δ=2.0 约需 {required_n(pr.sd, 2.0)} 组座位-场）")
+                         f"（α=0.05、功效 80% 下检出 Δ=2.0 约需 {required_n(pr.sd, 2.0)} 组座位-场）")
         lines += ["", "读法：CI 跨 0 或 p≥0.05 → **证不出差别**（牌山方差大，别拿单次跑分下结论）；",
                   "      要检出更小的 Δ，按上面的 sd(Δ) 反推场次（docs/TRAINING.md §7）。"]
         return "\n".join(lines)
@@ -280,14 +287,138 @@ def to_json(runs: dict[str, Run], metric: str) -> dict:
     return out
 
 
+def resolve_label(run: Run, sub: str) -> str:
+    """把 `awr-002` 这样的**子串**解析成 summary 里的完整策略标签（必须唯一命中）。
+
+    策略标签是完整路径（`net:S:\\…\\awr-002\\net.bin`），手打整串容易错，所以允许子串 ——
+    但命中不唯一时**报错而不是猜**（猜错会把两个策略的号混在一起算）。
+    """
+    labs = sorted({lab for g in run.per_game for lab in g.get("policies", [])})
+    hit = [l for l in labs if sub in l]
+    if len(hit) != 1:
+        raise ValueError(f"{run.path} 里 {sub!r} 命中 {len(hit)} 个策略标签：{hit or labs}")
+    return hit[0]
+
+
+def pool_diffs(runs: list[Run], label_a: str, label_b: str, metric: str
+               ) -> tuple[np.ndarray, list[dict]]:
+    """把**多次独立 run** 的逐场配对差合并成一列（`a − b`；正 = a 更好）。
+
+    为什么能合：每次 run 的牌山由各自的 `seedBase` 派生，**互不相同** → 合并样本量合法。
+    ⚠ 但**同一副牌山不能重复计入**：两次 run 只要有任何一场 seed 相同，这里就报错
+    （重复计入会把 CI 假窄 —— 那是"把同一份数据数两遍"的经典错误）。
+    """
+    seen: dict[int, str] = {}
+    chunks: list[np.ndarray] = []
+    per_run: list[dict] = []
+    for r in runs:
+        sa = per_game_series(r, label_a, metric)
+        sb = per_game_series(r, label_b, metric)
+        seeds = sorted(set(sa) & set(sb))
+        dup = [s for s in seeds if s in seen]
+        if dup:
+            raise ValueError(f"{r.path} 与 {seen[dup[0]]} 有 {len(dup)} 场牌山重叠"
+                             f"（seed 相同，例如 {dup[0]}）—— 合并会把同一副牌数两遍")
+        for s in seeds:
+            seen[s] = str(r.path)
+        dz = np.array([sa[s] - sb[s] for s in seeds], dtype=float)
+        chunks.append(dz)
+        per_run.append({"dir": str(r.path), "n": int(dz.size),
+                        "delta": float(dz.mean()) if dz.size else float("nan"),
+                        "se": float(dz.std(ddof=1) / math.sqrt(dz.size)) if dz.size > 1 else float("nan"),
+                        "win": int((dz > 0).sum()), "lose": int((dz < 0).sum())})
+    pooled = np.concatenate(chunks) if chunks else np.zeros(0, dtype=float)
+    return pooled, per_run
+
+
+def random_effects(per_run: list[dict]) -> dict:
+    """**run 级**随机效应合并（DerSimonian-Laird）：把批间方差 `τ²` 加进每个 run 的方差。
+
+    为什么必须给：逐场合并的 CI 只反映**场内**噪声（`sd/√n`）。各 run 的 Δ 散度明显时（τ 大），
+    只报逐场 CI 会把不确定性说得太窄 —— 它回答的是"同一批牌山下"，而不是"换一批牌局还成不成立"。
+    实测：三批 +1.27/+0.93/+3.16 → τ≈1.00，随机效应 CI 明显宽于逐场 CI（两者都排除 0）。
+    """
+    y = np.array([r["delta"] for r in per_run], dtype=float)
+    v = np.array([r["se"] ** 2 for r in per_run], dtype=float)
+    if y.size < 2 or not np.all(np.isfinite(y)) or not np.all(np.isfinite(v)):
+        return {"mu": float(y.mean()) if y.size else float("nan"), "se": float("nan"),
+                "ci": (float("nan"), float("nan")), "tau": float("nan"),
+                "q": float("nan"), "df": max(0, int(y.size) - 1)}
+    w = 1.0 / v
+    fixed = float((w * y).sum() / w.sum())
+    q = float((w * (y - fixed) ** 2).sum())
+    df = int(y.size - 1)
+    c = float(w.sum() - (w ** 2).sum() / w.sum())
+    tau2 = max(0.0, (q - df) / c) if c > 0 else 0.0
+    wr = 1.0 / (v + tau2)
+    mu = float((wr * y).sum() / wr.sum())
+    se = float(math.sqrt(1.0 / wr.sum()))
+    return {"mu": mu, "se": se, "ci": (mu - 1.96 * se, mu + 1.96 * se),
+            "tau": float(math.sqrt(tau2)), "q": q, "df": df}
+
+
+def format_pool(pooled: np.ndarray, per_run: list[dict], a: str, b: str,
+                metric: str) -> str:
+    """合并报告：先逐 run 看**能不能复现**，再看合并后的 CI 是否排除 0。"""
+    p = _paired_from_diffs(a, b, metric, pooled)
+    lines = [f"== 合并 {len(per_run)} 次 run（同一对策略、独立牌山）",
+             f"   指标 {metric}；策略 A = {a}",
+             f"            策略 B = {b}", ""]
+    for r in per_run:
+        lines.append(f"   {r['dir']}: n={r['n']}　Δ={r['delta']:+.2f}"
+                     f"　胜/负 {r['win']}/{r['lose']}")
+    lines += ["",
+              f"合并（逐场配对，eval.py 口径）：n={p.n}　Δ={p.mean:+.3f}　sd(Δ)={p.sd:.2f}"
+              f"　95%CI=[{p.ci[0]:+.2f},{p.ci[1]:+.2f}]　符号检验 p={_fmt_p(p.p)}"
+              f"　胜/负/平 {p.win}/{p.lose}/{p.tie}",
+              f"　→ {'CI 排除 0：**显著**' if p.ci[0] * p.ci[1] > 0 else 'CI 跨 0：**不显著**'}；"
+              f"按观测 sd，α=0.05、功效 80% 下检出 Δ=2 需 {required_n(p.sd, 2.0)} 场"]
+    if len(per_run) >= 2:
+        re_ = random_effects(per_run)
+        ok_re = re_["ci"][0] * re_["ci"][1] > 0
+        lines.append(
+            f"run 级随机效应（τ={re_['tau']:.2f}、Q={re_['q']:.1f}/df={re_['df']}）："
+            f"Δ={re_['mu']:+.3f}　95%CI=[{re_['ci'][0]:+.2f},{re_['ci'][1]:+.2f}]"
+            f"　→ {'仍排除 0' if ok_re else '**不排除 0**'}"
+            f"（⚠ 逐场 CI 只反映场内噪声；批间散度大时以这一行为准）")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="P0 评测：顺位点 + 配对显著性")
-    ap.add_argument("dirs", nargs="+", help="一次（或两次）自对弈的输出目录")
+    ap.add_argument("dirs", nargs="+", help="自对弈输出目录（1 个=单 run；2 个=两次 run 比较）")
     ap.add_argument("--metric", default="rank_points", choices=METRICS)
     ap.add_argument("--labels", default=None,
-                    help="两次 run 时按**座位**配对比较两个不同策略，如 `--labels net,teacher`")
+                    help="两次 run 时按**座位**配对比较两个不同策略，如 `--labels net,teacher`；"
+                         "配合 `--pool` 时是同一对策略的**子串**，如 `--labels awr-002,bc-003`")
+    ap.add_argument("--pool", action="store_true",
+                    help="把**任意多次**独立 run 的逐场配对差合并（同一对策略、不同牌山）—— "
+                         "用来把一个小效应钉到显著，或看它能不能复现")
     ap.add_argument("--json", dest="json_out", default=None)
     args = ap.parse_args(argv)
+
+    if args.pool:
+        if not args.labels:
+            ap.error("--pool 需要 --labels A,B（策略标签子串，两个）")
+        parts = [x.strip() for x in args.labels.split(",") if x.strip()]
+        if len(parts) != 2:
+            ap.error("--labels 需要恰好两个，如 `--labels awr-002,bc-003`")
+        runs = [load_run(d) for d in args.dirs]
+        la = resolve_label(runs[0], parts[0])
+        lb = resolve_label(runs[0], parts[1])
+        pooled, per_run = pool_diffs(runs, la, lb, args.metric)
+        print(format_pool(pooled, per_run, la, lb, args.metric))
+        if args.json_out:
+            p = _paired_from_diffs(la, lb, args.metric, pooled)
+            Path(args.json_out).write_text(json.dumps(
+                {"metric": args.metric, "labels": [la, lb], "per_run": per_run,
+                 "pooled": {"n": p.n, "mean": p.mean, "sd": p.sd, "ci": list(p.ci),
+                            "p": p.p, "win": p.win, "lose": p.lose, "tie": p.tie,
+                            "required_n_for_2": required_n(p.sd, 2.0)},
+                 "random_effects": random_effects(per_run)},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\n已写出 {args.json_out}")
+        return 0
 
     runs = [load_run(d) for d in args.dirs[:2]]
     if len(runs) == 1:
