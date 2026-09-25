@@ -508,7 +508,11 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
     }
 
     root.insert(QStringLiteral("log"), games);
-    out.json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    // ⚠ **必须紧凑**（Compact），不能缩进：这一份是要**贴进网页版 reviewer** 的（`mjai-reviewer -i`
+    //   也吃它）。那份 JSON 是"17 元组里套四家数组、里面全是数字"，缩进会让每个数字各占一行 ——
+    //   实测一局 16 个半庄的牌谱：紧凑 9.6 KB，缩进 **63.8 KB**（POST 出去 78 KB），
+    //   而网页版的表单在 ~64–70 KB 处就把请求挡成**裸 `400 Bad Request`**（连验证码都还没验）。
+    out.json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
     out.url = QStringLiteral("https://tenhou.net/6/#json=") + out.json;
     out.ok = out.rounds > 0;
     return out;
@@ -536,7 +540,8 @@ bool TenhouLog::writeFile(const Result& r, const QString& path, QString* err)
         }
         return false;
     }
-    // 文件内容 = 一行链接（与参考项目一致），末尾补 JSON 便于直接读
+    // 文件内容 = 一行链接（与参考项目一致），末尾补 JSON 便于直接读/直接贴
+    // ⚠ 末尾那份 JSON 也是**紧凑**的（`r.json` 就是紧凑版）：缩进版贴进网页版会被挡成 400（见上面 build() 的注释）。
     QByteArray out;
     out += "https://tenhou.net/6/#json=";
     out += QJsonDocument::fromJson(r.json.toUtf8()).toJson(QJsonDocument::Compact);

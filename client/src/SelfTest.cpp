@@ -2537,6 +2537,10 @@ int run(const QString& outDir)
                   QStringLiteral("牌谱：json 文件就是纯 JSON（没有链接那一行）"));
             check(!QJsonDocument::fromJson(raw).object().isEmpty(),
                   QStringLiteral("牌谱：json 文件可解析"));
+            // ⚠ 必须紧凑：缩进版会让"数字各占一行"，16 局牌谱从 9.6 KB 涨到 63.8 KB，
+            //   贴进网页版 reviewer 时整个 POST 超过它的请求体门限 → 裸 400 Bad Request（NOTES §9.6.3）
+            check(!raw.contains('\n'),
+                  QStringLiteral("牌谱：.json 必须是**紧凑单行**（缩进版会被网页版挡成 400）"));
         }
         // 空记录不能崩，也不能谎报成功
         ReplayModel empty;

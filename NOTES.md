@@ -1571,4 +1571,38 @@ Turnstile，网页版只能由人在正常浏览器里点**（判据：不要在
 > 另外 `cargo` 的配置按**当前工作目录**向上找，必须在 `probe/` 里跑，`--manifest-path` 不算数。
 > 详细步骤与两个坑见该 README。
 
+#### 9.6.3 网页版报 `400 Bad Request`：缩进 JSON 把请求体顶过了门限
+
+**报障原文**："我向网页提交 json 文本，返回 Bad Request"。也就是把导出的
+`<名字>.json` 贴进 https://mjai.ekyu.moe/zh-cn.html 的「自定义 (tenhou.net/6 JSON)」框，
+点提交 → 页面回一个**光秃秃的 `400 Bad Request`**（既没有报错详情，也没提验证码）。
+
+**怎么定位的**：用 node 直接 POST 到 `https://mjai.ekyu.moe/review`（字段照抄页面表单：
+`input-method=tenhou6&tenhou6=<文本>&player-id=0&engine=mortal&mortal-model-tag=4.1b&ui=killerducky&lang=zh-CN`），
+换不同的 payload 看状态码与响应体 —— 两种回复泾渭分明：
+
+| 发出去的 payload | 请求体 | 服务端 |
+| --- | --- | --- |
+| 缩进版 `.json`（63,797 字符） | 78,352 B | **`400 Bad Request`**（裸文本） |
+| 同一局紧凑 JSON（9,640 字符） | 17,563 B | `403 invalid captcha response`（**走到了应用层**） |
+| 空白补齐扫描：49,152 字符 | 57,075 B | `403 invalid captcha` |
+| 空白补齐扫描：65,536 字符 | 73,459 B | `400 Bad Request` |
+
+**根因**：`TenhouLog::build()` 原来用 `QJsonDocument::Indented` 序列化。这份 JSON 的结构是
+「17 元组 → 四家各三个数组 → 里面全是数字」，缩进让**每个数字各占一行** —— 同一局牌谱
+**紧凑 9.6 KB、缩进 63.8 KB（6.5×）**，POST 出去 78 KB，正好撞上网页版表单的请求体门限
+（实测在 **65,536 与 73,459 字节之间**，且**先于**验证码检查触发，所以回的是裸 400）。
+
+**修法**：序列化改 `QJsonDocument::Compact`（`.json` 与 `.txt` 里那份都紧凑了），
+自检加一条"`.json` 必须单行"的断言（L2 840 → **841**）。产物对比：
+`28JA8V5646.json` **63,965 B → 9,808 B**（Mortal 只吃半庄那三份同理）；三份导出再跑三层判据
+（我们的校验器 / 上游探针 / 上游 CLI）全绿。
+
+⚠ **顺带确认的两件事**（以后别再误判）：
+① 网页版**确实校验 Cloudflare Turnstile** —— 缺 token 是 `403 invalid captcha response`
+（不是 400），所以"无头浏览器点不了提交"是验证码，不是我们导出物的问题；
+② **裸 400 = 请求根本没到应用层**（体积/边缘策略），**带文字的 4xx/5xx 才是应用层的判断** ——
+排查这类问题先看响应体有没有内容。
+
+
 
