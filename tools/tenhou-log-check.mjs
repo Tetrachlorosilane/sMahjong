@@ -19,8 +19,10 @@
  *   ⑤ 走一遍事件流：摸切能回填、大明杠的 `0` 空位对得上、鸣牌的来源座位与被鸣牌 = 上一张打出、
  *      四家取牌用尽时收工（参考实现的两种收工条件之一必须成立）
  *   ⑥ 结果：`和了` → `["和了", 四家增减, [和了家, 放銃家, …], …]`（成对）；否则 `[状态字, 四家增减]`
+ *   ⑦ 点数账：四家增减 == 相邻两局点数板之差；`sum(点数) + 1000 × 桌上立直棒 == 100000` 全程成立
+ *      （⚠ 抄 `score_delta` 会漏掉各家自己立直扣的 1000 点 → 这条专门抓它）
  *
- * ⚠ 这是**格式**校验，不是规则校验（不判和牌是否合法、番符对不对）。
+ * ⚠ 这是**格式 + 点数账**校验，不是规则校验（不判和牌是否合法、番符对不对）。
  */
 import { readFileSync } from 'node:fs';
 
@@ -396,6 +398,65 @@ function checkKyoku(kyoku, ki, errs) {
     }
 }
 
+/**
+ * ⑦ 点数账：牌谱里「结果对的四家增减」必须等于**相邻两局点数板之差**，且立直棒（供託）的进出要合得上。
+ *
+ * 判据（十鳳语义，实盘验过）：
+ *   · 每家点数板是该局**开始时**的点数；立直宣言的 1000 点在宣言当时就从该家扣掉、进了桌面池子；
+ *   · 任何时刻恒有  sum(四家点数) + 1000 × 池中棒数 == 100000（起手总点）；
+ *   · 差分是**净变化**：它含各家自己立直的 -1000，也含赢家收走的 +1000×根数，
+ *     所以 `收走根数 = 本局宣言根数 + 差分和/1000`，桌面棒数随之增减；
+ *   · 下一局点数板 == 本局点数板 + 本局差分。
+ * ⚠ 这条最容易被 `score_delta` 骗过：它只含本局结算的收支、**不含各家自己立直扣的 1000 点**，
+ *   抄它就会让点数板与差分对不上（四家点数之和还会每根棒多出 1000）。
+ */
+function checkScores(root, errs) {
+    const SEAT = ['东', '南', '西', '北'];
+    let sticks = 0;        // 桌面上未收走的立直棒
+    let prev = null;       // 上一局结算后的四家点数
+    (root.log || []).forEach((k, i) => {
+        if (!Array.isArray(k) || !Array.isArray(k[1]) || k[1].length !== 4) return;
+        const board = k[1];
+        const meta = Array.isArray(k[0]) ? k[0] : [0, 0, 0];
+        const tag = `第${i + 1}局（${SEAT[meta[0]] ?? meta[0]}${(meta[1] ?? 0) + 1}局${meta[2] ?? 0}本场）`;
+        if (prev && board.some((v, s) => v !== prev[s])) {
+            errs.push(`${tag}: 起始点数板 ${JSON.stringify(board)} ≠ 上一局结算后的 ${JSON.stringify(prev)}`);
+        }
+        const boardSum = board.reduce((a, b) => a + b, 0);
+        if (boardSum + 1000 * sticks !== 100000) {
+            errs.push(`${tag}: 起始点数板之和 ${boardSum} + 桌上 ${sticks} 根棒 ≠ 100000`);
+        }
+        // 本局立直宣言数（"r<牌码>" / "r60"）
+        let declared = 0;
+        for (let s = 0; s < 4; s++) {
+            const row = Array.isArray(k[6 + 3 * s]) ? k[6 + 3 * s] : [];
+            for (const d of row) if (typeof d === 'string' && d.startsWith('r')) declared++;
+        }
+        const results = k[16];
+        if (!Array.isArray(results) || results.length < 2 || !Array.isArray(results[1])) return;
+        const deltas = results[1];
+        if (deltas.length !== 4) return;
+        const sum = deltas.reduce((a, b) => a + b, 0);
+        if (sum % 1000 !== 0) {
+            errs.push(`${tag}: 差分和 ${sum} 不是 1000 的整数倍 → 推不出供託的进出`);
+            return;
+        }
+        // 差分是净变化：含各家自己立直的 -1000，也含赢家收走的 +1000×根数
+        const collected = declared + sum / 1000;
+        if (collected < 0 || collected > declared + sticks) {
+            errs.push(`${tag}: 按差分推出来的收棒数 = ${collected} 根（本局宣言 ${declared} + 桌上 ${sticks}）`
+                + ' → 差分与立直棒对不上（多半是抄了不含立直投入的 score_delta）');
+        }
+        const after = board.map((v, s) => v + deltas[s]);
+        sticks = sticks + declared - collected;
+        const afterSum = after.reduce((a, b) => a + b, 0);
+        if (afterSum + 1000 * sticks !== 100000) {
+            errs.push(`${tag}: 结算后点数之和 ${afterSum} + 桌上 ${sticks} 根棒 ≠ 100000`);
+        }
+        prev = after;
+    });
+}
+
 function checkFile(path) {
     const errs = [];
     let root;
@@ -415,6 +476,7 @@ function checkFile(path) {
         }
     }
     (root.log || []).forEach((k, i) => checkKyoku(k, i, errs));
+    checkScores(root, errs);
     return errs.map((e) => `${path}: ${e}`);
 }
 

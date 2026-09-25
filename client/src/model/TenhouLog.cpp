@@ -123,11 +123,50 @@ QString drawStatusText(const QString& reason)
     return QStringLiteral("流局");               // i18n-keep 牌谱格式常量
 }
 
+/**
+ * 一局的「四家点数增减」—— 十鳳牌譜语义的**净变化**（结算后点数 − 上一次结算后的点数）。
+ *
+ * ⚠ 不能直接抄 `agari` / `ryuukyoku` 的 `score_delta`：它只含**本局结算的收支**
+ *   （和了点数的授受 + 赢家收走的供託），**不含各家自己立直宣言时扣掉的那 1000 点**
+ *   （宣言那一刻服务端就扣了，PROTOCOL §3.7 有说明）。于是只要本局有人立直，
+ *   差分就与点数板对不上，牌谱里四家点数之和还会凭空多出 1000 × 立直根数
+ *   （实测：一份 16 局的牌谱对到 101000 —— 复盘器显示的分数收支就是错的）。
+ * 服务端同时发了权威的 `scores_after`（结算后的四家点数），所以一律用它减去 `settled`
+ * （本局「已结算到哪」的四家点数，初值 = 本局起始点数板）；一局可能有多条 `agari`
+ * （双响/三响各一条），所以**每次结算后要把差分累加回 `settled`**，否则第二组会重复计一遍。
+ * 只有老服务端（不发 `scores_after`）才退回 `score_delta`。
+ */
+QJsonArray netDelta(const QJsonObject& body, const QVector<int>& settled)
+{
+    QJsonArray out;
+    const QJsonArray after = body.value(QStringLiteral("scores_after")).toArray();
+    if (after.size() == 4 && settled.size() == 4) {
+        for (int s = 0; s < 4; ++s) {
+            out.append(after.at(s).toInt() - settled.value(s, 25000));
+        }
+        return out;
+    }
+    for (const QJsonValue& v : body.value(QStringLiteral("score_delta")).toArray()) {
+        out.append(v.toInt());
+    }
+    while (out.size() < 4) {
+        out.append(0);
+    }
+    return out;
+}
+
+/** 把一组差分累加进 `settled`（`netDelta` 的配对操作）。 */
+void accumulateDelta(QVector<int>& settled, const QJsonArray& deltas)
+{
+    for (int s = 0; s < settled.size() && s < deltas.size(); ++s) {
+        settled[s] += deltas.at(s).toInt();
+    }
+}
+
 /** 牌码列表 → 牌号数组（跳过认不出的，并记一笔问题）。 */
 QJsonArray toNumbers(const QStringList& tiles, QStringList* problems, const char* where)
 {
-    QJsonArray arr;
-    for (const QString& t : tiles) {
+    QJsonArray arr;    for (const QString& t : tiles) {
         const int n = TenhouLog::tileNumber(t);
         if (n < 0) {
             if (problems != nullptr && !problems->contains(QLatin1String(where))) {
@@ -239,6 +278,7 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
         QStringList doraCodes;
         QStringList uraCodes;
         QVector<int> scores(4, 25000);
+        QVector<int> settled(4, 25000);   // 本局「已结算到哪」：初值 = 本局起始点数板，每次结算后累加
         QJsonArray result;
         bool hora = false;
         bool openingUsed = false;
@@ -259,6 +299,7 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                         scores[k] = sc.at(k).toInt(scores.at(k));
                     }
                 }
+                settled = scores;   // 本局起始点数板 = 结算起点
                 sticks = e.body.value(QStringLiteral("round")).toObject()
                                  .value(QStringLiteral("riichi_sticks")).toInt(sticks);
                 if (doraCodes.isEmpty()) {
@@ -397,13 +438,8 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                 hora = true;
                 const int winner = e.body.value(QStringLiteral("winner")).toInt(-1);
                 const int from = e.body.value(QStringLiteral("from")).toInt(-1);
-                QJsonArray deltas;
-                for (const QJsonValue& v : e.body.value(QStringLiteral("score_delta")).toArray()) {
-                    deltas.append(v.toInt());
-                }
-                while (deltas.size() < 4) {
-                    deltas.append(0);
-                }
+                const QJsonArray deltas = netDelta(e.body, settled);
+                accumulateDelta(settled, deltas);
                 result.append(deltas);
                 // 和了明细：只有前两个元素（和了家 / 放銃家）被解析，其余是给人看的文字。
                 // 自摸时放銃家 = 和了家（参考实现与天鳳的约定）。
@@ -420,13 +456,8 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                 if (!hora && result.isEmpty()) {
                     result.append(drawStatusText(
                             e.body.value(QStringLiteral("reason")).toString()));
-                    QJsonArray deltas;
-                    for (const QJsonValue& v : e.body.value(QStringLiteral("score_delta")).toArray()) {
-                        deltas.append(v.toInt());
-                    }
-                    while (deltas.size() < 4) {
-                        deltas.append(0);
-                    }
+                    const QJsonArray deltas = netDelta(e.body, settled);
+                    accumulateDelta(settled, deltas);
                     result.append(deltas);
                 }
             }

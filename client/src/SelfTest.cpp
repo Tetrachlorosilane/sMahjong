@@ -2390,8 +2390,13 @@ int run(const QString& outDir)
                                        {QStringLiteral("tsumo"), true},
                                        {QStringLiteral("han"), 3},
                                        {QStringLiteral("fu"), 40},
+                                       // ⚠ 0 号位**立直过**：`score_delta` 不含他自己那 1000 点投入
+                                       //   （和了点 2000/1000/1000 + 赢家收走 1 根供託 1000），
+                                       //   权威的四家点数是 `scores_after` —— 导出必须用它算差分
                                        {QStringLiteral("score_delta"),
-                                        QJsonArray{-1000, 8000, -1000, -1000}},
+                                        QJsonArray{-2000, 5000, -1000, -1000}},
+                                       {QStringLiteral("scores_after"),
+                                        QJsonArray{22000, 30000, 24000, 24000}},
                                        {QStringLiteral("ura_indicators"),
                                         QJsonArray{QStringLiteral("2z")}}})));
 
@@ -2498,8 +2503,11 @@ int run(const QString& outDir)
         checkEq(res.at(0).toString(), QStringLiteral("和了"), QStringLiteral("牌谱：结果 = 和了"));
         checkEq(QString::number(res.at(1).toArray().size()), QStringLiteral("4"),
                 QStringLiteral("牌谱：和了后第 1 项是**四家点数增减**（不是和了家）"));
-        checkEq(QString::number(res.at(1).toArray().at(1).toInt()), QStringLiteral("8000"),
-                QStringLiteral("牌谱：点数增减来自 score_delta"));
+        checkEq(QString::number(res.at(1).toArray().at(1).toInt()), QStringLiteral("5000"),
+                QStringLiteral("牌谱：点数增减来自结算后的四家点数"));
+        checkEq(QString::number(res.at(1).toArray().at(0).toInt()), QStringLiteral("-3000"),
+                QStringLiteral("牌谱：差分 = scores_after − 本局起始点数（立直投入的 1000 点也算进来，"
+                               "不能抄 score_delta 的 -2000）"));
         const QJsonArray detail = res.at(2).toArray();
         checkEq(QString::number(detail.at(0).toInt()), QStringLiteral("1"),
                 QStringLiteral("牌谱：和了家"));
