@@ -220,7 +220,7 @@ java -jar server\build\mahjong-server.jar --selftest
 
 ```powershell
 client\dist\mahjong-client.exe --selftest client\build\st
-# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 816 项）；并产出 tiles.png / table.png / river_overflow.png
+# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 839 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
 覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
@@ -257,6 +257,7 @@ node tools\check-i18n.mjs        # 服务端每个码都有客户端译文（词
 node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）
+node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解（见 §8）
 ```
 

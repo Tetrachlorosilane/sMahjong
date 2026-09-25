@@ -347,11 +347,13 @@ export const EXTRA = {
   'ui.replay.no_round_result': '%1 还没打完，暂时没有结算可看',
   // 导出天鳳牌譜
   'ui.replay.export': '导出牌谱',
-  'ui.replay.export_hint': '导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）',
+  'ui.replay.export_hint': '导出天鳳牌譜（tenhou.net/6 原生 JSON，mjai-reviewer / Mortal 可直接复盘）',
   'ui.replay.export_title': '导出天鳳牌谱',
   'ui.replay.export_filter': '牌谱文本 (*.txt)',
   'ui.replay.export_done': '已导出 %1（%2 个小局）。把文件里那一行链接粘到浏览器即可在 tenhou.net/6 打开',
   'ui.replay.export_failed': '导出失败：%1',
+  'ui.replay.export_json': '牌谱 JSON（喂 mjai-reviewer / Mortal 用）已写到 %1',
+  'ui.replay.export_json_failed': '牌谱 JSON 写失败：%1',
   'ui.replay.export_mjlog': '完整牌谱（mjlog XML）已写到 %1',
   'ui.replay.export_mjlog_failed': '完整牌谱写失败：%1',
   // ---- 个人设置 / 材质包 ----

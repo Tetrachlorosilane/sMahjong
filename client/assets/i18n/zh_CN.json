@@ -413,7 +413,7 @@
   "ui.replay.export_done": "已导出 %1（%2 个小局）。把文件里那一行链接粘到浏览器即可在 tenhou.net/6 打开",
   "ui.replay.export_failed": "导出失败：%1",
   "ui.replay.export_filter": "牌谱文本 (*.txt)",
-  "ui.replay.export_hint": "导出天鳳牌譜（tenhou.net/6 的 #json= 链接形式，参考 wuye999/tenhou 的格式）",
+  "ui.replay.export_hint": "导出天鳳牌譜（tenhou.net/6 原生 JSON，mjai-reviewer / Mortal 可直接复盘）",
   "ui.replay.export_title": "导出天鳳牌谱",
   "ui.replay.export_mjlog": "完整牌谱（mjlog XML）已写到 %1",
   "ui.replay.export_mjlog_failed": "完整牌谱写失败：%1",
@@ -446,5 +446,7 @@
   "ui.lobby.bot_ai_default": "跟服务端默认",
   "ui.lobby.bot_ai_tip": "这一桌的机器人用哪一代 AI（清单由服务端给：内置老师 / 各代训练网络；选「跟服务端默认」就不指定）",
   "ui.main.bot_ai": "机器人 AI：",
-  "ui.main.bot_ai_tip": "房主开局前可换：这一桌的机器人用哪一代 AI（牌局进行中不可改）"
+  "ui.main.bot_ai_tip": "房主开局前可换：这一桌的机器人用哪一代 AI（牌局进行中不可改）",
+  "ui.replay.export_json": "牌谱 JSON（喂 mjai-reviewer / Mortal 用）已写到 %1",
+  "ui.replay.export_json_failed": "牌谱 JSON 写失败：%1"
 }

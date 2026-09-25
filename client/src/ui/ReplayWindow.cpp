@@ -701,6 +701,14 @@ QString ReplayWindow::exportTenhou(const QString& pathIn, QString* err)
         }
         return QString();
     }
+    // **纯 JSON**（同名 .json）：这一份才能直接喂 mjai-reviewer / Mortal 复盘
+    QString jsonPath = path;
+    if (jsonPath.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) {
+        jsonPath.chop(4);
+    }
+    jsonPath += QStringLiteral(".json");
+    QString jerr;
+    const bool jsonOk = TenhouLog::writeJsonFile(r, jsonPath, &jerr);
     // **完整牌谱**：同时写一份 mjlog XML（鸣牌/立直/和了细节都在）到同名 .xml
     QString xmlPath = path;
     if (xmlPath.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) {
@@ -712,6 +720,13 @@ QString ReplayWindow::exportTenhou(const QString& pathIn, QString* err)
     const bool mjOk = TenhouLog::writeMjlogFile(mj, xmlPath, &mjErr);
     // 把链接也留在状态栏（可以直接粘到浏览器打开 tenhou.net/6）
     setStatus(lang::t(QStringLiteral("ui.replay.export_done")).arg(path, QString::number(r.rounds)));
+    if (jsonOk) {
+        setStatus(m_status->text() + QStringLiteral(" | ")
+                  + lang::t(QStringLiteral("ui.replay.export_json")).arg(jsonPath));
+    } else {
+        setStatus(m_status->text() + QStringLiteral(" | ")
+                  + lang::t(QStringLiteral("ui.replay.export_json_failed")).arg(jerr));
+    }
     if (mjOk) {
         setStatus(m_status->text() + QStringLiteral(" | ")
                   + lang::t(QStringLiteral("ui.replay.export_mjlog")).arg(xmlPath));
