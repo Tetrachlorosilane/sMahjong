@@ -1605,5 +1605,45 @@ Turnstile，网页版只能由人在正常浏览器里点**（判据：不要在
 ② **裸 400 = 请求根本没到应用层**（体积/边缘策略），**带文字的 4xx/5xx 才是应用层的判断** ——
 排查这类问题先看响应体有没有内容。
 
+#### 9.6.4 第三轮：引擎报 "An error occurred during the task" —— 手牌账错位
+
+**报障原文**：用户把紧凑版贴上网页版提交，回了一段**通用建议**：
+
+> An error occurred during the task, please check your inputs.
+> Common causes: Rule violation or ruleset is not compatible. / A type of tile appears for more than 4
+> times. / Dora indicator is not set. / Total number of draws exceeds 70.
+
+**先做的事**：这段文字**我们的三层判据全过**（复刻校验器 / 上游探针 / 上游 CLI 都 exit 0），
+本地 mjai-reviewer 源码里也没有 —— 它是**网页端 wrapper 在引擎非零退出时贴的固定建议**。
+于是用 node 把 **Mortal（libriichi）源码包**拉下来看它到底校验什么：
+`libriichi/src/state/action.rs` 里是一串 `ensure!(cans.can_riichi …)` / `ensure!(tile == pai, "cannot tsumogiri")`
+—— **它把整条 mjai 流当状态机重放**，任何一步与它重建的手牌不符就整场拒收。
+真判据因此是：**每一手打的牌必须真在手里**。照这条写了个对账脚本（按家重建手牌），
+**用户那份文件立刻红了 2 处**，而且我们自己三份真实回放的导出也各有 1~3 处 —— 系统性问题。
+
+**两个根因**（都在 `client/src/model/TenhouLog.cpp`）：
+
+1. **庄家第 14 张是"猜"的**：`round_start.hand` 是**排序后**下发的 14 张，旧实现 `takeLast()` 取最后一张
+   当"刚摸到的"。服务端其实**点名**了（`round_start.drawn`，AGENTS §2.3-11 早写明了），
+   摸到 1m 而手里有 9s 时就取错。错一张 → 复盘器认为那张"已经打掉"，若干巡后真的手切它时
+   就变成**打出手里没有的牌**。实测：`817KM3B87X` 第 10/11 局、我们自己 `28JA8V5646` 第 14 局。
+   修法：用 `drawn`（取不到时才退回 `takeLast()`）。
+2. **鸣牌串把被鸣那张的码复制 n 份**：手里那两张可能是**普通五**、被鸣的是**赤五**（反之亦然）。
+   旧实现写 `sameTile(calledCode, 3/4)` → `5151p51`（碰红五却写成 3 张红五），复盘器据此重建手牌
+   会发现"你手里有 3 张赤五"，同样对不上。修法：用 `meld.tiles` 里的**真实牌码**，只把被鸣/被加那张
+   放到关键字后面（`nakiTilesReal`）。实测 `8N0MRN0P0A` 第 8 局 → 修后串是 `1515p51` ✓。
+
+**判据固化**：`tools/tenhou-log-check.mjs` 新增**第 ⑧ 条「手牌账」**（按家重建手牌，逐手验
+"打的牌在手里 / 摸切 = 刚摸到的 / 鸣牌要的牌在手里 / 收尾张数 = 13 − 3×副露"）。
+红证：**用户提交的那份文件在本地就能复现同两处错误**；修后三份真实回放全绿。
+自检也加了一条断言：庄家第一次摸牌必须等于 `drawn` 点名的那张（夹具特意把第 14 张设成 `3m`
+—— 排序后它在中间，旧启发式必然取错）。
+
+⚠ **两条给未来的教训**：
+① **"结构对"不等于"能复盘"** —— 复盘器是状态机，手牌账错一步就整场拒收；导出格式再动，第 ⑦⑧ 条都要跑。
+② 排障先分清**是谁在报错**：网页端裸 400 是体积门限、`403 invalid captcha` 是验证码、
+这段"通用建议"是**引擎**的 —— 三者处置完全不同。
+
+
 
 

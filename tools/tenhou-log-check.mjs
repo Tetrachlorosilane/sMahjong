@@ -21,8 +21,10 @@
  *   ⑥ 结果：`和了` → `["和了", 四家增减, [和了家, 放銃家, …], …]`（成对）；否则 `[状态字, 四家增减]`
  *   ⑦ 点数账：四家增减 == 相邻两局点数板之差；`sum(点数) + 1000 × 桌上立直棒 == 100000` 全程成立
  *      （⚠ 抄 `score_delta` 会漏掉各家自己立直扣的 1000 点 → 这条专门抓它）
+ *   ⑧ 手牌账：按复盘器的账本重放每一家 —— 每一手打的牌必须真在手里、摸切 = 刚摸到的那张、
+ *      鸣牌要的那几张必须真在手里（⚠ 结构对了这条仍可能红：复盘器是状态机重放，错一步整场拒收）
  *
- * ⚠ 这是**格式 + 点数账**校验，不是规则校验（不判和牌是否合法、番符对不对）。
+ * ⚠ 这是**格式 + 点数账 + 手牌账**校验，不是规则校验（不判和牌是否合法、番符对不对）。
  */
 import { readFileSync } from 'node:fs';
 
@@ -457,6 +459,98 @@ function checkScores(root, errs) {
     });
 }
 
+/**
+ * ⑧ 手牌账：按复盘器的账本重放每一家 —— **每一手打的牌必须真在手里**、摸切必须等于刚摸到的那张、
+ *    鸣牌要的那几张必须真在手里。
+ *
+ * 为什么必须有这条：结构/配对都过了，牌谱仍然可能"看着对、打起来不对" ——
+ * 复盘器（Mortal/libriichi）是把整条流当**状态机**重放的，一旦某一步对不上就整场拒收
+ * （网页端只会给一句 "An error occurred during the task, please check your inputs."）。
+ * 实测踩过的两个：① 庄家第 14 张取"排序后最后一张"而不是服务端点名的 `drawn`（错一张，
+ * 若干巡后就变成打出手里没有的牌）；② 鸣牌串把被鸣那张的码复制 n 份（手里是普通五、
+ * 被鸣的是赤五时，复盘器会以为你手里有 3 张赤五）。
+ *
+ * ⚠ 对齐规则：`出` 表里的 `0` 是**大明杠那一巡的占位**，与 `取` 表里的 `m…` 串一一对应 ——
+ * 不能先滤掉它，否则那一巡之后全体错位一格。
+ */
+function checkHands(root, errs) {
+    (root.log || []).forEach((k, ki) => {
+        if (!Array.isArray(k) || k.length < 17) return;
+        const tag = `第${ki + 1}局`;
+        for (let seat = 0; seat < 4; seat++) {
+            const hand = new Map();
+            const add = (t) => hand.set(t, (hand.get(t) ?? 0) + 1);
+            const take = (t) => {
+                const n = hand.get(t) ?? 0;
+                if (n <= 0) return false;
+                hand.set(t, n - 1);
+                return true;
+            };
+            for (const code of k[4 + 3 * seat]) {
+                const n = parseInt(code, 10);
+                if (VALID_TILES.has(n)) add(n);
+            }
+            const takes = k[5 + 3 * seat];
+            const disc = k[6 + 3 * seat];
+            let melds = 0;
+            for (let i = 0; i < takes.length; i++) {
+                const tk = takes[i], d = disc[i];
+                let drawn = null;
+                if (typeof tk === 'number') {
+                    add(tk);
+                    drawn = tk;
+                } else if (typeof tk === 'string') {
+                    const parsed = parseNaki(tk, seat, `${tag} 座位${seat} 的取表`);
+                    if (parsed.error) { errs.push(parsed.error); break; }
+                    // 手里那几张 = 除"被鸣那张"（关键字后面那张）以外的
+                    const calledIdx = parsed.keyPos / 2;
+                    const nums = nakiTiles(tk, parsed.keyPos).map((p) => parseInt(p, 10));
+                    nums.forEach((n, idx) => {
+                        if (idx === calledIdx) return;
+                        if (!take(n)) {
+                            errs.push(`${tag} 座位${seat} 第${i}巡：鸣牌串 ${tk} 要的手牌 ${n} 不在手里`);
+                        }
+                    });
+                    if (parsed.kind !== 'kakan') melds++;
+                }
+                if (d === undefined) break;                 // 和了那一手没有出牌
+                if (d === 0) {
+                    if (!(typeof tk === 'string' && tk.includes('m'))) {
+                        errs.push(`${tag} 座位${seat} 第${i}巡：出表里的 0 占位对不上（取=${JSON.stringify(tk)}）`);
+                    }
+                    continue;
+                }
+                if (typeof d === 'number') {
+                    if (d === 60) {
+                        if (drawn === null) errs.push(`${tag} 座位${seat} 第${i}巡：摸切但这一巡没摸到牌`);
+                        else if (!take(drawn)) errs.push(`${tag} 座位${seat} 第${i}巡：摸切 ${drawn} 不在手里`);
+                    } else if (!take(d)) {
+                        errs.push(`${tag} 座位${seat} 第${i}巡：手切 ${d} 不在手里`
+                            + `（手里=${[...hand.entries()].filter(([, n]) => n > 0).map(([t, n]) => t + (n > 1 ? '×' + n : '')).join(' ')}）`);
+                    }
+                } else if (d.startsWith('r')) {
+                    const code = d.slice(1);
+                    const t = code === '60' ? drawn : parseInt(code, 10);
+                    if (t === null || !take(t)) errs.push(`${tag} 座位${seat} 第${i}巡：立直宣言牌 ${d} 不在手里`);
+                } else if (d[0] === 'k') {
+                    const parsed = parseNaki(d, seat, `${tag} 座位${seat} 的出表`);
+                    if (parsed.error) { errs.push(parsed.error); break; }
+                    if (!take(parsed.called)) errs.push(`${tag} 座位${seat} 第${i}巡：加杠的第 4 张 ${parsed.called} 不在手里`);
+                } else if (d[0] === 'a') {
+                    const nums = nakiTiles(d, 6).map((p) => parseInt(p, 10));
+                    for (const n of nums) if (!take(n)) errs.push(`${tag} 座位${seat} 第${i}巡：暗杠 ${n} 不在手里`);
+                    melds++;
+                }
+            }
+            const left = [...hand.values()].reduce((a, b) => a + b, 0);
+            const expect = 13 - 3 * melds;
+            if (left !== expect && left !== expect + 1) {
+                errs.push(`${tag} 座位${seat}：收尾手牌 ${left} 张（期望 ${expect} 或 ${expect + 1}，副露 ${melds}）`);
+            }
+        }
+    });
+}
+
 function checkFile(path) {
     const errs = [];
     let root;
@@ -477,6 +571,7 @@ function checkFile(path) {
     }
     (root.log || []).forEach((k, i) => checkKyoku(k, i, errs));
     checkScores(root, errs);
+    checkHands(root, errs);
     return errs.map((e) => `${path}: ${e}`);
 }
 

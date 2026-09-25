@@ -97,6 +97,38 @@ QStringList sameTile(const QString& dig, int n)
 }
 
 /**
+ * 一副露里那几张牌的**真实牌码**（吃 / 碰 / 大明杠 / 加杠 / 暗杠通用）。
+ *
+ * 服务端在 `meld.tiles` 里给的就是这一副露的每一张 —— **含被鸣/被加的那张**，
+ * 而且赤五与普通五各有各的码。⛔ 不能把被鸣那张的码复制 n 份：手里那几张可能是
+ * **普通五**而被鸣的是**赤五**（反之亦然），复制出来的串会让复盘器以为"你手里有 3 张赤五"，
+ * 重建手牌时就变成**打出手里没有的牌**（v1.10.3 及以前的实际故障，见 NOTES §9.6.4）。
+ *
+ * @param codes  事件里的 `meld.tiles` 原始码
+ * @param called 被鸣/被加那张的码（取自牌河或 `called_tile`）
+ * @param at     它在一副露里的**下标**（关键字插在它前面；暗杠固定 3 → `a` 落在 [6]）
+ */
+QStringList nakiTilesReal(const QStringList& codes, const QString& called, int at)
+{
+    QStringList rest;
+    const int calledKind = mj::kindOfTile(called);
+    bool dropped = false;
+    for (const QString& c : codes) {
+        // 只在"同种"里去掉一张 —— 那张就是被鸣/被加的那张（赤五与普通五算同种）
+        if (!dropped && calledKind >= 0 && mj::kindOfTile(c) == calledKind) {
+            dropped = true;
+            continue;
+        }
+        rest << digits(c);
+    }
+    if (at < 0 || at > rest.size()) {
+        at = qBound(0, at, rest.size());
+    }
+    rest.insert(at, digits(called));
+    return rest;
+}
+
+/**
  * 流局原因码（协议里是 ASCII）→ 天鳳牌譜里的**状态字**（查看器/解析器按它显示）。
  * `results[0]` 只要不是魔法串 `和了` 就一律按流局处理，所以途中流局写状态字即可。
  */
@@ -309,8 +341,20 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                     }
                 }
                 if (tiles.size() == 14 && !openingUsed) {
-                    // 庄家的第 14 张 = 他本局的**第一次摸牌**（配牌只写 13 张）
-                    const QString extra = tiles.takeLast();
+                    // 庄家的第 14 张 = 他本局的**第一次摸牌**（配牌只写 13 张）。
+                    // ⚠ 必须用服务端**点名**的 `round_start.drawn`（AGENTS §2.3-11）：配牌是**排序后**下发的，
+                    //   取"最后一张"只是碰巧对（摸到 1m 而手里有 9s 时就会取错），
+                    //   而**取错会让整场账对不上** —— 复盘器按"这一张是摸到的、那张还在手里"重建手牌，
+                    //   错一张就会在若干巡之后出现"打出手里没有的牌"，引擎直接报
+                    //   "An error occurred during the task, please check your inputs."（NOTES §9.6.4）。
+                    const QString drawn = e.body.value(QStringLiteral("drawn")).toString();
+                    QString extra;
+                    if (!drawn.isEmpty() && tiles.contains(drawn)) {
+                        extra = drawn;
+                        tiles.removeOne(drawn);
+                    } else {
+                        extra = tiles.takeLast();     // 老服务端不发 `drawn` 时的兜底
+                    }
                     openingUsed = true;
                     const int n = tileNumber(extra);
                     if (n >= 0) {
@@ -383,37 +427,27 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                 if (cd.isEmpty()) {
                     out.problems << QStringLiteral("bad_meld_tile");
                 } else if (kind == QLatin1String("chi")) {
-                    // 另外两张 = 副露里除了"和被鸣那张同种"的一张（赤五与普通五算同种）
-                    bool dropped = false;
-                    const int calledKind = mj::kindOfTile(called);
-                    QStringList own;
-                    for (const QString& c : codes) {
-                        if (!dropped && mj::kindOfTile(c) == calledKind) {
-                            dropped = true;
-                            continue;
-                        }
-                        own << digits(c);
-                    }
-                    while (own.size() < 2) {
-                        own << cd;
-                    }
+                    // 吃只能来自上家：关键字在 [0]，被鸣那张紧跟其后
                     takes[seat].append(nakiString(QLatin1Char('c'),
-                                                  QStringList { cd, own.at(0), own.at(1) }, 0));
+                                                  nakiTilesReal(codes, called, 0), 0));
                 } else if (kind == QLatin1String("pon")) {
-                    takes[seat].append(nakiString(QLatin1Char('p'), sameTile(cd, 3),
+                    takes[seat].append(nakiString(QLatin1Char('p'),
+                                                  nakiTilesReal(codes, called, nakiKeyAt(QLatin1Char('p'), rel)),
                                                   nakiKeyAt(QLatin1Char('p'), rel)));
                 } else if (kind == QLatin1String("daiminkan")) {
-                    takes[seat].append(nakiString(QLatin1Char('m'), sameTile(cd, 4),
+                    takes[seat].append(nakiString(QLatin1Char('m'),
+                                                  nakiTilesReal(codes, called, nakiKeyAt(QLatin1Char('m'), rel)),
                                                   nakiKeyAt(QLatin1Char('m'), rel)));
                     // 大明杠在「出」里留一个 `0` 空位：参考实现的 finalize_discards 靠它对齐（解析时删掉）
                     discards[seat].append(0);
                 } else if (kind == QLatin1String("kakan")) {
-                    discards[seat].append(nakiString(QLatin1Char('k'), sameTile(cd, 4),
+                    discards[seat].append(nakiString(QLatin1Char('k'),
+                                                     nakiTilesReal(codes, called, nakiKeyAt(QLatin1Char('k'), rel)),
                                                      nakiKeyAt(QLatin1Char('k'), rel)));
                 } else if (kind == QLatin1String("ankan")) {
                     // 暗杠的 `a` **只能**在 [6]：三张两两一组 + a + 第 4 张
                     discards[seat].append(
-                            nakiString(QLatin1Char('a'), sameTile(cd, 4), 3));
+                            nakiString(QLatin1Char('a'), nakiTilesReal(codes, called, 3), 3));
                 } else {
                     out.problems << QStringLiteral("unknown_meld_kind");
                 }

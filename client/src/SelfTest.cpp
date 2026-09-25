@@ -2276,6 +2276,8 @@ int run(const QString& outDir)
                                            {QStringLiteral("seat"), s},
                                            {QStringLiteral("dealer"), 0},
                                            {QStringLiteral("hand"), hand},
+                                           // ⚠ 这一张必须由服务端**点名**（配牌是排序后下发的，推不出来）
+                                           {QStringLiteral("drawn"), extra},
                                            {QStringLiteral("round"),
                                             obj({{QStringLiteral("bakaze"), QStringLiteral("E")},
                                                  {QStringLiteral("kyoku"), 1},
@@ -2324,7 +2326,8 @@ int run(const QString& outDir)
                                       {QStringLiteral("honba"), 0},
                                       {QStringLiteral("dealer"), 0},
                                       {QStringLiteral("wall"), wall3}})));
-        seatStart(1, 0, QStringLiteral("9s"));   // 庄家：配牌 13 + 第 14 张 9s
+        seatStart(1, 0, QStringLiteral("3m"));   // 庄家：配牌 13 + 第 14 张 3m（**排序后不在最后** ——
+                                                 //   这里刻意选 3m 而不是 9s/4p，专门钉"必须用 drawn 点名"）
         seatStart(2, 1, QString());
         seatStart(3, 2, QString());
         seatStart(4, 3, QString());
@@ -2459,8 +2462,9 @@ int run(const QString& outDir)
         const QJsonArray t0 = g.at(5).toArray();
         checkEq(QString::number(t0.size()), QStringLiteral("5"),
                 QStringLiteral("牌谱：座位 0 取了 5 次（配牌第 14 张 + 摸 3 次 + 大明杠 1 次）"));
-        checkEq(QString::number(t0.at(0).toInt()), QStringLiteral("39"),
-                QStringLiteral("牌谱：庄家第一次摸牌 = 配牌那张第 14 张（9s → 39）"));
+        checkEq(QString::number(t0.at(0).toInt()), QStringLiteral("13"),
+                QStringLiteral("牌谱：庄家第一次摸牌 = 服务端 `drawn` 点名的那张（3m → 13）；"
+                               "⛔ 不能取排序后的最后一张（那份配牌排序最后是 4p → 24）"));
         checkEq(t0.at(2).toString(), QStringLiteral("m47474747"),
                 QStringLiteral("牌谱：大明杠 7z 自下家 → `m` 在 [0]、被鸣那张紧跟其后（9 字符）"));
         const QJsonArray d0 = g.at(6).toArray();

@@ -56,7 +56,11 @@
 11. **「哪张是刚摸到的」只能由服务端点名**（`round_start.drawn`，仅庄家），客户端不许猜；
     **出牌取牌只认牌码**（`Round.pickDiscardId`）；⚠ **手切要从"除摸牌位之外"的暗手里取**
     （同码牌在按 id 排序的 `hand[]` 里谁先撞上纯属偶然）——否则动画/牌谱的手切被演成摸切。
-    客户端对账也按牌码，顺序不能反。（NOTES §2.3-11）
+    客户端对账也按牌码，顺序不能反。
+    ⚠ **牌谱导出踩过同一条**：庄家第 14 张若取"排序后最后一张"而不是 `drawn`，整场手牌账会错位，
+    复盘器（状态机重放）会直接拒收整份牌谱；**鸣牌串也必须写真实牌码**（赤五 51/52/53 与普通五
+    15/25/35 是两套码，别把被鸣那张复制 n 份）。判据：`tools/tenhou-log-check.mjs` 的第 ⑧ 条。
+    （NOTES §2.3-11、§9.6.4）
 12. **振听有三种，且「自己打出过的牌」≠「牌河」**：舍张振听要算上**被鸣走的舍牌**
     （唯一记账点 `Round.recordDiscard`，账在 `discardKindsEver`）；同巡振听在被给 `ron` 却见逃
     （含超时未答）时置位、自家下次摸牌解除；立直见逃 → `furitenPerm` 到本局结束。
@@ -220,7 +224,7 @@ java -jar server\build\mahjong-server.jar --selftest
 
 ```powershell
 client\dist\mahjong-client.exe --selftest client\build\st
-# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 839 项）；并产出 tiles.png / table.png / river_overflow.png
+# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 841 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
 覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
