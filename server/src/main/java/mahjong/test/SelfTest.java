@@ -101,6 +101,7 @@ public final class SelfTest {
         neuralForwardTests();
         hybridPolicyTests();
         samplingPolicyTests();
+        botAiTests();
         System.out.println();
         System.out.println("通过 " + pass + " 项，失败 " + fail + " 项");
         if (fail > 0) {
@@ -5304,6 +5305,193 @@ public final class SelfTest {
             p.finalScores[i] = t.seat(i).score;
         }
         return p;
+    }
+
+    /**
+     * **机器人用哪一代 AI**（`mahjong.ai.BotAis` + `Table.setBotAi`）。
+     *
+     * <p>判据分三层：
+     * <ol>
+     *   <li><b>注册表是服务端白名单</b>：名字合法、策略串在**启动期**就校验（坏路径/坏魔数
+     *       立刻抛，而不是等开局）；`--bot-ai-dir` 扫描按目录名注册、坏权重**跳过不炸**；</li>
+     *   <li><b>未知名字被拒</b>：`Table.setBotAi("没这个")` 返回 false 且**不改**当前值
+     *       —— 客户端只能选名字，服务端绝不去猜；</li>
+     *   <li><b>真的换了 AI</b>：注册一个 `gen-first → first`（恒选第一个合法动作），
+     *       整局逐决策断言"实际动作 == 第一个合法动作"，并配一条非空转对照
+     *       （同一探针下内置老师的动作**必须**有若干处不同）—— 否则"两边一样"什么也证明不了。
+     *       另外钉住可复现（同 seed 两遍逐条相同）。</li>
+     * </ol>
+     */
+    private static void botAiTests() {
+        // ---- ① 注册表 ----
+        mahjong.ai.BotAis.clear();
+        check("机器人 AI：出厂清单含 teacher/first/pass/random",
+                mahjong.ai.BotAis.names().containsAll(java.util.List.of(
+                        "teacher", "first", "pass", "random")));
+        eq("机器人 AI：默认是 teacher（= 改造前的行为）", mahjong.ai.BotAis.defaultAi(), "teacher");
+
+        mahjong.ai.BotAis.register("gen-first", "first");
+        eq("机器人 AI：注册后能查到策略串", mahjong.ai.BotAis.spec("gen-first"), "first");
+        check("机器人 AI：注册后拿得到工厂", mahjong.ai.BotAis.factory("gen-first") != null);
+        check("机器人 AI：未注册的名字查不到（返回 null，不猜）",
+                mahjong.ai.BotAis.spec("没这个") == null && !mahjong.ai.BotAis.has("没这个"));
+
+        int bad = 0;
+        for (String n : new String[]{"", "  ", "a,b", "a@b", "a#b", "一张网"}) {
+            try {
+                mahjong.ai.BotAis.register(n, "teacher");
+            } catch (IllegalArgumentException e) {
+                bad++;
+            }
+        }
+        eq("机器人 AI：坏名字（空 / 含 , @ # / 非 ASCII）一律拒绝", bad, 6);
+        boolean specLeak = false;
+        for (Object o : mahjong.ai.BotAis.json()) {
+            Map<String, Object> m = Json.asObj(o);
+            if (m != null && m.containsKey("spec")) {
+                specLeak = true;
+            }
+        }
+        check("机器人 AI：发给客户端的清单**不含策略串**（那是服务器本机路径）", !specLeak);
+        boolean threw = false;
+        try {
+            mahjong.ai.BotAis.register("坏权重", "net:Z:/definitely-not-here/net.bin");
+        } catch (RuntimeException e) {
+            threw = true;
+        }
+        check("机器人 AI：权重不存在时**注册期**就报错（不是等开局才发现）", threw);
+        threw = false;
+        try {
+            mahjong.ai.BotAis.setDefault("没这个");
+        } catch (IllegalArgumentException e) {
+            threw = true;
+        }
+        check("机器人 AI：默认只能设成已注册的名字", threw);
+
+        // ---- ② 扫目录（`--bot-ai-dir`）：按目录名注册，坏权重跳过不炸 ----
+        java.nio.file.Path tmp = null;
+        try {
+            tmp = java.nio.file.Files.createTempDirectory("botai");
+            java.nio.file.Files.createDirectories(tmp.resolve("zgood"));
+            java.nio.file.Files.createDirectories(tmp.resolve("yempty"));
+            java.nio.file.Files.createDirectories(tmp.resolve("xbad"));
+            java.nio.file.Files.write(tmp.resolve("xbad").resolve("net.bin"), new byte[]{1, 2, 3, 4});
+            java.nio.file.Path golden = goldenNetFile();
+            if (golden != null) {
+                java.nio.file.Files.copy(golden, tmp.resolve("zgood").resolve("net.bin"));
+            }
+            mahjong.ai.BotAis.scanDir(tmp);
+            if (golden != null) {
+                check("机器人 AI：扫目录按**目录名**注册（含 net.bin 的才算）",
+                        mahjong.ai.BotAis.has("zgood") && !mahjong.ai.BotAis.has("yempty"));
+            }
+            check("机器人 AI：坏权重只跳过（不让整个服务起不来）", !mahjong.ai.BotAis.has("xbad"));
+        } catch (java.io.IOException e) {
+            check("机器人 AI：扫目录用例不该抛 IO 异常", false);
+        } finally {
+            if (tmp != null) {
+                try {
+                    java.nio.file.Files.walk(tmp)
+                            .sorted(java.util.Comparator.reverseOrder())
+                            .forEach(p -> p.toFile().delete());
+                } catch (java.io.IOException ignored) {
+                    // 清理失败不影响判据
+                }
+            }
+        }
+        threw = false;
+        try {
+            mahjong.ai.BotAis.scanDir(java.nio.file.Path.of("Z:/definitely-not-here"));
+        } catch (IllegalArgumentException e) {
+            threw = true;
+        }
+        check("机器人 AI：扫一个不存在的目录要报错（不是静默注册 0 个）", threw);
+
+        // ---- ③ 桌子：换 AI / 拒未知 / 真的换了行为 / 可复现 ----
+        mahjong.ai.BotAis.register("gen-first", "first");
+        final long seed = 20260925L;
+        List<String> firstChosen = new ArrayList<>();
+        List<String> firstLegal = new ArrayList<>();
+        int[] mismatch = {0};
+        Table t = botAiProbe(seed, "gen-first", firstChosen, firstLegal, mismatch);
+        eq("机器人 AI：未知名字被拒（返回 false）", t.setBotAi("没这个"), false);
+        eq("机器人 AI：被拒之后当前值不变", t.botAi(), "gen-first");
+        check("机器人 AI：换 AI 之后整局动作 == 第一个合法动作（逐条；决策 "
+                + firstChosen.size() + " 条，不符 " + mismatch[0] + " 条）",
+                mismatch[0] == 0 && !firstChosen.isEmpty());
+        check("机器人 AI：机器人座位真的装了策略（policy != null）",
+                t.policy[0] != null && t.policy[1] != null);
+
+        List<String> again = new ArrayList<>();
+        int[] mismatch2 = {0};
+        botAiProbe(seed, "gen-first", again, new ArrayList<>(), mismatch2);
+        eq("机器人 AI：同 seed 两遍逐条相同（可复现）",
+                String.join("\n", again), String.join("\n", firstChosen));
+
+        List<String> teacherChosen = new ArrayList<>();
+        int[] mismatch3 = {0};
+        botAiProbe(seed, "", teacherChosen, new ArrayList<>(), mismatch3);
+        int diff = 0;
+        for (int i = 0; i < Math.min(firstChosen.size(), teacherChosen.size()); i++) {
+            if (!firstChosen.get(i).equals(teacherChosen.get(i))) {
+                diff++;
+            }
+        }
+        check("机器人 AI：非空转对照 —— 换成 `first` 后与内置老师的决策**有差异**（实际 "
+                + diff + " / " + Math.min(firstChosen.size(), teacherChosen.size()) + " 处）", diff > 0);
+
+        // `setBotAi("")` = 恢复"跟服务端默认"
+        eq("机器人 AI：空名字 = 恢复跟服务端默认", t.setBotAi(""), true);
+        eq("机器人 AI：恢复后 botAi() 就是服务端默认", t.botAi(), mahjong.ai.BotAis.defaultAi());
+
+        // 座位名要带上一代（玩家得看得出在跟谁打）；默认 teacher 时保持 CPU-N 原名
+        mahjong.ai.BotAis.register("gen-first", "first");
+        Table named = new Table("NAME", "命名", Rules.defaults());
+        named.addBot(0);
+        named.addBot(1);
+        eq("机器人 AI：默认（teacher）时座位名还是 CPU-1 / CPU-2",
+                named.seat(0).name + "|" + named.seat(1).name, "CPU-1|CPU-2");
+        named.setBotAi("gen-first");
+        eq("机器人 AI：选了非默认 AI 后座位名带上它（一眼看出在跟谁打）",
+                named.seat(0).name + "|" + named.seat(1).name,
+                "CPU-1·gen-first|CPU-2·gen-first");
+        named.removeBot(0);
+        eq("机器人 AI：移掉一个之后重新编号（不给玩家看空号）",
+                named.seat(1).name, "CPU-1·gen-first");
+
+        mahjong.ai.BotAis.clear();
+    }
+
+    /**
+     * 机器人 AI 的探针：四家都是机器人、都装同一代 AI，记录每一条决策的
+     * 「实际动作」与「第一个合法动作」（用来判"是不是真的换成了 `first`"）。
+     */
+    private static Table botAiProbe(long seed, String ai, List<String> chosen,
+                                    List<String> firstLegal, int[] mismatch) {
+        Table t = new Table("BOTAI", "机器人 AI 探针", Rules.defaults());
+        t.botDelayMs = 0;
+        t.roundDelayMs = 0;
+        t.debugDeterministicSeed = true;
+        t.debugMaxHands = PROBE_HANDS;
+        t.seedBase = seed;
+        if (!ai.isEmpty()) {
+            t.setBotAi(ai);
+        }
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+        }
+        t.debugChoiceTap = (d, cmd) -> {
+            mahjong.ai.Action a = mahjong.ai.Action.resolve(cmd, d.legal());
+            chosen.add(a == null ? "<非法回包>" : a.key());
+            java.util.List<mahjong.ai.Action> legal = d.legal();
+            String first = legal.isEmpty() ? "" : legal.get(0).key();
+            firstLegal.add(first);
+            if (a == null || !a.key().equals(first)) {
+                mismatch[0]++;
+            }
+        };
+        t.playGame();
+        return t;
     }
 
     /**

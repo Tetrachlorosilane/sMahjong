@@ -306,7 +306,11 @@ public final class Session {
                 pid = server.nextPid();
                 token = Long.toHexString(TOKEN_RNG.nextLong());
                 welcomed = true;
-                send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1));
+                send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1,
+                        // 服务端可选用的机器人 AI 清单（名字 + 策略串 + 哪个是默认）。
+                        // ⚠ 只发**名字**给客户端选，路径不出服务端：`net:<路径>` 是服务器本机文件，
+                        // 让客户端传串就等于开放任意文件读（见 `mahjong.ai.BotAis` 的说明）。
+                        "bot_ais", mahjong.ai.BotAis.json()));
                 // 身份这时候才算"人到齐"（uuid + 昵称）：第一次来的人在这里建档案，
                 // 早一步回过 uuid 的人在这里补上昵称、并试着接回掉线的座位。
                 if (uuid != null) {
@@ -381,10 +385,19 @@ public final class Session {
                 }
                 String rname = Json.str(msg, "name", name + " 的房间");
                 Map<String, Object> rulesJson = Json.map(msg, "rules");
+                // 建桌时就可以指定"机器人用哪一代 AI"（可选；名字必须在服务端注册表里）
+                String wantAi = Json.str(msg, "bot_ai", "").trim();
+                if (!wantAi.isEmpty() && !mahjong.ai.BotAis.has(wantAi)) {
+                    sendError("bad_bot_ai", wantAi);
+                    return;
+                }
                 Table t = server.createTable(rname, rulesJson, this);
                 if (t == null) {
                     sendError("no_room");
                     return;
+                }
+                if (!wantAi.isEmpty()) {
+                    t.setBotAi(wantAi);
                 }
                 // 房间状态类命令一律在桌子锁里做（见 Table.roomLock 的说明）：
                 // 等待室命令跑在各连接自己的线程上，判据 + 改座位 + 广播必须是一个原子步。
@@ -542,6 +555,35 @@ public final class Session {
                         return;
                     }
                     t.removeBot(wantSeat);
+                    t.broadcastRoom();
+                }
+                break;
+            }
+            case "set_bot_ai": {
+                // 换"机器人用哪一代 AI"（房主、等待室里）。
+                // ⚠ 只认**名字**：客户端传 `net:<路径>` 一律当未注册拒掉 —— 那是服务器本机文件，
+                // 让房间指定路径就等于把"读服务器任意文件"开放出去（`ai/BotAis` 的说明）。
+                Table t = table;
+                if (t == null) {
+                    sendError("no_room");
+                    return;
+                }
+                if (pid != t.hostPid) {
+                    sendError("not_host");
+                    return;
+                }
+                String ai = Json.str(msg, "ai", "").trim();
+                synchronized (t.roomLock()) {
+                    if (t.playing) {
+                        // 与 add_bot / remove_bot 同一口径：牌局进行中不换（否则同一场里四家
+                        // 用着两代 AI，回放与统计都对不上"这一场是谁在打"）。
+                        Log.warn("忽略牌局进行中的 set_bot_ai");
+                        return;
+                    }
+                    if (!t.setBotAi(ai)) {
+                        sendError("bad_bot_ai", ai);
+                        return;
+                    }
                     t.broadcastRoom();
                 }
                 break;

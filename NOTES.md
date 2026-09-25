@@ -318,7 +318,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | `--selftest [outdir]` | 自检 + 出图 |
 | `--lobbytest <host> <port>` | 大厅 UI 回归：连上后「建房间」按钮是否可用，并真的点它建房 |
 | `--autoplay <host> <port> [--name 名] [--timeout 秒]` | 真连服务端自走一整场，写 `autoplay.log` |
-| `--demo <host> <port> [--bots N] [--no-answer] [--shot png] [--after 秒]` | 起 GUI 自动进房；`--no-answer` = 建房但不自动应答（截图用）；`--shot` 定时出图后退出（**优先抓活动顶层窗口**，否则拍不到弹窗） |
+| `--demo <host> <port> [--bots N] [--bot-ai 名字] [--no-answer] [--shot png] [--after 秒]` | 起 GUI 自动进房；`--bot-ai` = 建房时指定"机器人用哪一代 AI"（名字在服务端清单里）；`--no-answer` = 建房但不自动应答（截图用）；`--shot` 定时出图后退出（**优先抓活动顶层窗口**，否则拍不到弹窗） |
 | `--replay <host> <port> [回放ID] [--wall] [--god] [--step N] [--result] [--export-tenhou out.txt] [--shot png]` | 打开回放窗口（`--wall` 牌山 / `--god` 他家手牌 / `--step N` 第 N 步 / `--result` 本局结算 / `--export-tenhou` 导出天鳳牌谱后退出）：复盘与 L4 截图都用它 |
 | `--gentiles <outdir> [字体路径]` | 用字体把 Unicode 麻将牌字形**轮廓化**成 SVG 素材（见 §9） |
 | `--fontprobe <out.png> [字体路径] [轮次]` | 渲染候选输入串，**实测字体的连字语法**；轮次 1=总览 / 2=组合符放大 |
@@ -944,6 +944,42 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   宝牌由发牌决定，靠运气会出现"同一手牌恰好撞上宝牌"的假红（这条真踩过）。
 - ⚠ `SelfTest.endGameTests` 的种子（现在是 **55**）是**扫出来的**：改 teacher 的行为之后它会换结果，
   那时**重新扫一个**（临时探针跑一批 seeds，看 `round_end.round.riichi_sticks`），别把断言改松。
+
+### 「机器人用哪一代 AI」（2026-09，`mahjong.ai.BotAis`）
+
+背景：训练侧已经攒了 `bc-003 / awr-002 / ppo-g01..g04 / ppo2-g01..g04` 这些导出好的 `net.bin`，
+但**只有自对弈 CLI（`--policy`）能选**；联网对局里的机器人座位永远只有内置牌效机器人。
+于是加了"房间可以选机器人用哪一代"。
+
+- **服务端注册表**（`ai/BotAis.java`，进程级静态，与 `PlayerStore`/`ReplayStore` 同套路）：
+  `--bot-ai <名字>`（默认用哪个）、`--bot-ai-reg <名=串>`（注册一个，可重复）、
+  `--bot-ai-dir <目录>`（**扫描目录**：每个含 `net.bin` 的一级子目录按目录名注册 —— 正好是
+  "各代 checkpoint"，实测挂 `S:\mahjong-training\ckpt` 一次注册了 **20** 个）。
+  出厂清单永远含 `teacher/first/pass/random`（客户端至少要有一个能选，`teacher` 还是"改造前行为"的锚点）。
+  ⚠ **注册即在启动期加载并校验权重**：坏路径/坏魔数/坏维度**当场报错退出**（不是开了房间打到一半才发现）；
+  但 `--bot-ai-dir` 里**单个坏权重只打 WARN 跳过** —— 一个半截文件不该让整个服务起不来。
+- **为什么必须是白名单**：策略串里的 `net:<路径>` 是**服务器本机文件**。让客户端传串，就等于
+  把"读服务器任意文件"开放出去（`net:/etc/passwd`、`net:C:\Windows\win.ini` 都会被当权重去读）。
+  所以协议里客户端**只发名字**（`name`），路径只由启动参数决定；`hello_ok.bot_ais` 也**只回
+  `{name, default}`、不回策略串**（串里是服务器绝对路径、可能带中文目录名，发出去既没必要又
+  违反"报文里只有 name/text/msg 允许非 ASCII"的纪律）；名字本身也限**可打印 ASCII**，注册时就拒。
+  socket 回归里专门用两个路径串打这条（都回 `bad_bot_ai`），另有一条断言"清单里不许出现 spec 字段"。
+- **装配点在 `Table.playGame()`，每场一次**（`PolicyFactory` 的契约：带采样的网络跨场复用会让
+  "同一 seed 可复现"失效 —— 与自对弈那边同一条纪律）；且**只装 `seats[i].bot` 的座位**
+  （真人座位的决策从网线上来，装了也收不到询问）。**没注册/装配抛异常 → 退回内置机器人**，
+  绝不让"选了个坏 AI"变成"这一桌开不了局"。
+- **房间口径**：`create_room.bot_ai`（可选）/ `room.bot_ai`（回显）/ `set_bot_ai`（房主、仅开局前；
+  `ai:""` = 恢复跟服务端默认）；未知名字 → `error{bad_bot_ai}`；**牌局进行中忽略**改动
+  （与 `add_bot`/`remove_bot` 同口径：同一场里四家用两代 AI，回放与统计都对不上"这是谁在打"）。
+- **座位名跟着走**：选了非 `teacher` 的一代时机器人名变成 `CPU-1·ppo2-g04`（玩家一眼看出在跟谁打）；
+  默认仍是 `CPU-1/2/3`，与改造前逐字节相同。`setBotAi` / `addBot` / `removeBot` 都会重编号。
+- **客户端**：大厅建房间多了「机器人 AI」下拉框、等待室按钮排里也有一个（房主且开局前可改，
+  值跟着服务端的 `room.bot_ai` 走 —— 别自己记状态，房主可能在别的设备上改过）；清单来自
+  `hello_ok.bot_ais`。`--demo ... --bot-ai <名字>` 给截图/联调用。
+  ⚠ 同步值时必须 `blockSignals`，否则"服务端回落当前值"会被当成"用户改选"再发一条 `set_bot_ai`（来回打架）。
+- 回归：`SelfTest.botAiTests`（注册/坏名/坏权重/扫目录/未知名字被拒/**逐决策**断言"真的换成了 `first`"
+  + 非空转对照 + 同 seed 可复现 + 座位名）+ `client --selftest` 的「机器人 AI」组（清单/报文带 `bot_ai`/
+  默认时不带/房主与开局前才可改/改选发 `set_bot_ai`）+ `node tools\bot-ai-test.mjs`（真 socket，19 项）。
 
 ---
 

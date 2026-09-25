@@ -36,7 +36,9 @@ public:
 
     // 演示 / 联调用：自动连接 → 建房 → 补机器人 → 准备 → 自动应答。
     //   mj-bots = 0 时只自动连接并在牌桌上等待人工操作。
-    void autoStart(const QString& host, quint16 port, const QString& name, int bots);
+    //   botAi = 建房时指定的机器人 AI 名字（空 = 跟服务端默认）。
+    void autoStart(const QString& host, quint16 port, const QString& name, int bots,
+                   const QString& botAi = QString());
     // 局间确认：告诉服务端可以直接开下一局
     void sendConfirmNextRound();
     // 自动进房但仍由人工操作（演示/截图用）
@@ -73,6 +75,14 @@ public:
     QString stackPageForTest() const;
 
     /**
+     * 等待室的「机器人 AI」下拉框（房主开局前可换"机器人用哪一代"）。
+     *
+     * <p>自检要钉三件事：清单来自服务端 `hello_ok.bot_ais`、当前值跟着 `room.bot_ai` 走、
+     * **只有房主且不在牌局中**才可点。
+     */
+    QComboBox* botAiComboForTest() const { return m_botAiCombo; }
+
+    /**
      * 上电时把**持久化的个人设置**装进来：预填大厅的地址/端口/昵称，
      * 并记住设置文件路径（用户改完设置、或从大厅连上过一次，就写回去）。
      */
@@ -105,6 +115,15 @@ private:
     void buildTablePage();
     void showLobby();
     void updateWaitingRoom(const QJsonObject& room);
+    /**
+     * 填「机器人 AI」下拉框（清单来自服务端 `hello_ok.bot_ais`）。
+     *
+     * 客户端**只认名字**：`net:<路径>` 是服务器本机文件，服务端只接受注册表里的名字
+     * （`mahjong.ai.BotAis`），所以这里也不提供手填入口。第一项固定是「跟服务端默认」。
+     */
+    void setBotAiCatalogue(const QJsonArray& ais);
+    /** 把下拉框设成某个名字（空 = 默认项）；信号会被**临时挡住**，避免"同步"被当成"用户改选"。 */
+    void showBotAiSelection(const QString& name);
     void updateScorePanel();
     void appendChat(const QString& who, const QString& text);
     /**
@@ -171,6 +190,9 @@ private:
     QPushButton* m_removeBotBtn = nullptr;
     QPushButton* m_startBtn = nullptr;
     QPushButton* m_shuffleBtn = nullptr;   // 房主：随机洗座（随机门风）
+    /** 房主：这一桌的机器人用哪一代 AI（清单来自服务端；开局前可换）。 */
+    QComboBox* m_botAiCombo = nullptr;
+    QLabel* m_botAiLabel = nullptr;
     QTextBrowser* m_waitChat = nullptr;
     QLineEdit* m_waitChatEdit = nullptr;
     bool m_ready = false;
@@ -219,6 +241,8 @@ private:
     bool m_autoPlay = false;
     bool m_autoRoomSent = false;
     int m_autoBots = 3;
+    /** `--demo ... --bot-ai <名字>`：自动建房时指定的机器人 AI（空 = 跟服务端默认）。 */
+    QString m_autoBotAi;
     std::function<void(const QJsonObject&)> m_cmdTap;   // 自检用（正常运行为空）
 
     // 回放

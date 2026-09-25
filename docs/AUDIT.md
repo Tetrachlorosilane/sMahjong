@@ -439,6 +439,19 @@
 
 > 本节记录 **2026-09-15「回放渲染与视角」这一轮**的验证（上一轮「对局记录回放」见 §4.1）。
 
+**2026-09 「机器人用哪一代 AI」（服务端注册表 + 房间选择 + 客户端下拉框）**：
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **1362 项全绿**（1340 → +22：`botAiTests` —— 注册表（坏名/坏权重/扫目录/未知名字被拒）、`Table.setBotAi` 换 AI 后**逐决策**断言"实际动作 == 第一个合法动作"（`gen-first → first`）+ 非空转对照 + 同 seed 可复现 + 座位名 `CPU-1·gen-first` 与重编号） |
+| L2 客户端自检 | `client\dist\mahjong-client.exe --selftest client\build\st` | **816 项 / 0 失败**（801 → +15：「机器人 AI」组 —— 清单来自 `hello_ok.bot_ais`、建房报文带/不带 `bot_ai`、等待室下拉框跟着 `room.bot_ai` 走、房主且开局前才可改、改选发 `set_bot_ai`）＋语言文件哨兵同步（442→448 条 / error 12→13 / ui 318→323） |
+| i18n 三件套 | `node tools\i18n-gen.mjs` + `--check` + `node tools\check-i18n.mjs` | 新增 6 条（5 个 `ui.*` + 服务端新错误码 `error.bad_bot_ai`）；**CHECK-I18N PASS**（服务端错误码 13 个全部有译文） |
+| L3 真 socket | `node tools\bot-ai-test.mjs 127.0.0.1 10088`（服务端以 `--bot-ai-dir S:\mahjong-training\ckpt` 启动） | **BOT-AI PASS 19/19**：清单 **20 项**（`teacher/first/pass/random` + `awr-001/awr-002/bc-002/bc-003/ppo-g01..g04/ppo2-g01..g04/ppos-g01` 及两个 `-src`）、建房 `bot_ai` 回显、房主换一代广播全房间、**非房主 → `not_host`**、**未知名字与 `net:/etc/passwd`、`net:C:\Windows\win.ini` → `bad_bot_ai`**（且当前值不变）、牌局进行中改动被忽略、座位名带 `·first` |
+| L4 看图 | `--demo 127.0.0.1 10087 --bots 0 --bot-ai ppo2-g04 --shot …`；再 `--bots 3` 打一局 | 等待室按钮排显示「机器人 AI: ppo2-g04」且**可点**（房主、未开局）；`--bots 3` 那局 CPU-1/2/3 由该代网络打完整局（余牌/岭上正常推进，界面无异常） |
+| 安全边界（本轮的**主要设计约束**） | 同 L3 的两个路径串用例 | 策略串 `net:<路径>` 是**服务器本机文件**：客户端只许发**注册表里的名字**，路径只由启动参数决定 ⇒ 房间无法读服务器任意文件 |
+| 服务端实现 | `ai/BotAis.java`（新）+ `Table`（`botAi`/`setBotAi`/`applyBotAi`/`refreshBotNames`）+ `Session`（`create_room.bot_ai` / `set_bot_ai` / `hello_ok.bot_ais`）+ `Main`（`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir`） | 装配在 `playGame()` 里**每场一次**（`PolicyFactory` 契约）、只装机器人座位、装不上退回内置 teacher（绝不让"选了个坏 AI"变成"开不了局"） |
+| 文档 | `PROTOCOL.md`（§2.1 命令表 / §3.1 `hello_ok`+`room` 样例与 `bot_ai` 段 + 错误码表）、`NOTES.md` §6.6、`AGENTS.md` §6.6/§4/§7、`README.md`（面向玩家） | 协议先改、再服务端、再客户端、最后两侧测试（AGENTS §6.1 的流程） |
+
 **2026-09 训练轮 P4（在线自对弈 PPO + 联赛）**：
 
 | 层 | 命令 | 结果 |

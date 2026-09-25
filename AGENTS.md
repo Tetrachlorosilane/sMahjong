@@ -204,7 +204,7 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1340 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1362 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
@@ -221,7 +221,7 @@ java -jar server\build\mahjong-server.jar --selftest
 
 ```powershell
 client\dist\mahjong-client.exe --selftest client\build\st
-# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 801 项）；并产出 tiles.png / table.png / river_overflow.png
+# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 816 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
 覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
@@ -248,6 +248,7 @@ node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000  # 作废的立直不得�
 node tools\spectate-test.mjs 127.0.0.1 10086     # 观战：公开快照 + 持续公开事件 + action 被拒（跑满 1~2 分钟）
 node tools\utf8-test.mjs 127.0.0.1 10086         # 中文/代理对往返 + 截断不切坏字符
 node tools\replay-test.mjs 127.0.0.1 10086       # 对局记录：写入/分页/守恒/路径穿越/限速（--no-game 只验读取）
+node tools\bot-ai-test.mjs 127.0.0.1 10086       # 机器人 AI：清单/建房 bot_ai/换一代/未知名字与路径串被拒/非房主被拒
 ```
 
 **静态检查（不用起服务端，改文案/码表必跑）**：
@@ -570,6 +571,15 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 
 **完整策略说明（每层的判据、权重与理由）见 `NOTES.md` §6.6。**
 配套：`docs/DESIGN.md` 的「AI 取舍」、`§8.2` 的特征判据表（`HandEval` / `Danger` / `Visible` / `scoreIfWin`）。
+
+**机器人用哪一代 AI**（`mahjong.ai.BotAis`，2026-09）：房间可以选机器人座位用**哪一代**
+（内置 teacher / 各代训练网络），**但客户端只传注册表里的名字**：`net:<路径>` 是**服务器本机文件**，
+让房间指定路径就等于把"读服务器任意文件"开放出去（`net:/etc/passwd` 会被当权重去读）。
+名字只由启动参数决定（`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir`），**启动期**就加载校验
+（坏权重在启动时炸，不等到开局）。⚠ 装配在 `Table.playGame()` 里**每场一次**
+（`PolicyFactory` 的契约：带采样的网络跨场复用会破坏"同种子可复现"），
+且**只在 `seats[i].bot` 的座位**上装。回归：`SelfTest.botAiTests` + `client --selftest`
+的「机器人 AI」组 + `node tools\bot-ai-test.mjs`。
 ### 6.7 无用代码清理（可重复的判据）
 
 **`node tools/deadcode-scan.mjs [java|cpp]`** 扫出"只在声明/定义处出现"的函数 —— 2026-09 的一次全仓清理

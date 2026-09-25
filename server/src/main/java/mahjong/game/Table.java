@@ -407,6 +407,77 @@ public final class Table implements Runnable {
 
     private java.util.Random botRng;
 
+    // ================================================================ 机器人用哪一代 AI
+    //
+    // 机器人座位以前**只能**用内置牌效机器人。现在这一桌可以指定"用哪一代 AI"
+    // （`mahjong.ai.BotAis` 的注册表里的名字：teacher / 各代训练网络 / 脚本基线）。
+    // 三条口径：
+    //   · **名字**必须来自服务端注册表 —— 客户端不许传路径（那是"读服务器任意文件"的漏洞）；
+    //   · 策略实例**每场重开**（`PolicyFactory` 的契约）：带随机采样的网络跨场复用会让
+    //     "同一 seed 可复现"失效；
+    //   · 没指定（或指定的名字后来从注册表里没了）→ 退回内置机器人，行为与改造前一致。
+
+    /** 这一桌的机器人 AI 名字（空 = 用服务端默认）。 */
+    private volatile String botAiName = "";
+
+    /** 场次序号：给"每场一份策略实例"派生子种子（`debugDeterministicSeed` 下同样可复现）。 */
+    private int gameIndex;
+
+    /** 这一桌实际生效的机器人 AI 名字（空配置时回落到服务端默认）。 */
+    public String botAi() {
+        String n = botAiName;
+        if (n != null && !n.isEmpty()) {
+            return n;
+        }
+        return mahjong.ai.BotAis.defaultAi();
+    }
+
+    /**
+     * 指定这一桌的机器人 AI（`Session` 在等待室里调用，房主权限由它把关）。
+     *
+     * @return {@code false} = 这个名字没注册（调用方回一条错误，**不要**静默退回默认）
+     */
+    public boolean setBotAi(String name) {
+        String n = name == null ? "" : name.trim();
+        if (n.isEmpty()) {                       // 空 = 恢复"跟服务端默认"
+            botAiName = "";
+            return true;
+        }
+        if (!mahjong.ai.BotAis.has(n)) {
+            return false;
+        }
+        botAiName = n;
+        refreshBotNames();          // 名字带上这一代（`CPU-1·ppo2-g04`），玩家看得出在跟谁打
+        return true;
+    }
+
+    /**
+     * 把这一桌的机器人 AI 装配到**机器人座位**上（每场开局时调一次）。
+     *
+     * <p>⚠ 只在 {@code seats[i].bot} 的座位上装：真人座位的决策从网线上来（{@code awaitAction}），
+     * 装了也收不到询问（见 {@link #decideBot}）。装不上（没注册/权重坏了）就保持 `null`
+     * = 内置机器人 —— **绝不让"选了个坏 AI"变成"这一桌开不了局"**。
+     */
+    private void applyBotAi() {
+        final mahjong.ai.PolicyFactory f = mahjong.ai.BotAis.factory(botAi());
+        final long seed = mixSeed(seedBase + 0x5DEECE66DL * (++gameIndex));
+        for (int i = 0; i < 4; i++) {
+            if (!seats[i].bot) {
+                policy[i] = null;               // 座位已经不是机器人了：把上一场的策略摘掉
+                continue;
+            }
+            if (f == null) {
+                continue;
+            }
+            try {
+                policy[i] = f.create(i, seed);
+            } catch (RuntimeException e) {
+                Log.warn("机器人 AI `" + botAi() + "` 装配失败，本场退回内置机器人：" + e);
+                policy[i] = null;
+            }
+        }
+    }
+
     public void send(int seat, Map<String, Object> ev) {
         if (debugEventTap != null) {
             debugEventTap.accept(seat, ev);
@@ -663,6 +734,7 @@ public final class Table implements Runnable {
                     "name", name,
                     "host", hostPid,
                     "playing", playing,
+                    "bot_ai", botAi(),          // 这一桌的机器人用哪一代 AI（客户端据此显示）
                     "rules", rules.toJson(),
                     "seats", seatList));
         }
@@ -829,6 +901,26 @@ public final class Table implements Runnable {
         }
     }
 
+    /**
+     * 机器人座位重命名：`CPU-1` / `CPU-2` …（号码按座位顺序数）。
+     *
+     * <p>选了**非内置老师**的 AI 时带后缀（`CPU-1·ppo2-g04`）：玩家得能一眼看出这一桌在跟
+     * 哪一代打 —— 否则"我明明选了 ppo2-g04"只能靠等待室那个下拉框确认。默认（`teacher`）
+     * 保持原名，行为与改造前逐字节相同。
+     */
+    private void refreshBotNames() {
+        String ai = botAi();
+        final boolean tag = ai != null && !ai.isEmpty() && !"teacher".equals(ai);
+        int n = 0;
+        for (Seat s : seats) {
+            if (!s.bot) {
+                continue;
+            }
+            n++;
+            s.name = "CPU-" + n + (tag ? "·" + ai : "");
+        }
+    }
+
     public void addBot(int at) {
         int idx = at >= 0 ? at : firstEmptySeat();
         // `idx >= 4` 也要挡：`{"cmd":"add_bot","seat":99}` 会直接 seats[99] 越界（AUDIT F19）。
@@ -842,13 +934,7 @@ public final class Table implements Runnable {
         s.score = rules.startScore;
         s.uuid = null;
         s.away = false;
-        int n = 1;
-        for (Seat o : seats) {
-            if (o.bot && o != s) {
-                n++;
-            }
-        }
-        s.name = "CPU-" + n;
+        refreshBotNames();
     }
 
     public void removeBot(int idx) {
@@ -859,6 +945,7 @@ public final class Table implements Runnable {
             seats[idx].ready = false;
             seats[idx].uuid = null;
             seats[idx].away = false;
+            refreshBotNames();      // 移掉中间那个之后，剩下的机器人重新编号
         }
     }
 
@@ -1061,6 +1148,7 @@ public final class Table implements Runnable {
     public void playGame() {
         playing = true;
         voteEnded = false;          // 新的一场：清掉上一场的"投票结束"标志
+        applyBotAi();               // 机器人座位装上这一桌选定的 AI（每场一份实例）
         int[] scores = new int[4];
         for (int i = 0; i < 4; i++) {
             scores[i] = rules.startScore;

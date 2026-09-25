@@ -443,7 +443,7 @@ int main(int argc, char* argv[])
         return app.exec();
     }
 
-    // 演示 / 联调：--demo <host> <port> [--name 名] [--bots N]
+    // 演示 / 联调：--demo <host> <port> [--name 名] [--bots N] [--bot-ai 名字]
     const int dm = args.indexOf(QStringLiteral("--demo"));
     MainWindow window;
     window.applySettings(settings, settingsPath);
@@ -454,6 +454,7 @@ int main(int argc, char* argv[])
         QString name = QStringLiteral("Qt-演示");   // i18n-keep: 默认玩家名（用户数据）
         int bots = 3;
         bool noAnswer = false;
+        QString botAi;      // 机器人用哪一代 AI（空 = 跟服务端默认）
         const QStringList rest = args.mid(dm + 1);
         int positional = 0;
         for (int i = 0; i < rest.size(); ++i) {
@@ -462,6 +463,8 @@ int main(int argc, char* argv[])
                 name = rest.at(++i);
             else if (a == QLatin1String("--bots") && i + 1 < rest.size())
                 bots = rest.at(++i).toInt();
+            else if (a == QLatin1String("--bot-ai") && i + 1 < rest.size())
+                botAi = rest.at(++i);
             else if (a == QLatin1String("--no-answer"))
                 noAnswer = true;
             else if (!a.startsWith(QLatin1Char('-'))) {
@@ -472,8 +475,8 @@ int main(int argc, char* argv[])
                 ++positional;
             }
         }
-        QTimer::singleShot(0, &window, [&window, host, port, name, bots, noAnswer]() {
-            window.autoStart(host, port, name, bots);
+        QTimer::singleShot(0, &window, [&window, host, port, name, bots, noAnswer, botAi]() {
+            window.autoStart(host, port, name, bots, botAi);
             window.setAutoAnswer(!noAnswer && bots > 0);
         });
         // --shot <png> [--after 秒]：到时把窗口原样渲染成图片后退出（用于验收/文档配图）

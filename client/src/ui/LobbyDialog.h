@@ -24,6 +24,15 @@ public:
     void setStatus(const QString& text);
     void setConnected(bool on);
 
+    /**
+     * 服务端可选的**机器人 AI 清单**（来自 `hello_ok.bot_ais`）：填进「机器人 AI」下拉框。
+     * 第一项固定是「跟服务端默认」（数据 = 空串 = 建桌报文不带 `bot_ai`）。
+     */
+    void setBotAis(const QJsonArray& ais);
+
+    /** 自检用：机器人 AI 下拉框（不依赖私有成员名）。 */
+    QComboBox* botAiComboForTest() const { return m_botAi; }
+
     QString host() const;
     quint16 port() const;
     QString playerName() const;
@@ -37,7 +46,8 @@ public:
 signals:
     void connectRequested(const QString& host, quint16 port, const QString& name);
     void refreshRequested();
-    void createRoomRequested(const QString& name, const QJsonObject& rules, int fillBots);
+    void createRoomRequested(const QString& name, const QJsonObject& rules, int fillBots,
+                             const QString& botAi);
     void joinRoomRequested(const QString& roomId);
     /** 「对局回放」：打开回放窗口（未连接时入口无效）。 */
     void replayRequested();
@@ -51,6 +61,8 @@ private:
     /** 切换预设时把「一位必要点数」的默认值填进输入框（玩家仍可改成任意值）。 */
     void onPresetChanged();
     QString selectedRoomId() const;
+    /** 选中的机器人 AI 名字；空 = 「跟服务端默认」（建桌报文就不带 `bot_ai`）。 */
+    QString selectedBotAi() const;
 
     QLineEdit* m_host = nullptr;
     QSpinBox* m_port = nullptr;
@@ -70,6 +82,8 @@ private:
     QComboBox* m_think = nullptr;   // 思考时间：每巡基本时长 + 总额外时长
     QSpinBox* m_requiredPoints = nullptr;   // 一位必要点数（0 = 不要求）
     QSpinBox* m_bots = nullptr;
+    // 机器人用哪一代 AI：清单由服务端给（`hello_ok.bot_ais`），第一项 = 跟服务端默认
+    QComboBox* m_botAi = nullptr;
     QPushButton* m_createBtn = nullptr;
 
     QLineEdit* m_joinId = nullptr;

@@ -116,7 +116,7 @@
 ```jsonc
 {"cmd":"hello","name":"玩家名","ver":1}          // 连接后第一条，必须
 {"cmd":"list_rooms"}                              // 请求房间列表
-{"cmd":"create_room","name":"房间名","rules":{...},"fill_bots":0}  // 建房间，自己自动入座
+{"cmd":"create_room","name":"房间名","rules":{...},"fill_bots":0,"bot_ai":"teacher"}  // 建房间，自己自动入座
 {"cmd":"join_room","room":"AB12"}                 // 加入房间（作为玩家；满员则成为观战者）
 {"cmd":"leave_room"}
 {"cmd":"ready","ready":true}                      // 准备/取消准备
@@ -124,6 +124,7 @@
 {"cmd":"shuffle_seats"}                           // 房主：随机洗座（随机门风），洗完所有人重新准备
 {"cmd":"add_bot"}                                 // 房主给空位补一个机器人
 {"cmd":"remove_bot","seat":2}                     // 房主移除机器人
+{"cmd":"set_bot_ai","ai":"teacher"}               // 房主：机器人用哪一代 AI（开局前；名字必须在服务端清单里）
 {"cmd":"start_game"}                              // 房主（4 人齐且全 ready 时）开始
 {"cmd":"chat","text":"..."}                       // 房间内聊天
 {"cmd":"replay_list","offset":0,"limit":30}       // 对局记录列表（只读，见 §3.11）
@@ -270,12 +271,14 @@
 ```jsonc
 {"ev":"error","code":"unknown_cmd","arg":"frobnicate"}   // arg 可选，永远是 ASCII
 {"ev":"pong"}
-{"ev":"hello_ok","pid":12345,"token":"...","name":"玩家名","ver":1}
+{"ev":"hello_ok","pid":12345,"token":"...","name":"玩家名","ver":1,
+ "bot_ais":[{"name":"teacher","default":true},{"name":"ppo2-g04","default":false}]}
 {"ev":"uuid_ask"}                                 // 连接后立即发（见 §2.0）
 {"ev":"uuid_ok","uuid":"...","issued":true,"new_player":true}
 {"ev":"rooms","rooms":[{"id":"AB12","name":"房间名","players":2,"seats":4,"playing":false}]}
 {"ev":"room_joined","room":"AB12","seat":0}      // 自己入座成功（随后必有一条 room）
 {"ev":"room","id":"AB12","name":"房间名","host":1,"playing":false,
+ "bot_ai":"ppo2-g04",
  "rules":{...},
  "seats":[{"seat":0,"pid":12345,"name":"甲","ready":true,"bot":false,"away":false,"score":25000},
           {"seat":1,"pid":0,"name":"CPU-1","ready":true,"bot":true,"away":false,"score":25000},
@@ -289,9 +292,25 @@
 `away=true` 表示这一家**掉线托管中**（座位仍占着、牌局照常推进，见 §3.13）。
 客户端可用 `hello_ok.pid` 在 `seats` 中匹配自己的座位，`room_joined` 是便捷通知。
 
+**机器人用哪一代 AI**（`bot_ai` / `bot_ais` / `set_bot_ai`，2026-09）：
+
+- `hello_ok.bot_ais` = **服务端当前可选的清单**（`[{name, default}]`，顺序稳定）。
+  ⚠ **只发名字与默认标记，不发策略串** —— 串里是**服务器本机的绝对路径**（还可能带中文目录名）：
+  发出去既没必要，又违反"报文里只有 `name`/`text`/`msg` 允许非 ASCII"的纪律。
+  ⚠ 反过来，客户端也**只发 `name`、永远不发路径** —— `net:<路径>` 是服务器本机文件，
+  让房间指定路径就等于把"读服务器任意文件"开放出去。名字限**可打印 ASCII**（报文纪律），
+  服务端在注册时就拒绝非 ASCII 名字。
+- `room.bot_ai` = 这一桌实际生效的名字（没指定时 = 服务端的默认）。
+- `create_room.bot_ai`（可选）= 建房时直接指定；**不带 = 用服务端默认**。
+- `set_bot_ai`（仅房主、仅开局前）＝ 换这一桌的机器人 AI；`ai:""` = 恢复"跟服务端默认"。
+  名字不在清单里 → `error{bad_bot_ai}`；牌局进行中 → 忽略（与 `add_bot`/`remove_bot` 同口径，
+  否则同一场里四家用着两代 AI，回放与统计都对不上"这是谁在打"）。
+- 服务端怎么配清单：`--bot-ai <名字>`（默认）、`--bot-ai-reg <名=串>`、`--bot-ai-dir <目录>`
+  （每个含 `net.bin` 的一级子目录按目录名注册 = "各代 checkpoint"）。权重坏了在**启动期**报错。
+
 `error.code` 的取值（全部 ASCII，文案在客户端 `error.*`）：
 `too_large` / `bad_json` / `internal` / `need_hello` / `bad_token` / `in_room` /
-`no_room` / `not_host` / `bad_seat` / `unknown_cmd`（`arg` = 那个命令名）。
+`no_room` / `not_host` / `bad_seat` / `bad_bot_ai`（`arg` = 那个名字）/ `unknown_cmd`（`arg` = 那个命令名）。
 
 ### 3.2 开局
 

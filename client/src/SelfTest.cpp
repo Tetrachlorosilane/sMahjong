@@ -21,6 +21,7 @@
 #include "ui/WallView.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -1755,6 +1756,107 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 机器人用哪一代 AI：清单来自服务端、只发名字、房主且开局前才能改 ----------
+    // 与上面两条同一个思路：**真的去改控件**，抓真正发出去的报文（只断言成员函数测不出"字段
+    // 有没有进报文"）。服务端只认注册表里的**名字**（`mahjong.ai.BotAis`），客户端绝不发路径。
+    {
+        MainWindow w;
+        if (LobbyDialog* dlg0 = w.findChild<LobbyDialog*>())
+            dlg0->hide();
+        w.setAutoAnswer(false);
+        QList<QJsonObject> cmds;
+        w.setCommandTapForTest([&cmds](const QJsonObject& o) { cmds << o; });
+        // 服务端握手：清单两项（teacher 是默认；ppo2-g04 是训练出来的网络）
+        w.feedEventForTest(parseEv(
+                R"({"ev":"hello_ok","pid":1001,"name":"我","bot_ais":[)"
+                R"({"name":"teacher","spec":"teacher","default":true},)"
+                R"({"name":"ppo2-g04","spec":"net:X:/ckpt/ppo2-g04/net.bin","default":false}]})"));
+
+        LobbyDialog* dlg = w.findChild<LobbyDialog*>();
+        QComboBox* lobbyCombo = dlg ? dlg->botAiComboForTest() : nullptr;
+        check(lobbyCombo != nullptr, QStringLiteral("大厅有「机器人 AI」下拉框"));
+        checkEq(QString::number(lobbyCombo ? lobbyCombo->count() : -1), QStringLiteral("3"),
+                QStringLiteral("建桌下拉框 = 「跟服务端默认」+ 服务端给的 2 个 AI"));
+        checkEq(lobbyCombo ? lobbyCombo->itemData(0).toString() : QStringLiteral("?"), QString(),
+                QStringLiteral("第一项「跟服务端默认」的数据是空串（= 报文不带 bot_ai）"));
+        checkEq(lobbyCombo ? lobbyCombo->itemData(1).toString() : QStringLiteral("?"),
+                QStringLiteral("teacher"),
+                QStringLiteral("第二项就是服务端清单里的第一个 AI"));
+
+        QPushButton* createBtn = nullptr;
+        if (dlg) {
+            const QString label = lang::t(QStringLiteral("ui.lobby.create_room"));
+            for (QPushButton* b : dlg->findChildren<QPushButton*>()) {
+                if (b->text() == label) {
+                    createBtn = b;
+                    break;
+                }
+            }
+        }
+        check(createBtn != nullptr, QStringLiteral("找到大厅的「建房间」按钮"));
+        auto lastCreate = [&cmds]() {
+            for (auto it = cmds.crbegin(); it != cmds.crend(); ++it) {
+                if (it->value(QStringLiteral("cmd")).toString() == QLatin1String("create_room"))
+                    return *it;
+            }
+            return QJsonObject();
+        };
+        if (createBtn && lobbyCombo) {
+            createBtn->setEnabled(true);        // 未连接时按钮禁用，click() 是空操作（上面那条同坑）
+            lobbyCombo->setCurrentIndex(1);     // teacher
+            createBtn->click();
+            checkEq(lastCreate().value(QStringLiteral("bot_ai")).toString(),
+                    QStringLiteral("teacher"),
+                    QStringLiteral("建房报文带上了选中的 bot_ai"));
+            cmds.clear();
+            lobbyCombo->setCurrentIndex(0);     // 跟服务端默认
+            createBtn->click();
+            check(!lastCreate().contains(QStringLiteral("bot_ai")),
+                  QStringLiteral("选「跟服务端默认」时建房报文**不带** bot_ai（服务端用自己的默认）"));
+            cmds.clear();
+        }
+
+        // 等待室：值跟着服务端的 room.bot_ai 走；只有房主且**不在牌局中**才能改
+        auto roomEv = [](int host, bool playing, const QString& ai) {
+            QJsonObject ev;
+            ev.insert(QStringLiteral("ev"), QStringLiteral("room"));
+            ev.insert(QStringLiteral("id"), QStringLiteral("TEST"));
+            ev.insert(QStringLiteral("name"), QStringLiteral("自检房"));
+            ev.insert(QStringLiteral("host"), host);
+            ev.insert(QStringLiteral("playing"), playing);
+            ev.insert(QStringLiteral("bot_ai"), ai);
+            ev.insert(QStringLiteral("seats"), QJsonArray());
+            return ev;
+        };
+        QComboBox* wc = w.botAiComboForTest();
+        check(wc != nullptr, QStringLiteral("等待室有「机器人 AI」下拉框"));
+        w.feedEventForTest(roomEv(1001, false, QStringLiteral("ppo2-g04")));
+        checkEq(wc ? wc->currentData().toString() : QStringLiteral("?"), QStringLiteral("ppo2-g04"),
+                QStringLiteral("等待室下拉框跟着服务端的 room.bot_ai 走"));
+        check(wc && wc->isEnabled(), QStringLiteral("房主在开局前可以改机器人 AI"));
+        cmds.clear();
+        if (wc)
+            wc->setCurrentIndex(1);
+        checkEq(cmds.isEmpty() ? QStringLiteral("(没发)")
+                               : cmds.last().value(QStringLiteral("cmd")).toString(),
+                QStringLiteral("set_bot_ai"), QStringLiteral("改选后发出 set_bot_ai"));
+        checkEq(cmds.isEmpty() ? QStringLiteral("?")
+                               : cmds.last().value(QStringLiteral("ai")).toString(),
+                QStringLiteral("teacher"),
+                QStringLiteral("set_bot_ai 带的是**名字**（不是路径）"));
+        cmds.clear();
+        if (wc)
+            wc->setCurrentIndex(0);
+        checkEq(cmds.isEmpty() ? QStringLiteral("?")
+                               : cmds.last().value(QStringLiteral("ai")).toString(),
+                QString(), QStringLiteral("选「跟服务端默认」时 ai 是空串（服务端恢复默认）"));
+        w.feedEventForTest(roomEv(4242, false, QStringLiteral("teacher")));
+        check(wc && !wc->isEnabled() && wc->currentData().toString() == QLatin1String("teacher"),
+              QStringLiteral("非房主：下拉框不可用，但仍显示这一桌当前的 AI"));
+        w.feedEventForTest(roomEv(1001, true, QStringLiteral("teacher")));
+        check(wc && !wc->isEnabled(), QStringLiteral("牌局进行中：机器人 AI 不可改"));
+    }
+
     // ---------- 回归：聊天「发送」按钮必须真的能发出去 ----------
     // 真踩过的坑：`onChatSend()` 用 `qobject_cast<QLineEdit*>(sender())` 反推输入框 ——
     // **按钮点击时 sender 是 QPushButton**，cast 得到 nullptr、函数直接 return，
@@ -2453,7 +2555,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("442"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("448"),
                 QStringLiteral("语言文件条目数（新增/删除 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2478,9 +2580,9 @@ int run(const QString& outDir)
                 QStringLiteral("limit.* 条目数（满贯/跳满/倍满/三倍满/累计役满/役满）"));
         checkEq(QString::number(family.value(QStringLiteral("reason"))), QStringLiteral("7"),
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
-        checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("12"),
-                QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("318"),
+        checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("13"),
+                QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat + bad_bot_ai）"));
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("323"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 结束对局投票 / 掉线托管：这两族同样是"漏一条 key 就会显示裸键"，
         // 所以除了上面那条总数断言，再把**用得着的几条**逐条点名（占位符也点）。

@@ -99,12 +99,16 @@ MainWindow::MainWindow(QWidget* parent)
         sendCommand(cmd);
     });
     connect(m_lobby, &LobbyDialog::createRoomRequested, this,
-            [this](const QString& name, const QJsonObject& rules, int bots) {
+            [this](const QString& name, const QJsonObject& rules, int bots,
+                   const QString& botAi) {
                 QJsonObject cmd;
                 cmd.insert(QStringLiteral("cmd"), QStringLiteral("create_room"));
                 cmd.insert(QStringLiteral("name"), name.isEmpty() ? lang::t("ui.main.room") : name);
                 cmd.insert(QStringLiteral("rules"), rules);
                 cmd.insert(QStringLiteral("fill_bots"), bots);
+                // 机器人用哪一代：**只发名字**（空 = 不带这个字段，服务端用自己的默认）
+                if (!botAi.isEmpty())
+                    cmd.insert(QStringLiteral("bot_ai"), botAi);
                 sendCommand(cmd);
             });
     connect(m_lobby, &LobbyDialog::joinRoomRequested, this, [this](const QString& id) {
@@ -168,15 +172,30 @@ void MainWindow::buildWaitingPage()
     m_startBtn = new QPushButton(lang::t("ui.main.start_game"), m_waitPage);
     m_shuffleBtn = new QPushButton(lang::t("ui.main.shuffle_seats"), m_waitPage);
     m_shuffleBtn->setToolTip(lang::t("ui.main.shuffle_seats_tip"));
+    // 机器人用哪一代 AI（房主、开局前）：值由服务端 `room.bot_ai` 回落，改选就发 `set_bot_ai`
+    m_botAiLabel = new QLabel(lang::t("ui.main.bot_ai"), m_waitPage);
+    m_botAiCombo = new QComboBox(m_waitPage);
+    m_botAiCombo->setToolTip(lang::t("ui.main.bot_ai_tip"));
+    m_botAiCombo->addItem(lang::t("ui.lobby.bot_ai_default"), QString());
     auto* leaveBtn = new QPushButton(lang::t("ui.main.leave_room"), m_waitPage);
     btnRow->addWidget(m_readyBtn);
     btnRow->addWidget(m_addBotBtn);
     btnRow->addWidget(m_removeBotBtn);
     btnRow->addWidget(m_startBtn);
     btnRow->addWidget(m_shuffleBtn);
+    btnRow->addWidget(m_botAiLabel);
+    btnRow->addWidget(m_botAiCombo);
     btnRow->addStretch(1);
     btnRow->addWidget(leaveBtn);
     root->addLayout(btnRow);
+    connect(m_botAiCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        // ⚠ 只在"用户真的改选"时发命令：`showBotAiSelection()` 会把信号挡住，
+        //   否则每次收到 `room` 事件（服务端回落当前值）都会再发一条 `set_bot_ai` —— 来回打架。
+        QJsonObject cmd;
+        cmd.insert(QStringLiteral("cmd"), QStringLiteral("set_bot_ai"));
+        cmd.insert(QStringLiteral("ai"), m_botAiCombo->currentData().toString());
+        sendCommand(cmd);
+    });
 
     m_waitChat = new QTextBrowser(m_waitPage);
     m_waitChat->setMinimumHeight(120);
@@ -464,6 +483,55 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
         m_shuffleBtn->setToolTip(host ? lang::t("ui.main.shuffle_seats_tip")
                                       : lang::t("ui.main.host_only_start"));
     }
+    // 机器人 AI：值跟着服务端的 `room.bot_ai` 走（别自己记状态 —— 房主可能在别的设备上改过），
+    // 只有房主且**不在牌局中**才能改（牌局中途换会让同一场里四家用两代 AI，回放也对不上）。
+    if (m_botAiCombo) {
+        showBotAiSelection(room.value(QStringLiteral("bot_ai")).toString());
+        const bool canPick = host && !playing;
+        m_botAiCombo->setEnabled(canPick);
+        if (m_botAiLabel)
+            m_botAiLabel->setEnabled(canPick);
+        m_botAiCombo->setToolTip(canPick ? lang::t("ui.main.bot_ai_tip")
+                                         : lang::t("ui.main.host_only_start"));
+    }
+}
+
+void MainWindow::setBotAiCatalogue(const QJsonArray& ais)
+{
+    if (m_botAiCombo) {
+        const QString keep = m_botAiCombo->currentData().toString();
+        m_botAiCombo->blockSignals(true);
+        m_botAiCombo->clear();
+        m_botAiCombo->addItem(lang::t("ui.lobby.bot_ai_default"), QString());
+        for (const QJsonValue& v : ais) {
+            if (!v.isObject())
+                continue;
+            const QJsonObject o = v.toObject();
+            const QString nm = o.value(QStringLiteral("name")).toString();
+            if (nm.isEmpty())
+                continue;
+            m_botAiCombo->addItem(nm, nm);
+        }
+        const int idx = m_botAiCombo->findData(keep);
+        m_botAiCombo->setCurrentIndex(idx >= 0 ? idx : 0);
+        m_botAiCombo->blockSignals(false);
+    }
+    if (m_lobby)
+        m_lobby->setBotAis(ais);
+}
+
+void MainWindow::showBotAiSelection(const QString& name)
+{
+    if (!m_botAiCombo)
+        return;
+    const int idx = m_botAiCombo->findData(name);
+    if (idx < 0)
+        return;                        // 服务端报的名字不在清单里（服务端版本比客户端新）：保持原样
+    if (idx == m_botAiCombo->currentIndex())
+        return;
+    m_botAiCombo->blockSignals(true);
+    m_botAiCombo->setCurrentIndex(idx);
+    m_botAiCombo->blockSignals(false);
 }
 
 void MainWindow::updateScorePanel()
@@ -928,10 +996,12 @@ void MainWindow::onTileClicked(const QString& tile, int index)
     onActionReady(m_actions->discardCmd(tile, tsumogiri));
 }
 
-void MainWindow::autoStart(const QString& host, quint16 port, const QString& name, int bots)
+void MainWindow::autoStart(const QString& host, quint16 port, const QString& name, int bots,
+                           const QString& botAi)
 {
     m_myName = name;
     m_autoBots = bots;
+    m_autoBotAi = botAi;        // `--demo ... --bot-ai ppo2-g04`：建房时指定机器人用哪一代
     m_autoCreate = true;
     m_autoPlay = bots > 0;   // --no-answer 随后会把 m_autoPlay 关掉（见 setAutoAnswer）
     if (m_lobby)
@@ -1117,6 +1187,8 @@ void MainWindow::onEvent(const QJsonObject& ev)
         refreshVoteUi();
     } else if (name == QLatin1String("hello_ok")) {        m_myPid = ev.value(QStringLiteral("pid")).toInt();
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
+        // 服务端可选的机器人 AI 清单（建桌与等待室两个下拉框都用它）
+        setBotAiCatalogue(ev.value(QStringLiteral("bot_ais")).toArray());
         if (m_lobby)
             m_lobby->setStatus(lang::t("ui.main.handshake_done"));
         QJsonObject cmd;
@@ -1131,6 +1203,8 @@ void MainWindow::onEvent(const QJsonObject& ev)
             create.insert(QStringLiteral("name"), lang::t("ui.main.demo_room"));
             create.insert(QStringLiteral("rules"), rules);
             create.insert(QStringLiteral("fill_bots"), m_autoBots);
+            if (!m_autoBotAi.isEmpty())
+                create.insert(QStringLiteral("bot_ai"), m_autoBotAi);
             sendCommand(create);
         }
     } else if (name == QLatin1String("room_joined")) {

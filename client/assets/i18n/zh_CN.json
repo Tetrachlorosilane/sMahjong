@@ -440,5 +440,11 @@
   "ui.vote.passed": "投票通过，本场结束",
   "ui.vote.rejected": "投票未通过（%1/%2 同意），本场继续",
   "ui.vote.running": "投票中：同意 %1/%2（在场 %3 人） · 剩 %4 秒",
-  "ui.vote.started": "%1 发起了结束对局的投票"
+  "ui.vote.started": "%1 发起了结束对局的投票",
+  "error.bad_bot_ai": "这个机器人 AI 不存在（清单由服务端决定，客户端只能选列表里的名字）",
+  "ui.lobby.bot_ai": "机器人 AI",
+  "ui.lobby.bot_ai_default": "跟服务端默认",
+  "ui.lobby.bot_ai_tip": "这一桌的机器人用哪一代 AI（清单由服务端给：内置老师 / 各代训练网络；选「跟服务端默认」就不指定）",
+  "ui.main.bot_ai": "机器人 AI：",
+  "ui.main.bot_ai_tip": "房主开局前可换：这一桌的机器人用哪一代 AI（牌局进行中不可改）"
 }

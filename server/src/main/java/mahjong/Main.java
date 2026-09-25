@@ -43,6 +43,10 @@ public final class Main {
         String preset = null;
         // ---- 训练接口（派生特征富化）：见 mahjong.train.TraceFeatures
         String featuresDir = null;
+        // ---- 机器人用哪一代 AI：见 mahjong.ai.BotAis（服务端白名单，客户端只选名字）
+        String botAiDefault = null;
+        java.util.List<String> botAiReg = new java.util.ArrayList<>();
+        java.util.List<String> botAiDirs = new java.util.ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--port":
@@ -157,6 +161,24 @@ public final class Main {
                         preset = args[++i];
                     }
                     break;
+                case "--bot-ai":
+                    // 默认机器人 AI（注册表里的名字）：房间不指定 `bot_ai` 时用它
+                    if (i + 1 < args.length) {
+                        botAiDefault = args[++i];
+                    }
+                    break;
+                case "--bot-ai-reg":
+                    // 注册一个可选 AI：`<名字>=<策略串>`（可重复；名字会出现在客户端的下拉框里）
+                    if (i + 1 < args.length) {
+                        botAiReg.add(args[++i]);
+                    }
+                    break;
+                case "--bot-ai-dir":
+                    // 扫描目录：每个含 net.bin 的一级子目录按**目录名**注册（各代 checkpoint）
+                    if (i + 1 < args.length) {
+                        botAiDirs.add(args[++i]);
+                    }
+                    break;
                 case "--help":
                 case "-h":
                     printHelp();
@@ -169,6 +191,32 @@ public final class Main {
         if (selftest) {
             int code = SelfTest.run();
             System.exit(code);
+        }
+        // 机器人 AI 注册表：**启动期一次建好并校验**（权重坏了/名字写错都在这里炸，
+        // 而不是"开了房间打到一半才发现机器人不动"）。自对弈不装它（那边用 `--policy`）。
+        if (selfplay < 0 && featuresDir == null) {
+            try {
+                mahjong.ai.BotAis.clear();
+                for (String dir : botAiDirs) {
+                    mahjong.ai.BotAis.scanDir(java.nio.file.Path.of(dir));
+                }
+                for (String kv : botAiReg) {
+                    int eq = kv.indexOf('=');
+                    if (eq <= 0 || eq == kv.length() - 1) {
+                        throw new IllegalArgumentException("--bot-ai-reg 要写成 <名字>=<策略串>：" + kv);
+                    }
+                    mahjong.ai.BotAis.register(kv.substring(0, eq), kv.substring(eq + 1));
+                }
+                if (botAiDefault != null) {
+                    mahjong.ai.BotAis.setDefault(botAiDefault);
+                }
+                Log.info("机器人 AI：" + String.join(", ", mahjong.ai.BotAis.names())
+                        + "（默认 " + mahjong.ai.BotAis.defaultAi() + "）");
+            } catch (RuntimeException e) {
+                Log.error("机器人 AI 配置有误", e);
+                System.exit(2);
+                return;
+            }
         }
         if (selfplay >= 0) {            // 自对弈**不装回放库**：训练局没必要占 replay 配额（ReplayStore.current() 为 null
             // 时 Table 的录制开销为零）。
@@ -277,6 +325,13 @@ public final class Main {
         System.out.println("  --fast             机器人不思考、局间不停顿（自动化测试用）");
         System.out.println("  --selftest         运行规则引擎自测后退出");
         System.out.println("  --help             显示帮助");
+        System.out.println();
+        System.out.println("机器人 AI（房间可以选\"机器人用哪一代\"，客户端只传**名字**）：");
+        System.out.println("  --bot-ai <名字>        默认用哪个（缺省 teacher = 内置牌效）");
+        System.out.println("  --bot-ai-reg <名=串>   注册一个可选 AI，可重复；串 = teacher|first|pass|random"
+                + "|net:<权重文件>[@<α>][#<T>]");
+        System.out.println("  --bot-ai-dir <目录>    扫描目录：每个含 net.bin 的一级子目录按目录名注册"
+                + "（各代 checkpoint）");
         System.out.println();
         System.out.println("训练接口（无网络自对弈 / 评测）：");
         System.out.println("  --selfplay <n>     跑 n 场半庄（4 个机器人座位；不监听端口）");

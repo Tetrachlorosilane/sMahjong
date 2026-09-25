@@ -103,6 +103,12 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     m_bots = new QSpinBox(createBox);
     m_bots->setRange(0, 3);
     m_bots->setValue(0);
+    // 机器人用哪一代 AI：清单来自服务端（`hello_ok.bot_ais`），这里先放"跟服务端默认"。
+    // ⚠ 客户端**只发名字**：`net:<路径>` 是服务器本机文件，服务端只认注册表里的名字
+    //   （见 `mahjong.ai.BotAis`），所以这里也不给任何手填入口。
+    m_botAi = new QComboBox(createBox);
+    m_botAi->addItem(lang::t(QStringLiteral("ui.lobby.bot_ai_default")), QString());
+    m_botAi->setToolTip(lang::t(QStringLiteral("ui.lobby.bot_ai_tip")));
     // 一位必要点数（`docs/日本麻将.md` L116/L143/L157）：0 = 不要求。
     // 自选填写框 —— 切预设时填该预设的默认值（M.League 0 / 天凤·雀魂 30000），
     // 玩家可以改成任意值；它决定 All Last 轮庄后是否进延长战、以及庄家能否和了止/听牌止。
@@ -122,6 +128,7 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     createForm->addRow(lang::t("ui.lobby.clock"), m_think);
     createForm->addRow(lang::t("ui.lobby.required_points"), m_requiredPoints);
     createForm->addRow(lang::t("ui.lobby.fill_bots"), m_bots);
+    createForm->addRow(lang::t("ui.lobby.bot_ai"), m_botAi);
     createForm->addRow(QString(), m_createBtn);
     root->addWidget(createBox);
 
@@ -250,7 +257,35 @@ void LobbyDialog::onCreateClicked()
         rules.insert(QStringLiteral("thinking_bank_ms"), think.at(0).toInt() * 1000);
         rules.insert(QStringLiteral("thinking_base_ms"), think.at(1).toInt() * 1000);
     }
-    emit createRoomRequested(m_roomName->text().trimmed(), rules, m_bots->value());
+    emit createRoomRequested(m_roomName->text().trimmed(), rules, m_bots->value(),
+                             selectedBotAi());
+}
+
+QString LobbyDialog::selectedBotAi() const
+{
+    // 数据为空 = 「跟服务端默认」：报文里就**不带** `bot_ai`（服务端用自己的默认）
+    return m_botAi ? m_botAi->currentData().toString() : QString();
+}
+
+void LobbyDialog::setBotAis(const QJsonArray& ais)
+{
+    if (!m_botAi)
+        return;
+    const QString keep = selectedBotAi();
+    m_botAi->clear();
+    m_botAi->addItem(lang::t(QStringLiteral("ui.lobby.bot_ai_default")), QString());
+    for (const QJsonValue& v : ais) {
+        if (!v.isObject())
+            continue;
+        const QJsonObject o = v.toObject();
+        const QString name = o.value(QStringLiteral("name")).toString();
+        if (name.isEmpty())
+            continue;
+        // 名字进下拉框（服务端**只发名字与默认标记**：策略串里是服务器本机路径，不下发）
+        m_botAi->addItem(name, name);
+    }
+    const int idx = m_botAi->findData(keep);
+    m_botAi->setCurrentIndex(idx >= 0 ? idx : 0);
 }
 
 int lobbyrules::defaultRequiredPoints(const QString& preset)

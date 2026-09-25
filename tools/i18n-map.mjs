@@ -260,6 +260,15 @@ export const EXTRA = {
   // ---- 服务端新增的错误码（回放接口）----
   'error.replay_not_found': '这条回放记录不存在（可能已被容量上限淘汰，或 ID 抄错了）',
   'error.replay_rate_limited': '回放请求太频繁，请稍等几秒再试',
+  // ---- 机器人用哪一代 AI（2026-09，服务端 BotAis 注册表）----
+  // 清单由**服务端**给（`hello_ok.bot_ais`）；客户端只发**名字**，绝不发 `net:<路径>`
+  // （那是服务器本机文件，让客户端传串就等于开放任意文件读，见 `mahjong.ai.BotAis`）。
+  'ui.lobby.bot_ai': '机器人 AI',
+  'ui.lobby.bot_ai_default': '跟服务端默认',
+  'ui.lobby.bot_ai_tip': '这一桌的机器人用哪一代 AI（清单由服务端给：内置老师 / 各代训练网络；选「跟服务端默认」就不指定）',
+  'ui.main.bot_ai': '机器人 AI：',
+  'ui.main.bot_ai_tip': '房主开局前可换：这一桌的机器人用哪一代 AI（牌局进行中不可改）',
+  'error.bad_bot_ai': '这个机器人 AI 不存在（清单由服务端决定，客户端只能选列表里的名字）',
   // ---- 对局回放（回放窗口 / 牌山窗口 / 操作列表）----
   // 这一族的文案**源码里直接写 lang::t("ui.replay.*")**（不是从字面量搬过来的），
   // 所以放在 EXTRA：i18n-gen 照常写进语言文件，i18n-scan 也看不到中文残留。
