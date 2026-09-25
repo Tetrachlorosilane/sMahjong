@@ -862,6 +862,14 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
     `node tools\selfplay-check.mjs` 抽查一批轨迹，确认盘上数据没坏；② 补跑第二轮判据
     （`pair ppo2-g04 vs ppo-g04` / `vs teacher` + `ladder --label ppo2`）；③ 若该盘反复掉线，
     把数据根换到别的卷即可（`MAHJONG_DATA_ROOT` 环境变量一行，代码里没有硬编码路径）。
+    ✅ **已恢复（同日）并清理干净**：重新插拔后 `C:/D:/E:/S:` 四卷齐备，**全树 55,894 个文件
+    逐个读头 8 KB，读失败 0 个**；掉线时唯一报过 `ERROR_IO_DEVICE` 的两个文件
+    （`ckpt/ppo2-g01/metrics.json` 与 `net.bin`）现在都读得出，且 `metrics.json` 解析出来的
+    epoch 数 / 决策数 / valMAE **与控制台日志逐项一致**（5 / 934,761 / 5.3834）⇒ **数据没坏**。
+    恢复后的动作次序（照上面写的做了一遍）：写探针 → 删掉上次**中断的半截 run**
+    （`raw/ppo2-g04-vs-ppo-g04` 只剩 174 个文件；⚠ 必须删，否则同名重跑会把半截文件当成本次 run 的一部分）
+    → 60 场小烟雾自对弈 + `selfplay-check` **DATASET PASS** → 才开大规模评测。
+    ⚠ 一条更一般的教训：**盘掉线期间不要"顺手重跑同名 run"** —— 半截目录会静默混进结果。
 - 回归：`SelfTest.trainingInterfaceTests`（动作空间往返、观测反作弊不变式 + 正向对照、
   策略三种失败方式兜底、同种子可复现、注入真的改变行为、runner 统计自洽）
   + `SelfTest.obsFeaturesTests`（派生特征 golden）+ `SelfTest.neuralForwardTests`（前向 golden）

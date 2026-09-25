@@ -29,12 +29,13 @@ DATA_ROOT = Path(os.environ.get("MAHJONG_DATA_ROOT", r"S:\mahjong-training"))
 SUBDIRS = ("raw", "compact", "ckpt", "league", "logs", "probe")
 
 #: 各子目录的**硬配额**（GB）。超了就滚动淘汰最旧的（`raw` 先淘汰），并始终保留 MIN_FREE_GB。
-#: ⚠ `compact` 从 10 GB 提到 **50 GB**（2026-09，用户指定）：P4 的世代循环每代要一份紧凑集
-#: （~1.5 GB），四代就把 10 GB 顶爆，滚动淘汰把 `compact/rl-001`（P3 的数据集）删了 ——
-#: 而淘汰是**按 mtime 从最旧的开始**，不区分"废弃数据集"和"还要复算的数据集"。
+#: ⚠ `compact` 10 → **50 GB**（2026-09 用户指定）→ **100 GB**（同日再次指定）：P4 的世代循环每代要
+#: 一份紧凑集（~1.5 GB），四代就把 10 GB 顶爆，而滚动淘汰**按 mtime 从最旧的开始删**、
+#: 不区分"废弃数据集"和"还要复算的数据集"，于是把 `compact/rl-001`（P3 的数据集）删了。
+#: 100 GB ≈ 60 代紧凑集的余量；`raw` 仍是 30 GB（每代 ~1.8 GB ≈ 16 代）。
 QUOTA_GB: dict[str, float] = {
     "raw": 30.0,
-    "compact": 50.0,
+    "compact": 100.0,
     "ckpt": 2.0,
     "league": 1.0,
     "logs": 1.0,

@@ -170,10 +170,10 @@ ok(verify_env.GpuMonitor is guard.GpuMonitor and verify_env.DutyCycle is guard.D
 # ---------------------------------------------------------------- ④ paths 配额
 
 print("== paths（数据根与配额）==")
-# 配额数字本身钉住：文档（TRAINING §0.1.1）与代码必须同口径 —— 上一轮 compact 从 10 提到 50 GB
+# 配额数字本身钉住：文档（TRAINING §0.1.1）与代码必须同口径 —— compact 从 10 → 50 → 100 GB
 # 就是因为世代循环每代 ~1.5 GB 的紧凑集把 10 GB 顶爆、滚动淘汰删掉了 `compact/rl-001`。
-eq("配额：compact = 50 GB（2026-09 用户指定，防止世代循环把 P3 数据集挤掉）",
-   paths.QUOTA_GB["compact"], 50.0)
+eq("配额：compact = 100 GB（2026-09 用户两次上调 10→50→100，防止世代循环挤掉数据集）",
+   paths.QUOTA_GB["compact"], 100.0)
 eq("配额：raw = 30 GB（不变；P4 每代 raw ~1.8 GB ⇒ 约 16 代）", paths.QUOTA_GB["raw"], 30.0)
 ok(set(paths.QUOTA_GB) == {"raw", "compact", "ckpt", "league", "logs"},
    "配额：五个带配额的子目录齐全（probe 故意无配额：用完即删）", str(sorted(paths.QUOTA_GB)))
