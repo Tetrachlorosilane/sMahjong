@@ -1305,7 +1305,9 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 所以**解压到服务端目录**（而不是解压到已存在的 `bot-ai/` 里 —— 那会多一层）。
 ⚠ 权重是**二进制发布资产**，不进仓库（`.gitignore` 里的 `bot-ai/`）：改了训练脚本要重发时重新打包。
 ⚠ 重新打包会改 zip 的 sha256（条目里带时间戳）→ 发布清单里的摘要要跟着更新
-（草稿与摘要表放在 `release/RELEASE-v1.9.0.md` / `release/assets-v1.9.0.txt`，`release/` 已 gitignore）。
+（草稿与摘要表放在 `release/RELEASE-v<版本>.md` / `release/assets-v<版本>.txt`，`release/` 已 gitignore）。
+⚠ **发新版前先查一遍 release 列表**：`v1.9.0` 已经发过（那是"训练数据校验修复 + 训练方案"，
+与"房间选 AI + 机器人包"不是一回事），所以这一轮发的是 **v1.10.0**，tag 指向 `6cc0a2c`。
 
 **服务端包的结构是 2026-09 重构过的**（用户点名："release 里服务端内容结构不合理"）：
 
