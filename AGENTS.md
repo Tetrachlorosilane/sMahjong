@@ -258,6 +258,8 @@ node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
+# 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
+#   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解（见 §8）
 ```
 

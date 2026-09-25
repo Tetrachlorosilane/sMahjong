@@ -1,0 +1,12 @@
+[package]
+name = "tenhou-probe"
+version = "0.0.1"
+edition = "2021"
+
+# ⚠ 这个探针是**用上游真解析器**验我们导出的牌谱（对照 `tools/tenhou-log-check.mjs` 那份复刻）：
+# 它直接路径依赖 mjai-reviewer 源码里的 `convlog`，跑的就是网页版「自定义 JSON」那条路。
+# 用法见 ../README.md（含 cargo 取凭据失败时的离线 vendor 办法）。
+[dependencies]
+# ⚠ 改成你本机 mjai-reviewer 源码里 convlog 的路径（绝对路径也行）。
+convlog = { path = "../../../mjai-reviewer/convlog" }
+serde_json = "1"

@@ -1539,3 +1539,36 @@ Turnstile，网页版只能由人在正常浏览器里点**（判据：不要在
 红证是"把它跑在**修之前**的导出上会红（101000 / 点数板接不上）"，修完三份真实回放全绿。
 ⚠ 以后再动「结果对」这一块，先跑这条 —— 它专门抓"抄了某个字段但语义不是净变化"这类错。
 
+#### 9.6.2 再拿**上游真解析器**验一遍（合规判据的第二层）
+
+上面那个校验器是**我们照抄规格复刻**的 —— 复刻得再像也还是两份代码。所以
+2026-09-25 起多了一层判据：**直接用 mjai-reviewer 自己的代码**（用户提供了本地源码
+`C:\Users\HP\source\games\mjai-reviewer`）跑导出物。工具与用法见
+**`tools/upstream-parse-check/README.md`**（探针 + 上游 CLI 两条路）。
+
+- **① 探针**（路径依赖上游 `convlog`）：`tenhou::Log::from_json_str` + `tenhou_to_mjai`
+  —— 与网页版「自定义 (tenhou.net/6 JSON)」同一条解析/转换路径。除了解析成功，
+  它还把 `start_kyoku.scores` 与 `hora/ryukyoku.deltas` 串成链（点数板必须自洽）。
+- **② 上游 CLI**：`mjai-reviewer 1.5.10 --no-review -a 0 -i <导出.json> --mjai-out out.jsonl`
+  —— **同一个二进制**，`--no-review` 让它只解析+转换、不起引擎（所以不需要 Mortal）。
+
+结论（三份真实回放 + 合成夹具，2026-09-25 实测）：
+
+| 判据 | 修之前（v1.10.1） | 修之后（v1.10.2） |
+| --- | --- | --- |
+| 我们的复刻校验器（结构 + 取/出配对 + 点数账） | 红（101000） | **PASS** |
+| 上游探针（解析 + 转 mjai + 点数板链） | 解析过、**链断**（差 1000/根棒） | **PASS**（终局和 = 100000） |
+| 上游 CLI `--no-review` | exit 0（它不查账） | **exit 0**，mjai 输出 1638/886/891 行 |
+
+⚠ **负向对照不能省**：同一套工具跑四份故意改坏的牌谱 —— 字符串 `"60"`
+（→ `invalid naki string: "60"`）、座位不交错（→ JSON 尾部多余字符）、配牌 12 张
+（→ `invalid length 12, expected an array of size 13`）都被上游拒。
+**但第 4 份（结果对少一组）上游静默通过**（`chunks_exact(2)` 把落单的那组跳过，
+那一局就成了"没有和了家的和了"）—— 我们的校验器会拒。**两把尺子都要用**。
+
+> 环境坑：本机 `cargo` / `curl` 走 schannel 取凭据失败（`SEC_E_NO_CREDENTIALS`），
+> 而 node 能下载 —— 所以依赖是**离线 vendor** 出来的（`vendorize.mjs`）。
+> 另外 `cargo` 的配置按**当前工作目录**向上找，必须在 `probe/` 里跑，`--manifest-path` 不算数。
+> 详细步骤与两个坑见该 README。
+
+

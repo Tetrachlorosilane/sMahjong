@@ -1,0 +1,10 @@
+# 离线构建用的 cargo 配置模板：把依赖指到本地 vendor 目录（见 ../../README.md）。
+# 放到 probe/.cargo/config.toml，并把 directory 改成你的 vendor 绝对路径（用正斜杠）。
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "C:/path/to/vendor"
+
+[net]
+offline = true
