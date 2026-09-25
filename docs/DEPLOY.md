@@ -145,7 +145,7 @@ java -jar mahjong-server.jar --selftest
 
 ```bash
 cd /opt/sMahjong            # jar / start.sh 所在目录
-unzip ~/sMahjong-bot-ai-v1.10.3.zip  # 一包全给（内含 bot-ai/ 一层）
+unzip ~/sMahjong-bot-ai-v1.10.4.zip  # 一包全给（内含 bot-ai/ 一层）
 # 或只装某几代：unzip ~/ppo2-g04.zip  （包里同样是 bot-ai/ppo2-g04/…）
 ./restart.sh
 ```
