@@ -305,8 +305,11 @@
 - `set_bot_ai`（仅房主、仅开局前）＝ 换这一桌的机器人 AI；`ai:""` = 恢复"跟服务端默认"。
   名字不在清单里 → `error{bad_bot_ai}`；牌局进行中 → 忽略（与 `add_bot`/`remove_bot` 同口径，
   否则同一场里四家用着两代 AI，回放与统计都对不上"这是谁在打"）。
-- 服务端怎么配清单：`--bot-ai <名字>`（默认）、`--bot-ai-reg <名=串>`、`--bot-ai-dir <目录>`
-  （每个含 `net.bin` 的一级子目录按目录名注册 = "各代 checkpoint"）。权重坏了在**启动期**报错。
+- 服务端怎么配清单：**启动时自动挂载 `bot-ai/`**（与 `replays/`、`players/` 同层 = 相对启动目录；
+  每个一级子目录一个包 = `bot.json` 清单 + 载荷，深度模型与启发搜索同一套格式 —— 见 `docs/BOT-AI.md`），
+  另有 `--bot-ai <名字>`（默认用哪个）、`--bot-ai-dir <目录>`（再挂一个，可重复）、
+  `--bot-ai-reg <名=串>`（点名注册/覆盖，可重复）。**后面的覆盖前面的**。
+  包里的坏权重只跳过它一个（启动日志 WARN）；**点名的**（`--bot-ai` / `--bot-ai-reg`）坏了在启动期直接报错。
 
 `error.code` 的取值（全部 ASCII，文案在客户端 `error.*`）：
 `too_large` / `bad_json` / `internal` / `need_hello` / `bad_token` / `in_room` /
@@ -1241,3 +1244,19 @@ node tools/selfplay-check.mjs <dir>
 ⚠ **采样（`--sample k`）必须被校验器建模**：`--sample k` 只记每 k 次决策里的 1 条，一局 60 次决策在
 k=64 时只剩 0～1 条 —— 那不是脏数据。所以 `game.sampled_every > 1` 时"每小局至少 4 次决策"这条
 **不适用**（只保留"整场不能被采空"），k=1 时仍是严格红线（AUDIT S-75）。
+
+### 8.6 打包成服务端即用的 AI 包（`bot-ai/`）
+
+训练出来的各代策略要进**正式对局**（人 + 机器人同桌）时，不走 `--policy`（那是自对弈的口子），
+而是打成**包**放进服务端的 `bot-ai/`：
+
+```bash
+python -m mahjong_ml.packbot --out bot-ai \
+    --from-dir <ckpt 根目录> --include all --builtin teacher,first,pass,random \
+    --alpha auto --data <紧凑数据集> --zip release/bot-ai
+```
+
+一个包 = 一个目录 + `bot.json` 清单（`kind: net|builtin`，`net` 带 `net.bin`/`alpha`/`temp`）。
+**深度模型与启发搜索共用同一套接口**，服务端启动时**自动挂载** `bot-ai/` 下的每个包，
+客户端只按**名字**选一代（报文见 §3.1）。
+完整的字段表、命名规则、坏包处理与验证清单见 **`docs/BOT-AI.md`**。

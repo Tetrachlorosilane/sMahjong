@@ -953,11 +953,29 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 
 - **服务端注册表**（`ai/BotAis.java`，进程级静态，与 `PlayerStore`/`ReplayStore` 同套路）：
   `--bot-ai <名字>`（默认用哪个）、`--bot-ai-reg <名=串>`（注册一个，可重复）、
-  `--bot-ai-dir <目录>`（**扫描目录**：每个含 `net.bin` 的一级子目录按目录名注册 —— 正好是
+  `--bot-ai-dir <目录>`（**扫描目录**：每个一级子目录按目录名/清单注册 —— 正好是
   "各代 checkpoint"，实测挂 `S:\mahjong-training\ckpt` 一次注册了 **20** 个）。
   出厂清单永远含 `teacher/first/pass/random`（客户端至少要有一个能选，`teacher` 还是"改造前行为"的锚点）。
   ⚠ **注册即在启动期加载并校验权重**：坏路径/坏魔数/坏维度**当场报错退出**（不是开了房间打到一半才发现）；
-  但 `--bot-ai-dir` 里**单个坏权重只打 WARN 跳过** —— 一个半截文件不该让整个服务起不来。
+  但**扫目录**时单个坏包只打 WARN 跳过 —— 一个半截文件不该让整个服务起不来。
+  启动顺序固定：`clear()` → **自动扫 `bot-ai/`** → `--bot-ai-dir` → `--bot-ai-reg` → `--bot-ai`（默认），
+  **后面的覆盖前面的**（同名重复注册 = 覆盖，不报错）。
+- **自动挂载 `bot-ai/`**（2026-09 追加）：与 `replays/`/`players/` 同层（**相对启动目录**），
+  每个一级子目录 = 一个包（清单 `bot.json` + 载荷）。**装一代新网络 = 丢一个目录进去**，
+  不用改代码、不用加启动参数。目录不存在只留一句 INFO（部署里可以一个包都不放）。
+  ⚠ 为什么"包"要能在**没有 `bot.json`** 时也认：训练侧的 `ckpt/<名字>/net.bin` 就是这个形状
+  （`--bot-ai-dir S:\mahjong-training\ckpt` 直接指过去就能用）——有清单的包只是多了"改名/写 α、T/声明内置"。
+- **统一接口（两种形态同一套 `bot.json`）**：`kind=net`（`model`/`alpha`/`temp`）与
+  `kind=builtin`（`policy ∈ teacher|first|pass|random`）。串起来就是策略串
+  `net:<权重>[@<α>][#<T>]` 或裸 `teacher`，**加新形态只多一个 `kind`，协议不用动**。
+  名字必须可打印 ASCII 且不含 `,` `@` `#`；四个内置名是锚点 —— **net 包不许占用**，
+  但 `{"kind":"builtin","policy":"teacher"}` 这种**同名同义声明是允许的**（那正是让启发搜索
+  用同一套格式走，否则 `bot-ai/teacher/` 这种包会被自己的规则挡掉）。
+  完整字段表/命名规则/坏包清单见 **`docs/BOT-AI.md`**（`packbot.py` 生成的 `README.txt` 里也指了它）。
+- **打包器 `python/mahjong_ml/packbot.py`**：`--from-dir`+`--include`（或 `--from-ckpt`）出深度模型包、
+  `--builtin` 出启发搜索包、`--alpha auto` 走 `hybrid.analyse` 的让位曲线选 α、`--zip <目录>`
+  另出一份**独立分发包**（`<名字>.zip`，解压到 `bot-ai/` 下即用）。名字校验与服务端**同一把尺子**
+  —— 尺子不一致的话"打包成功但服务端跳过"是最难查的那种 bug。
 - **为什么必须是白名单**：策略串里的 `net:<路径>` 是**服务器本机文件**。让客户端传串，就等于
   把"读服务器任意文件"开放出去（`net:/etc/passwd`、`net:C:\Windows\win.ini` 都会被当权重去读）。
   所以协议里客户端**只发名字**（`name`），路径只由启动参数决定；`hello_ok.bot_ais` 也**只回
@@ -978,8 +996,11 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   `hello_ok.bot_ais`。`--demo ... --bot-ai <名字>` 给截图/联调用。
   ⚠ 同步值时必须 `blockSignals`，否则"服务端回落当前值"会被当成"用户改选"再发一条 `set_bot_ai`（来回打架）。
 - 回归：`SelfTest.botAiTests`（注册/坏名/坏权重/扫目录/未知名字被拒/**逐决策**断言"真的换成了 `first`"
-  + 非空转对照 + 同 seed 可复现 + 座位名）+ `client --selftest` 的「机器人 AI」组（清单/报文带 `bot_ai`/
-  默认时不带/房主与开局前才可改/改选发 `set_bot_ai`）+ `node tools\bot-ai-test.mjs`（真 socket，19 项）。
+  + 非空转对照 + 同 seed 可复现 + 座位名 + **包与清单**：`name` 覆盖目录名 / `@4#0.5` 组合 /
+  内置同名声明放行 / **net 包占用内置名被拒** / 未知 `kind` 与缺权重被跳过 / `DEFAULT_DIR == "bot-ai"`）
+  + `client --selftest` 的「机器人 AI」组（清单/报文带 `bot_ai`/
+  默认时不带/房主与开局前才可改/改选发 `set_bot_ai`）+ `node tools\bot-ai-test.mjs`（真 socket，20 项）。
+  实测：服务端 `--selftest` **1370 项 / 0 失败**；`bot-ai/` 里放 8 个包时启动日志注册 8 个（默认 `teacher`）。
 
 ---
 
@@ -1273,6 +1294,14 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | --- | --- | --- |
 | `sMahjong-client-v<版本>-win64.zip` | `client\dist` 全部内容 **去掉 `settings.json`** + 自带 `README.txt` | 自带 Qt 运行时与 `licenses\`（LGPLv3 要求），解压即用 |
 | `sMahjong-server-v<版本>.zip` | **一层版本目录** `sMahjong-server-v<版本>/`：`mahjong-server.jar` + `VERSION` + `start.sh`/`stop.sh`/`restart.sh`/`status.sh`/`update.sh`（来自 `server\pack\`）+ `DEPLOY.md` + `README.txt` | 目标机只要 JDK 17+；`./start.sh` 起，`./update.sh` 自更新 |
+
+**机器人 AI 包（`release\bot-ai\<名字>.zip`）也是发布资产**（2026-09 起）：每个包**独立一个 zip**，
+解压到服务端的 `bot-ai/`（与 `replays/` 同层）下**重启即生效**，不用改配置、不用重新打包服务端。
+它们是 `python -m mahjong_ml.packbot … --zip release\bot-ai` 的产物（见 `docs/BOT-AI.md` §6）：
+内置启发搜索包 ~0.2 KB、深度模型包 ~974 KB（内含 1042 KB 的 `net.bin`）。
+zip 里带一层 `bot-ai/<名字>/` 前缀（`zip_packages` 用 `out_root.name` 拼的），所以**解压到服务端根目录**
+就是对的落点（解压到 `bot-ai/` 里会多一层）。
+⚠ 权重是**二进制发布资产**，不进仓库（`.gitignore` 里的 `bot-ai/`）：改了训练脚本要重发时重新打包。
 
 **服务端包的结构是 2026-09 重构过的**（用户点名："release 里服务端内容结构不合理"）：
 

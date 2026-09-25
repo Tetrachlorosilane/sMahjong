@@ -5368,7 +5368,8 @@ public final class SelfTest {
         }
         check("机器人 AI：默认只能设成已注册的名字", threw);
 
-        // ---- ② 扫目录（`--bot-ai-dir`）：按目录名注册，坏权重跳过不炸 ----
+        // ---- ② 扫目录（默认 `bot-ai/` 与 `--bot-ai-dir` 走同一条路）：包格式 + 坏包跳过 ----
+        eq("机器人 AI：默认包目录名与 replays 同层", mahjong.ai.BotAis.DEFAULT_DIR, "bot-ai");
         java.nio.file.Path tmp = null;
         try {
             tmp = java.nio.file.Files.createTempDirectory("botai");
@@ -5386,6 +5387,53 @@ public final class SelfTest {
                         mahjong.ai.BotAis.has("zgood") && !mahjong.ai.BotAis.has("yempty"));
             }
             check("机器人 AI：坏权重只跳过（不让整个服务起不来）", !mahjong.ai.BotAis.has("xbad"));
+
+            // ---- ②b **包格式**（`bot.json`）：深度模型 / 启发搜索同一套接口 ----
+            if (golden != null) {
+                java.nio.file.Path pk = tmp.resolve("mynet");
+                java.nio.file.Files.createDirectories(pk);
+                java.nio.file.Files.copy(golden, pk.resolve("net.bin"));
+                java.nio.file.Files.writeString(pk.resolve("bot.json"),
+                        "{\"kind\":\"net\",\"name\":\"mynet-x\",\"model\":\"net.bin\","
+                                + "\"alpha\":4,\"temp\":0.5,\"note\":\"自检\"}");
+                java.nio.file.Path hb = tmp.resolve("hb");
+                java.nio.file.Files.createDirectories(hb);
+                java.nio.file.Files.writeString(hb.resolve("bot.json"),
+                        "{\"kind\":\"builtin\",\"policy\":\"teacher\",\"name\":\"hb-teacher\"}");
+                // 名字与内置同名、且确实是"内置包同义声明" → 允许（启发搜索与深度模型同一套格式）
+                java.nio.file.Path okT = tmp.resolve("teacher");
+                java.nio.file.Files.createDirectories(okT);
+                java.nio.file.Files.writeString(okT.resolve("bot.json"),
+                        "{\"kind\":\"builtin\",\"policy\":\"teacher\"}");
+                // 深度模型包占用内置名 → 必须跳过（不许悄悄顶掉锚点）
+                java.nio.file.Path squat = tmp.resolve("first");
+                java.nio.file.Files.createDirectories(squat);
+                java.nio.file.Files.copy(golden, squat.resolve("net.bin"));
+                java.nio.file.Files.writeString(squat.resolve("bot.json"),
+                        "{\"kind\":\"net\",\"model\":\"net.bin\"}");
+                // 未知 kind / 缺载荷 → 跳过
+                java.nio.file.Path badKind = tmp.resolve("weird");
+                java.nio.file.Files.createDirectories(badKind);
+                java.nio.file.Files.writeString(badKind.resolve("bot.json"), "{\"kind\":\"magic\"}");
+                java.nio.file.Path noModel = tmp.resolve("nomodel");
+                java.nio.file.Files.createDirectories(noModel);
+                java.nio.file.Files.writeString(noModel.resolve("bot.json"), "{\"kind\":\"net\"}");
+
+                mahjong.ai.BotAis.scanDir(tmp);
+                check("机器人 AI 包：清单里的 name 覆盖目录名（`mynet-x`）",
+                        mahjong.ai.BotAis.has("mynet-x"));
+                check("机器人 AI 包：α/T 进策略串（`net:<路径>@4#0.5`）",
+                        "net:".equals(mahjong.ai.BotAis.spec("mynet-x").substring(0, 4))
+                                && mahjong.ai.BotAis.spec("mynet-x").endsWith("@4#0.5"));
+                eq("机器人 AI 包：kind=builtin 直接写 policy（启发搜索）",
+                        mahjong.ai.BotAis.spec("hb-teacher"), "teacher");
+                eq("机器人 AI 包：内置名 + 同义 policy 允许（两种形态同一套包格式）",
+                        mahjong.ai.BotAis.spec("teacher"), "teacher");
+                check("机器人 AI 包：**深度模型**不许占用内置名（不顶掉锚点）",
+                        !mahjong.ai.BotAis.spec("first").startsWith("net:"));
+                check("机器人 AI 包：未知 kind / 缺权重只跳过",
+                        !mahjong.ai.BotAis.has("weird") && !mahjong.ai.BotAis.has("nomodel"));
+            }
         } catch (java.io.IOException e) {
             check("机器人 AI：扫目录用例不该抛 IO 异常", false);
         } finally {

@@ -452,6 +452,18 @@
 | 服务端实现 | `ai/BotAis.java`（新）+ `Table`（`botAi`/`setBotAi`/`applyBotAi`/`refreshBotNames`）+ `Session`（`create_room.bot_ai` / `set_bot_ai` / `hello_ok.bot_ais`）+ `Main`（`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir`） | 装配在 `playGame()` 里**每场一次**（`PolicyFactory` 契约）、只装机器人座位、装不上退回内置 teacher（绝不让"选了个坏 AI"变成"开不了局"） |
 | 文档 | `PROTOCOL.md`（§2.1 命令表 / §3.1 `hello_ok`+`room` 样例与 `bot_ai` 段 + 错误码表）、`NOTES.md` §6.6、`AGENTS.md` §6.6/§4/§7、`README.md`（面向玩家） | 协议先改、再服务端、再客户端、最后两侧测试（AGENTS §6.1 的流程） |
 
+**2026-09 「机器人 AI 包」（`bot-ai/` 启动自动挂载 + 统一包格式 + 独立分发 zip）**：
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| L1 规则引擎 | `java -jar server/build/mahjong-server.jar --selftest` | **1370 项全绿**（1362 → +8：`botAiTests` 的**包与清单**用例 —— `name` 覆盖目录名、`@4#0.5` 拼成策略串、内置同名声明（`kind=builtin` 且 `policy` 同名）放行、**net 包占用内置名被拒**、未知 `kind` 与缺权重包被跳过、`DEFAULT_DIR == "bot-ai"`） |
+| 启动期实测 | 仓库根目录直接 `java -jar server/build/mahjong-server.jar`（**不带任何 `--bot-ai*` 参数**） | 启动日志自动挂载 8 个包：`机器人 AI：teacher, first, pass, random, awr-002, bc-003, ppo-g04, ppo2-g04（默认 teacher）` —— 「装一代新网络 = 丢一个目录进去」成立 |
+| L3 真 socket | `node tools/bot-ai-test.mjs 127.0.0.1 10086` | **BOT-AI PASS 20/20**：清单来自自动挂载的 8 个包、`hello_ok.bot_ais` 里**不含 `spec`**（路径不泄漏）、建房 `bot_ai`、房主换一代、非房主 `not_host`、未知名字与两个路径串 `bad_bot_ai`（当前值不变）、开局中改动被忽略、座位名带 `·first` |
+| 打包器 | `python -m mahjong_ml.packbot --out bot-ai --from-dir S:\mahjong-training\ckpt --include ppo2-g04,ppo-g04,awr-002,bc-003 --builtin teacher,first,pass,random --alpha auto --data S:\mahjong-training\compact\rl-001 --zip release\bot-ai` | 8 个包（4 内置 ~0.2 KB + 4 网络 ~974 KB zip / `net.bin` 1042 KB）；`ppo2-g04` 的 `alpha: 2` 由**让位曲线**选出（让位 95.1%）；每个包另出一份**独立 zip**（解压到 `bot-ai/` 下即用） |
+| 服务端实现 | `ai/BotAis.java`（`scanDefault`/`loadPackage`/清单解析/坏包 WARN 跳过）+ `Main`（启动顺序 `clear → 自动扫 bot-ai/ → --bot-ai-dir → --bot-ai-reg → --bot-ai`） | 两种形态（`kind=net` / `kind=builtin`）**共用一套清单**；没有 `bot.json` 的老目录（`ckpt/<名字>/net.bin`）照旧可用 |
+| Python 侧 | `python/mahjong_ml/packbot.py`（新） | 名字校验与服务端**同一把尺子**（可打印 ASCII / 不含 `,@#` / 内置名规则）；`README.txt` 生成在包目录里，指向 `docs/BOT-AI.md` |
+| 文档 | `docs/BOT-AI.md`（新，包格式权威说明）、`PROTOCOL.md` §3.1/§8.6、`NOTES.md` §6.6、`AGENTS.md` §6.6、`README.md`、`.gitignore`（`bot-ai/` = 发布资产不进仓库） | 协议先改（§8.6 指向新文档），细节进 NOTES §6.6，AGENTS 只留判据（64 KB 预算） |
+
 **2026-09 训练轮 P4（在线自对弈 PPO + 联赛）**：
 
 | 层 | 命令 | 结果 |

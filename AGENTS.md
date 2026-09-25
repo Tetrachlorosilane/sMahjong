@@ -23,6 +23,7 @@
 文档地图：`docs/PROTOCOL.md`（协议契约 —— **改协议先改它**）· `docs/DESIGN.md`（架构与规则取舍）·
 `docs/AUDIT.md`（审计与修复清单，条目号 `S-nn`）· `docs/THEME.md`（材质包/设置文件）·
 `docs/THIRD-PARTY.md`（第三方许可与分发义务）· `docs/DEPLOY.md`（Ubuntu 部署）·
+`docs/BOT-AI.md`（**机器人 AI 包格式**）·
 `client/README.md`（客户端构建与链接方式）· `README.md`（**面向玩家**）· `NOTES.md`（**细节分册**）·
 `docs/TRAINING.md`（机器学习训练方案 · P0–P2 已落地，P3 起未实施）。
 ### 2.3 十四条曾经踩过的坑（同类问题会再犯）
@@ -204,7 +205,7 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1362 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1370 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
@@ -572,14 +573,13 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 **完整策略说明（每层的判据、权重与理由）见 `NOTES.md` §6.6。**
 配套：`docs/DESIGN.md` 的「AI 取舍」、`§8.2` 的特征判据表（`HandEval` / `Danger` / `Visible` / `scoreIfWin`）。
 
-**机器人用哪一代 AI**（`mahjong.ai.BotAis`，2026-09）：房间可以选机器人座位用**哪一代**
-（内置 teacher / 各代训练网络），**但客户端只传注册表里的名字**：`net:<路径>` 是**服务器本机文件**，
-让房间指定路径就等于把"读服务器任意文件"开放出去（`net:/etc/passwd` 会被当权重去读）。
-名字只由启动参数决定（`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir`），**启动期**就加载校验
-（坏权重在启动时炸，不等到开局）。⚠ 装配在 `Table.playGame()` 里**每场一次**
-（`PolicyFactory` 的契约：带采样的网络跨场复用会破坏"同种子可复现"），
-且**只在 `seats[i].bot` 的座位**上装。回归：`SelfTest.botAiTests` + `client --selftest`
-的「机器人 AI」组 + `node tools\bot-ai-test.mjs`。
+**机器人用哪一代 AI**（`mahjong.ai.BotAis`，2026-09）：房间可选机器人座位用**哪一代**
+（内置 teacher / 各代训练网络），但**客户端只传注册表里的名字** —— `net:<路径>` 是**服务器本机文件**，
+让房间指定路径就等于开放"读服务器任意文件"。清单来自**启动时自动挂载的 `bot-ai/` 包目录**
+（与 `replays/` 同层；一个一级子目录 = 一个包 = `bot.json` + 载荷，**深度模型与启发搜索同一套接口**），
+`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir` 可覆盖（后面的赢）。**格式与打包见 `docs/BOT-AI.md`**；
+装配每场一次、只装机器人座位、坏包只跳过它一个（细节见 `NOTES.md` §6.6）。
+回归：`SelfTest.botAiTests` + `client --selftest` 的「机器人 AI」组 + `node tools\bot-ai-test.mjs`。
 ### 6.7 无用代码清理（可重复的判据）
 
 **`node tools/deadcode-scan.mjs [java|cpp]`** 扫出"只在声明/定义处出现"的函数 —— 2026-09 的一次全仓清理

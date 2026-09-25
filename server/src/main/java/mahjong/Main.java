@@ -197,9 +197,14 @@ public final class Main {
         if (selfplay < 0 && featuresDir == null) {
             try {
                 mahjong.ai.BotAis.clear();
+                // ① **默认目录 `bot-ai/`**（与 `replays`/`players` 同层 = 相对启动目录）：
+                //    启动时自动挂载里面的每个 AI 包，不用加任何参数。
+                mahjong.ai.BotAis.scanDefault();
+                // ② 额外目录（可重复）：训练侧的 `ckpt/*/net.bin` 可以直接指过来
                 for (String dir : botAiDirs) {
                     mahjong.ai.BotAis.scanDir(java.nio.file.Path.of(dir));
                 }
+                // ③ 点名注册（可重复）：显式覆盖，优先级最高
                 for (String kv : botAiReg) {
                     int eq = kv.indexOf('=');
                     if (eq <= 0 || eq == kv.length() - 1) {
@@ -327,11 +332,13 @@ public final class Main {
         System.out.println("  --help             显示帮助");
         System.out.println();
         System.out.println("机器人 AI（房间可以选\"机器人用哪一代\"，客户端只传**名字**）：");
+        System.out.println("  启动时自动挂载 `bot-ai/`（与 replays/ 同层）里的每个 AI 包：");
+        System.out.println("    bot-ai/<名字>/bot.json + net.bin   {\"kind\":\"net\",\"alpha\":4,\"temp\":1}");
+        System.out.println("    bot-ai/<名字>/bot.json              {\"kind\":\"builtin\",\"policy\":\"teacher\"}");
         System.out.println("  --bot-ai <名字>        默认用哪个（缺省 teacher = 内置牌效）");
-        System.out.println("  --bot-ai-reg <名=串>   注册一个可选 AI，可重复；串 = teacher|first|pass|random"
+        System.out.println("  --bot-ai-dir <目录>    再挂一个目录（可重复；每个含 net.bin 的一级子目录按目录名注册）");
+        System.out.println("  --bot-ai-reg <名=串>   点名注册/覆盖，可重复；串 = teacher|first|pass|random"
                 + "|net:<权重文件>[@<α>][#<T>]");
-        System.out.println("  --bot-ai-dir <目录>    扫描目录：每个含 net.bin 的一级子目录按目录名注册"
-                + "（各代 checkpoint）");
         System.out.println();
         System.out.println("训练接口（无网络自对弈 / 评测）：");
         System.out.println("  --selfplay <n>     跑 n 场半庄（4 个机器人座位；不监听端口）");
