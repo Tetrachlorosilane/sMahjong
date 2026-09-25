@@ -659,6 +659,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 | 新增界面文案忘了搬 | 三件套流程：字面量 → `i18n-map.mjs` → `i18n-apply.mjs` → `i18n-gen.mjs`（§6.4） |
 | 牌河/副露牌太小、盘偏扁、立直棒叠点数 | §6.2 的不变量（比例、区带、固定左缘）；改完**必须看图**（L2 出 `table.png`） |
 | `dist\` 里的 exe 不是最新 | 带 `-Deploy` 重新构建（`build\` 每次更新，`dist\` 只在 `-Deploy` 时更新） |
+| **训练盘（`S:`）采集/训练中途开始报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样（目录一度还能枚举、余量正常），⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据与事故记录：`NOTES.md` §6.5、`docs/TRAINING.md` §4 P4 第二轮 |
 ## 8. 文档维护约定（AGENTS.md / NOTES.md 的分工）
 
 **本文件是"每次会话自动加载"的工作区指令，而指令预算只有 64 KB —— 一旦超过，后面的章节会被

@@ -170,6 +170,13 @@ ok(verify_env.GpuMonitor is guard.GpuMonitor and verify_env.DutyCycle is guard.D
 # ---------------------------------------------------------------- ④ paths 配额
 
 print("== paths（数据根与配额）==")
+# 配额数字本身钉住：文档（TRAINING §0.1.1）与代码必须同口径 —— 上一轮 compact 从 10 提到 50 GB
+# 就是因为世代循环每代 ~1.5 GB 的紧凑集把 10 GB 顶爆、滚动淘汰删掉了 `compact/rl-001`。
+eq("配额：compact = 50 GB（2026-09 用户指定，防止世代循环把 P3 数据集挤掉）",
+   paths.QUOTA_GB["compact"], 50.0)
+eq("配额：raw = 30 GB（不变；P4 每代 raw ~1.8 GB ⇒ 约 16 代）", paths.QUOTA_GB["raw"], 30.0)
+ok(set(paths.QUOTA_GB) == {"raw", "compact", "ckpt", "league", "logs"},
+   "配额：五个带配额的子目录齐全（probe 故意无配额：用完即删）", str(sorted(paths.QUOTA_GB)))
 tmp_root = scratch("paths")
 saved_root, saved_quota = paths.DATA_ROOT, dict(paths.QUOTA_GB)
 try:
@@ -1016,6 +1023,37 @@ _med = float(np.median(_th[:, _names.index("g1")] - _th[:, _names.index("teacher
 ok(_th.shape == (60, 3) and abs(_med - _pd["delta"]) < 0.02,
    "联赛：`boot_thetas` 一次重抽供多对比较复用，且与 `pl_ci_diff` 同源（不是两套统计）",
    f"抽样矩阵 {_th.shape}，中位差 {_med:+.3f} vs 点估计 {_pd['delta']:+.3f}")
+
+# ⑪ 策略位移矩阵（P4 的"步长体检"）：Elo 的分辨率有限，一代只改 2% 决策时"没有趋势"是必然的 ——
+#    所以先量位移。纯函数，直接喂合成数组。
+from mahjong_ml import online as ml_online                    # noqa: E402
+_a = np.arange(100) % 4
+_b = (np.arange(100) + 1) % 4                                  # 与 a 完全错开（循环移位）
+_c = np.arange(100) % 4
+_c[:10] = 99                                                   # 与 a 只差 10/100
+_d = np.arange(100) % 4
+_d[:25] = -1                                                   # 与 a 差 25/100
+_nm, _m = ml_online.agreement_matrix({"a": _a, "b": _b, "c": _c, "d": _d})
+eq("位移：对角线恒 1 且矩阵对称",
+   (bool((np.diag(_m) == 1).all()), bool(np.allclose(_m, _m.T))), (True, True))
+eq("位移：完全错开（循环移位）一致率 = 0", round(float(_m[0][1]), 6), 0.0)
+eq("位移：改了 10/100 的两条 → 一致率 = 0.90", round(float(_m[0][2]), 6), 0.90)
+eq("位移：改了 25/100 → 一致率 = 0.75（「看着差不多」在数字上就是 25% 的决策不同）",
+   round(float(_m[0][3]), 6), 0.75)
+
+# ⑫ 策略串解析（`pair` / 联赛都走它）：内置名原样、短名找 `ckpt/<名>/net.bin`、找不到就**报错**
+eq("解析：内置名原样返回", [ml_online.resolve_spec(x) for x in ("teacher", "first")], ["teacher", "first"])
+_real = paths.DATA_ROOT / "ckpt" / "ppo-g04" / "net.bin"
+if _real.is_file():
+    ok(ml_online.resolve_spec("ppo-g04") == f"net:{_real}",
+       "解析：ckpt 短名 → net:<路径>", ml_online.resolve_spec("ppo-g04")[:40])
+    ok(ml_online.resolve_spec(str(_real)) == f"net:{_real}",
+       "解析：直接给 net.bin 路径也对")
+try:
+    ml_online.resolve_spec("definitely-not-a-net")
+    eq("解析：找不到的策略必须报错（不许当成内置名跑）", "没报错", "应报错")
+except SystemExit as _e:
+    ok("找不到策略" in str(_e), "解析：找不到的策略报错并指出路径", str(_e)[:60])
 
 # ---------------------------------------------------------------- 汇总
 

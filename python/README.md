@@ -286,6 +286,12 @@ python\.venv\Scripts\python.exe -m mahjong_ml.online ladder --label ppo --genera
 # 3) 也可以只跑一代 PPO（数据必须是**当前网络**采的；--temp 必须等于采集时用的 #<T>）
 python\.venv\Scripts\python.exe -m mahjong_ml.ppo --data S:\mahjong-training\compact\ppo-g01 `
     --init S:\mahjong-training\ckpt\awr-002\model.pt --temp 1.0 --label ppo-g01 --epochs 4
+
+# 4) **步长体检**（调 lr/epoch 之前先跑它）：各代网络在固定数据集上的贪心一致率
+python\.venv\Scripts\python.exe -m mahjong_ml.online displace `
+    --data S:\mahjong-training\compact\ppo-g02 --label ppo --generations 4
+# 输出示例（第一轮）：逐代位移 2.68% / 2.56% / 2.66% / 2.42%；首→末累计 **4.85%**
+#   ⇒ 累计位移 <5% 时别指望 Elo 能分辨（1200 场/代 ≈ ±4 顺位点）——先调步长，不是加代数。
 ```
 
 口径与坑（细节见 `NOTES.md` §6.5、判据见 `TRAINING.md` §4 P4）：
@@ -303,7 +309,22 @@ python\.venv\Scripts\python.exe -m mahjong_ml.ppo --data S:\mahjong-training\com
 | ③ 对脚本基线不掉 | `first` θ=−2.516 / `random` θ=−2.566（vs 网络 ≥ +1.02、teacher +0.840）⇒ **没有过拟合到自己策略的迹象** ✓ |
 | 为什么没涨（可测） | 每代只改 **~2.5%** 决策（相邻代贪心一致率 0.973~0.975），四代累计 4.9%；训练日志 **KL≈0.006/代**（早停阈值 0.03 未触发）⇒ 步长太小，Elo 在 1200 场/代下分辨不出 |
 | 副产品：**判据① 价值校准** | 在线价值头**四代单调变好**：MAE 5.750→5.403（全部 < 常数基线）、逐点 ρ 0.599→**0.723**、小局级 ρ 0.663→**0.765** ⇒ **首次三项全过**（P3 的 `iql-004` 逐点 MAE 6.399 > 6.241 不过） |
-| ⚠ 配额副作用 | 四代紧凑集把 `compact` 顶过 10 GB ⇒ **`compact/rl-001` 被滚动淘汰**（`raw` 三个来源还在，重建 ≈13 分钟，命令见 `AUDIT.md` §4 的 P4 轮） |
+| ⚠ 配额副作用 | 四代紧凑集把 `compact` 顶过 10 GB ⇒ **`compact/rl-001` 被滚动淘汰**（`raw` 三个来源还在）。已把 `compact` 配额提到 **50 GB** 并重建成功（重建结果逐项一致） |
+
+**第二轮（`ppo2`：把步长提上去 —— `lr` ×3、`epoch` ×2，其余全同）**：
+
+| 项 | 结果 |
+| --- | --- |
+| **每代位移**（`online displace`） | 4.83% / 5.59% / 5.00% / 5.19%（第一轮 2.68/2.56/2.66/2.42%）⇒ **约 2 倍**；首→末累计 **9.49%**（从 `awr-002` 算 13.9%） |
+| KL 早停 | **每代都触发**（5/3/4/3 epoch）⇒ 步长上去后**信任域成了限制**（第一轮四代都没触发、KL≈0.006） |
+| 价值头 | MAE **5.17~5.44**（全部 < 常数基线）、逐点 ρ 0.682→0.748、小局级 ρ 0.711→**0.779** |
+| 判据（Elo / 2+2） | ⛔ **未取到** —— 评测刚开跑就撞上**数据盘掉线**（见下） |
+
+⛔ **存储事故（2026-09-25 05:05）**：第二轮的判据评测在写轨迹时报
+`java.nio.file.AccessDeniedException`、随后读报 `ERROR_IO_DEVICE`，再往后 **`S:` 与 `E:` 两个卷一起
+从系统里消失**（只剩 C:/D:）——**同一个物理设备掉总线**，不是沙箱权限。代码与文档全在 `C:` 工作区、
+不受影响；盘回来后先跑 `paths.ensure_root()` 探针 + `node tools\selfplay-check.mjs` 抽查一批轨迹，
+再补跑 `online pair --a ppo2-g04 --b ppo-g04 --games 1500`、`--b teacher` 与 `online ladder --label ppo2`。
 
 - ✅ **P0 评测口径**：服务端 `SelfPlay` 的顺位点指标（`avg_rank_points` / `per_game[].rank_points`）
 

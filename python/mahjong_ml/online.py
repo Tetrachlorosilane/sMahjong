@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from . import league, paths
 
@@ -345,6 +346,146 @@ def cmd_ladder(args) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ 策略位移（"每代到底动了多少"）
+
+
+def agreement_matrix(preds: dict[str, np.ndarray]) -> tuple[list[str], np.ndarray]:
+    """两两一致率矩阵（**纯函数**，自检直接喂合成数组）。
+
+    `M[i][j] = P(argmax_i == argmax_j)`。为什么先看这个而不是直接看 Elo：
+    **Elo 的分辨率是有限的**（1200 场/代下约 ±4 顺位点）—— 如果一代只改了 2% 的决策，
+    Elo 必然"看不出趋势"，那不是跑得不够久，而是**步长太小**。先量位移，再决定跑几代。
+    """
+    names = list(preds)
+    n = len(names)
+    m = np.ones((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            a, b = preds[names[i]], preds[names[j]]
+            m[i, j] = float((a == b).mean()) if a.size else float("nan")
+    return names, m
+
+
+def resolve_spec(name: str) -> str:
+    """名字或路径 → 策略串。`teacher`/`first`/`pass`/`random` 原样；`ppo-g04` → `net:ckpt/ppo-g04/net.bin`；
+    已经是 `net:` 串或一个存在的 `net.bin` 路径就直接用。"""
+    s = name.strip()
+    if s.lower() in BUILTIN_POLICIES or s.lower().startswith("net:"):
+        _check_policy(s)
+        return s
+    p = Path(s)
+    if not p.is_file():
+        p = paths.DATA_ROOT / "ckpt" / s / "net.bin"
+    if not p.is_file():
+        raise SystemExit(f"找不到策略 {name!r}：既不是内置名，也没有 {p}")
+    spec = f"net:{p}"
+    _check_policy(spec)
+    return spec
+
+
+def cmd_pair(args) -> int:
+    """**两个策略的 2+2 同牌山配对**（P3/P5b 的判据协议，通用化）：
+
+        python -m mahjong_ml.online pair --a ppo2-g04 --b teacher --games 1500
+        python -m mahjong_ml.online pair --a ppo2-g04 --b ppo-g04  --games 1500
+
+    ⚠ 为什么是 **2+2** 而不是一席对一席：实测 `sd(Δ)≈53` vs `≈80`（同场次精度差一倍），
+    而"这一代到底比上一代强没有"这种小效应必须用精度高的那个协议。
+    """
+    a, b = resolve_spec(args.a), resolve_spec(args.b)
+    tag = args.tag or f"{_short_of_spec(a)}-vs-{_short_of_spec(b)}"
+    out = paths.allocate("raw", tag)
+    spec = f"{a},{a},{b},{b}"
+    print(f"配对：{_short_of_spec(a)} ×2  vs  {_short_of_spec(b)} ×2（{args.games} 场，seed={args.seed}）")
+    t = selfplay(out, args.games, spec, seed=args.seed, workers=args.workers, sample=args.sample)
+    pr = paired_report(out, _short_of_spec(a), _short_of_spec(b))
+    print(f"\n  Δ = {pr['delta']:+.2f} 顺位点（正 = 前者更好）｜95%CI "
+          f"[{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]｜p={pr['p']:.3f}｜"
+          f"胜/负/平 {pr['win']}/{pr['lose']}/{pr['tie']}｜sd={pr['sd']:.2f}｜"
+          f"检出 Δ=2 需 {pr['required_n_delta2']} 场｜{args.games} 场用了 {t:.0f}s")
+    pr["games"] = args.games
+    pr["seconds"] = t
+    pr["raw"] = str(out)
+    dest = Path(args.json) if args.json else (paths.allocate("league", args.label) / f"pair-{tag}.json")
+    dest.write_text(json.dumps(pr, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  已写出 {dest}")
+    return 0
+
+
+def _short_of_spec(spec: str) -> str:
+    """策略串 → 阶梯/报告里用的短名（与 `league.short_name` 同源，免得两处不一致）。"""
+    return league.short_name(spec)
+
+
+def cmd_displace(args) -> int:
+    """量"各代网络在固定数据集上的贪心动作一致率"（P4 的**步长体检**）。
+
+        python -m mahjong_ml.online displace --data <紧凑集> --label ppo2 --generations 4
+        python -m mahjong_ml.online displace --data <紧凑集> --ckpts a.pt,b.pt
+
+    ⚠ 参考数据集要选**大家都见过的同一批状态**：用最新一代的紧凑集 val 切分即可
+    （或 P3 的 `rl-001`，如果没被配额淘汰 —— 见 `paths.QUOTA_GB`）。
+    """
+    from . import bc, dataset as ds, nets
+    if args.ckpts:
+        items = []
+        for spec in args.ckpts.split(","):
+            spec = spec.strip()
+            if not spec:
+                continue
+            p = Path(spec)
+            items.append((p.parent.name or p.stem, p))
+    else:
+        items = []
+        for g in range(1, args.generations + 1):
+            tag = short_of(args.label, g)
+            items.append((tag, paths.DATA_ROOT / "ckpt" / tag / "model.pt"))
+    for name, p in items:
+        if not p.is_file():
+            raise SystemExit(f"缺 checkpoint：{p}（{name}）")
+
+    split = ds.load_split(args.data, args.split)
+    n = int(np.asarray(split["state"]).shape[0])
+    if n == 0:
+        raise SystemExit(f"{args.data} 的 {args.split} 切分为空")
+    rng = np.random.default_rng(args.seed)
+    idx = np.sort(rng.choice(n, size=min(args.rows, n), replace=False))
+    state, cand, mask, label = bc._batch(split, idx, "cpu")
+
+    preds: dict[str, np.ndarray] = {}
+    for name, p in items:
+        ck = torch.load(p, map_location="cpu", weights_only=False)
+        cfg = ck["config"]
+        model = nets.build(cfg["state_dim"], cfg["cand_dim"], hidden=cfg["hidden"], head=cfg["head"])
+        model.load_state_dict(ck["model"])
+        model.eval()
+        with torch.no_grad():
+            preds[name] = model(state, cand, mask).argmax(dim=1).numpy()
+
+    names, m = agreement_matrix(preds)
+    lab = label.numpy()
+    print(f"\n策略位移：{args.data} 的 {args.split} 切分抽 {len(idx)} 条（seed={args.seed}）")
+    print("两两贪心一致率：")
+    print("  " + " " * 14 + "".join(f"{x[-6:]:>10}" for x in names) + "   与数据动作")
+    for i, a in enumerate(names):
+        row = "".join(f"{m[i, j]:>10.4f}" for j in range(len(names)))
+        print(f"  {a:<12}{row}{float((preds[a] == lab).mean()):>12.4f}")
+    if len(names) >= 2:
+        drift = 1.0 - m[0, -1]
+        step = [1.0 - m[k, k + 1] for k in range(len(names) - 1)]
+        print(f"  逐代位移：{' / '.join(f'{s*100:.2f}%' for s in step)}"
+              f"；首→末累计 **{drift*100:.2f}%**")
+        print("  读法：累计位移 < 5% 时别指望 Elo 能分辨（1200 场/代约 ±4 顺位点）——"
+              "先调步长（lr / epoch），不是加代数。")
+    out = {"data": str(args.data), "split": args.split, "rows": int(len(idx)),
+           "names": names, "matrix": m.tolist(),
+           "data_agreement": {a: float((preds[a] == lab).mean()) for a in names}}
+    dest = Path(args.json) if args.json else (paths.allocate("league", args.label) / "displace.json")
+    dest.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  已写出 {dest}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="P4：世代循环 + 联赛阶梯")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -383,8 +524,36 @@ def main(argv: list[str] | None = None) -> int:
     l.add_argument("--workers", type=int, default=24)
     l.add_argument("--seed", type=int, default=701001)
     l.add_argument("--sample", type=int, default=64, help="评测用采样（省盘；不省时间）")
+
+    d = sub.add_parser("displace", help="量各代网络的贪心一致率（P4 的步长体检）")
+    d.add_argument("--data", required=True, help="参考紧凑集（大家都见过的同一批状态）")
+    d.add_argument("--label", default="ppo", help="配合 --generations 自动找 ckpt/<label>-gNN")
+    d.add_argument("--generations", type=int, default=4)
+    d.add_argument("--ckpts", default=None, help="显式列 checkpoint（逗号分隔；给了就不看 --label）")
+    d.add_argument("--split", default="val", choices=["val", "train"])
+    d.add_argument("--rows", type=int, default=40000)
+    d.add_argument("--json", default=None)
+    d.add_argument("--seed", type=int, default=20260401)
+
+    p = sub.add_parser("pair", help="两个策略的 2+2 同牌山配对（判据协议）")
+    p.add_argument("--a", required=True, help="策略：内置名 / ckpt 短名（ppo-g04）/ net.bin 路径")
+    p.add_argument("--b", required=True)
+    p.add_argument("--games", type=int, default=1500)
+    p.add_argument("--workers", type=int, default=24)
+    p.add_argument("--sample", type=int, default=64)
+    p.add_argument("--seed", type=int, default=1001001)
+    p.add_argument("--tag", default=None, help="run 目录名（缺省 = <A>-vs-<B>）")
+    p.add_argument("--label", default="pairs", help="报告落到 league/<label>/")
+    p.add_argument("--json", default=None)
+
     args = ap.parse_args(argv)
-    return cmd_run(args) if args.cmd == "run" else cmd_ladder(args)
+    if args.cmd == "run":
+        return cmd_run(args)
+    if args.cmd == "displace":
+        return cmd_displace(args)
+    if args.cmd == "pair":
+        return cmd_pair(args)
+    return cmd_ladder(args)
 
 
 if __name__ == "__main__":

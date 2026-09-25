@@ -837,6 +837,31 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   - ⚠ **配额副作用**：四代紧凑集（~1.5 GB/代）把 `compact` 顶过 10 GB ⇒ 滚动淘汰把
     **`compact/rl-001`（P3 的数据集）删了**（`raw` 三来源仍在，重建 ≈13 分钟）。
     `paths.enforce_quota` 是在 **allocate 时**检查的，而目录是之后才长大的 ⇒ 实际占用会**超出配额一代**。
+    → **已按用户指示把 `compact` 配额提到 50 GB**（`paths.QUOTA_GB`，自检里钉着这个数），
+    并重建了 `compact/rl-001`：**同命令同种子重建出来逐项一致**（训练 622,472 条 / 验证 69,607 条、
+    93,341 条老师标注）—— 这是"紧凑集可重建"的一次实测。
+  - **P4 第二轮（步长 ×6）**：`lr` 1e-4→3e-4、epoch 4→8，其余全同（初始化取第一轮末代）。
+    **每代位移从 2.5% 涨到 ~5%**（4.83/5.59/5.00/5.19%），首→末累计 9.49%（从 `awr-002` 算 13.9%）；
+    **KL 早停每代都触发**（5/3/4/3 epoch）⇒ 步长提上去之后**信任域成了限制**而不是 `lr`。
+    价值头继续变好（MAE 5.17~5.44 < 常数基线、小局级 ρ 0.711→0.779）。
+    ⚠ 判据（Elo / 2+2）**没取到**：见下面的存储事故。
+  - ⛔ **存储事故（2026-09-25 05:05，训练盘掉总线）**：P4 第二轮四代训练全部正常写完，
+    紧接着的判据评测（`online pair` / `ladder`）在写轨迹时开始报
+    `java.nio.file.AccessDeniedException`，随后**读**也失败（`ERROR_IO_DEVICE` =
+    "The request could not be performed because of an I/O device error"），
+    再往后 **`S:`（Silicon_files）与 `E:`（Silicon_SSD）两个卷一起从系统里消失**
+    （`[System.IO.DriveInfo]::GetDrives()` 只剩 C:/D:）。**特征**：
+    ① 目录还能枚举、`Get-Volume`/余量信息一度正常；② 报错先是"写被拒"、然后才"读 I/O 错误"；
+    ③ 两个同标签卷同时消失 ⇒ **同一个物理设备掉总线**。
+    ⚠ **诊断教训**：我一开始把它读成"沙箱权限收紧"（症状确实像 `EPERM`/`AccessDenied`），
+    甚至去申请放宽沙箱 —— 正确的是**第一条就查盘符还在不在**。
+    **处置**：停掉所有写 `S:` 的作业；已完成证据（第一轮全量 + 第二轮的位移/KL/价值）留在
+    本文档与 `league/`、`ckpt/` 里；**盘上数据能否恢复取决于重新插拔/换线**，
+    而代码与文档全在 `C:` 工作区、不受影响。
+    **恢复后要做的**：① `paths.ensure_root()` 写探针 + 读一个 `raw/` 目录 +
+    `node tools\selfplay-check.mjs` 抽查一批轨迹，确认盘上数据没坏；② 补跑第二轮判据
+    （`pair ppo2-g04 vs ppo-g04` / `vs teacher` + `ladder --label ppo2`）；③ 若该盘反复掉线，
+    把数据根换到别的卷即可（`MAHJONG_DATA_ROOT` 环境变量一行，代码里没有硬编码路径）。
 - 回归：`SelfTest.trainingInterfaceTests`（动作空间往返、观测反作弊不变式 + 正向对照、
   策略三种失败方式兜底、同种子可复现、注入真的改变行为、runner 统计自洽）
   + `SelfTest.obsFeaturesTests`（派生特征 golden）+ `SelfTest.neuralForwardTests`（前向 golden）
