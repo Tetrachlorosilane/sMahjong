@@ -1295,13 +1295,17 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | `sMahjong-client-v<版本>-win64.zip` | `client\dist` 全部内容 **去掉 `settings.json`** + 自带 `README.txt` | 自带 Qt 运行时与 `licenses\`（LGPLv3 要求），解压即用 |
 | `sMahjong-server-v<版本>.zip` | **一层版本目录** `sMahjong-server-v<版本>/`：`mahjong-server.jar` + `VERSION` + `start.sh`/`stop.sh`/`restart.sh`/`status.sh`/`update.sh`（来自 `server\pack\`）+ `DEPLOY.md` + `README.txt` | 目标机只要 JDK 17+；`./start.sh` 起，`./update.sh` 自更新 |
 
-**机器人 AI 包（`release\bot-ai\<名字>.zip`）也是发布资产**（2026-09 起）：每个包**独立一个 zip**，
-解压到服务端的 `bot-ai/`（与 `replays/` 同层）下**重启即生效**，不用改配置、不用重新打包服务端。
+**机器人 AI 包（`release\bot-ai\<名字>.zip` + `sMahjong-bot-ai-v<版本>.zip`）也是发布资产**（2026-09 起）：
+每个包**独立一个 zip**，解压到**服务端目录**（`mahjong-server.jar`/`start.sh` 所在处，与 `replays/` 同层），
+重启即生效，不用改配置、不用重新打包服务端；另有一个**一包全给**的 `sMahjong-bot-ai-v<版本>.zip`
+（`tools/make-zip.mjs` 打的，zip 内是 `bot-ai/…` 一整棵，含包目录里那份 `README.txt`）。
 它们是 `python -m mahjong_ml.packbot … --zip release\bot-ai` 的产物（见 `docs/BOT-AI.md` §6）：
 内置启发搜索包 ~0.2 KB、深度模型包 ~974 KB（内含 1042 KB 的 `net.bin`）。
-zip 里带一层 `bot-ai/<名字>/` 前缀（`zip_packages` 用 `out_root.name` 拼的），所以**解压到服务端根目录**
-就是对的落点（解压到 `bot-ai/` 里会多一层）。
+⚠ **两种 zip 的落点都是服务端根目录**：包内已带 `bot-ai/<名字>/` 前缀，
+所以**解压到服务端目录**（而不是解压到已存在的 `bot-ai/` 里 —— 那会多一层）。
 ⚠ 权重是**二进制发布资产**，不进仓库（`.gitignore` 里的 `bot-ai/`）：改了训练脚本要重发时重新打包。
+⚠ 重新打包会改 zip 的 sha256（条目里带时间戳）→ 发布清单里的摘要要跟着更新
+（草稿与摘要表放在 `release/RELEASE-v1.9.0.md` / `release/assets-v1.9.0.txt`，`release/` 已 gitignore）。
 
 **服务端包的结构是 2026-09 重构过的**（用户点名："release 里服务端内容结构不合理"）：
 

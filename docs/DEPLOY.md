@@ -136,7 +136,47 @@ java -jar mahjong-server.jar --selftest
 - 清理是**自动的**：启动时一次，之后每 6 小时一次（判据是"上次登录距今 > TTL"）。
   `--uuid-ttl-days 0` 表示只保留本进程登录过的（调试用）。
 
-### 3.5 全部命令行开关
+### 3.5 机器人用哪一代 AI（`bot-ai/`）
+
+服务端**启动时自动挂载 `./bot-ai/`**（相对启动目录 —— 与 `replays/`、`players/` 同层，
+也就是 `start.sh` 所在处）里的每个**一级子目录**，一个子目录 = 一个「机器人 AI 包」
+（`bot.json` 清单 + 载荷）。**装一代新网络 = 解压一个 zip 进去 + `./restart.sh`**，
+不需要任何命令行参数：
+
+```bash
+cd /opt/sMahjong            # jar / start.sh 所在目录
+unzip ~/sMahjong-bot-ai-v1.9.0.zip   # 一包全给（内含 bot-ai/ 一层）
+# 或只装某几代：unzip ~/ppo2-g04.zip  （包里同样是 bot-ai/ppo2-g04/…）
+./restart.sh
+```
+
+启动日志确认：
+
+```
+[INFO] 挂载机器人 AI 包 `ppo2-g04`（kind=net，来源 …（打包 2026-09-25）；α=auto（让位 95.1%，数据集 rl-001））
+[INFO] 机器人 AI：teacher, first, pass, random, awr-002, bc-003, ppo-g04, ppo2-g04（默认 teacher）
+```
+
+之后客户端建房间的「机器人 AI」下拉框里能选一代（房主在等待室还能改，**开局后不可改**）。
+相关开关（`./start.sh` 后透传）：
+
+```bash
+--bot-ai <名字>            默认用哪一代（缺省 teacher = 内置牌效，改造前行为）
+--bot-ai-dir <目录>        再挂一个目录（可重复）：每个一级子目录按目录名/清单注册 —— 
+                           直接指训练侧的 checkpoint 目录即可（`ckpt/<名字>/net.bin`）
+--bot-ai-reg <名=串>       点名注册/覆盖（可重复；串 = teacher|first|pass|random|net:<权重>[@<α>][#<T>]）
+```
+
+- **`bot-ai/` 不会被 `./update.sh` 动**（它只替换 jar 与脚本），所以升级不会丢这几代；
+  但它**不在** `players/`、`replays/` 那类"要备份"的清单里 —— 权重是可重新分发的产物。
+- **坏包只跳过它一个**（清单读不出 / 未知 `kind` / 权重缺失或损坏 / 名字撞内置锚点），
+  日志里留 WARN，其余包照常用；**点名的**（`--bot-ai` / `--bot-ai-reg`）坏了才是启动报错。
+- 安全口径：客户端只能选**名字**，`net:<路径>` 一律被拒（回 `error{bad_bot_ai}`）——
+  否则等于把"读服务器任意文件"开放给房间。
+- 包格式（自己打一代进去）、命名规则与坏包清单见仓库 **`docs/BOT-AI.md`**；
+  打包器 `python -m mahjong_ml.packbot --out bot-ai … --zip release/bot-ai`。
+
+### 3.6 全部命令行开关
 
 ```bash
 java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要）
@@ -145,6 +185,7 @@ java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要�
 --no-replay                                # 不写对局记录
 --player-dir players --uuid-ttl-days 60    # 玩家档案（身份）目录与保留期，见 §3.4
 --no-player-store                          # 不落盘玩家档案
+--bot-ai teacher --bot-ai-dir bot-ai       # 机器人用哪一代，见 §3.5
 --selftest                                 # 规则引擎自检后退出
 --selfplay N --workers K --policy a,b,c,d  # 自对弈 / 评测（训练接口，见 PROTOCOL §8）
 ```
