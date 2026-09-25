@@ -1394,7 +1394,8 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 （草稿与摘要表放在 `release/RELEASE-v<版本>.md` / `release/assets-v<版本>.txt`，`release/` 已 gitignore）。
 ⚠ **发新版前先查一遍 release 列表**：`v1.9.0` 已经发过（那是"训练数据校验修复 + 训练方案"，
 与"房间选 AI + 机器人包"不是一回事），所以那一轮发的是 **v1.10.0**，tag 指向 `6cc0a2c`。
-后来 **v1.10.1** 已发布（牌谱导出修复，tag 指向 `eb939f8`，release #396794051）：本仓库的版本号
+后来 **v1.10.1**（牌谱导出修复，tag `eb939f8`，release #396794051）与 **v1.10.2**
+（点数账修复，tag `0581d17`，release #396820517）也已发布：本仓库的版本号
 **只加不改**，发布记录（资产摘要、release id、走过哪条推送通道）写在 `release/RELEASE-v<版本>.md`。
 ⚠ **tag 要先建再建 release**：`POST /releases` 的 `target_commitish` 默认是 `main`，
 tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Training`）—— 先 `POST /git/refs` 建 tag
