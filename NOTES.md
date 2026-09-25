@@ -1431,6 +1431,15 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   ⚠ 三条仍在的硬要求：`bodyFile` 用**绝对路径**；`PATCH /git/refs/…` 的 body 也走文件
   （内联字符串会被当字符串发走、422 `is not an object`）；提交对象的 message **必须带尾随换行**，
   否则远端 commit sha 与本地不同（内容一样、对象不一样 → 本地区远端分叉）。
+- **broker 的 git 通道 502 时的兜底**（`github_git_push` 报 `git push 失败（退出码 128）` +
+  代理 `error: 502`，而 REST 照常通）：走 REST 自己造**逐字节相同**的提交 ——
+  `POST /git/blobs`（每个改动文件一个，base64）→ `POST /git/trees`（**带 `base_tree` = 本地父提交的
+  tree**，只列改动项）→ `POST /git/commits`（tree + parents + **原样的 message / author /
+  committer / date**，date 写 `+08:00` 形式）→ `PATCH /git/refs/heads/<分支>`。
+  **判据是 sha 与本地 `git rev-parse HEAD` 完全一致**（2026-09 实测 `a1c4ce6` 两边同 sha：
+  本地不分叉，下一次 `github_git_push` 仍是快进）。
+  ⚠ 取本地提交对象**别用 `Out-File`**（它会把 LF 换成 CRLF，message 字节数就变了）——
+  用 `cmd /c "git cat-file commit <sha> > file"` 原样落盘。
   ⚠ **旧的三件套已删**（`gh-push-payload.ps1` / `make-gh-tree-payload.mjs` / `push-github-api.mjs`）：
   它们是"插件还没有 `github_commit_files`"时代的绕路（自己拼 base64、自己算 commit sha），
   现在用插件一次调用即可，留着只会让人以为必须那么干。
