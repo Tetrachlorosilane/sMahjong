@@ -1393,7 +1393,12 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 ⚠ 重新打包会改 zip 的 sha256（条目里带时间戳）→ 发布清单里的摘要要跟着更新
 （草稿与摘要表放在 `release/RELEASE-v<版本>.md` / `release/assets-v<版本>.txt`，`release/` 已 gitignore）。
 ⚠ **发新版前先查一遍 release 列表**：`v1.9.0` 已经发过（那是"训练数据校验修复 + 训练方案"，
-与"房间选 AI + 机器人包"不是一回事），所以这一轮发的是 **v1.10.0**，tag 指向 `6cc0a2c`。
+与"房间选 AI + 机器人包"不是一回事），所以那一轮发的是 **v1.10.0**，tag 指向 `6cc0a2c`。
+后来 **v1.10.1** 已发布（牌谱导出修复，tag 指向 `eb939f8`，release #396794051）：本仓库的版本号
+**只加不改**，发布记录（资产摘要、release id、走过哪条推送通道）写在 `release/RELEASE-v<版本>.md`。
+⚠ **tag 要先建再建 release**：`POST /releases` 的 `target_commitish` 默认是 `main`，
+tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Training`）—— 先 `POST /git/refs` 建 tag
+指向目标提交，release 便会关联到这个已存在的 tag。
 
 **服务端包的结构是 2026-09 重构过的**（用户点名："release 里服务端内容结构不合理"）：
 
