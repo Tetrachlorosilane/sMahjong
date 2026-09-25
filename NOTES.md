@@ -951,6 +951,15 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   + `SelfTest.hybridPolicyTests`（P5b 先验）+ `SelfTest.samplingPolicyTests`（P4 温度采样）
   + `tools\selfplay-check.mjs` + `python\selfcheck.py`（sidecar 格式契约、P3 转移/校准、
   P0 合并与功效口径、**P4 的 PPO 数学与联赛**）+ `python -m mahjong_ml.league --selftest`（18 项）。
+- **推理开销怎么量**（2026-09 加）：`java -cp server\build\mahjong-server.jar tools\BenchForward.java
+  <net.bin> <轨迹.jsonl> [行数]` —— 单文件源码模式直接跑，逐段打印
+  「`ofObs` / `state` / **每个候选的派生特征** / trunk+打分头 / 整条 `logits`」的 µs。
+  实测结论（数字与表格在 `docs/TRAINING.md` §3.3）：**网络只占一次决策的 ~8%**，
+  九成开销在**逐候选的进张/向听统计**（`HandEval.of` × 34 种进张 ≈ 0.5～0.8 ms/候选）——
+  要提速先动特征。⚠ 本机是笔记本，单线程跑分抖动 ±30%，看区间别看单次。
+  想量**端到端**（含引擎与并行度）就直接 `--selfplay N --workers K --policy "net:…,…"`
+  （**不给 `--out` 就不落盘**，这时打印的场/秒、决策/秒才是纯 CPU 吞吐：
+  24 核上 `teacher×4` 2.28 场/秒、纯网络 1.73、出厂 `@2` 混合 1.08）。
 
 
 ---
