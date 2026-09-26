@@ -967,9 +967,13 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 > 目标是把这两步换成 C++ 跑（同核数下决策/秒 ≥ 3×）。切换**不应改变数据集内容** ——
 > 所以判据是同种子产物逐字节相同，而不是"能跑"：
 > ```
-> node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101   # C++ 生产者 ↔ Java 生产者
+> node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101   # 采集：C++ ↔ Java（g*.jsonl 逐字节）
+> node tools\trainer-features-parity.mjs                       # 派生特征：sidecar 逐字节
 > node tools\selfplay-check.mjs <C++ 产出的目录>               # 独立校验器（Python 侧同一份）
 > ```
+> `trainer-features-parity.mjs --self-check` 是**自检模式**（两边都跑 Java）—— 用来验证脚本本身与
+> Java 侧可复现性，不需要 C++ 就绪；`--hands 1 --policy pass --seed 20260101` 这一场的参考 sidecar
+> 是 **19,050 B**（sha256 `fc7bcf27eceea3b2…`）。
 > 接线处在 `python/mahjong_ml/producer.py`（`online.py` / `dagger.py` 都走它）；C++ 侧还没实现的
 > 能力（`--teacher-label`、`--sample` 等）会**显式报错**，不悄悄降级成另一种数据集。
 

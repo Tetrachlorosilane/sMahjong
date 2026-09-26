@@ -1133,6 +1133,13 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       ⚠ 一个坑：`online.selfplay()` 的 `--out` 我一开始传了相对路径（在 `python/` 下 `../trainer/...`
       只上跳一级 → 落到**工作区外**），沙箱拒绝写入而 Java **只打一行 WARN、静默降级**（"采集看起来成功、
       却只有 summary.json"）。接 C++ 生产者时同样要传**绝对路径**。
+    - **派生特征 sidecar 的对拍闸门也已就位**（`tools/trainer-features-parity.mjs`）：把同一份轨迹拷成
+      两份、分别让两个生产者跑 `--features`，然后**逐字节**比 `g*.feat.bin`（顺手打 sha256 前 16 位）。
+      为什么比字节而不解析格式：解析等于再写一份实现，而 sidecar 的消费方已经有 `dataset.py` 与
+      `selfcheck.py` 两道闸门。
+      `--self-check` 模式两边都跑 Java —— 已实测 PASS（Java 侧可复现），参考值：
+      `--hands 1 --policy pass --seed 20260101` → `g0.feat.bin` = **19,050 B**
+      `sha256=fc7bcf27eceea3b2…`。C++ 侧实现 `features` 后要正好落在这个字节数上。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。
