@@ -32,14 +32,23 @@ SUBDIRS = ("raw", "compact", "ckpt", "league", "logs", "probe")
 #: ⚠ `compact` 10 → **50 GB**（2026-09 用户指定）→ **100 GB**（同日再次指定）：P4 的世代循环每代要
 #: 一份紧凑集（~1.5 GB），四代就把 10 GB 顶爆，而滚动淘汰**按 mtime 从最旧的开始删**、
 #: 不区分"废弃数据集"和"还要复算的数据集"，于是把 `compact/rl-001`（P3 的数据集）删了。
-#: 100 GB ≈ 60 代紧凑集的余量；`raw` 仍是 30 GB（每代 ~1.8 GB ≈ 16 代）。
+#: ⚠ **2026-09-26：S 盘上限抬到 200 GB（用户指定）** —— 见下面的 `TOTAL_QUOTA_GB`：
+#: `raw` 30 → **80 GB**（≈44 代）、`compact` 100 → **116 GB**（≈77 代），
+#: 五项之和**恰好 = 200 GB**（这样"总量上限"与"分项上限"不会互相打脸：分项加起来够不到总量时，
+#: 总配额就是一句空话）。
 QUOTA_GB: dict[str, float] = {
-    "raw": 30.0,
-    "compact": 100.0,
+    "raw": 80.0,
+    "compact": 116.0,
     "ckpt": 2.0,
     "league": 1.0,
     "logs": 1.0,
 }
+
+#: **数据根总配额**（GB，2026-09-26 用户指定 **200**）。
+#: 与分项配额**同时生效**：先按 kind 压回自己的配额，再看总量 —— 超了就从最旧的开始淘汰
+#: （只在"每代一份、可复算"的 `raw` / `compact` 里挑，`probe` 用完即删、不参与）。
+#: ⚠ 它只是**策略上限**：真正的兜底是下面的 `MIN_FREE_GB`（S 盘物理 231 GB，别把它当成"一定有 200 GB 可用"）。
+TOTAL_QUOTA_GB = 200.0
 
 #: 磁盘余量下限（GB）：任何时刻都要留这么多（写满盘会让采集静默失败）。
 MIN_FREE_GB = 10.0
@@ -123,34 +132,63 @@ def _rm(path: Path) -> int:
     return before
 
 
+def total_gb() -> float:
+    """数据根下**全部**子目录的占用（GB）—— 总配额的判据。"""
+    return sum(dir_size_bytes(DATA_ROOT / k) for k in SUBDIRS) / 1024**3
+
+
+def _oldest_among(kinds: tuple[str, ...]) -> Path | None:
+    """这些子目录里**全局最旧**的那一条（`None` = 都没东西可删）。"""
+    best: tuple[float, Path] | None = None
+    for k in kinds:
+        for t, p in _entries(k):
+            if best is None or t < best[0]:
+                best = (t, p)
+            break                                    # `_entries` 已按 mtime 升序
+    return None if best is None else best[1]
+
+
 def enforce_quota(kind: str, *, need_bytes: int = 0) -> list[str]:
-    """把 `kind` 压回配额内：**从最旧的开始删**，直到"够用 + 留足余量"。
+    """把数据根压回配额内：**从最旧的开始删**，直到"够用 + 留足余量"。
+
+    三道闸门（依次）：
+      ① `kind` 自己的分项配额；② **数据根总配额**（`TOTAL_QUOTA_GB`，只淘汰 raw/compact）；
+      ③ 整盘余量（留 `MIN_FREE_GB`）。
+    ⚠ `probe` 没有分项配额（用完即删），但**仍受总配额约束**。
 
     @return 被删掉的条目名（便于日志/审计）
     """
-    if kind not in QUOTA_GB:
-        return []
-    quota = int(QUOTA_GB[kind] * 1024**3)
     removed: list[str] = []
     # ① 先按自身配额
-    while dir_size_bytes(DATA_ROOT / kind) + need_bytes > quota:
-        entries = _entries(kind)
-        if not entries:
-            break
-        _, victim = entries[0]
+    if kind in QUOTA_GB:
+        quota = int(QUOTA_GB[kind] * 1024**3)
+        while dir_size_bytes(DATA_ROOT / kind) + need_bytes > quota:
+            entries = _entries(kind)
+            if not entries:
+                break
+            _, victim = entries[0]
+            _rm(victim)
+            removed.append(victim.name)
+    # ② 再看**总配额**（2026-09-26 加的 200 GB 上限）：只在可复算的两类里淘汰
+    while total_gb() + need_bytes / 1024**3 > TOTAL_QUOTA_GB:
+        victim = _oldest_among(("raw", "compact"))
+        if victim is None:
+            raise QuotaError(
+                f"数据根占用 {total_gb():.2f} GB 超过总配额 {TOTAL_QUOTA_GB:.0f} GB，"
+                f"且 raw/compact 已无可删条目")
         _rm(victim)
-        removed.append(victim.name)
-    # ② 再看整盘余量（留 MIN_FREE_GB）—— 不够就继续删（仍从最旧的删）
+        removed.append(f"{victim.parent.name}/{victim.name}")
+    # ③ 最后看整盘余量（留 MIN_FREE_GB）—— 不够就继续删（仍从最旧的删）
     while free_gb() < MIN_FREE_GB + need_bytes / 1024**3:
-        entries = _entries(kind)
-        if not entries:
+        victim = _oldest_among(("raw", "compact")) or (
+            _entries(kind)[0][1] if _entries(kind) else None)
+        if victim is None:
             total = sum(t for t, _ in _entries("raw") + _entries("compact"))
             raise QuotaError(
-                f"磁盘余量不足（{free_gb():.2f} GB < {MIN_FREE_GB} GB）且 {kind} 已无可删条目"
+                f"磁盘余量不足（{free_gb():.2f} GB < {MIN_FREE_GB} GB）且已无可删条目"
                 f"（raw+compact 共 {total/1024**3:.2f} GB）")
-        _, victim = entries[0]
         _rm(victim)
-        removed.append(victim.name)
+        removed.append(f"{victim.parent.name}/{victim.name}")
     return removed
 
 
@@ -170,13 +208,14 @@ def allocate(kind: str, label: str, *, need_bytes: int = 0, root: Path | None = 
 
 
 def report() -> str:
-    """一行式状态：各子目录占用 / 配额 + 盘余量（写进日志用）。"""
+    """一行式状态：各子目录占用 / 配额 + **总量/总配额** + 盘余量（写进日志用）。"""
     parts = []
     for k in SUBDIRS:
         size = dir_size_bytes(DATA_ROOT / k) / 1024**3
         q = QUOTA_GB.get(k)
         parts.append(f"{k}={size:.2f}GB" + (f"/{q:.0f}GB" if q else ""))
-    return f"{DATA_ROOT} | " + " ".join(parts) + f" | free={free_gb():.2f}GB"
+    return (f"{DATA_ROOT} | " + " ".join(parts)
+            + f" | total={total_gb():.2f}GB/{TOTAL_QUOTA_GB:.0f}GB | free={free_gb():.2f}GB")
 
 
 if __name__ == "__main__":                       # python -m mahjong_ml.paths

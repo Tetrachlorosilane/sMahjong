@@ -177,15 +177,21 @@ ok(verify_env.GpuMonitor is guard.GpuMonitor and verify_env.DutyCycle is guard.D
 # ---------------------------------------------------------------- ④ paths 配额
 
 print("== paths（数据根与配额）==")
-# 配额数字本身钉住：文档（TRAINING §0.1.1）与代码必须同口径 —— compact 从 10 → 50 → 100 GB
+# 配额数字本身钉住：文档（TRAINING §0.1.1）与代码必须同口径 —— compact 从 10 → 50 → 100 → 116 GB
 # 就是因为世代循环每代 ~1.5 GB 的紧凑集把 10 GB 顶爆、滚动淘汰删掉了 `compact/rl-001`。
-eq("配额：compact = 100 GB（2026-09 用户两次上调 10→50→100，防止世代循环挤掉数据集）",
-   paths.QUOTA_GB["compact"], 100.0)
-eq("配额：raw = 30 GB（不变；P4 每代 raw ~1.8 GB ⇒ 约 16 代）", paths.QUOTA_GB["raw"], 30.0)
+# 2026-09-26 用户指定「S 盘上限 200 GB」：新增**总配额**，并把 raw/compact 抬到五项之和恰好 200。
+eq("配额：S 盘总配额 = 200 GB（2026-09-26 用户指定）", paths.TOTAL_QUOTA_GB, 200.0)
+eq("配额：compact = 116 GB（10→50→100→116，防止世代循环挤掉数据集）",
+   paths.QUOTA_GB["compact"], 116.0)
+eq("配额：raw = 80 GB（30→80；P4 每代 raw ~1.8 GB ⇒ 约 44 代）", paths.QUOTA_GB["raw"], 80.0)
+eq("配额：分项之和 == 总配额（否则「总量 200」是句空话）",
+   sum(paths.QUOTA_GB.values()), paths.TOTAL_QUOTA_GB)
 ok(set(paths.QUOTA_GB) == {"raw", "compact", "ckpt", "league", "logs"},
-   "配额：五个带配额的子目录齐全（probe 故意无配额：用完即删）", str(sorted(paths.QUOTA_GB)))
+   "配额：五个带配额的子目录齐全（probe 故意无分项配额：用完即删，但**仍受总配额约束**）",
+   str(sorted(paths.QUOTA_GB)))
 tmp_root = scratch("paths")
 saved_root, saved_quota = paths.DATA_ROOT, dict(paths.QUOTA_GB)
+saved_total = paths.TOTAL_QUOTA_GB
 try:
     paths.DATA_ROOT = tmp_root
     paths.ensure_root()
@@ -195,12 +201,21 @@ try:
     (old / "g0.jsonl").write_bytes(b"x" * 120_000)       # 明显超过配额 → 下一次分配应删掉它
     paths.allocate("raw", "new")                         # 再分配 → 应把最旧的 raw 条目删掉
     ok(not old.exists(), "超配额时**从最旧的开始删**", f"old 还在？{old.exists()}")
-    paths.QUOTA_GB["raw"] = 30.0
+    paths.QUOTA_GB["raw"] = 80.0
     d2 = paths.allocate("raw", "ok")
     ok(d2.is_dir(), "配额内正常分配")
     ok("raw=" in paths.report(), "report() 给出各子目录占用", paths.report()[:60])
+    ok(f"total=" in paths.report() and "/200GB" in paths.report(),
+       "report() 给出**总量/总配额**（2026-09-26 加的 200 GB 那条闸门）", paths.report()[-70:])
+    # **总配额**那条闸门也要真的能触发淘汰（新代码路径，别只测分项配额）
+    paths.TOTAL_QUOTA_GB = 0.00002                       # 比任何一个条目都小 → 必须淘汰
+    big = paths.allocate("raw", "big")
+    (big / "g0.jsonl").write_bytes(b"y" * 120_000)
+    paths.allocate("compact", "c1")                      # 再分配 → 总配额超了 ⇒ 从 raw/compact 里删最旧的
+    ok(not big.exists(), "超**总配额**时也从最旧的（raw/compact）开始删", f"big 还在？{big.exists()}")
+    paths.TOTAL_QUOTA_GB = 200.0
 finally:
-    paths.DATA_ROOT, paths.QUOTA_GB = saved_root, saved_quota
+    paths.DATA_ROOT, paths.QUOTA_GB, paths.TOTAL_QUOTA_GB = saved_root, saved_quota, saved_total
     shutil.rmtree(tmp_root, ignore_errors=True)
 
 # 数据根不可写时必须**抛错**（不能静默降级去写别处）
