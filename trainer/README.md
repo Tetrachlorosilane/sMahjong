@@ -50,6 +50,7 @@ trainer\build\trainer.exe rules <corpus> shanten <out>    # 语料 → 向听（
 trainer\build\trainer.exe rules <corpus> of|discard <out> # 语料 → 进张/听牌形快照（供对拍）
 trainer\build\trainer.exe bench <corpus> of 20            # 同语料跑 20 遍并计时（不写输出）
 trainer\build\trainer.exe score <corpus> <out>            # 语料 → 役种/符/点数/授受（供对拍）
+trainer\build\trainer.exe settle <corpus> <out>           # 语料 → 顺位点/余棒/连庄判据/种子链（供对拍）
 ```
 
 ## 与 Java 对拍（**核心判据**）
@@ -64,16 +65,19 @@ node tools\trainer-rule-parity.mjs of 20000 --random-only # 只量"进张"那条
 node tools\trainer-rule-parity.mjs of 20000 --tenpai-only # 只量"听牌形"那条路
 
 node tools\trainer-score-parity.mjs         # M2：役种 / 符数 / 打点 / 授受（默认 20 万行）
+node tools\trainer-settle-parity.mjs        # M2：顺位点精算 / 余棒 / 连庄判据 / 种子链（默认 2 万）
 ```
 
-对拍用的是三个 Java 侧**只读探针**（只 import jar 的公开 API，不修改服务端）：
+对拍用的是四个 Java 侧**只读探针**（只 import jar 的公开 API，不修改服务端）：
 
 - **`tools/WallProbe.java`**（M0）：136 张牌山 + 四家配牌（含庄家第 14 张）+ 表/里宝指示牌 + 4 张岭上，
   **逐个整数**比对；
 - **`tools/RuleProbe.java`**（M1）：`Shanten.min` / `HandEval.of` / `HandEval.afterDiscard`，
   **逐行逐字段**比对（含两个 34 维数组的 FNV-1a 哈希）；
 - **`tools/ScoreProbe.java`**（M2）：`Rules.applyPreset` + `Evaluator.evaluate` + `Payments.compute`，
-  **逐行 17 个字段**比对（含和了形签名与**有序**役种列表）。
+  **逐行 17 个字段**比对（含和了形签名与**有序**役种列表）；
+- **`tools/SettleProbe.java`**（M2）：`RoundScoring.*` + `SelfPlay.seedFor` —— 顺位点按**原始位模式**
+  比对（浮点十进制格式化的差异也算不同）。
 
 ⚠ 沙箱坑：Node 不能用管道接子进程输出（`spawnSync … EPERM`），所以脚本让子进程
 **直接写文件描述符**再读文件（等价于重定向）。
@@ -86,7 +90,7 @@ node tools\trainer-score-parity.mjs         # M2：役种 / 符数 / 打点 / �
 | --- | --- | --- |
 | **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 512/512 组逐整数一致** |
 | **M1 向听/进张/和了** | ✅ | 查表式向听（花色分组 + **位并行合并**）+ 进张/听牌/听牌形；**100 万手向听 + 21.7 万手派生评估逐字段一致**；向听 **31.5×** / 进张 **19×** / 听牌形 **44×**（纯计算口径，见 `docs/TRAINER-CPP.md` §6.1） |
-| **M2 规则与打点** | 🔄 打点内核 ✅ | 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（`docs/TRAINER-CPP.md` §6.2）；`Round` 牌局流程 ⏳ |
+| **M2 规则与打点** | 🔄 打点内核 ✅ / 精算与种子链 ✅ | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；`Round` 牌局流程 ⏳ |
 | M3 策略与网络 | ⏳ | teacher / first/pass/random / `NeuralPolicy` 前向；轨迹直接喂通现有 Python 管线 |
 | M4 性能与工程化 | ⏳ | 线程池、AVX2 向听表、批量前向；**同核数下决策/秒 ≥ Java 3×** |
 
@@ -103,6 +107,8 @@ trainer/
 │  ├─ tiles.hpp       牌码编码（与 Java Tiles 同一套：id = (kind<<2)|copy，赤五 = copy 0）
 │  ├─ meld.hpp        副露（吃/碰/大明杠/暗杠/加杠）
 │  ├─ rules.hpp       规则集 + 三套预设（⚠ 默认 = M.League 预设）
+│  ├─ seed.hpp        种子链（mixSeed / 每局种子 / SelfPlay.seedFor / 顺位）
+│  ├─ roundscoring.hpp/.cpp 顺位点精算 + 连庄/本场/和了止/延长战/终局余棒
 │  ├─ counts.hpp      34 维计数 + 幺九判定
 │  ├─ wall.hpp/.cpp   牌山 + 王牌（两个账分开记：开杠动 liveEnd、岭上摸牌动 rinshan）
 │  ├─ shanten.hpp/.cpp 查表向听（位并行合并）+ 参考 DFS（自检交叉验证）
@@ -111,6 +117,6 @@ trainer/
 │  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
 │  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
 │  ├─ yaku_codes.hpp/.cpp 役种名 → ASCII 码（= Java `YakuCodes`）
-│  └─ main.cpp        CLI：wall / rng / rules / bench / score / --selftest
+│  └─ main.cpp        CLI：wall / rng / rules / bench / score / settle / --selftest
 └─ build/             产物（已 gitignore）
 ```

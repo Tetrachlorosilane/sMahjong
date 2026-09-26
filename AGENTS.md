@@ -264,14 +264,14 @@ node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立�
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形**逐字段**对拍
 node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受对拍
+node tools\trainer-settle-parity.mjs      # 同上：顺位点精算/余棒/连庄/种子链对拍
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解（见 §8）
 ```
 
-> ⏱ `e2e-test` 跑完整场要 4~8 分钟（机器人每步 ~800ms、局间 1.2s，**刻意放慢**）；
-> 想快就 `--fast`，或临时调小 `Table.botDelayMs` / `roundDelayMs`。
+> ⏱ `e2e-test` 耗时与加速开关见 NOTES §4。
 
 ### L4 GUI 定点复现（发现 UI bug 时首选）
 
@@ -327,7 +327,7 @@ mahjong/
 │                    test-client.mjs = 联调共用小客户端 · doc-refs-check.mjs = 文档引用自检 ·
 │                    package-release.ps1 + make-zip.mjs = 发布打包（NOTES §9.5）
 ├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，build/ 不进仓库）：java_rand/tiles/wall/
-│                    counts/shanten/handeval/agari/evaluator/payments + main；
+│                    counts/shanten/handeval/agari/evaluator/payments/seed/roundscoring + main；
 │                    `pwsh -File trainer\build.ps1`；对拍见 §4；设计见 **`docs/TRAINER-CPP.md`**（服务端**不变**）
 └─ 运行时数据（**都不进仓库**，见 .gitignore）：`replays/` 对局记录 · `players/` 玩家档案 ·
                      `bot-ai/` 机器人 AI 包（与 jar/start.sh 同层，启动时自动挂载）

@@ -24,7 +24,9 @@
 #include "java_rand.hpp"
 #include "meld.hpp"
 #include "payments.hpp"
+#include "roundscoring.hpp"
 #include "rules.hpp"
+#include "seed.hpp"
 #include "shanten.hpp"
 #include "tiles.hpp"
 #include "wall.hpp"
@@ -385,6 +387,113 @@ int selftest() {
         }
     }
 
+    // ⑨ 精算 / 连庄判据 / 种子链的定点（**手算与文档例子可验**，不依赖 Java 探针）
+    {
+        // 文档《日本麻将.md》§精算点数 的例子：53600/28600/20000/−2200
+        {
+            const std::array<int, 4> scores = {53600, 28600, 20000, -2200};
+            trainer::Rules ml;
+            ml.applyPreset("mleague");
+            const trainer::Settlement s = trainer::settle(scores, ml);
+            check("M.League 精算：+73.6 / +8.6 / −20 / −62.2",
+                  std::llround(s.point[0] * 10) == 736 && std::llround(s.point[1] * 10) == 86
+                  && std::llround(s.point[2] * 10) == -200 && std::llround(s.point[3] * 10) == -622);
+            trainer::Rules ms;
+            ms.applyPreset("majsoul");
+            const trainer::Settlement s2 = trainer::settle(scores, ms);
+            check("《雀魂》精算：+43.6 / +8.6 / −10 / −42.2",
+                  std::llround(s2.point[0] * 10) == 436 && std::llround(s2.point[2] * 10) == -100
+                  && std::llround(s2.point[3] * 10) == -422);
+        }
+        // 同点拆分：三家同分时尾数归**更接近起家**者（0.1 分单位）
+        {
+            const std::array<int, 4> scores = {30000, 30000, 30000, 10000};
+            trainer::Rules ml;
+            ml.applyPreset("mleague");
+            const trainer::Settlement s = trainer::settle(scores, ml);
+            check("三家同点：同顺位（rank 0/0/0/3）", s.rank[0] == 0 && s.rank[1] == 0
+                    && s.rank[2] == 0 && s.rank[3] == 3);
+            check("三家同点：头名赏尾数归更接近起家者（6.8/6.6/6.6）",
+                  std::llround(s.oka[0] * 10) == 68 && std::llround(s.oka[1] * 10) == 66
+                  && std::llround(s.oka[2] * 10) == 66);
+            check("三家同点：顺位点 16.8/16.6/16.6/−50",
+                  std::llround(s.point[0] * 10) == 168 && std::llround(s.point[1] * 10) == 166
+                  && std::llround(s.point[3] * 10) == -500);
+        }
+        // 四家同点：马点为 0、头名赏四人均分 → 顺位点全 0
+        {
+            const std::array<int, 4> scores = {25000, 25000, 25000, 25000};
+            trainer::Rules ml;
+            ml.applyPreset("mleague");
+            const trainer::Settlement s = trainer::settle(scores, ml);
+            check("四家同点 25000：顺位点全 0", s.point[0] == 0.0 && s.point[1] == 0.0
+                    && s.point[2] == 0.0 && s.point[3] == 0.0);
+        }
+        // 终局余棒：四家同点的 1 根立直棒 → 400/200/200/200（100 点为单位 + 尾数归起家）
+        {
+            const std::array<int, 4> scores = {25000, 25000, 25000, 25000};
+            const std::array<int, 4> add = trainer::endGameSticks(scores, 1);
+            check("终局余棒 1 根 / 四家同点：400/200/200/200",
+                  add[0] == 400 && add[1] == 200 && add[2] == 200 && add[3] == 200);
+            const std::array<int, 4> add2 =
+                    trainer::endGameSticks(std::array<int, 4>{30000, 29000, 20000, 1000}, 2);
+            check("终局余棒 2 根 / 无并列：全给 1 位", add2[0] == 2000 && add2[1] == 0);
+        }
+        // 本场数真值表（+1 / 清零）
+        {
+            check("本场数：连庄 +1", trainer::nextHonba(2, true, true, false) == 3);
+            check("本场数：荒牌流局轮庄也 +1", trainer::nextHonba(2, false, false, false) == 3);
+            check("本场数：闲家和了清零", trainer::nextHonba(2, false, true, false) == 0);
+            check("本场数：流局满贯按和了清零", trainer::nextHonba(2, false, false, true) == 0);
+        }
+        // 和了止 / 听牌止：M.League 关着 → 永不中止；《天凤》庄家 1 位且达 30000 → 中止
+        {
+            const std::array<bool, 4> tenpai = {true, false, false, false};
+            const std::array<int, 4> scores = {32000, 25000, 25000, 18000};
+            trainer::Rules ml;
+            ml.applyPreset("mleague");
+            trainer::Rules th;
+            th.applyPreset("tenhou");
+            check("和了止：M.League 关 → false",
+                  !trainer::stopAtAllLast(0, true, false, tenpai, scores, ml));
+            check("和了止：《天凤》庄家 1 位且 32000 → true",
+                  trainer::stopAtAllLast(0, true, false, tenpai, scores, th));
+            check("听牌止：《天凤》庄家听牌也算",
+                  trainer::stopAtAllLast(0, false, false, tenpai, scores, th));
+            check("流局满贯不算听牌止",
+                  !trainer::stopAtAllLast(0, false, true, tenpai, scores, th));
+            const std::array<int, 4> low = {29000, 25000, 25000, 18000};
+            check("和了止：庄家没到 30000 → false",
+                  !trainer::stopAtAllLast(0, true, false, tenpai, low, th));
+        }
+        // 延长战：门槛是 requiredPoints，且场风上限 lastWind + 1（没有北入）
+        {
+            trainer::Rules th;
+            th.applyPreset("tenhou");
+            th.westExtension = true;
+            check("西入：半庄 lastWind=1、南 4 轮庄后 nw=2 且 top<30000 → true",
+                  trainer::keepPlayingWest(th, 25000, 2, 1));
+            check("西入：nw=3（北）永远不进 → false", !trainer::keepPlayingWest(th, 25000, 3, 1));
+            check("西入：top 已达 30000 → false", !trainer::keepPlayingWest(th, 30000, 2, 1));
+        }
+        // 种子链（golden 取自 Java 探针的输出，钉住"同种子 → 同轨迹"的地基）
+        {
+            check("RoundSeed 0 = mixSeed(seedBase)",
+                  trainer::roundSeedAt(20260101, 0) == trainer::mixSeed(20260101));
+            check("种子序列 golden（前 3 个）",
+                  trainer::roundSeedAt(20260101, 0) == -960161659727720390LL
+                  && trainer::roundSeedAt(20260101, 1) == 3330228915103503152LL
+                  && trainer::roundSeedAt(20260101, 2) == 7773727536108528963LL);
+            check("SelfPlay.seedFor golden（第 0/1 场）",
+                  trainer::seedFor(20260101, 0) == -7695544463733805304LL
+                  && trainer::seedFor(20260101, 1) == -960161659727720390LL);
+            const std::array<int, 4> p =
+                    trainer::placementOf(std::array<int, 4>{1, 1, 2, 2});
+            check("顺位：同点按座次（1,1,2,2 → 3,4,1,2）",
+                  p[0] == 3 && p[1] == 4 && p[2] == 1 && p[3] == 2);
+        }
+    }
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
 }
@@ -632,6 +741,203 @@ void appendFormSig(std::string &out, const trainer::HandScore &s) {
         out += f.setConcealed[static_cast<size_t>(i)] ? 'c' : 'o';
         out += f.setFromMeld[static_cast<size_t>(i)] ? 'm' : '-';
     }
+}
+
+// ---------------------------------------------------------------- 连庄判据 / 精算对拍（`settle`）
+//
+// 语料（`tools/trainer-settle-parity.mjs` 生成，Java 侧 `tools/SettleProbe.java` 同样解析）：
+//   每行以**类型**开头，字段用空格分隔：
+//     settle <preset> <s0> <s1> <s2> <s3>            精算（顺位/名次/顺位点/马点/头名赏）
+//     sticks <s0..s3> <sticks>                       终局余棒分配
+//     honba  <honba> <renchan> <agari> <nagashi>     下一局本场数
+//     alllast <preset> <dealer> <agari> <nagashi> <tenpaiBits> <s0..s3>   和了止 / 听牌止
+//     west   <preset> <top> <nextWind> <lastWind>    要不要进延长战
+//     nagashi <winner> <dealer>                      流局满贯的支付
+//     ngelig <calledFrom> <idsCsv|->                  流局满资格
+//     split  <total> <n> <unit>                      通用拆分（尾数归第一家）
+//     seeds  <seedBase> <n>                          每局种子序列（mixSeed 岔路）
+//     seedfor <seedBase> <games>                     每场种子（SelfPlay.seedFor）
+//     place  <s0..s3>                                顺位（同点按座次）
+// 输出：每行一次结果，**浮点打印原始位模式**（`%016llx`）—— 与 Java 的
+// `Double.doubleToLongBits` 逐位可比，避免两边十进制格式化的差异。
+std::string doubleBits(double v) {
+    const uint64_t bits = std::bit_cast<uint64_t>(v);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(bits));
+    return buf;
+}
+
+std::string intsCsv(const int *v, int n) {
+    std::string out;
+    for (int i = 0; i < n; i++) {
+        if (i > 0) {
+            out += ',';
+        }
+        out += std::to_string(v[i]);
+    }
+    return out;
+}
+
+int cmdSettle(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "用法：trainer settle <corpus> <out>\n");
+        return 2;
+    }
+    std::FILE *in = std::fopen(argv[1], "rb");
+    if (in == nullptr) {
+        std::fprintf(stderr, "读不到语料：%s\n", argv[1]);
+        return 2;
+    }
+    std::FILE *out = std::fopen(argv[2], "wb");
+    if (out == nullptr) {
+        std::fprintf(stderr, "写不了输出：%s\n", argv[2]);
+        std::fclose(in);
+        return 2;
+    }
+    char line[16384];
+    long long rows = 0;
+    long long checksum = 0;
+    while (std::fgets(line, sizeof(line), in) != nullptr) {
+        std::string text(line);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        std::vector<std::string> f;
+        {
+            size_t start = 0;
+            while (start <= text.size()) {
+                const size_t pos = text.find(' ', start);
+                if (pos == std::string::npos) {
+                    f.push_back(text.substr(start));
+                    break;
+                }
+                if (pos > start) {
+                    f.push_back(text.substr(start, pos - start));
+                }
+                start = pos + 1;
+            }
+        }
+        if (f.empty()) {
+            continue;
+        }
+        std::string outLine;
+        const std::string &kind = f[0];
+        if (kind == "settle" && f.size() >= 6) {
+            std::array<int, 4> scores{};
+            for (int i = 0; i < 4; i++) {
+                scores[static_cast<size_t>(i)] = std::atoi(f[static_cast<size_t>(2 + i)].c_str());
+            }
+            const trainer::Rules rules = rulesOfPreset(f[1]);
+            const trainer::Settlement st = trainer::settle(scores, rules);
+            outLine = intsCsv(st.order.data(), 4);
+            outLine += ' ';
+            outLine += intsCsv(st.rank.data(), 4);
+            for (int i = 0; i < 4; i++) {
+                outLine += ' ';
+                outLine += doubleBits(st.point[static_cast<size_t>(i)]);
+            }
+            for (int i = 0; i < 4; i++) {
+                outLine += ' ';
+                outLine += doubleBits(st.uma[static_cast<size_t>(i)]);
+            }
+            for (int i = 0; i < 4; i++) {
+                outLine += ' ';
+                outLine += doubleBits(st.oka[static_cast<size_t>(i)]);
+            }
+            checksum += static_cast<long long>(st.point[0] * 10);
+        } else if (kind == "sticks" && f.size() >= 6) {
+            std::array<int, 4> scores{};
+            for (int i = 0; i < 4; i++) {
+                scores[static_cast<size_t>(i)] = std::atoi(f[static_cast<size_t>(1 + i)].c_str());
+            }
+            const std::array<int, 4> add =
+                    trainer::endGameSticks(scores, std::atoi(f[5].c_str()));
+            outLine = intsCsv(add.data(), 4);
+            checksum += add[0];
+        } else if (kind == "honba" && f.size() >= 5) {
+            const int v = trainer::nextHonba(std::atoi(f[1].c_str()), std::atoi(f[2].c_str()) != 0,
+                                             std::atoi(f[3].c_str()) != 0,
+                                             std::atoi(f[4].c_str()) != 0);
+            outLine = std::to_string(v);
+            checksum += v;
+        } else if (kind == "alllast" && f.size() >= 10) {
+            std::array<bool, 4> tenpai{};
+            const int bits = std::atoi(f[5].c_str());
+            for (int i = 0; i < 4; i++) {
+                tenpai[static_cast<size_t>(i)] = (bits & (1 << i)) != 0;
+            }
+            std::array<int, 4> scores{};
+            for (int i = 0; i < 4; i++) {
+                scores[static_cast<size_t>(i)] = std::atoi(f[static_cast<size_t>(6 + i)].c_str());
+            }
+            const trainer::Rules rules = rulesOfPreset(f[1]);
+            const bool v = trainer::stopAtAllLast(std::atoi(f[2].c_str()),
+                                                  std::atoi(f[3].c_str()) != 0,
+                                                  std::atoi(f[4].c_str()) != 0, tenpai, scores, rules);
+            outLine = v ? "1" : "0";
+            checksum += v ? 1 : 0;
+        } else if (kind == "west" && f.size() >= 5) {
+            const trainer::Rules rules = rulesOfPreset(f[1]);
+            const bool v = trainer::keepPlayingWest(rules, std::atoi(f[2].c_str()),
+                                                    std::atoi(f[3].c_str()),
+                                                    std::atoi(f[4].c_str()));
+            outLine = v ? "1" : "0";
+            checksum += v ? 1 : 0;
+        } else if (kind == "nagashi" && f.size() >= 3) {
+            const std::array<int, 4> d = trainer::nagashiPayments(std::atoi(f[1].c_str()),
+                                                                  std::atoi(f[2].c_str()));
+            outLine = intsCsv(d.data(), 4);
+        } else if (kind == "ngelig" && f.size() >= 3) {
+            const bool v = trainer::nagashiEligible(parseIntList(f[2]), std::atoi(f[1].c_str()) != 0);
+            outLine = v ? "1" : "0";
+            checksum += v ? 1 : 0;
+        } else if (kind == "split" && f.size() >= 4) {
+            const std::array<int, 2> sr = trainer::splitRemainder(std::atoi(f[1].c_str()),
+                                                                  std::atoi(f[2].c_str()),
+                                                                  std::atoi(f[3].c_str()));
+            outLine = std::to_string(sr[0]) + " " + std::to_string(sr[1]);
+        } else if (kind == "seeds" && f.size() >= 3) {
+            const int n = std::atoi(f[2].c_str());
+            outLine.clear();
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    outLine += ',';
+                }
+                outLine += std::to_string(trainer::roundSeedAt(std::stoll(f[1]), i));
+            }
+        } else if (kind == "seedfor" && f.size() >= 3) {
+            const int n = std::atoi(f[2].c_str());
+            outLine.clear();
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    outLine += ',';
+                }
+                outLine += std::to_string(trainer::seedFor(std::stoll(f[1]), i));
+            }
+        } else if (kind == "place" && f.size() >= 5) {
+            std::array<int, 4> scores{};
+            for (int i = 0; i < 4; i++) {
+                scores[static_cast<size_t>(i)] = std::atoi(f[static_cast<size_t>(1 + i)].c_str());
+            }
+            const std::array<int, 4> p = trainer::placementOf(scores);
+            outLine = intsCsv(p.data(), 4);
+        } else {
+            std::fprintf(stderr, "认不出的语料行：%s\n", text.c_str());
+            std::fclose(in);
+            std::fclose(out);
+            return 2;
+        }
+        outLine += '\n';
+        std::fwrite(outLine.data(), 1, outLine.size(), out);
+        rows++;
+    }
+    std::fclose(in);
+    std::fclose(out);
+    std::fprintf(stderr, "[trainer] settle 语料 %lld 行 校验和 %lld\n", rows, checksum);
+    return 0;
 }
 
 int cmdScore(int argc, char **argv) {
@@ -896,12 +1202,13 @@ int cmdRules(int argc, char** argv, bool bench) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "用法：trainer <wall|rng|rules|bench|score|--selftest> …\n"
+                     "用法：trainer <wall|rng|rules|bench|score|settle|--selftest> …\n"
                      "  wall  <seed> [aka] [dealer]      牌山/配牌/指示牌/岭上（JSON）\n"
                      "  rng   <seed> <n>                 java.util.Random.nextInt(136) 前 n 个\n"
                      "  rules <corpus> <mode> <out>      语料 → 逐行结果（mode = shanten|of|discard）\n"
                      "  bench <corpus> <mode> <reps>     同语料计时（性能基准）\n"
-                     "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n");
+                     "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n"
+                     "  settle <corpus> <out>            语料 → 顺位点/余棒/连庄判据（与 SettleProbe.java 对拍）\n");
         return 2;
     }
     const std::string cmd = argv[1];
@@ -913,6 +1220,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "score") {
         return cmdScore(argc - 1, argv + 1);
+    }
+    if (cmd == "settle") {
+        return cmdSettle(argc - 1, argv + 1);
     }
     if (cmd == "rules") {
         return cmdRules(argc - 1, argv + 1, false);

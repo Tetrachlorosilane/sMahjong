@@ -70,6 +70,8 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | **新增** `tools/trainer-rule-parity.mjs` | 上一条的对拍驱动器（确定性语料 → 两边逐行逐字段比对，含数组哈希） |
 | **新增** `tools/ScoreProbe.java` | Java 侧打点**只读探针**（`Rules.applyPreset` + `Evaluator.evaluate` + `Payments.compute`） |
 | **新增** `tools/trainer-score-parity.mjs` | 打点对拍驱动器（19 万和了手 + 上下文 → 役种/符/点数/授受逐字段比对） |
+| **新增** `tools/SettleProbe.java` | Java 侧**精算/连庄判据/种子链**只读探针（`RoundScoring.*` + `SelfPlay.seedFor`） |
+| **新增** `tools/trainer-settle-parity.mjs` | 上一条的对拍驱动器（顺位点按**位模式**比对，见 §6.3） |
 
 ---
 
@@ -106,7 +108,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：打点内核（役种/符数/基本点/授受/不听罚符）✅ **已完成** —— 19 万手逐字段一致、61 个役种码全覆盖（§6.2）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核（役种/符数/基本点/授受/不听罚符）✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -267,6 +269,52 @@ $ node tools\trainer-score-parity.mjs 200000
    反推付方）全部照抄，`--selftest` 里有 12 条手算定点钉住（含役满授受 48000/32000/16000+8000×2、
    1 本场 +300、立直棒 1000、不听罚符 1000/3 家听时收付和为 0）。
 
+### 6.3 M2（中段）：种子链 + 精算 / 连庄判据（已完成）
+
+**为什么先做这一块**：`rank_points`（顺位点）是**奖励函数的直接输入**
+（`python/mahjong_ml/rewards.py` 直接读它，从不自己重算 uma）—— 算错一位，整条 RL 的奖励就悄悄偏了；
+而它是由一串"看起来都很简单"的判据堆出来的：连庄 / 本场数 / 和了止 / 延长战 / 同点拆分 /
+终局余棒。这些判据在 Java 侧原来**散在五个地方各写一行**（AUDIT S-46 / S-54 / S-55 / S-64），
+每一处写错都只表现为"分数算错但不报错"。同时把"同种子 → 同轨迹"的地基（`mixSeed` /
+`nextRoundSeed` 的确定性岔路 / `SelfPlay.seedFor` / 顺位）一起钉住。
+
+**怎么验的**：`tools/SettleProbe.java` 与 `trainer settle <corpus> <out>` 跑同一份语料
+（`settle` / `sticks` / `honba` / `alllast` / `west` / `nagashi` / `ngelig` / `split` /
+`seeds` / `seedfor` / `place` 十一种行），逐行比对。
+
+⚠ **浮点比的是原始位模式**（两边都打印 `%016x`）：两边十进制格式化的差异（Java 最短往返 vs
+`printf %.17g`）会让"值相同但文本不同"，而顺位点是要写进数据集的 —— 位模式一致才算同源。
+
+| 规模 | 结果 |
+| --- | --- |
+| **21 万行**（精算 5 万 + 余棒 5 万 + 本场真值表 / 和了止 / 延长战 / 流局满贯 / 拆分 / 种子链全覆盖） | **0 处不一致** |
+
+**文档例子逐字复现**（这也是自检里的定点）：
+
+| 终局点数 | M.League | 《雀魂》 |
+| --- | --- | --- |
+| 53600 / 28600 / 20000 / −2200 | **+73.6 / +8.6 / −20 / −62.2** | **+43.6 / +8.6 / −10 / −42.2** |
+
+同点拆分（`tieSplitPoint`，只在 M.League 开）：30000/30000/30000/10000 → 三家**同顺位**（rank 0/0/0/3），
+头名赏按 **0.1 分**为单位拆、尾数归**更接近起家**者 → 6.8/6.6/6.6，顺位点 16.8/16.6/16.6/−50；
+四家同点 25000 → 顺位点**全 0**（马点相互抵消、头名赏四人均分）。
+终局余棒（只有"最后一局是流局"才走）按 **100 点**为单位拆、尾数同样归起家：1 根 / 四家同点 →
+**400/200/200/200**（与 M.League 原文的"3 人 1000 → 400/300/300"同一把尺子，只是人数不同）。
+
+**实现要点**：
+
+1. **种子链三个函数必须分开照抄，不能"顺手统一"**：`Table.mixSeed`（SplitMix64 终混，**先加黄金比**）、
+   `SelfPlay.seedFor`（**不加**黄金比，只做两轮 xor-mul-shift）、`nextRoundSeed` 的确定性岔路
+   （`mixSeed(seedBase + 局序号)`）。三者长得像、用途不同，差一步整场牌就换了。
+2. **所有移位运算必须在无符号域做**：Java 的 `>>>` 是逻辑右移、`long` 溢出是**有定义**的回绕，
+   而 C++ 的**有符号**溢出是 UB —— 用 `uint64_t` 算完再转回 `int64_t`，语义与 Java 逐位一致。
+3. **`splitRemainder` 必须向下取整**（Java `Math.floorDiv`）：末位的顺位点是**负**的，
+   C++/Java 的截断除法会给出负余数、尾数就分不完（`each × n + rest` 不再等于原值）。
+4. **`stopAtAllLast` 的"和了止"与"听牌止"是两件事**：`agari` 为真时**无论是否听牌**都成立；
+   `tenpaiAbort` 只在 `!nagashi` 时算（流局满贯按和了结算，不算听牌止）。门槛是
+   `requiredPoints`（一位必要点数），**不是** `returnScore`（返点 = 精算基准）——《雀魂》
+   正是"30000 vs 25000"。
+
 ---
 
 ## 7. 目录与构建
@@ -280,6 +328,8 @@ trainer/
 │  ├─ tiles.hpp         牌码/kind/copy/赤五/种类判定/宝牌推导（与 Java Tiles 同一套）
 │  ├─ meld.hpp          副露（吃/碰/大明杠/暗杠/加杠）
 │  ├─ rules.hpp         规则集 + 三套预设（⚠ 默认 = M.League 预设，不是字段初始值）
+│  ├─ seed.hpp          种子链（`mixSeed` / 每局种子 / `SelfPlay.seedFor` / 顺位）
+│  ├─ roundscoring.hpp/.cpp 顺位点精算 + 连庄/本场/和了止/延长战/终局余棒（= Java `RoundScoring`）
 │  ├─ counts.hpp        34 维计数 + 幺九判定的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）
 │  ├─ shanten.hpp/.cpp  查表向听（花色分组 + 位并行合并）+ "参考 DFS"（Java 逐行移植，自检用）
@@ -288,7 +338,7 @@ trainer/
 │  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
 │  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
 │  ├─ yaku_codes.hpp/.cpp 役种名/档位/流局原因 → ASCII 码（= Java `YakuCodes`）
-│  └─ main.cpp          CLI：wall / rng / rules / bench / score / --selftest
+│  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
 
