@@ -550,8 +550,8 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），
-  不是"能跑"。C++ 侧还没实现的能力（`--teacher-label` / `--sample`）**显式报错**，不悄悄降级。
-  ⚠ 完整半庄验收**≥200 场**；`docs/TRAINER-CPP.md` §6.15 是训练端**唯一**"绕过内置 Bot"的例外。
+  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、`teacher`、`net:` 的 `@α` 先验）**显式报错**，不悄悄降级；
+  `net:<权重文件>[@0][#T]` 前向已落地（§6.16）。⚠ 完整半庄验收**≥200 场**；§6.15 是唯一"绕过内置 Bot"的例外。
 ### 6.6 teacher（内置机器人）的五层取舍
 
 `Bot` 同时是**补位机器人**和**训练用的 teacher**：它怎么打，直接决定自对弈数据集里的标签质量

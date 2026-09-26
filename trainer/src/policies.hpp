@@ -14,12 +14,14 @@
 //   所以训练端**不需要** Bot，但一旦真触发就报错，绝不悄悄换一个动作（那等于伪造标签）。
 #pragma once
 
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <string>
 
 #include "action.hpp"
 #include "java_rand.hpp"
+#include "net.hpp"
 #include "observation.hpp"
 
 namespace trainer {
@@ -86,11 +88,133 @@ inline Policy makeRandomPolicy(int64_t seed) {
 using PolicyFactory = std::function<Policy(int seat, int64_t gameSeed)>;
 
 /**
+ * `net:<权重文件>` 的策略本体（= Java `NeuralPolicy.choose` / `chooseSampled`，**不含** `@α` 先验）。
+ *
+ * `temp <= 0` ⇒ argmax（并列取最小下标）；`temp > 0` ⇒ 从 `softmax(logits / T)` 采样。
+ * `rng` 按值捕获 —— 调用方每局每席新建一个（`netMixSeed(gameSeed, seat)`），
+ * 跨局共享会让"同种子可复现"失效（AGENTS §6.5）。
+ *
+ * ⚠ 失败（obs 解析不出 / 权重维度不符 / 键解析不出）时返回 `valid = false`：上层
+ * `Table::decideBot` 会据此**报错退出**，绝不悄悄换一个动作（训练端没有 Bot 可退）。
+ */
+inline Policy makeNetPolicy(std::shared_ptr<const Net> net, float temp, JavaRandom rng) {
+    return [net, temp, rng](const Decision &d) mutable {
+        Cmd c;
+        if (d.obs == nullptr) {
+            return c;
+        }
+        // Java `chooseWithPrior`：`legal` 为空 → `Action.of(PASS)`
+        // （那一条随后会被判"不在 legal 里" → 引擎按 `defaultDiscardId` 兜底，见 docs/TRAINER-CPP.md §6.15）
+        std::vector<std::string> keys = d.obs->legalKeys();
+        if (keys.empty()) {
+            c.valid = true;
+            c.action = actionOf(kActPass);
+            return c;
+        }
+        // 与 Java 同一条拼装路径：`Observation.toJson()` → `Features.state/candidate`
+        JVal obsJson;
+        if (!jsonParse(d.obs->toJson(), obsJson) || !obsJson.isObj()) {
+            return c;
+        }
+        std::vector<float> logits;
+        std::string err;
+        if (!netLogits(*net, obsJson, keys, logits, err)) {
+            return c;
+        }
+        const int pick = temp > 0.f ? netSampleSoftmax(logits, temp, rng) : netArgmax(logits);
+        bool ok = false;
+        const Action a = pick < 0 ? Action{} : actionParse(keys[static_cast<size_t>(pick)], ok);
+        if (pick < 0) {
+            c.valid = true;
+            c.action = actionOf(kActPass);
+            return c;
+        }
+        if (!ok) {
+            return c;
+        }
+        c.valid = true;
+        c.action = a;
+        return c;
+    };
+}
+
+/** ASCII 空白裁剪（Java `String.trim()` 的等价物，只处理 ≤ 0x20 的字符）。 */
+inline std::string trimAscii(const std::string &s) {
+    size_t b = 0;
+    size_t e = s.size();
+    while (b < e && static_cast<unsigned char>(s[b]) <= 0x20) {
+        b++;
+    }
+    while (e > b && static_cast<unsigned char>(s[e - 1]) <= 0x20) {
+        e--;
+    }
+    return s.substr(b, e - b);
+}
+
+/** 严格解析 float（整串都被吃掉才算数；Java `Float.parseFloat(trimmed)` 的口径）。 */
+inline bool parseFloatStrict(const std::string &s, float &out) {
+    if (s.empty()) {
+        return false;
+    }
+    char *end = nullptr;
+    const float v = std::strtof(s.c_str(), &end);
+    if (end == s.c_str() || end == nullptr || *end != '\0') {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+/**
  * `Policies.byName(name)` 的等价物。
  *
  * @param err 未知 / 未实现的策略名写在这里（调用方据此报错退出，**不静默降级**）
  */
 inline PolicyFactory policyFactoryByName(const std::string &name, std::string &err) {
+    // `net:<权重文件>[@<α>][#<T>]` —— 与 Java `Policies.byName` 同一套解析：
+    // 前缀大小写不敏感、**先剥 `#T` 再剥 `@α`**（顺序固定：Windows 路径里可能带 `#`），
+    // 权重路径保持原样大小写；权重在**构造期**加载并校验魔数/版本/维度（坏了立刻报错）。
+    if (name.size() >= 4 && (name[0] == 'n' || name[0] == 'N') && (name[1] == 'e' || name[1] == 'E')
+            && (name[2] == 't' || name[2] == 'T') && name[3] == ':') {
+        std::string rest = name.substr(4);
+        float temp = 0.f;
+        const size_t hash = rest.rfind('#');
+        if (hash != std::string::npos && hash > 0 && hash < rest.size() - 1) {
+            const std::string t = trimAscii(rest.substr(hash + 1));
+            if (!parseFloatStrict(t, temp)) {
+                err = "采样温度不是数：" + t + "（写法 net:<权重文件>[@<α>][#<T>]）";
+                return nullptr;
+            }
+            rest = rest.substr(0, hash);
+        }
+        float alpha = 0.f;
+        const size_t at = rest.rfind('@');
+        if (at != std::string::npos && at > 0 && at < rest.size() - 1) {
+            const std::string a = trimAscii(rest.substr(at + 1));
+            if (!parseFloatStrict(a, alpha)) {
+                err = "先验权重不是数：" + a + "（写法 net:<权重文件>@<α>）";
+                return nullptr;
+            }
+            rest = rest.substr(0, at);
+        }
+        if (alpha > 0.f) {
+            err = "策略 `net:<权重文件>@<α>`（P5b 的 teacher 先验）在训练端**尚未移植**：先验要调 "
+                  "`Bot.decide(Round, …)`，而 teacher 未实现（见 docs/TRAINER-CPP.md §5 的 M3）。"
+                  "纯网络（`@0` 或缺省）与 `#<T>` 温度采样已支持 —— 要跑混合臂请用 Java 生产者。";
+            return nullptr;
+        }
+        std::shared_ptr<Net> loaded = std::make_shared<Net>();
+        std::string loadErr;
+        if (!loadNet(rest, *loaded, loadErr)) {
+            err = "加载神经网络权重失败：" + rest + " —— " + loadErr;
+            return nullptr;
+        }
+        const std::shared_ptr<const Net> shared = loaded;
+        return [shared, temp](int seat, int64_t gameSeed) {
+            return makeNetPolicy(shared, temp, JavaRandom(netMixSeed(gameSeed, seat)));
+        };
+    }
+
     std::string n = name;
     for (char &c : n) {
         if (c >= 'A' && c <= 'Z') {
@@ -113,12 +237,7 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
     }
     if (n == "teacher" || n == "bot") {
         err = "策略 `teacher`（内置牌效机器人 Bot.decide）在训练端**这一轮还没实现**"
-              "（见 docs/TRAINER-CPP.md §5 的 M3）；本轮只支持 pass / first / random";
-        return nullptr;
-    }
-    if (n.rfind("net:", 0) == 0) {
-        err = "策略 `net:`（神经网络前向）在训练端**这一轮还没实现**（M3）；"
-              "本轮只支持 pass / first / random";
+              "（见 docs/TRAINER-CPP.md §5 的 M3）；本轮支持 pass / first / random / net:<权重文件>";
         return nullptr;
     }
     err = "未知策略名: " + name;

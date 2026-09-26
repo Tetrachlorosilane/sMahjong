@@ -27,6 +27,7 @@
 #include "handeval.hpp"
 #include "java_rand.hpp"
 #include "meld.hpp"
+#include "net.hpp"
 #include "payments.hpp"
 #include "roundclaims.hpp"
 #include "roundoptions.hpp"
@@ -2280,10 +2281,15 @@ int main(int argc, char** argv) {
                      "                                   钳制到 [1, games]；只改调度、不改产出（逐字节相同）\n"
                      "  features <dir> [--workers K]      轨迹目录 → 派生特征 sidecar `g*.feat.bin`\n"
                      "                                   （= Java --features，逐字节对拍）\n"
-                     "                                   --workers 缺省/0 = max(1, 核数×3/4)，钳制到 [1, 文件数]\n");
+                     "                                   --workers 缺省/0 = max(1, 核数×3/4)，钳制到 [1, 文件数]\n"
+                     "  net <net.bin> <轨迹1.jsonl> …     逐条 decision 行打印网络 logits（与 tools/NetProbe.java 逐字符对拍）\n"
+                     "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %.9g）\n");
         return 2;
     }
     const std::string cmd = argv[1];
+    if (cmd == "net") {
+        return trainer::netCli(argc - 1, argv + 1);
+    }
     if (cmd == "selfplay") {
         return trainer::selfplayCli(argc - 1, argv + 1);
     }

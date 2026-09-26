@@ -54,6 +54,14 @@ public:
         return (hi << 32) + lo;
     }
 
+    // public double nextDouble()：`(((long)next(26) << 27) + next(27)) * 0x1.0p-53`
+    // —— 温度采样（`net:<ckpt>#<T>`）的**唯一**随机源，必须逐位等于 Java（AGENTS §6.5 的可复现口径）。
+    double nextDouble() {
+        const int64_t hi = static_cast<int64_t>(next(26));
+        const int64_t lo = static_cast<int64_t>(next(27));
+        return static_cast<double>((hi << 27) + lo) * (1.0 / 9007199254740992.0);
+    }
+
 private:
     static constexpr uint64_t kMultiplier = 0x5DEECE66DULL;
     static constexpr uint64_t kAddend = 0xBULL;

@@ -83,7 +83,10 @@ $sources = @($allSrc | Where-Object { $_.Extension -eq '.cpp' } | ForEach-Object
 if (-not $sources) { throw "src\ 里没有 .cpp：$srcDir" }
 $exe = Join-Path $buildDir 'trainer.exe'
 
-$flags = @('-std=c++23', '-march=native', '-fno-exceptions', '-Wall', '-Wextra', '-Wpedantic', '-D_CRT_SECURE_NO_WARNINGS')
+# ⚠ `-ffp-contract=off`：**禁 FMA 收缩**。`net.cpp` 的前向必须与 Java（float、正序单累加器）
+# 逐位同序 —— 收缩成 FMA 只改最后一位舍入，而 1e-4 的逐元素容差**挡不住** argmax 翻转，
+# 我们的判据是"同种子 → 逐字节轨迹"（docs/TRAINER-CPP.md §2 / §6.15、trainer/src/net.hpp 顶部）。
+$flags = @('-std=c++23', '-march=native', '-fno-exceptions', '-ffp-contract=off', '-Wall', '-Wextra', '-Wpedantic', '-D_CRT_SECURE_NO_WARNINGS')
 if ($Dbg) { $flags += @('-O1', '-g') } else { $flags += @('-O3', '-DNDEBUG') }
 if ($San) { $flags += @('-fsanitize=address,undefined', '-fno-omit-frame-pointer') }
 

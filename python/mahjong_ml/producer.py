@@ -26,9 +26,12 @@ PRODUCERS = ("java", "cpp")
 
 #: C++ 侧**还没**实现的能力（用到了就报错，别悄悄降级）——
 #: 每补上一项就从这里删掉，并在 `docs/TRAINER-CPP.md` 的里程碑里记一笔。
+#: ⚠ `--sample` 曾在这里，已于 2026-09 删除：C++ CLI 一直支持它，且**逐字节验过**
+#: （`trainer-selfplay-parity.mjs 50 0 first 20260101 --sample 7` PASS、
+#: `… 50 0 net:<ckpt> 20260101 --sample 7` PASS；见 docs/TRAINER-CPP.md §6.16）——
+#: 留在这里会**挡住** P5 世代采集（`online.py` 的阶梯/评测默认 `--sample 64`）。
 CPP_MISSING = {
-    "--teacher-label": "DAgger 的老师标注（P2 采集用）",
-    "--sample": "决策采样（`--sample k`）",
+    "--teacher-label": "DAgger 的老师标注（P2 采集用；要调 Bot.decide）",
 }
 
 

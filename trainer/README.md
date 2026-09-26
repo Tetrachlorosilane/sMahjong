@@ -63,6 +63,7 @@ trainer\build\trainer.exe turnopts <javaCorpus> <out>     # 真实牌局的自�
 # ★ 自对弈（训练端的主要用途）：写出与 Java `--selfplay` **逐字节相同**的轨迹
 trainer\build\trainer.exe selfplay 300 --workers 8 --policy first --seed 20260101 --hands 0 --out DIR
 trainer\build\trainer.exe features DIR --workers 8        # 轨迹目录 → 派生特征 sidecar g*.feat.bin
+trainer\build\trainer.exe net NET.BIN TRACE.jsonl …       # 逐条 decision 行打印网络 logits（与 tools/NetProbe.java 对拍）
 ```
 
 `selfplay` 的开关（`trainer.exe selfplay --help`）：
@@ -70,7 +71,7 @@ trainer\build\trainer.exe features DIR --workers 8        # 轨迹目录 → 派
 | 开关 | 含义 | 缺省 |
 | --- | --- | --- |
 | `--workers K` | K 个线程抢场号 `g`；**并行只改调度**，`g*.jsonl` 与 `--workers 1` 逐字节相同 | **1**（不按核数自动并发），钳制到 `[1, games]` |
-| `--policy P` | 四家策略，逗号分隔，**目前只支持 `pass` / `first` / `random`** | `teacher`（训练端**未实现** → 显式报错） |
+| `--policy P` | 四家策略，逗号分隔：`pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（`#T` = 从 `softmax(logits/T)` 采样，`T≤0` = argmax） | `teacher`（**未实现** → 显式报错）；`@α`（teacher 先验）同样**显式报错** |
 | `--seed S` | 基准种子；每场种子只与 `(S, 场号)` 有关 | `20260101` |
 | `--hands H` | 每场最多 H 小局 | **0 = 完整半庄** |
 | `--out DIR` | 轨迹输出目录（`g<场号>.jsonl` + `summary.json`）；不给就只算不写 | — |
@@ -124,6 +125,9 @@ node tools\trainer-features-parity.mjs <dir> 24 [--self-check]              # si
 node tools\trainer-features-workers-check.mjs <dir> 1 8                     # sidecar 串行 vs 并行逐字节
 node tools\trainer-jsonl-diff.mjs <javaDir> <cppDir> [g]                    # 不一致时做**字段级**定位
 node tools\trainer-features-synth.mjs                                       # 合成边界语料（真实轨迹到不了的支路）
+node tools\trainer-net-parity.mjs <net.bin> <轨迹目录|jsonl>                # 网络 logits：Java ↔ C++ 逐元素（tol 1e-4）
+node tools\trainer-net-parity.mjs --golden                                  # 仓库内 golden 小网夹具（maxΔ 应为 0）
+node tools\trainer-net-parity.mjs <net.bin> <corpus> --selfcheck            # 闸门自检（负向对照必须报 FAIL）
 node tools\trainer-takeover-check.mjs 1 1 pass 20260101                     # 整条链：采集 → 比 → sidecar → 比 → dataset build
 node tools\selfplay-check.mjs <dir>                                         # 独立数据集校验器（Python 侧同一份）
 ```
@@ -158,12 +162,14 @@ sidecar 200/200，`selfplay-check` DATASET PASS。
 | 能力 | Java | C++ |
 | --- | --- | --- |
 | `--policy pass` / `first` / `random` | ✅ | ✅（`random` 的 `java.util.Random` 逐位复刻） |
-| `--policy teacher` / `net:<路径>` | ✅ | ❌ 未实现（报错退出） |
-| `--teacher-label`（DAgger 的老师标注）、`--sample` | ✅ | ❌ 未实现（`producer.py` 在 cpp 下直接拒绝） |
-| `--hands` / `--rotate` / `--no-claims` / `--preset` | ✅ | ✅ |
+| `--policy net:<权重文件>` / `net:…@0#<T>`（温度采样） | ✅ | ✅（logits maxΔ=1e-6、argmax 全同；端到端逐字节，见 `docs/TRAINER-CPP.md` §6.16） |
+| `--policy net:…@<α>`（teacher 先验） | ✅ | ❌ **显式报错**（先验要调 `Bot.decide`，teacher 未移植） |
+| `--policy teacher` / `--teacher-label`（DAgger 标注） | ✅ | ❌ 未实现（`producer.py` 在 cpp 下直接拒绝） |
+| `--sample` / `--hands` / `--rotate` / `--no-claims` / `--preset` | ✅ | ✅（`--sample` 已逐字节验过） |
 
-所以**缺省仍是 `java`**：完整的采集口径（`teacher` 标签 / 采样 / 网络策略）目前只有 Java 能出。
-C++ 生产者适用于"`first`/`pass`/`random` 基线臂"与**派生特征**这两条已经逐字节验过的路径。
+所以**缺省仍是 `java`**：**含 `teacher` 席的口径**（`teacher` 标签 / `@α` 先验 / 联赛里"老师常驻一席"）
+目前只有 Java 能出。C++ 生产者适用于 `first`/`pass`/`random`/`net:`（含 `#T` 采样）这四条已经逐字节验过的
+路径，以及**派生特征**。
 
 **日志里那一行 `[trainer] 引擎兜底出牌…` 是什么**：某些局面下 Java 引擎自己的"可打牌"集合会是**空**的
 （食替把暗手每种牌都禁打），两侧状态一致，Java 会退回内置 Bot 并被强制兜底出牌、**且这条决策不进轨迹**
@@ -179,7 +185,7 @@ C++ 生产者适用于"`first`/`pass`/`random` 基线臂"与**派生特征**这�
 | **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 512/512 组逐整数一致** |
 | **M1 向听/进张/和了** | ✅ | 查表式向听（花色分组 + **位并行合并**）+ 进张/听牌/听牌形；**100 万手向听 + 21.7 万手派生评估逐字段一致**；向听 **31.5×** / 进张 **19×** / 听牌形 **44×**（纯计算口径，见 `docs/TRAINER-CPP.md` §6.1） |
 | **M2 规则与打点** | ✅ 全部完成 | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；③ 动作键/下标/回包/落位：**369 行逐字符一致**（§6.4）；④ 鸣牌仲裁判据（等级/压过/收工/回包认领）：**1.26 万行一致**（§6.5）；⑤ 振听记账（三种振听，用**真实 Round** 驱动）：**354 行一致**（§6.6）；⑥ 可见牌统计 + 和了形纯判断：**1.37 万行一致**（§6.8）；⑦ 配牌顺序的假阳性已修正（探针改用真实 `Round`）并重验 **512/512**（§6.7）；⑧ `Round` 状态容器 + 配牌（`menzen` 全真 / 牌山 122→69 / 庄家第 14 张）：**1.4 万行一致，含 260 行 `rinit`**（§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌 / 食替 / 立直后杠 / 吃搭子）：**320 行一致**（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）：**11.6 万次真实询问逐字符一致**（§6.11/§6.12，含鸣牌段）；⑪ `Round` 摸打/鸣牌/流局循环：**完整半庄与 Java 逐字节一致**（300×2 / 100×8 / 150 完整半庄 / **200 场完整半庄 200/200**，另 `random` 50 场、`pass` 100 场同样 100%，**soak 500 场 × 2 策略各 500/500**；§6.13/§6.14/§6.15）。⚠ 完整半庄验收**至少 200 场**（soak 已到 **500 场 × 2 策略**）：食替退化局面实测 `first` 约 1/167 场、`random` 0/500（§6.15） |
-| M3 策略与网络 | 🔄 部分完成 | `first`/`pass`/`random` 三策略 ✅ **与 Java 逐字节一致**（含 `random` 的 `java.util.Random` 逐位复刻）；轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81/671 条、state 607 / cand 96 / float16）；⏳ `teacher`（五层取舍）与 `NeuralPolicy` 前向**未实现** —— 调用即**显式报错**，不静默降级 |
+| M3 策略与网络 | 🔄 大部分完成 | `first`/`pass`/`random` ✅ 与 Java 逐字节一致（含 `random` 的 `java.util.Random` 逐位复刻）；**`net:<权重文件>[@α][#T]` 前向 ✅**：golden 夹具 Java↔C++ **maxΔ=0（逐位相同）**、真实权重（266,753 参数）36,181 条决策 **maxΔ=1e-6 且 argmax 全同**、端到端 `net:` **100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（详见 `docs/TRAINER-CPP.md` §6.16）；轨迹 + 派生特征直接喂通现有 Python 管线 ✅；⏳ `teacher`（五层取舍）**未实现** ⇒ teacher 席与 `@α` 先验**显式报错**，含 teacher 席的 P5 世代仍只能用 Java 生产者 |
 | M4 性能与工程化 | ✅ 并行已落地 | `--workers` 真并行（`selfplay` + `features`，**产出逐字节不变**：C++ 1 vs 24 workers 200/200）✅；**同 24 核下决策/秒 ≈ Java 的 16.7–18.7×**（100 / 200 场完整半庄，目标 3× 已超 5 倍，§6.14）✅；⏳ AVX2 向听表、批量前向未做（§6.14 说明了为什么 `-flto` 也不留） |
 
 **非目标**：网络对战、房间/身份/投票、回放与牌谱导出、客户端相关的一切，

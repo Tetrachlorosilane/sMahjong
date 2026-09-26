@@ -113,7 +113,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | ✅ **已完成**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ 四种策略 24 局 × 40 场 = 9.77 万次（§6.11）；⑪ 鸣牌询问 `claimOptions`（ron/pon/kan/chi + 赤五取法 + 振听）✅ 1.85 万次（§6.12）—— ⑩+⑪ 合计 **116,166 次逐字符一致**；⑫ `Round` 摸打/鸣牌/立直/杠/流局循环 ✅ **完整半庄与 Java 逐字节相同**（官方闸门 300 场 × 2 小局 `--cpp-workers 8`、100 场 × 8 小局、150 场完整半庄；独立复算 **200 场完整半庄 200/200** = 155,464 决策 / 1,761 小局两侧相等；**soak 500 场 × {`first`,`random`} 各 500/500**；§6.13 / §6.14 / §6.15）。⚠ 判据里原来写的"先 100 场"**不够**：食替退化局面**跟策略走**（**实测** `first` **3/500 场 ≈ 1/167**、`random` **0/500**，且短局碰不到），完整半庄验收**至少 200 场** —— 见 §6.15 |
-| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`trainer-takeover-check.mjs` PASS、`dataset build` 出 81 / 671 条、state 607 / cand 96 / float16）；③ `selfplay-check.mjs` ✅ DATASET PASS（含 200 场完整半庄）；⏳ `teacher` 决策序列与 `NeuralPolicy` 前向**未实现** —— 调用即**显式报错**（`docs/TRAINER-CPP.md` §5 的目标仍是"与 Java 逐决策一致"），**不静默降级** |
+| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state 607`/`candidate 96` 拼装）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 607 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⏳ **`teacher`（五层取舍）未实现** ⇒ `teacher` 席与 `@α` 先验**显式报错**（含 teacher 席的 P5 世代仍只能用 Java 生产者），**不静默降级** |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ✅ **已完成（并行 + 对接）**：① `--workers` 真并行落地（`selfplay` + `features`），**产出逐字节不变**（300 场 × 2 小局 1 vs 8 逐字节、**200 场完整半庄 1 vs 24 逐字节 200/200**）；② **同等核数下决策/秒 = Java 的 16.7×（100 场）/ 18.7×（200 场）**（基线：24 核 1172 决策/秒、单核 88；目标 3× 超出 5 倍以上，§6.14）；③ 产出数据直接喂通 P3/P4 管线不改一行 Python（`MAHJONG_PRODUCER=cpp` + `trainer-takeover-check.mjs` PASS）；④ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 供工作流省掉编后自检。⏳ AVX2 向听表、批量前向未做（§6.14 也说明了为什么 `-flto`/`-fno-rtti` 不留） |
 
 **非目标**（明确不做，避免范围失控）：网络对战（TCP/NDJSON）、房间/等待室/身份/投票、
@@ -729,6 +729,55 @@ Java 24 workers **17.9 s 墙钟**（自身计时 17.61 s，8,827 决策/秒）vs
 
 ---
 
+### 6.16 M3（后半）：网络策略 `net:<权重文件>[@α][#T]` 前向（已完成）
+
+**为什么必须做**：P5 的对抗训练（联赛世代）**每一席都跑 `net:<ckpt>`** —— `online.py` 的采集命令就是
+`--policy net:<权重文件>@0#1.0`。C++ 侧只有 `first/pass/random` 的话，换到 C++ 生产者只能跑基线臂，
+"进一步对抗训练"就无从谈起。
+
+**三段拼装（与 Java 严格同序、同类型）**：
+
+| 段 | 来源 | 说明 |
+| --- | --- | --- |
+| 权重 | `export.py` 的 `weights` 格式 | 小端；7 个 int32 头（magic `0x4D4A4E4E` / 版本 1 / state / cand / hidden / head / trunkLayers）+ trunk 各层 `W[out][in]`、`b[out]` + head `W[head][hidden+cand]`、`b` + `out W` + 标量 `ob`。`net.cpp::loadNet` 在**构造期**校验魔数/版本/维度（文案与 Java 同义），坏了立刻报错 |
+| 输入 | `Features.state` 607 / `Features.candidate` 96 | 607 = 539 基础 + 68 派生（danger / 100）；96 = 88 基础 + 8 派生（各自 / 固定 scale）。⚠ 这两层**原先只有 Java/Python 有**（C++ 的 sidecar 是 int 段），是本轮新写的；它们依赖的 `perDecision` / `perCandidate` 早已在 C++ 且逐字节验过（sidecar 200/200） |
+| 前向 | `NeuralPolicy` | `h = ReLU(W₂·ReLU(W₁·x + b₁) + b₂)`；`logit_i = o·ReLU(H·[h ‖ cand_i] + b_h) + b_o`。全程 **float**、**单累加器正序** |
+
+**两条硬口径（缺一条判据就不成立）**：
+
+1. **`-ffp-contract=off`**（`trainer/build.ps1`）：FMA 收缩只改最后一位舍入，而 1e-4 的逐元素容差
+   **挡不住** argmax 翻转 —— 本项目的判据是"同种子 → **逐字节轨迹**"，不是"数值接近"。禁掉收缩后
+   前向与 Java 是逐位同序的。
+2. **破平取最小下标**（严格 `>` 才更新）+ **`#T` 的随机源每局每席新建**
+   `JavaRandom(mixSeed(gameSeed, seat))`（= `Policies.net` 的那一条；`random` 策略用的是另一条
+   `gameSeed * 31 + seat`，**两者不能混**）。`nextDouble` 已按 JDK 逐位补进 `java_rand.hpp`。
+
+**判据与实测**（命令：`tools/trainer-net-parity.mjs`，闸门 + `--golden` + `--selfcheck`）：
+
+| 判据 | 结果 |
+| --- | --- |
+| **golden 夹具**（`python/tests/golden/forward.bin`：小网 hidden 32 / head 16 / 6 条用例） | Java↔Python maxΔ **3.0e-8**；**Java↔C++ maxΔ = 0（逐位相同）**；6 条 argmax 全同 |
+| **真实权重** `ckpt/ppo2-g04/net.bin`（266,753 参数）× 100 个真实轨迹 | **36,181 条决策 maxΔ = 1.0e-6**（float32 1 ulp）、`n` 与 **argmax 全部相同** → PASS |
+| **端到端（贪心）** `--policy net:<ckpt>` | **100 场完整半庄：Java 24w vs C++ 24w 逐字节 100/100**；Java 85.6 s vs C++ **4.2 s = 20.1×** |
+| **端到端（采样）** `net:<ckpt>@0#1.0`（世代采集的形状） | **20 场完整半庄逐字节 20/20**（`exp` / `nextDouble` / CDF 累积全部一致） |
+| `--sample` 组合（世代采集的另一半形状） | `50 场 first --sample 7`、`50 场 net:<ckpt> --sample 7` 均逐字节 PASS |
+| `@α`（P5b 的 teacher 先验） | **显式报错**：先验要调 `Bot.decide(Round, …)`，而 teacher 未移植 —— **不静默降级** |
+| 闸门自身 | `--selfcheck` 3/3（未改坏 → PASS；某 logit +1e-3 → FAIL；argmax 6→0 → FAIL），另用假 C++ 验过全链路出口码 |
+
+**本轮的坑（都值得记）**：
+
+- **`%.9g` 的文本必然不同**（Java 保留尾随零 `-554.013000`、C 的 `%g` 去掉 `-554.013`；`NaN`/`Infinity`
+  拼写也不同）→ 闸门按**数值 + 容差**比、文本差异只当 info。**不要**为了"文本一致"去模拟 Java 的 Formatter。
+- **Windows 命令行上限 32,767 字符**：整个 `bc-001`（800 个路径）一次传给探针会**根本起不来**
+  （Node 报 `status=null`，看着像被信号杀）→ 闸门按长度自动分批（`NET_PARITY_MAX_ARG_CHARS` 可强制小批）。
+- Java 探针成本 ≈ **5.9 ms/条**（瓶颈是 Java 侧的特征拼装，不是前向本身）：整目录 29 万条 ≈ 28 分钟。
+- **`teacher` 仍未移植 ⇒ 含 teacher 席的 P5 世代仍只能在 Java 生产者上跑**（联赛设计里老师常驻一席）。
+  这是"对抗训练完全走 C++"的**最后一块**，见 §5 M3 的 ⏳。
+- `producer.py` 的 `CPP_MISSING` 里曾挂着 `--sample`（其实早就支持且逐字节验过）—— 那条多余的门
+  正好挡住世代采集（`online.py` 阶梯/评测默认 `--sample 64`），已删除。
+
+---
+
 ## 7. 目录与构建
 
 ```
@@ -760,9 +809,34 @@ trainer/
 │  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
 │  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
 │  ├─ yaku_codes.hpp/.cpp 役种名/档位/流局原因 → ASCII 码（= Java `YakuCodes`）
-│  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / action / --selftest
+│  ├─ round.hpp/.cpp    **一整局的完整状态机**（摸打/鸣牌仲裁/立直/杠/和了/流局 = Java `Round.play()`）
+│  ├─ table.hpp         **一整场的推进器** + 唯一的决策漏斗 `decideBot`（= Java `Table.playGame/decideBot`；
+│  │                    唯一允许"绕过内置 Bot"的例外见 §6.15）
+│  ├─ observation.hpp   观测（只含合法信息；字段白名单 = `PROTOCOL.md` §8.2）
+│  ├─ options.hpp       询问内容 → 动作空间的展开（= Java `Action.enumerate`）
+│  ├─ policies.hpp      `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（= Java `Policies`；
+│  │                    `@α` 先验与 `teacher` 未实现 → 显式报错）
+│  ├─ net.hpp/.cpp      **网络前向**：`net.bin` 加载 + `Features.state(607)`/`candidate(96)` 拼装 +
+│  │                    argmax/温度采样（= Java `NeuralPolicy` + `Features`；`net` 子命令供对拍，§6.16）
+│  ├─ jsonw.hpp         手写 JSON 写出器（键序 = 插入序、整数/定点、无浮点噪声）
+│  ├─ trace.hpp/.cpp    轨迹记录器 `g*.jsonl`（三段式 + 丢行规则 = Java `TraceRecorder`）
+│  ├─ selfplay.hpp/.cpp 自对弈编排（每场种子/策略实例/**K 线程抢场号**/`summary.json` = Java `SelfPlay`）
+│  ├─ danger.hpp        危险度（teacher 与派生特征共用 = Java `Danger`）
+│  ├─ obffeatures.hpp/.cpp 每个候选的派生特征（= Java `ObsFeatures`）
+│  ├─ jsonscan.hpp/.cpp 读回 `g*.jsonl` 的极简扫描器（`features` / `net` 用）
+│  ├─ features.hpp/.cpp `features <dir>`：轨迹 → `g*.feat.bin`（= Java `TraceFeatures`）
+│  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / action / turnopts /
+│                       selfplay / features / **net** / --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
+
+对拍工具（都在 `tools/`，命令见 §4）：`trainer-parity-check.mjs`（牌山）·`trainer-rule-parity.mjs`（向听/进张/听牌形）·
+`trainer-score-parity.mjs`（打点）·`trainer-settle-parity.mjs`（精算/种子链）·`trainer-action-parity.mjs` +
+`trainer-opts-parity.mjs`（动作空间/询问内容）·`trainer-selfplay-parity.mjs`（轨迹逐字节，支持 `--cpp-workers`）·
+`trainer-workers-check.mjs`（并行不变性）·`trainer-features-parity.mjs` + `trainer-features-workers-check.mjs`
+（sidecar）·**`trainer-net-parity.mjs` + `NetProbe.java`**（网络 logits，含 `--golden`/`--selfcheck`）·
+`trainer-takeover-check.mjs`（整条 Python 链）·`selfplay-check.mjs`（独立数据集校验器）·`trainer-jsonl-diff.mjs`
+（字段级差异定位）·`trainer-soak-check.mjs` / `trainer-perf.mjs`（大规模与计时）。
 
 工具链：本机实测 **`clang++ 22.1.7`**（`D:\Program Files\LLVM\bin`）+ `cmake` + `.qt/Tools/Ninja`；
 `build.ps1` 按「显式参数 → PATH → 常见安装位置」解析，找不到就报明确错误（不静默降级）。
