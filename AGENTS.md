@@ -266,7 +266,7 @@ node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌�
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
 node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受
 node tools\trainer-settle-parity.mjs      # 同上：精算/连庄/种子链
-node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落位；trainer-opts-parity.mjs = 自家回合询问内容
+node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落位；trainer-opts-parity.mjs = 询问内容
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）

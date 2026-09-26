@@ -1106,8 +1106,20 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       `kokushiTenhou13`/`kokushiAnkan` 只有 majsoul 会置 true、切预设不会清回 false 这个 Java 怪癖）。
     - **M2 下半之七（自家回合的询问内容 `turnOptions`）已完成**（`turnoptions.hpp` + 新探针
       `tools/RoundProbe.java` + `tools/trainer-opts-parity.mjs`）：四种策略 × 24 局 × 40 场 =
-      **97,686 次真实询问逐字符一致**（另有 `teacher` 12 局 × 20 场那轮的 10,204 次；见
-      `docs/TRAINER-CPP.md` §6.11）。
+      累计 **116,166 次真实询问逐字符一致**（自家回合 97,686 + 鸣牌 18,480；另有 `teacher`
+      12 局 × 20 场那轮的 10,204 次；见 `docs/TRAINER-CPP.md` §6.11）。
+    - **M2 下半之八（鸣牌询问 `claimOptions`）已完成**（`claimoptions.hpp`；`RoundProbe` 现在也 dump
+      `kind=="claim"` 的行）：与自家回合对称的一层，但有三处口径差异 —— 手牌是 **13 张形态**
+      （荣和判定要把被鸣那张**加进来**）、**燕返/河底**只有这条路上有、**振听**走完整判据
+      （舍张振听的账 `discardKindsEver` 是 private，探针反射读出来，再由 C++ 自己算 `isFuriten`，
+      而不是让 Java 喂结论）。
+    - **取法（`akaVariants`）**：普通牌优先、**用赤五那条在后**，于是"碰 5p"可能下发**两条选项**
+      （`pon=5p+5p;pon=0p+5p`，40 场里 23 行）—— 这正是"副露分不清赤五"那次的根因所在。
+    - ⚠ **一条结构性覆盖缺口**：`claimPhase` 只把"有得选"的座位算作 eligible（只有 `pass` 一条的
+      **根本不问**），所以「只有 pass」的行在真实牌局里**不会出现**；河底/立直那两条早返回只能通过
+      "能荣和"的行被观察到（191 行，其中仍带吃碰杠 = **0**）。自检里另配了构造用例补齐这三条。
+    - 自检 123 → **135 项**全绿（新增鸣牌：pass 在最后 / 无役不给荣和 / 役牌荣和 / 舍张振听 /
+      赤五两条取法 / 大明杠 / 立直与河底只给荣和或过 / 只有下家能吃）。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。

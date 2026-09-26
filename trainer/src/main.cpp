@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "action.hpp"
+#include "claimoptions.hpp"
 #include "agari.hpp"
 #include "counts.hpp"
 #include "evaluator.hpp"
@@ -826,6 +827,84 @@ int selftest() {
                 a.rules.applyPreset("tenhou");
                 check("自家回合：换成《天凤》预设（kyuushuAbort=true）才给 kyuushu",
                       has(trainer::turnOptionsText(a), "kyuushu"));
+            }
+        }
+
+        // ---- 鸣牌询问（`claimOptions`）
+        {
+            auto has = [](const std::string &s, const std::string &sub) {
+                return s.find(sub) != std::string::npos;
+            };
+            auto claim = [](std::vector<int> ids, int calledKind, int from) {
+                trainer::ClaimAsk a;
+                a.seat = 0;
+                a.from = from;
+                a.calledKind = calledKind;
+                a.calledId = calledKind < 0 ? -1 : trainer::idOf(calledKind, 3);
+                a.dealer = 0;
+                a.roundWind = 0;
+                a.handIds = std::move(ids);
+                for (int id : a.handIds) {
+                    a.hand[static_cast<size_t>(trainer::kindOf(id))]++;
+                }
+                a.deadWallLeft = 4;
+                return a;
+            };
+            // ① pass 永远在最后（且无役时只有 pass）
+            {
+                trainer::ClaimAsk a = claim({51, 55, 59, 63, 67, 71, 75, 75, 107, 107}, 26, 3);
+                const std::string txt = trainer::claimOptionsText(a);
+                check("鸣牌：pass 永远在最后", !txt.empty() && txt.rfind("pass") == txt.size() - 4);
+                check("鸣牌：无役不能荣和 → 没有 ron 段", !has(txt, "ron"));
+            }
+            // ② 役牌荣和 → ron 在最前（111z 234p 567p 678s + 9s 单骑，荣 9s）
+            //    id 速查：kind<<2|copy；1z = 108..111、2p=40..43、7p=60..63、6s=92..95、9s=104..107
+            {
+                trainer::ClaimAsk a = claim({108, 109, 110, 43, 47, 51, 55, 59, 63, 95, 99, 103, 107},
+                                            26, 2);
+                check("鸣牌：役牌（場風東）可以荣和 → ron 在最前",
+                      trainer::claimOptionsText(a).rfind("ron", 0) == 0);
+                // ③ 舍张振听：听牌里有自己打出过的牌种 → 不给 ron
+                a.discardKindsEver[26] = 1;                 // 自己打出过 9s
+                check("鸣牌：舍张振听（打出过这张）→ 没有 ron",
+                      !has(trainer::claimOptionsText(a), "ron"));
+                check("鸣牌：isFuriten 认定成立", trainer::isFuritenClaim(a));
+            }
+            // ④ 碰的取法：两张普通五 → 一条；赤五 + 两张普通五 → 两条（普通在前）
+            {
+                trainer::ClaimAsk a = claim({55, 54, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43}, 13, 2);
+                check("鸣牌：碰只有一种取法 → pon=5p+5p",
+                      has(trainer::claimOptionsText(a), "pon=5p+5p"));
+                trainer::ClaimAsk b = claim({52, 55, 54, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39}, 13, 2);
+                check("鸣牌：赤五 + 普通五 → 两条取法（普通在前、用赤在后；各自一条选项）",
+                      has(trainer::claimOptionsText(b), "pon=5p+5p;pon=0p+5p"));
+            }
+            // ⑤ 大明杠：手里 3 张 → 给；立直后只可能荣和或过
+            {
+                trainer::ClaimAsk a = claim({108, 109, 110, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39}, 27, 2);
+                check("鸣牌：手里 3 张 → 给大明杠",
+                      has(trainer::claimOptionsText(a), "kan=daiminkan:1z:1z+1z+1z"));
+                a.riichi = true;
+                const std::string t = trainer::claimOptionsText(a);
+                check("鸣牌：立直后没有 pon/kan/chi（只能荣和或过）",
+                      !has(t, "pon=") && !has(t, "kan=") && !has(t, "chi=") && has(t, "pass"));
+            }
+            // ⑥ 河底：吃碰杠全部挡掉
+            {
+                trainer::ClaimAsk a = claim({55, 56, 60, 64, 68, 3, 7, 11, 15, 19, 23, 27, 31}, 13, 3);
+                a.houtei = true;
+                const std::string t = trainer::claimOptionsText(a);
+                check("鸣牌：河底那一张不给吃碰杠（只可能荣和或过）",
+                      !has(t, "pon=") && !has(t, "kan=") && !has(t, "chi=") && has(t, "pass"));
+            }
+            // ⑦ 吃：只有下家能吃
+            {
+                trainer::ClaimAsk a = claim({1, 2, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43}, 0, 3);
+                check("鸣牌：下家（seat 0 ← from 3）能吃 → 有 chi=",
+                      has(trainer::claimOptionsText(a), "chi="));
+                trainer::ClaimAsk b = claim({1, 2, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43}, 0, 1);
+                check("鸣牌：不是下家打的牌不给 chi",
+                      !has(trainer::claimOptionsText(b), "chi="));
             }
         }
     }
@@ -2038,6 +2117,81 @@ int cmdTurnOpts(int argc, char **argv) {
             return 2;
         }
         const std::vector<std::string> f = splitWs(text.substr(0, at));
+        if (f.empty()) {
+            continue;
+        }
+        if (f[0] == "c") {
+            // c seat from calledCode houtei handIds melds menzen riichi dbl ippatsu fromRiichi
+            //   fromDiscards playerDraws anyCall dealer roundWind tileId ever temp perm
+            //   deadWallLeft kanCount dora ura preset   → 25 个 token
+            if (f.size() < 25) {
+                std::fprintf(stderr, "认不出的鸣牌语料行（%zu 个 token）\n", f.size());
+                std::fclose(in);
+                std::fclose(out);
+                return 2;
+            }
+            trainer::ClaimAsk a;
+            a.seat = std::atoi(f[1].c_str());
+            a.from = std::atoi(f[2].c_str());
+            a.calledKind = trainer::parseKind(f[3]);
+            a.calledId = a.calledKind < 0 ? -1 : trainer::idOf(a.calledKind, 3);
+            a.houtei = std::atoi(f[4].c_str()) != 0;
+            a.handIds = parseIntList(f[5]);
+            for (int id : a.handIds) {
+                a.hand[static_cast<size_t>(trainer::kindOf(id))]++;
+            }
+            if (!parseMelds(f[6], a.melds)) {
+                std::fprintf(stderr, "认不出的副露：%s\n", f[6].c_str());
+                std::fclose(in);
+                std::fclose(out);
+                return 2;
+            }
+            a.menzen = std::atoi(f[7].c_str()) != 0;
+            a.riichi = std::atoi(f[8].c_str()) != 0;
+            a.doubleRiichi = std::atoi(f[9].c_str()) != 0;
+            a.ippatsu = std::atoi(f[10].c_str()) != 0;
+            a.fromRiichi = std::atoi(f[11].c_str()) != 0;
+            a.fromDiscardsSinceRiichi = std::atoi(f[12].c_str());
+            a.playerDraws = std::atoi(f[13].c_str());
+            a.anyCall = std::atoi(f[14].c_str()) != 0;
+            a.dealer = std::atoi(f[15].c_str());
+            a.roundWind = std::atoi(f[16].c_str());
+            // 被鸣那张的真实牌 id（燕返比的是 id；赤五要能区分）
+            {
+                const int id = std::atoi(f[17].c_str());
+                a.calledId = id;
+                if (id >= 0) {
+                    a.calledKind = trainer::kindOf(id);
+                }
+            }
+            // 舍张振听的账：`kind:cnt;…`
+            if (f[18] != "-") {
+                for (const std::string &pair : splitOn(f[18], ';')) {
+                    const std::vector<std::string> kv = splitOn(pair, ':');
+                    if (kv.size() == 2) {
+                        const int k = std::atoi(kv[0].c_str());
+                        if (k >= 0 && k < trainer::kKindCount) {
+                            a.discardKindsEver[static_cast<size_t>(k)] =
+                                static_cast<uint8_t>(std::atoi(kv[1].c_str()));
+                        }
+                    }
+                }
+            }
+            a.furitenTemp = std::atoi(f[19].c_str()) != 0;
+            a.furitenPerm = std::atoi(f[20].c_str()) != 0;
+            a.deadWallLeft = std::atoi(f[21].c_str());
+            a.kanCount = std::atoi(f[22].c_str());
+            a.doraKinds = parseIntList(f[23]);
+            a.uraKinds = parseIntList(f[24]);
+            a.rules = rulesOfPreset(f.size() > 25 ? f[25] : "mleague");
+            const std::string res = trainer::claimOptionsText(a);
+            std::fprintf(out, "%s\n", res.c_str());
+            rows++;
+            for (char ch : res) {
+                checksum = checksum * 131 + static_cast<unsigned char>(ch);
+            }
+            continue;
+        }
         // t seat drawn rinshan atLastLive handIds melds menzen riichi dbl ippatsu scores
         //   roundWind kyoku honba dealer tilesLeft deadWallLeft kanCount anyCall playerDraws
         //   doraKinds uraKinds forbidden preset   → 25 个 token

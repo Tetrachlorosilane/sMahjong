@@ -42,6 +42,7 @@ public final class RoundProbe {
     private static long checksum;
     private static long claims;
     private static Field forbiddenField;
+    private static Field everField;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 4) {
@@ -55,8 +56,10 @@ public final class RoundProbe {
         try {
             forbiddenField = Round.class.getDeclaredField("forbiddenDiscard");
             forbiddenField.setAccessible(true);
+            everField = Round.class.getDeclaredField("discardKindsEver");
+            everField.setAccessible(true);
         } catch (ReflectiveOperationException e) {
-            System.err.println("读不到 forbiddenDiscard：" + e);
+            System.err.println("读不到私有字段：" + e);
             System.exit(2);
         }
         out = new BufferedWriter(new FileWriter(args[3]));
@@ -89,6 +92,7 @@ public final class RoundProbe {
     private static void onDecision(Decision d) throws Exception {
         if (!"turn".equals(d.kind)) {
             claims++;
+            onClaim(d);
             return;
         }
         Round r = d.round;
@@ -124,6 +128,68 @@ public final class RoundProbe {
         for (int i = 0; i < line.length(); i++) {
             checksum = checksum * 131 + line.charAt(i);
         }
+    }
+
+    /**
+     * 鸣牌询问（`Round.claimOptions`）：一行 `c ...`。
+     *
+     * 与自家回合的区别：手牌是 **13 张形态**（被鸣那张在别人牌河），要额外带上
+     * 「谁打的、打的哪张、河底没河底、自己振听没振听」——`checkWin` 的荣和判定要用它们
+     * （河底、燕返），而 `isFuriten` 要的舍张账（`discardKindsEver`）是 private，只能反射读。
+     */
+    private static void onClaim(Decision d) throws Exception {
+        Round r = d.round;
+        int seat = d.obs.seat;
+        int from = d.obs.from;
+        final int tileId = r.lastDiscardTile;             // 被鸣/被荣那张的**牌 id**（判定要用）
+        final boolean houtei = r.atLastLiveTile();
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("c ").append(seat).append(' ').append(from).append(' ');
+        sb.append(d.obs.calledTile).append(' ');
+        sb.append(houtei ? 1 : 0).append(' ');
+        sb.append(joinInts(r.hand[seat])).append(' ');
+        sb.append(meldsSpec(r.melds[seat])).append(' ');
+        sb.append(r.menzen[seat] ? 1 : 0).append(' ');
+        sb.append(r.riichi[seat] ? 1 : 0).append(' ');
+        sb.append(r.doubleRiichi[seat] ? 1 : 0).append(' ');
+        sb.append(r.ippatsu[seat] ? 1 : 0).append(' ');
+        sb.append(from >= 0 && r.riichi[from] ? 1 : 0).append(' ');
+        sb.append(from >= 0 ? r.discardsSinceRiichi[from] : 0).append(' ');
+        sb.append(r.playerDraws[seat]).append(' ');
+        sb.append(r.anyCall ? 1 : 0).append(' ');
+        sb.append(r.dealer).append(' ');
+        sb.append(r.roundWind).append(' ');
+        sb.append(tileId).append(' ');
+        sb.append(everSpec(r, seat)).append(' ');
+        sb.append(r.furitenTemp[seat] ? 1 : 0).append(' ');
+        sb.append(r.furitenPerm[seat] ? 1 : 0).append(' ');
+        sb.append(r.deadWallLeft()).append(' ').append(r.kanCount).append(' ');
+        sb.append(kinds(r.doraIndicators())).append(' ');
+        sb.append(kinds(r.uraIndicators())).append(' ');
+        sb.append(r.rules.preset);
+        sb.append(" @ ").append(optionsText(d.options));
+        sb.append('\n');
+        String line = sb.toString();
+        out.write(line);
+        rows++;
+        for (int i = 0; i < line.length(); i++) {
+            checksum = checksum * 131 + line.charAt(i);
+        }
+    }
+
+    /** 舍张振听的账（`discardKindsEver[seat]`，private）→ `kind:cnt;…`，全 0 时 `-`。 */
+    private static String everSpec(Round r, int seat) throws Exception {
+        int[][] ever = (int[][]) everField.get(r);
+        StringBuilder sb = new StringBuilder();
+        for (int k = 0; k < 34; k++) {
+            if (ever[seat][k] > 0) {
+                if (sb.length() > 0) {
+                    sb.append(';');
+                }
+                sb.append(k).append(':').append(ever[seat][k]);
+            }
+        }
+        return sb.length() == 0 ? "-" : sb.toString();
     }
 
     /** `forbiddenDiscard`（食替禁打牌种）—— private，只能反射读。 */
@@ -214,10 +280,46 @@ public final class RoundProbe {
                         sb.append(',');
                     }
                     sb.append(k.get("kind")).append(':').append(k.get("tile"));
+                    // 鸣牌的大明杠另带 `tiles`（精确牌码，赤五要能区分）；自家回合的暗/加杠没有
+                    Object ts = k.get("tiles");
+                    if (ts instanceof List) {
+                        List<Object> tv = (List<Object>) ts;
+                        sb.append(':');
+                        for (int j = 0; j < tv.size(); j++) {
+                            if (j > 0) {
+                                sb.append('+');
+                            }
+                            sb.append(tv.get(j));
+                        }
+                    }
+                }
+            } else if ("pon".equals(type)) {
+                sb.append("pon=").append(joinCodes(o.get("tiles")));
+            } else if ("chi".equals(type)) {
+                List<Object> sets = (List<Object>) o.get("sets");
+                sb.append("chi=");
+                for (int i = 0; i < sets.size(); i++) {
+                    if (i > 0) {
+                        sb.append(',');
+                    }
+                    sb.append(joinCodes(sets.get(i)));
                 }
             } else {
                 sb.append(type);
             }
+        }
+        return sb.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String joinCodes(Object v) {
+        List<Object> list = (List<Object>) v;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append('+');
+            }
+            sb.append(list.get(i));
         }
         return sb.toString();
     }
