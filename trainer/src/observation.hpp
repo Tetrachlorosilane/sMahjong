@@ -21,7 +21,7 @@
 namespace trainer {
 
 /** 观测格式版本（字段增删要 +1；与 Java `Observation.VERSION` 同步）。 */
-inline constexpr int kObservationVersion = 1;
+inline constexpr int kObservationVersion = 2;
 
 /** 副露的 JSON 形状（Java `Meld.toJson()`）。 */
 struct MeldJson {
@@ -59,6 +59,8 @@ struct Observation {
     int honba = 0;
     int sticks = 0;
     int dealer = 0;
+    /** 规则是否允许食い断（v2 起进观测；打点粗估要用，缺省 true）。 */
+    bool kuitan = true;
     int tilesLeft = 0;
     int deadWallLeft = 0;
     int totalDiscards = 0;
@@ -172,6 +174,9 @@ struct Observation {
         jsonBoolArray(o, ippatsu.data(), 4);
         o += ",\"scores\":";
         jsonIntArray(o, scores.data(), 4);
+
+        o += ",\"kuitan\":";
+        jsonBool(o, kuitan);
 
         o += ",\"round\":{\"bakaze\":";
         jsonStr(o, kWindNames[static_cast<size_t>(std::max(0, std::min(3, roundWind)))]);

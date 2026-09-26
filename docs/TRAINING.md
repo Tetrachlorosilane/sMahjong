@@ -256,7 +256,7 @@ uv pip install --python python\.venv\Scripts\python.exe numpy        # torch 不
 | 改动 | 位置 | 断言 |
 | --- | --- | --- |
 | ✅ 纯 Java 前向（权重加载 + trunk + 打分头） | `ai/NeuralPolicy.java`（**已落地**） | `SelfTest.neuralForwardTests`：与 Python 的 golden 输出**逐元素**对拍（状态/候选 <1e-4、logits <1e-4、argmax 一致）+ 红证（输出偏置 +1 → 每条 logit 恰好 +1） |
-| ✅ **特征抽取**（obs → 输入向量，与 Python 同一规格） | `ai/Features.java`（基础 539/88）+ `ai/ObsFeatures.java`（派生 68/8） | 同上的 golden 夹具（含 `hand`/`visible` 是 `int[]` 还是 `List` 这类"两条通路不同形态"的坑） |
+| ✅ **特征抽取**（obs → 输入向量，与 Python 同一规格） | `ai/Features.java`（基础 544/88）+ `ai/ObsFeatures.java`（派生 71/8；v3 起） | 同上的 golden 夹具（含 `hand`/`visible` 是 `int[]` 还是 `List` 这类"两条通路不同形态"的坑） |
 | ✅ `--policy net:<权重文件>` | `ai/Policies.java` 的 `byName` | 构造期校验魔数/格式/**特征维度**；运行期仍过 `fromAction` 三道保护 |
 | ✅ DAgger 标注字段（`teacher` / `teacher_index`） | `train/TraceRecorder.java` + `SelfPlay --teacher-label` | `PROTOCOL.md` §8.4 已写；`selfplay-check.mjs` 字段白名单与合法性校验同步（2026-09） |
 | ✅ 顺位点统计（马点+头名赏） | `train/SelfPlay.java` | 与 `RoundScoring.settle` 对拍 |
@@ -293,8 +293,9 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
 | 副露 | 四家 × 各副露（kind + 牌 + from + 赤），建议编码成 4×34 的"明牌计数"+ 类型通道 |
 | 牌河 | 四家 × 34 计数 **+ 巡目分层**（早期/立直后/摸切 vs 手切，后两者对读牌极有用） |
 | 公开状态 | `riichi`/`ippatsu`、`dora_indicators`、`scores`、`round{bakaze,kyoku,honba,dealer,riichi_sticks}`、`tiles_left`/`dead_wall_left`、`total_discards`、`kan_count`、`any_call`、`haitei`/`houtei`/`rinshan` |
+| **位置与点数**（v3 落地） | 自己点数、与三家均值之差、**顺位**、与上一名/下一名的分差（`points/5`）。⚠ 四家块（副露/牌河/立直/一发/点数）一律**旋转到自己为下标 0** —— 不旋转时输入里没有"哪一格是我"的锚，实测只有 15.5% 的决策能靠账目恒等式反推出来（开局 90.7% 完全不可分，见 `NOTES.md` §6.5） |
 | 询问上下文 | `kind`（turn / claim）、`from` / `called_tile`、`win_note`（`furiten`/`no_yaku`）、`legal` 掩码 |
-| **派生特征**（**已落地** = 特征 v2） | `mahjong/ai/ObsFeatures.java`：逐张危险度 `danger_worst[34]` + `danger_riichi[34]`（68 维 → 进**状态**）；逐候选 `[shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count]`（8 维 → 进**候选**）。**由 Java 算、Python 只读**（`--features` 写 sidecar），两侧靠 `SelfTest.obsFeaturesTests` 的 golden 对拍钉住（obs 通路 == Round 通路，带红证） |
+| **派生特征**（**已落地** = 特征 v2 / v3） | `mahjong/ai/ObsFeatures.java`：逐张危险度 `danger_worst[34]` + `danger_riichi[34]`（68 维）+ v3 的 `[shanten_now, value_han, value_points]`（3 维，**打点粗估与 teacher 的押し引き同一把尺子** `HandEval.estimatedHan`）→ 共 71 维进**状态**；逐候选 `[shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count]`（8 维 → 进**候选**）。**由 Java 算、Python 只读**（`--features` 写 sidecar，逐决策段 int16），两侧靠 `SelfTest.obsFeaturesTests` 的 golden 对拍钉住（obs 通路 == Round 通路，带红证） |
 | （可选，未做） | teacher 在同一 obs 上的**动作 one-hot**、四家逐张危险度的**理由码**（`genbutsu`/`suji`/…）、鸣后"有没有役计划" |
 
 **为什么必须带派生特征**：这些正是 teacher 自己吃的东西。把它们显式喂进去，
@@ -321,7 +322,7 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
 | 环节 | 单线程实测 | 说明 |
 | --- | --- | --- |
 | `ObsFeatures.ofObs`（obs → 视图） | **3～4 µs** | 便宜 |
-| `Features.state`（607 维 = 539 + 68 派生） | **12～15 µs** | 便宜（含 68 维危险度） |
+| `Features.state`（**v3：615 维 = 544 + 71 派生**） | **24～34 µs** | 含 68 维危险度 + 一次 `Shanten.min` + 打点粗估（v1/v2 是 607 维、12～15 µs） |
 | **每个候选**的 `cand`（96 维 = 88 + 8 派生） | **0.5～0.8 ms** | `HandEval.of` 对 34 种进张各跑一次 `Shanten.min` —— 真正的开销 |
 | trunk + 打分头（1 个候选） | **0.20～0.32 ms** | 266,753 参数、≈0.53 MFLOP |
 | 每个额外候选（只多打分头） | **~85 µs**（JIT 热身后） | 45,313 MAC / 候选 |
@@ -332,6 +333,11 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
   → **纯 CPU 绰绰有余，推理不需要 GPU**（GPU 只在批量训练时有意义）；权重常驻 L2、
   服务端仍是零第三方依赖。想再快，先优化 `HandEval`/`Shanten` 的逐候选统计（向量化 / 记忆化），
   而不是把网络改小。
+- **v3 的一个实测取舍（为什么要写下来）**：状态段里**不放**"当前进张种数/枚数"。那要跑一次完整的
+  `HandEval.of`（34 次 `Shanten.min`），实测 **≈0.94 ms/决策**（状态段从 ~26 µs 涨到 ~1 ms，40 倍）；
+  而"打完这张之后"的进张本来就在**逐候选段**（`advance_types`/`advance_tiles`），决策时真正要比的是
+  候选之间的大小 ⇒ 信息并不缺。最终状态段只加 `[shanten_now, value_han, value_points]`
+  （一次 `Shanten.min` + 打点粗估，≈3 µs）。⚠ 以后再想"顺手把 X 塞进状态段"时，先按这张表量一遍。
 - **端到端自对弈（`--selfplay`，不落盘，24 workers）**：`teacher×4` **2.28 场/秒**（1610 决策/秒）·
   纯网络 `x4` **1.73 场/秒**（1172 决策/秒）· 出厂默认的 `@2` 混合×4（网络 + 老师先验）
   **1.08 场/秒**（736 决策/秒）；单核 88（网络）～117（teacher）决策/秒。
@@ -383,7 +389,7 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
 ### P1 · 行为克隆（基模）—— ✅ **冒烟已跑通（2026-09）**
 - **做法**：teacher 自对弈采轨迹 → 候选打分网络监督学习（`chosen_index`）。
 - **已落地的四块**（都在 `python/`）：
-  `features.py`（539 维状态 + 88 维候选，**唯一规格来源**；`python -m mahjong_ml.features` 打印分段偏移，
+  `features.py`（**唯一规格来源**；P1 当时 539 维状态 + 88 维候选；`python -m mahjong_ml.features` 打印分段偏移，
   Java 侧照它移植）· `dataset.py`（jsonl → 紧凑数组：**按整场切分**、候选存 uint8、内存映射落盘）·
   `nets.py`（候选打分头 + `export_weights` 给纯 Java 前向用）·
   `bc.py`（训练循环自带封线程 / GPU 节流 / checkpoint 落 S 盘）。
@@ -414,7 +420,7 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
 
 派生量**由 Java 的权威实现算**（新增 `mahjong/ai/ObsFeatures.java`：逐张危险度 68 维 +
 逐候选 8 个量，直接复用 `HandEval` / `Danger`），离线用 `--features` 写成二进制 sidecar
-（`g*.feat.bin`，**轨迹格式不变**），Python **只读、绝不重算**。特征 **539+88 → 607+96**。
+（`g*.feat.bin`，**轨迹格式不变**），Python **只读、绝不重算**。特征 **539+88 → 607+96**（P1 口径；v3 现为 **615+96**）。
 
 | epoch | v1 val top-1（无派生） | **v2 val top-1（带派生）** | v2 类型准确率 | v2 nll |
 | --- | --- | --- | --- | --- |
@@ -1059,11 +1065,11 @@ P5 采集席需要的两样齐了 ⇒ 世代可以整条跑在 C++ 上（`MAHJON
 > ```
 > node tools\selfplay-check.mjs <dir>                       # DATASET PASS
 > java -jar server\build\mahjong-server.jar --features <dir> # → g<N>.feat.bin（或 trainer features <dir>）
-> python -m mahjong_ml.dataset build <dir> <紧凑目录>        # → 81 条 / state 607 / cand 96 / float16
+> python -m mahjong_ml.dataset build <dir> <紧凑目录>        # → 81 条 / state 615 / cand 96 / float16
 > ```
 > 参考轨迹（1 场 1 小局 `pass`）：`g0.jsonl` 134,375 B / 81 决策（自家回合 70 + 鸣牌 11）、
 > `g0.feat.bin` 19,050 B（perDecision 68 + perCandidate 8）、`summary.json` 553 B；
-> 紧凑集构建输出 `训练 81 条（1 场）… state 607 维 / cand 96 维`。
+> 紧凑集构建输出 `训练 81 条（1 场）… state 615 维 / cand 96 维`。
 
 - **采集**：`--selfplay <n> --workers 24 --rotate --sample <k> --out S:\mahjong-training\raw\<标签>`
   （`PROTOCOL.md` §8.4；⚠ **workers 必须显式写 24**，见 §0.1.2）。
@@ -1076,6 +1082,9 @@ P5 采集席需要的两样齐了 ⇒ 世代可以整条跑在 C++ 上（`MAHJON
   （`HandEval` / `Danger`）算，Python 只读 —— 两侧由 `SelfTest.obsFeaturesTests`
   （obs 通路 == Round 通路，逐元素 + 红证）与 `python/selfcheck.py`（格式契约、缺 sidecar 报错）钉住。
   实测：279,518 条决策 **6.6 分钟**（24 workers）、sidecar **55 MB**（轨迹的 ~13%）。
+  ⚠ **格式（v3 起）**：逐决策 A 段是 **int16**（不是 uint8）—— 这一段现在混了危险度（0..100）与
+  打点粗估（点数最大 32000），按 uint8 写会被**截成 mod 256**（症状：golden 对拍 `maxΔ = 0.0545`）；
+  Python 侧 `load_sidecar` 的 `off_b = 20 + ndec*pdec*2` 与它配套。
 - **紧凑化**：`python -m mahjong_ml.dataset build <轨迹目录> <紧凑目录>` —— 特征在这里算一次，
   **按整场**切训练/验证（`--val-frac` / `--split-seed`），`state` 存 float16、`cand` 存 uint8
   （派生候选量存**原始整数**，归一化只在 `bc._batch` 一处做），**缺 sidecar 直接报错**（不悄悄填 0）。
@@ -1200,7 +1209,7 @@ python/                        # 训练侧（本仓库内；torch 走本地 .ven
 │  ├─ paths.py                 # ✅ 数据根固定 S:\mahjong-training + 配额闸门 + 滚动淘汰（§0.1.1）
 │  ├─ guard.py                 # ✅ 进程纪律：线程数封顶 / CPU·GPU 采样与节流 / 越界即停（§0.1.2-3）
 │  ├─ eval.py                  # ✅ P0 配对显著性 + 顺位点 + 置信区间
-│  ├─ features.py              # ✅ obs → 特征：**唯一规格来源**（607 状态 + 96 候选）
+│  ├─ features.py              # ✅ obs → 特征：**唯一规格来源**（615 状态 + 96 候选，v3）
 │  ├─ dataset.py               # ✅ jsonl + sidecar → 紧凑数组；**按整场**切分；内存映射落盘
 │  ├─ nets.py                  # ✅ trunk + 候选打分头
 │  ├─ bc.py                    # ✅ P1 行为克隆（封线程 + GPU 节流 + checkpoint 落 S 盘；含 `eval` 子命令）
@@ -1216,8 +1225,8 @@ python/                        # 训练侧（本仓库内；torch 走本地 .ven
 └─ tests/golden/               # ✅ forward.bin：Python↔Java 的**前向 golden 夹具**（SelfTest 读它）
 
 server/.../ai/                 # B 形态（✅ 已落地）
-├─ ObsFeatures.java            # ✅ 派生特征（obs → 68 维危险度 + 8 维逐候选）—— 权威实现，golden 对拍
-├─ Features.java               # ✅ 基础段拼装（539/88，与 features.py 同规格）
+├─ ObsFeatures.java            # ✅ 派生特征（obs → 71 维 + 8 维逐候选）—— 权威实现，golden 对拍
+├─ Features.java               # ✅ 基础段拼装（544/88，与 features.py 同规格；v3 起四家块旋转到自己为 0）
 ├─ NeuralPolicy.java           # ✅ 纯 Java 前向（加载权重 + trunk + 打分头 + 掩码 argmax）
 └─ Policies.java               # ✅ byName 接 net:<权重文件>
 ```

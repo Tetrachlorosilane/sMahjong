@@ -11,7 +11,7 @@
 （`g*.feat.bin`，格式见 `mahjong_ml/dataset.py`），这里**只读不重算** ——
 在 Python 里再写一份向听/Danger 就是两套实现、必然漂移（`docs/TRAINING.md` §3.4）。
 
-容量：`state_dim() == 607`、`cand_dim() == 96`（自检里钉着，改了必须同步 Java 与两个自检）。
+容量：`state_dim() == 615`、`cand_dim() == 96`（自检里钉着，改了必须同步 Java 与两个自检）。
 """
 
 from __future__ import annotations
@@ -20,20 +20,23 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-FEATURE_VERSION = 2                # v2：接上 sidecar 的派生特征（68 维危险度 + 逐候选 8 个量）
+FEATURE_VERSION = 3                # v3：四家块旋转到自己为 0 + points/5 + 派生段加 3 维牌力/打点
 
 KIND_COUNT = 34          # 34 种牌（0..8=1m..9m，9..17=1p..9p，18..26=1s..9s，27..33=1z..7z）
 TILE_SLOTS = 37          # 34 种 + 赤 5m/5p/5s（与 Java 的 `Action.tileIndex` 逐字对齐）
 N_PLAYERS = 4
 
 #: 派生特征的段长（**与 Java `mahjong.ai.ObsFeatures` 必须一致**；改了两边一起改 + 版本 +1）
-DERIVED_VERSION = 1      # = Java `ObsFeatures.FEATURE_VERSION`（sidecar 头部也带它）
-DERIVED_DECISION = 68    # danger_worst[34] + danger_riichi[34]（0..100）
+DERIVED_VERSION = 2      # = Java `ObsFeatures.FEATURE_VERSION`（sidecar 头部也带它）
+DERIVED_DECISION = 71    # danger_worst[34] + danger_riichi[34] + shanten_now, value_han, value_points
 DERIVED_CANDIDATE = 8    # shanten, advance_types, advance_tiles, wait_types, wait_tiles,
                          # good_wait_types, good_wait_tiles, dora_count
 
 #: 派生量的**归一化**（Java 侧推理时也必须用同一组系数；单点定义，别散在各处）
 DERIVED_SCALE_DANGER = 100.0
+#: 逐决策段**逐维**分母（v3 起这一段不再同量纲 —— 危险度 0..100，向听/打点各有各的轴）
+DERIVED_DECISION_SCALE = ((DERIVED_SCALE_DANGER,) * (2 * KIND_COUNT)
+                          + (8.0, 13.0, 32000.0))
 DERIVED_SCALE_CAND = (8.0, 34.0, 136.0, 34.0, 136.0, 34.0, 136.0, 4.0)
 
 ACTION_TYPES = ("discard", "riichi", "pon", "chi", "kan", "tsumo", "ron", "pass", "kyuushu")
@@ -99,7 +102,7 @@ def is_red(code: str) -> bool:
 # ------------------------------------------------------------------ 状态特征
 
 def state_dim() -> int:
-    """状态向量维度（固定；改了要同步 Java 与自检）。末尾 68 维是**派生危险度**。"""
+    """状态向量维度（固定；改了要同步 Java 与自检）。末尾 73 维是**派生量**（危险度 68 + 牌力/打点 5）。"""
     return _base_state_dim() + DERIVED_DECISION
 
 
@@ -111,7 +114,8 @@ def _base_state_dim() -> int:
             + KIND_COUNT        # 宝牌指示牌
             + N_PLAYERS         # 立直
             + N_PLAYERS         # 一发
-            + N_PLAYERS         # 点数（相对 25000，/1000）
+            + N_PLAYERS         # 点数（相对 25000，/1000；自己在下标 0）
+            + 5                 # **位置与点数**：自己点数/与三家均值差/顺位/与上一名差/与下一名差
             + 5                 # 场风/自风/局/本场/供託
             + 5                 # 余牌/岭上/巡目/杠数/有无鸣牌
             + 4                 # 自己第几次摸牌/门清/自家立直/自家振听
@@ -158,23 +162,29 @@ def state_vector(obs: dict, derived: Sequence[int] | None = None) -> np.ndarray:
         i += v.size
 
     seat = int(obs.get("seat", 0))
+
+    def rel(s: int) -> int:
+        """绝对座位 → **相对下标**（0=自己 / 1=下家 / 2=对家 / 3=上家）。⚠ v3 起四家块统一这一套。"""
+        return (int(s) - seat) % N_PLAYERS
+
     # 自家暗牌（计数 ×0.25 归一化；赤五另给标记）
     hand = np.asarray(obs.get("hand", []), dtype=np.float32)
     put(hand * 0.25)
     put(np.asarray(obs.get("hand_red", []), dtype=np.float32))
-    # 四家副露：种类计数 + 牌种计数
+    # 四家副露：种类计数 + 牌种计数（按相对下标摆放）
     meld_kind = np.zeros(N_PLAYERS * len(MELD_KINDS), dtype=np.float32)
     meld_tiles = np.zeros(N_PLAYERS * KIND_COUNT, dtype=np.float32)
     melds = obs.get("melds") or []
     for s in range(N_PLAYERS):
+        j = rel(s)
         for m in (melds[s] if s < len(melds) else []) or []:
             k = MELD_KINDS.index(m.get("kind")) if m.get("kind") in MELD_KINDS else -1
             if k >= 0:
-                meld_kind[s * len(MELD_KINDS) + k] += 1.0
+                meld_kind[j * len(MELD_KINDS) + k] += 1.0
             for code in m.get("tiles", []) or []:
                 kk = tile_kind(code)
                 if kk >= 0:
-                    meld_tiles[s * KIND_COUNT + kk] += 1.0
+                    meld_tiles[j * KIND_COUNT + kk] += 1.0
     put(meld_kind)
     put(meld_tiles * 0.25)
     # 四家牌河
@@ -182,13 +192,26 @@ def state_vector(obs: dict, derived: Sequence[int] | None = None) -> np.ndarray:
     discards = obs.get("discards") or []
     for s in range(N_PLAYERS):
         if s < len(discards):
-            rivers[s * KIND_COUNT:(s + 1) * KIND_COUNT] = _counts(discards[s] or [])
+            rivers[rel(s) * KIND_COUNT:(rel(s) + 1) * KIND_COUNT] = _counts(discards[s] or [])
     put(rivers * 0.25)
     put(_counts(obs.get("dora_indicators") or []) * 0.25)
-    put(np.asarray(obs.get("riichi", [0] * 4), dtype=np.float32))
-    put(np.asarray(obs.get("ippatsu", [0] * 4), dtype=np.float32))
+    put(np.asarray([obs.get("riichi", [0] * 4)[(seat + j) % N_PLAYERS] for j in range(N_PLAYERS)],
+                   dtype=np.float32))
+    put(np.asarray([obs.get("ippatsu", [0] * 4)[(seat + j) % N_PLAYERS] for j in range(N_PLAYERS)],
+                   dtype=np.float32))
     scores = np.asarray(obs.get("scores", [25000] * 4), dtype=np.float32)
-    put((scores - 25000.0) / 1000.0)
+    put((scores[[(seat + j) % N_PLAYERS for j in range(N_PLAYERS)]] - 25000.0) / 1000.0)
+    # 位置与点数（v3 新增）：自己那一格 + 顺位/分差（四家点数的非线性组合，网络推不出来）
+    self_score = float(scores[seat]) if seat < scores.size else 25000.0
+    others = [float(scores[(seat + j) % N_PLAYERS]) for j in range(1, N_PLAYERS)]
+    rank = 1 + sum(1 for x in others if x > self_score)      # 同点不算比自己高：并列取最好名次
+    ups = [x - self_score for x in others if x > self_score]
+    downs = [self_score - x for x in others if x < self_score]
+    put(np.array([(self_score - 25000.0) / 1000.0,
+                  (self_score - sum(others) / (N_PLAYERS - 1)) / 1000.0,
+                  (rank - 1) / 3.0,
+                  (min(ups) if ups else 0.0) / 1000.0,
+                  (min(downs) if downs else 0.0) / 1000.0], dtype=np.float32))
     rnd = obs.get("round") or {}
     put(np.array([wind_index(rnd.get("bakaze", "E")) / 4.0,
                   _num(rnd.get("kyoku", 1)) / 4.0,
@@ -220,9 +243,9 @@ def state_vector(obs: dict, derived: Sequence[int] | None = None) -> np.ndarray:
     wn = obs.get("win_note")
     note[WIN_NOTES.index(wn) if wn in WIN_NOTES else len(WIN_NOTES)] = 1.0
     put(note)
-    # 派生危险度（68 维，**由 Java 算好**；缺了填 0）
+    # 派生危险度 + 牌力/打点（**由 Java 算好**；缺了填 0）
     if derived is not None and len(derived) >= DERIVED_DECISION:
-        put(np.asarray(derived[:DERIVED_DECISION], dtype=np.float32) / DERIVED_SCALE_DANGER)
+        put(np.asarray(derived[:DERIVED_DECISION], dtype=np.float32) / DERIVED_DECISION_SCALE)
     else:
         put(np.zeros(DERIVED_DECISION, dtype=np.float32))
 
@@ -342,12 +365,13 @@ def describe() -> str:
         ("river/4x34", N_PLAYERS * KIND_COUNT),
         ("dora_indicators/34", KIND_COUNT),
         ("riichi/4", N_PLAYERS), ("ippatsu/4", N_PLAYERS),
-        ("scores/4", N_PLAYERS),
+        ("scores/4（自己在下标 0）", N_PLAYERS),
+        ("points/5（自己点数·与三家均值差·顺位·与上一名差·与下一名差）", 5),
         ("round/5", 5), ("state/5", 5), ("self/4", 4), ("ctx/4", 4),
         ("visible/34", KIND_COUNT),
         ("drawn/37", TILE_SLOTS), ("called_tile/37", TILE_SLOTS),
         ("from/4", N_PLAYERS), ("win_note/3", len(WIN_NOTES) + 1),
-        ("derived/danger 68（Java 算）", DERIVED_DECISION),
+        (f"derived {DERIVED_DECISION}（危险度 68 + 向听/打点 3，Java 算）", DERIVED_DECISION),
     ]
     lines, off = [f"FEATURE_VERSION={FEATURE_VERSION}  state_dim={state_dim()}  "
                   f"cand_dim={cand_dim()}", "state:"], 0

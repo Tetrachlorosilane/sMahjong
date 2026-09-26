@@ -3026,8 +3026,21 @@ public final class SelfTest {
         check("派生特征：每个合法候选的 8 个量逐元素一致（候选数 " + obs.legalKeys().size() + "）", candOk);
         check("派生特征：候选侧不是全 0（打牌候选真的算出了向听/进张）", nonZero);
         boolean rangeOk = true;
-        for (int v : decObs) {
-            if (v < 0 || v > 100) {
+        // 逐决策段**逐维**量纲不同（v3）：危险度 0..100 · 向听 0..8
+        // · 打点粗估番数 0..40 · 打点粗估点数 0..32000（粗表上限就是 32000）
+        for (int x = 0; x < decObs.length; x++) {
+            int v = decObs[x];
+            final int hi;
+            if (x < 2 * 34) {
+                hi = 100;
+            } else if (x == 2 * 34) {
+                hi = 8;
+            } else if (x == 2 * 34 + 1) {
+                hi = 40;
+            } else {
+                hi = 32000;
+            }
+            if (v < 0 || v > hi) {
                 rangeOk = false;
             }
         }
@@ -3136,7 +3149,7 @@ public final class SelfTest {
         eq("golden 夹具格式版本", ver, mahjong.ai.NeuralPolicy.FORMAT_VERSION);
         eq("golden 夹具的特征维度（state/cand）",
                 mahjong.ai.Features.STATE + "/" + mahjong.ai.Features.CAND,
-                "607/96");
+                "615/96");
         byte[] wbytes = new byte[weightsLen];
         bb.get(wbytes);
         mahjong.ai.NeuralPolicy net = null;
@@ -5678,7 +5691,7 @@ public final class SelfTest {
         Map<String, Object> j1 = o1.toJson();
         Set<String> want = new java.util.TreeSet<>(Arrays.asList("v", "seat", "kind", "hand",
                 "hand_red", "drawn", "player_draws", "menzen", "self_riichi", "furiten", "melds",
-                "discards", "dora_indicators", "riichi", "ippatsu", "scores", "round",
+                "discards", "dora_indicators", "riichi", "ippatsu", "scores", "kuitan", "round",
                 "tiles_left", "dead_wall_left", "total_discards", "kan_count", "any_call",
                 "visible", "haitei", "houtei", "rinshan", "from", "called_tile", "win_note",
                 "legal"));

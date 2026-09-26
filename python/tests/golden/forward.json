@@ -1,12 +1,12 @@
 {
   "cases": 6,
-  "state_dim": 607,
+  "state_dim": 615,
   "cand_dim": 96,
   "hidden": 32,
   "head": 16,
-  "feature_version": 2,
-  "derived_version": 1,
-  "bytes": 135078,
+  "feature_version": 3,
+  "derived_version": 2,
+  "bytes": 136294,
   "trace": "S:\\mahjong-training\\raw\\bc-001",
   "seed": 20260101,
   "case_kinds": [

@@ -1363,6 +1363,7 @@ Observation Round::makeObservation(int seat, const std::string &kind, const std:
     o.riichi = riichi;
     o.ippatsu = ippatsu;
     o.scores = scores;
+    o.kuitan = rules.kuitan;
     o.roundWind = roundWind;
     o.kyoku = kyoku;
     o.honba = honba;

@@ -31,7 +31,7 @@ import mahjong.util.Json;
 public final class Observation {
 
     /** 观测格式版本：字段增删要 +1（数据集复用靠它判断兼容性）。 */
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     public final int seat;
     /** {@code "turn"} = 自家摸打询问；{@code "claim"} = 别家舍张的鸣牌询问。 */
@@ -62,6 +62,14 @@ public final class Observation {
     /** 四家一发状态（公开：立直后一巡且无人鸣牌）。 */
     public final boolean[] ippatsu;
     public final int[] scores;
+    /**
+     * 本局是否**允许食い断**（规则取舍里唯一被特征用到的位；打点粗估的断幺项要它）。
+     *
+     * <p>规则集整体**不进观测**（训练数据是在固定预设下产生的），但这一位会影响
+     * {@code HandEval.estimatedHan} 的结果 —— 不带上它，同一份 obs 在"食い断 on/off"
+     * 两种规则下会被算成两个不同的输入（推理与离线两条通路就会漂）。
+     */
+    public final boolean kuitan;
     public final int roundWind;
     public final int kyoku;
     public final int honba;
@@ -150,6 +158,7 @@ public final class Observation {
         this.riichi = r.riichi.clone();
         this.ippatsu = r.ippatsu.clone();
         this.scores = r.scores.clone();
+        this.kuitan = r.rules == null || r.rules.kuitan;
         this.roundWind = r.roundWind;
         this.kyoku = r.kyoku;
         this.honba = r.honba;
@@ -230,6 +239,7 @@ public final class Observation {
                 "riichi", Json.boolList(riichi),
                 "ippatsu", Json.boolList(ippatsu),
                 "scores", Json.intList(scores),
+                "kuitan", kuitan,
                 "round", Json.obj(
                         "bakaze", new String[]{"E", "S", "W", "N"}[roundWind],
                         "kyoku", kyoku,

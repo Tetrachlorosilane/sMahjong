@@ -83,7 +83,7 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
 
 
 def features_cmd(directory: Path, workers: int = 0, *, name: str | None = None) -> list[str]:
-    """派生特征 sidecar（607/96 那些由服务端算的字段）。"""
+    """派生特征 sidecar（615/96 那些由服务端算的字段）。"""
     p = producer(name)
     if p == "java":
         cmd = ["java", "-jar", str(JAR), "--features", str(directory)]

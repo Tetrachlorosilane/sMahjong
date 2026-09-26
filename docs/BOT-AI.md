@@ -139,6 +139,7 @@ bot-ai/teacher/
 | `名字 xx 与内置策略同名` | `kind=net` 占用了四个锚点名字（见 §4） |
 | `跳过机器人 AI 包 xx：机器人 AI 的名字必须是可打印 ASCII` | 目录名/`name` 含非 ASCII |
 | `…：net:… 权重文件损坏`（来自 `Policies.byName`） | 魔法数/维度不对 —— 权重与当前代码的特征维度不匹配 |
+| `加载神经网络权重失败：… 权重维度 (607,96) != 本服务端特征维度 (615,96) —— 重新导出权重（特征版本 3）` | **特征 v3 的兼容性边界**：`net.bin` 头部记着 state/cand 维度，老（v2，607 维）权重在新服务端上会被**构造期明确拒绝**、不静默降级。要用 v3 服务端跑老代模型，只能用 v3 代码重新训练 + `python -m mahjong_ml.export weights` 重导出再打包（`docs/TRAINING.md` §3.2、`NOTES.md` §6.5） |
 
 ⚠ **与"点名"不同**：`--bot-ai <名字>`（默认 AI）与 `--bot-ai-reg` 里写错名字/坏权重是
 **启动期直接炸**（`IllegalArgumentException`）——那是人显式点的，错了就该当场知道，

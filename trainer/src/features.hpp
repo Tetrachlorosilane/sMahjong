@@ -7,7 +7,7 @@
 //
 // 文件格式（小端；Python 侧按固定 dtype 内存映射读，见 `python/mahjong_ml/dataset.py`）：
 //   header: magic(4)=0x4D4A4654 "MJFT" · featureVersion(4) · nDec(4) · perDec(4) · perCand(4)
-//   A: nDec × perDec            uint8   逐决策危险度
+//   A: nDec × perDec            int16   逐决策派生量（危险度 0..100 + 打点粗估点数 ≤32000）
 //   B: nDec × int16             nLegal  每条决策的候选数（与 jsonl 里的决策行**同序**）
 //   C: ΣnLegal × perCand        int16   逐候选派生量（按 legal 顺序）
 #pragma once

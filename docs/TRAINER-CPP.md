@@ -113,7 +113,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | ✅ **已完成**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ 四种策略 24 局 × 40 场 = 9.77 万次（§6.11）；⑪ 鸣牌询问 `claimOptions`（ron/pon/kan/chi + 赤五取法 + 振听）✅ 1.85 万次（§6.12）—— ⑩+⑪ 合计 **116,166 次逐字符一致**；⑫ `Round` 摸打/鸣牌/立直/杠/流局循环 ✅ **完整半庄与 Java 逐字节相同**（官方闸门 300 场 × 2 小局 `--cpp-workers 8`、100 场 × 8 小局、150 场完整半庄；独立复算 **200 场完整半庄 200/200** = 155,464 决策 / 1,761 小局两侧相等；**soak 500 场 × {`first`,`random`} 各 500/500**；§6.13 / §6.14 / §6.15）。⚠ 判据里原来写的"先 100 场"**不够**：食替退化局面**跟策略走**（**实测** `first` **3/500 场 ≈ 1/167**、`random` **0/500**，且短局碰不到），完整半庄验收**至少 200 场** —— 见 §6.15 |
-| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state 607`/`candidate 96` 拼装）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 607 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
+| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state`/`candidate` 拼装，**v3 起 state 615**）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 615 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ✅ **已完成（并行 + 对接）**：① `--workers` 真并行落地（`selfplay` + `features`），**产出逐字节不变**（300 场 × 2 小局 1 vs 8 逐字节、**200 场完整半庄 1 vs 24 逐字节 200/200**）；② **同等核数下决策/秒 = Java 的 16.7×（100 场）/ 18.7×（200 场）**（基线：24 核 1172 决策/秒、单核 88；目标 3× 超出 5 倍以上，§6.14）；③ 产出数据直接喂通 P3/P4 管线不改一行 Python（`MAHJONG_PRODUCER=cpp` + `trainer-takeover-check.mjs` PASS）；④ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 供工作流省掉编后自检。⏳ AVX2 向听表、批量前向未做（§6.14 也说明了为什么 `-flto`/`-fno-rtti` 不留） |
 
 **非目标**（明确不做，避免范围失控）：网络对战（TCP/NDJSON）、房间/等待室/身份/投票、
@@ -740,7 +740,7 @@ Java 24 workers **17.9 s 墙钟**（自身计时 17.61 s，8,827 决策/秒）vs
 | 段 | 来源 | 说明 |
 | --- | --- | --- |
 | 权重 | `export.py` 的 `weights` 格式 | 小端；7 个 int32 头（magic `0x4D4A4E4E` / 版本 1 / state / cand / hidden / head / trunkLayers）+ trunk 各层 `W[out][in]`、`b[out]` + head `W[head][hidden+cand]`、`b` + `out W` + 标量 `ob`。`net.cpp::loadNet` 在**构造期**校验魔数/版本/维度（文案与 Java 同义），坏了立刻报错 |
-| 输入 | `Features.state` 607 / `Features.candidate` 96 | 607 = 539 基础 + 68 派生（danger / 100）；96 = 88 基础 + 8 派生（各自 / 固定 scale）。⚠ 这两层**原先只有 Java/Python 有**（C++ 的 sidecar 是 int 段），是本轮新写的；它们依赖的 `perDecision` / `perCandidate` 早已在 C++ 且逐字节验过（sidecar 200/200） |
+| 输入 | `Features.state` **615** / `Features.candidate` 96 | **v3**：615 = 544 基础（四家块旋转到自己为下标 0 + `points/5`）+ 71 派生（68 危险度 + 向听/打点粗估 3，**逐维分母**见 `ObsFeatures.DERIVED_DECISION_SCALE`）；96 = 88 基础 + 8 派生（各自 / 固定 scale）。⚠ 这两层**原先只有 Java/Python 有**（C++ 的 sidecar 是 int 段），是本轮新写的；它们依赖的 `perDecision` / `perCandidate` 早已在 C++ 且逐字节验过（sidecar 200/200） |
 | 前向 | `NeuralPolicy` | `h = ReLU(W₂·ReLU(W₁·x + b₁) + b₂)`；`logit_i = o·ReLU(H·[h ‖ cand_i] + b_h) + b_o`。全程 **float**、**单累加器正序** |
 
 **两条硬口径（缺一条判据就不成立）**：
@@ -872,6 +872,46 @@ chi=20305 ron=14893 tsumo=5159 kan=3014` —— teacher 席把**开杠/自摸**�
 ⚠ 但 `eval.py` 自己算出的"检出 Δ=2 需 ≈5,100 场（80% 功效）"说明 800 场只是**分辨率边缘**：
 这里能下的结论是"**趋势单调 + g05 首次 CI 不含 0**"，**不是**"已经钉住 +4.9 顺位点"—— 要钉住得再跑几千场。
 
+### 6.19 特征 v3：训练端三处同步（2026-09-26，已完成）
+
+**动机**（详见 `NOTES.md` §6.5 与 `docs/TRAINING.md` §3.2）：v2 的 607 维里**没有"哪一格是我"的锚**——
+`seat` 只以 `(dealer − seat)` / `(from − seat)` 两个相对量进入向量，于是"自己点数 / 顺位"读不出来，
+连"哪条牌河是我自己的"都只能靠账目恒等式反推（真实语料实测：唯一锁定 **15.5%**、四家全自洽 **30.7%**、
+开局阶段 **90.7% 完全不可分**）。
+
+**v3 布局（`Features.VERSION = 3`）**：`state 615 = 544 基础 + 71 派生`（cand 96 不变）
+- 四家块（`meld_kind`/`meld_tiles`/`river`/`riichi`/`ippatsu`/`scores`）**旋转到自己为下标 0**
+  （第 j 格 = 座位 `(seat + j) % 4`；`visible`/`dora`/`drawn`/`called_tile`/`from`/`win_note` 不动）；
+- 新增 `points/5`：自己点数、与三家均值差、**顺位**（同点并列取最好名次）、与上一名/下一名的分差；
+- 派生段 68 → **71**：`[shanten_now, value_han, value_points]`
+  （打点粗估 = teacher 押し引き那把尺子 `Bot.estimatedHan`/`hanToPoints`，C++ 侧**复用** `bot.cpp` 那一份）；
+- obs `"v": 2` + 新增 `kuitan`（规则取舍里唯一被特征用到的位）；派生段**逐维分母**
+  （68×100 + 8/13/32000，`kDerivedDecisionScale`）；
+- **sidecar A 段 `uint8 → int16`**（带了点数后 uint8 会截成 mod 256；Java `TraceFeatures` 与
+  python `dataset.py` 的 `off_b = 20 + ndec*pdec*2` 同步，C++ 用 `putI16`）。
+
+**门禁（本机重跑，训练端冻结构建）**：
+
+| 命令 | 结果 |
+| --- | --- |
+| `trainer --selftest` | **TRAINER SELFTEST PASS** |
+| `trainer-selfplay-parity.mjs 1 0 pass 20260101` | **PASS**：`g0.jsonl` **1,119,860 B 逐字节一致** |
+| `trainer-selfplay-parity.mjs 1 1 net:<v3 临时权重>` | **PASS**：**159,477 B 逐字节一致**（权重 header state=615 / cand=96） |
+| `trainer-features-parity.mjs <dir> 4` | **PASS**：3 个 sidecar **逐字节一致**（203,988 / 331,636 / 163,844 B） |
+| `trainer-net-parity.mjs --golden` | **PASS**：夹具 state **615**/cand 96；Java↔C++ **maxΔ = 0**，6/6 argmax 全同 |
+| C++ 侧全链（`selfplay-check` → `features` → `dataset build`） | **DATASET PASS** → `state 615 维 / 特征版本 3` |
+
+**吞吐（C++ `features --workers 1`，142,770 决策 / 1,227,719 候选，3 次取中位）**：
+v3/71 **12.0 s ≈ 84.1 µs/决策 ≈ 11,900 决策/秒/核**；同构建里把新 3 维留 0 的 A/B 探针 11.7 s
+⇒ **v3 的状态段只值 ≈ +2.5%（噪声内）**。原因：每决策 ~84 µs 里九成仍在**逐候选段**的 `HandEval.of`
+（≈8.6 候选/决策），状态段只多一次 `Shanten.min` + 打点粗估。
+⚠ 一条口径提醒：Java 侧量到的"状态段塞 `HandEval.of` = ≈0.94 ms/决策"**不适用于 C++**（C++ 的
+`HandEval.of` 是微秒级）——"71 维"是按 **Java/Python 权威同规格**定的，不是 C++ 的性能必需。
+
+**兼容性**：老 **607 维** `net.bin` 在两侧都被**构造期拒绝**（C++ exit 1 / Java exit 2，
+`权重维度 (607,96) != 本训练端特征维度 (615,96) —— 重新导出权重`），未放宽任何维度检查；
+旧 `compact/*` 与旧 sidecar（`derived_version 1`）同样硬拒绝，重跑 `--features` + 重训即可。
+
 ---
 
 ## 7. 目录与构建
@@ -912,7 +952,7 @@ trainer/
 │  ├─ options.hpp       询问内容 → 动作空间的展开（= Java `Action.enumerate`）
 │  ├─ policies.hpp      `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（= Java `Policies`；
 │  │                    `@α` 先验与 `teacher` 未实现 → 显式报错）
-│  ├─ net.hpp/.cpp      **网络前向**：`net.bin` 加载 + `Features.state(607)`/`candidate(96)` 拼装 +
+│  ├─ net.hpp/.cpp      **网络前向**：`net.bin` 加载 + `Features.state(615)`/`candidate(96)` 拼装 +
 │  │                    argmax/温度采样（= Java `NeuralPolicy` + `Features`；`net` 子命令供对拍，§6.16）
 │  ├─ jsonw.hpp         手写 JSON 写出器（键序 = 插入序、整数/定点、无浮点噪声）
 │  ├─ trace.hpp/.cpp    轨迹记录器 `g*.jsonl`（三段式 + 丢行规则 = Java `TraceRecorder`）

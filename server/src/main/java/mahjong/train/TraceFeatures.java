@@ -30,10 +30,13 @@ import mahjong.util.Log;
  * <h2>文件格式（小端）</h2>
  * <pre>
  *   header: magic(4)=0x4D4A4654 "MJFT" · featureVersion(4) · nDec(4) · perDec(4) · perCand(4)
- *   A: nDec × perDec            uint8   逐决策危险度（ObsFeatures.perDecision）
+ *   A: nDec × perDec            int16   逐决策派生量（ObsFeatures.perDecision）
  *   B: nDec × int16             nLegal  每条决策的候选数（与 jsonl 里的决策行**同序**）
  *   C: ΣnLegal × perCand        int16   逐候选派生量（ObsFeatures.perCandidate，按 legal 顺序）
  * </pre>
+ * ⚠ v2 起 A 段从 `uint8` 改成 `int16`：逐决策段不再只有危险度（0..100），
+ * 还带上了向听/进张与打点粗估（点数最大 32000）——uint8 会把它截成 mod 256。
+ * 读侧按 `int16` 解析（`mahjong_ml/dataset.py` 的 `load_sidecar`）。
  * Python 侧按固定 dtype 内存映射读取，不用逐行解析（`mahjong_ml/dataset.py`）。
  */
 public final class TraceFeatures {
@@ -134,7 +137,7 @@ public final class TraceFeatures {
         long candidates = 0;
         // 三段分开攒，最后按 header + A + B + C **顺序**写盘 ——
         // Python 侧才能"每段一次 memmap"（交错写就得逐行 Python 循环找偏移，几十万条会很难看）。
-        Grow secA = new Grow(1 << 16);      // nDec × perDec  uint8
+        Grow secA = new Grow(1 << 16);      // nDec × perDec  int16
         Grow secB = new Grow(1 << 12);      // nDec ×          int16
         Grow secC = new Grow(1 << 16);      // ΣnLegal × perCand int16
         try (FileChannel in = FileChannel.open(jsonl, StandardOpenOption.READ)) {
@@ -158,7 +161,9 @@ public final class TraceFeatures {
                 }
                 ObsFeatures.View v = ObsFeatures.ofObs(obs);
                 for (int x : ObsFeatures.perDecision(v)) {
-                    secA.put((byte) Math.max(0, Math.min(255, x)));
+                    // ⚠ int16：v3 起这一段混了危险度（0..100）与打点粗估（点数最大 32000），
+                    //   原来按 uint8 写会把后几维**截断成 mod 256**（实测 golden 对拍直接红）。
+                    secA.putShort((short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, x)));
                 }
                 List<Object> legal = Json.list(row, "legal");
                 int n = legal == null ? 0 : legal.size();

@@ -223,9 +223,12 @@ eq("场风：字母 'E'（真实轨迹里的写法）", feat.wind_index("E"), 0.
 eq("场风：字母 'S'/'W'/'N'", (feat.wind_index("S"), feat.wind_index("W"), feat.wind_index("N")),
    (1.0, 2.0, 3.0))
 eq("场风：数字写法也容忍", feat.wind_index(2), 2.0)
-eq("state_dim 固定（改了要同步 Java）", feat.state_dim(), 607)
+eq("state_dim 固定（改了要同步 Java）", feat.state_dim(), 615)
 eq("cand_dim 固定", feat.cand_dim(), 96)
-eq("派生段长与 Java ObsFeatures 一致", (feat.DERIVED_DECISION, feat.DERIVED_CANDIDATE), (68, 8))
+eq("派生段长与 Java ObsFeatures 一致", (feat.DERIVED_DECISION, feat.DERIVED_CANDIDATE), (71, 8))
+eq("派生段逐维分母与 Java 一致（前 68 维危险度 /100，后 3 维向听/打点）",
+   (feat.DERIVED_DECISION_SCALE[:5], feat.DERIVED_DECISION_SCALE[-3:]),
+   ((100.0,) * 5, (8.0, 13.0, 32000.0)))
 
 
 def _fake_obs(legal, kind="turn"):
@@ -255,10 +258,13 @@ eq("赤五/摸切标志位对普通打牌为 0", float(cand[0, 9 + 2 * feat.TILE
 ok(np.array_equal(cand[1][:feat.cand_dim() - feat.DERIVED_CANDIDATE],
                   feat.cand_vector("discard:5m")),
    "候选向量的基础段是纯函数（与单点定义一致）")
-# 派生量：传了就按单点系数归一化落在末尾，不传就填 0（缺 sidecar 时才该发生）
+# 派生量：传了就按**逐维分母**归一化落在末尾，不传就填 0（缺 sidecar 时才该发生）
 sv_d = feat.state_vector(obs, [50] * feat.DERIVED_DECISION)
-ok(abs(float(sv_d[-1]) - 0.5) < 1e-6, "派生危险度按 /100 归一化放在末尾",
-   f"got={float(sv_d[-1])}")
+ok(abs(float(sv_d[-feat.DERIVED_DECISION]) - 0.5) < 1e-6, "派生段第 1 维（危险度）按 /100 归一化",
+   f"got={float(sv_d[-feat.DERIVED_DECISION])}")
+ok(abs(float(sv_d[-2]) - 50.0 / 13.0) < 1e-6 and abs(float(sv_d[-1]) - 50.0 / 32000.0) < 1e-6,
+   "派生段后两维（打点番数/点数）按各自的量纲归一化，而不是统一 /100",
+   f"han={float(sv_d[-2])} points={float(sv_d[-1])}")
 ok(np.allclose(sv[-feat.DERIVED_DECISION:], 0.0), "不传派生量时末尾填 0")
 cd_d = feat.cand_vector_full("discard:1m", [8, 34, 136, 0, 0, 0, 0, 4])
 ok(abs(float(cd_d[-1]) - 1.0) < 1e-6 and abs(float(cd_d[-8]) - 1.0) < 1e-6,
@@ -272,7 +278,7 @@ def write_sidecar(jsonl, rows):
     """按 `TraceFeatures` 的三段式写一个 sidecar（合成用；同时也是格式契约的守卫）。"""
     import struct
     ndec = len(rows)
-    a = np.concatenate([np.asarray(r["danger"], dtype=np.uint8) for r in rows])
+    a = np.concatenate([np.asarray(r["danger"], dtype="<i2") for r in rows])
     b = np.asarray([len(r["cand"]) for r in rows], dtype="<i2")
     c = np.concatenate([np.asarray(r["cand"], dtype="<i2") for r in rows]).reshape(-1, 8)
     head = struct.pack("<5i", ds.SIDECAR_MAGIC, feat.DERIVED_VERSION, ndec,
@@ -285,7 +291,7 @@ def write_sidecar(jsonl, rows):
 droot = scratch("dataset")
 src = droot / "src"
 src.mkdir(parents=True, exist_ok=True)
-DANGER = [7] * feat.DERIVED_DECISION                      # 合成的危险度（68 维）
+DANGER = [7] * feat.DERIVED_DECISION                      # 合成的逐决策派生量（71 维）
 CAND0 = [[1, 2, 3, 4, 5, 6, 7, 8], [0] * 8]               # 两条候选的派生量（原始整数）
 for g in range(2):                                        # 两场，每场 2 条决策
     jsonl = src / f"g{g}.jsonl"
@@ -315,16 +321,17 @@ tr = ds.load_split(droot / "compact", "train")
 eq("读回的 state 形状", tr["state"].shape, (2, feat.state_dim()))
 eq("读回的 cand 形状", tr["cand"].shape, (2, 2, feat.cand_dim()))
 ok(np.array_equal(np.asarray(tr["n_legal"]), [2, 2]), "n_legal 记对了")
-# 派生量落盘的口径：state 末尾 68 维是**归一化后**的危险度；cand 末尾 8 维是**原始整数**
+# 派生量落盘的口径：state 末尾 73 维是**归一化后**的派生量；cand 末尾 8 维是**原始整数**
 ok(np.allclose(np.asarray(tr["state"][0, -feat.DERIVED_DECISION:], dtype=np.float32),
-               np.asarray(DANGER, dtype=np.float32) / feat.DERIVED_SCALE_DANGER, atol=1e-3),
-   "state 末尾 68 维 = 危险度 / 100")
+               np.asarray(DANGER, dtype=np.float32) / np.asarray(feat.DERIVED_DECISION_SCALE,
+                                                                 dtype=np.float32), atol=1e-3),
+   "state 末尾 73 维 = 派生量 / 逐维分母")
 ok(np.array_equal(np.asarray(tr["cand"][0, 0, -feat.DERIVED_CANDIDATE:]),
                   np.asarray(CAND0[0], dtype=np.uint8)),
    "cand 末尾 8 维 = 派生量的原始整数（归一化留给 _batch）")
 sc = ds.load_sidecar(ds.sidecar_path(src / "g0.jsonl"))
 eq("sidecar：条数", sc["n"], 2)
-eq("sidecar：危险度形状", sc["danger"].shape, (2, feat.DERIVED_DECISION))
+eq("sidecar：逐决策派生块形状", sc["danger"].shape, (2, feat.DERIVED_DECISION))
 eq("sidecar：候选块形状", sc["cand"].shape, (4, feat.DERIVED_CANDIDATE))
 # 缺 sidecar 必须**报错**（悄悄用 0 会让训练/推理口径不一致，而且查不出来）
 noside = scratch("dataset-noside")

@@ -23,7 +23,6 @@
 namespace trainer {
 namespace {
 
-constexpr float kDerivedDangerScale = 100.f;
 /** 与 Python `DERIVED_SCALE_CAND` / Java `Features.DERIVED_CAND_SCALE` 逐位一致。 */
 constexpr float kDerivedCandScale[8] = {8.f, 34.f, 136.f, 34.f, 136.f, 34.f, 136.f, 4.f};
 constexpr const char *kActionTypes[9] = {"discard", "riichi", "pon", "chi", "kan",
@@ -129,7 +128,7 @@ int tileSlotOf(const std::string &code) {
     return k;
 }
 
-// ------------------------------------------------------------------ state（607）
+// ------------------------------------------------------------------ state（615）
 
 /** Java `Features.state(obs, view)`。**行序、系数、槽位都不许动。** */
 std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
@@ -147,6 +146,7 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
     }
 
     // 四家副露：种类计数（不缩放）+ 牌种计数（×0.25）
+    // ⚠ 四家块一律写到**相对下标** `(s - seat + 4) % 4`（自己 = 0），见 `Features` 的 v3 说明。
     std::vector<float> meldKind(4 * 5, 0.f);
     std::vector<float> meldTiles(4 * kKindCount, 0.f);
     const JVal *melds = obs.find("melds");
@@ -156,13 +156,14 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
             if (!row.isArr()) {
                 continue;
             }
+            const int j = (s - seat + 4) % 4;
             for (const JVal &mo : row.arr) {
                 if (!mo.isObj()) {
                     continue;
                 }
                 const int ki = indexOfArr(kMeldKinds, 5, strField(mo, "kind", ""));
                 if (ki >= 0) {
-                    meldKind[static_cast<size_t>(s * 5 + ki)] += 1.f;
+                    meldKind[static_cast<size_t>(j * 5 + ki)] += 1.f;
                 }
                 const JVal *tiles = mo.find("tiles");
                 if (tiles == nullptr || !tiles->isArr()) {
@@ -171,7 +172,7 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
                 for (const JVal &code : tiles->arr) {
                     const int k = parseKind(code.asStr());
                     if (k >= 0) {
-                        meldTiles[static_cast<size_t>(s * kKindCount + k)] += 1.f;
+                        meldTiles[static_cast<size_t>(j * kKindCount + k)] += 1.f;
                     }
                 }
             }
@@ -195,10 +196,11 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
             if (!row.isArr()) {
                 continue;
             }
+            const int j = (s - seat + 4) % 4;
             for (const JVal &code : row.arr) {
                 const int k = parseKind(code.asStr());
                 if (k >= 0) {
-                    river[static_cast<size_t>(s * kKindCount + k)] += 1.f;
+                    river[static_cast<size_t>(j * kKindCount + k)] += 1.f;
                 }
             }
         }
@@ -225,16 +227,45 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
     }
 
     const JVal *riichi = obs.find("riichi");
-    for (int s = 0; s < 4; s++) {
-        f[static_cast<size_t>(i++)] = boolAt(riichi, s) ? 1.f : 0.f;
+    for (int j = 0; j < 4; j++) {
+        f[static_cast<size_t>(i++)] = boolAt(riichi, (seat + j) % 4) ? 1.f : 0.f;
     }
     const JVal *ippatsu = obs.find("ippatsu");
-    for (int s = 0; s < 4; s++) {
-        f[static_cast<size_t>(i++)] = boolAt(ippatsu, s) ? 1.f : 0.f;
+    for (int j = 0; j < 4; j++) {
+        f[static_cast<size_t>(i++)] = boolAt(ippatsu, (seat + j) % 4) ? 1.f : 0.f;
     }
     const JVal *scores = obs.find("scores");
-    for (int s = 0; s < 4; s++) {
-        f[static_cast<size_t>(i++)] = (numAt(scores, s, 25000.f) - 25000.f) / 1000.f;
+    for (int j = 0; j < 4; j++) {
+        f[static_cast<size_t>(i++)]
+                = (numAt(scores, (seat + j) % 4, 25000.f) - 25000.f) / 1000.f;
+    }
+    // ---- 位置与点数（v3 新增）：自己那一格 + 顺位/分差这类**四家点数的非线性组合**。
+    // 旋转到"自己 = 0"只解决了"哪一格是我"，顺位与分差仍要显式给（网络推不出来）。
+    {
+        const float self = numAt(scores, seat, 25000.f);
+        float sumOthers = 0.f;
+        int rank = 1;
+        float nearUp = std::numeric_limits<float>::max();
+        float nearDown = std::numeric_limits<float>::max();
+        for (int j = 1; j < 4; j++) {
+            const float sc = numAt(scores, (seat + j) % 4, 25000.f);
+            sumOthers += sc;
+            if (sc > self) {                   // 同点不比自己高：并列取**最好**名次
+                rank++;
+                nearUp = std::min(nearUp, sc - self);
+            } else if (sc < self) {
+                nearDown = std::min(nearDown, self - sc);
+            }
+        }
+        f[static_cast<size_t>(i++)] = (self - 25000.f) / 1000.f;   // 自己点数（刻意冗余：直读）
+        f[static_cast<size_t>(i++)] = (self - sumOthers / 3.f) / 1000.f;   // 与三家均值之差
+        f[static_cast<size_t>(i++)] = static_cast<float>(rank - 1) / 3.f;  // 顺位 1..4 → 0..1
+        // Java 写的是 `nearUp == Float.MAX_VALUE`：这两个 min 累加器**不可能超过** MAX
+        // （没有 NaN 进来），所以 `>=` 与 `==` 逐位等价。
+        f[static_cast<size_t>(i++)]
+                = (nearUp >= std::numeric_limits<float>::max() ? 0.f : nearUp) / 1000.f;
+        f[static_cast<size_t>(i++)]
+                = (nearDown >= std::numeric_limits<float>::max() ? 0.f : nearDown) / 1000.f;
     }
 
     const JVal *rndPtr = obs.find("round");
@@ -310,8 +341,11 @@ std::vector<float> stateOf(const JVal &obs, const FeatureView &v) {
     i += 3;
 
     const std::array<int, kPerDecision> dec = perDecision(v);
-    for (int x : dec) {
-        f[static_cast<size_t>(i++)] = static_cast<float>(x) / kDerivedDangerScale;
+    for (int x = 0; x < kPerDecision; x++) {
+        // ⚠ 逐维分母：前 68 维危险度是 /100，后 3 维（向听/打点）各有各的量纲
+        f[static_cast<size_t>(i++)]
+                = static_cast<float>(dec[static_cast<size_t>(x)])
+                / static_cast<float>(kDerivedDecisionScale[static_cast<size_t>(x)]);
     }
     return f;
 }
@@ -630,7 +664,7 @@ int64_t netMixSeed(int64_t gameSeed, int seat) {
 }
 
 std::string netDescribe() {
-    return "Features v2 state=" + std::to_string(kNetState) + "（base 539 + derived 68） cand="
+    return "Features v3 state=" + std::to_string(kNetState) + "（base 544 + derived 71） cand="
             + std::to_string(kNetCand) + "（base 88 + derived 8）";
 }
 

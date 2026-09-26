@@ -4,8 +4,8 @@
 
 三件事：
   · **流式读** `g*.jsonl`（每场一个文件），只取 `type == "decision"` 的行；
-  · 用 `features.py` 把 `obs` + `legal` 转成 `state[539]` + `cand[L,88]`，**落盘用内存映射**
-    （两遍：先数、再写）—— 否则 30 万条决策 × (539+12×88) 的 float32 会把内存吃干净；
+  · 用 `features.py` 把 `obs` + `legal` 转成 `state[544]` + `cand[L,88]`，**落盘用内存映射**
+    （两遍：先数、再写）—— 否则 30 万条决策 × (544+12×88) 的 float32 会把内存吃干净；
   · **按文件（= 整场）切分训练/验证**：同一场的后续决策**绝不能**进验证集（那是最隐蔽的信息泄漏，
     见 §5）。切分只由 `--split-seed` 决定，**与数据量无关** → 可复现。
 
@@ -82,7 +82,8 @@ def sidecar_path(jsonl: Path) -> Path:
 def load_sidecar(path: str | Path) -> dict:
     """读派生特征 sidecar（三段式、小端；格式见 `mahjong.train.TraceFeatures` 的 javadoc）。
 
-    返回 `danger[n,68]` / `nlegal[n]` / `cand[Σnlegal,8]`（都是只读视图）+ 候选偏移。
+    返回 `danger[n,73]` / `nlegal[n]` / `cand[Σnlegal,8]`（都是只读视图）+ 候选偏移。
+    `danger` 是**逐决策派生段**（v3 起 73 维：危险度 68 + 牌力/打点 5），int16 存盘。
     """
     p = Path(path)
     raw = p.read_bytes()
@@ -98,14 +99,14 @@ def load_sidecar(path: str | Path) -> dict:
         raise ValueError(f"{p.name} 派生块布局不符：perDec={pdec} perCand={pcand}"
                          f"（Python 侧期望 {features.DERIVED_DECISION}/"
                          f"{features.DERIVED_CANDIDATE}）—— 两边一起改并 +版本")
-    off_b = 20 + ndec * pdec
+    off_b = 20 + ndec * pdec * 2                  # A 段是 int16（v2 起；见 TraceFeatures 的格式说明）
     nlegal = np.frombuffer(raw, dtype="<i2", count=ndec, offset=off_b)
     off_c = off_b + ndec * 2
     total = int(nlegal.sum())
     if off_c + total * pcand * 2 != len(raw):
         raise ValueError(f"{p.name} 长度不自洽：文件 {len(raw)} 字节，按头部推算应为 "
                          f"{off_c + total * pcand * 2}")
-    danger = np.frombuffer(raw, dtype=np.uint8, count=ndec * pdec, offset=20).reshape(ndec, pdec)
+    danger = np.frombuffer(raw, dtype="<i2", count=ndec * pdec, offset=20).reshape(ndec, pdec)
     cand = np.frombuffer(raw, dtype="<i2", count=total * pcand, offset=off_c).reshape(total, pcand)
     return {"ver": ver, "n": ndec, "danger": danger, "nlegal": nlegal, "cand": cand,
             "offsets": np.concatenate([[0], np.cumsum(nlegal)]).astype(np.int64)}

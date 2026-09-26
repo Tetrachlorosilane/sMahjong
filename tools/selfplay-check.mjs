@@ -29,8 +29,8 @@ if (!fs.existsSync(dir)) {
 /** 观测的字段白名单 —— 与 mahjong/ai/Observation.java 的 toJson 必须一致。 */
 const OBS_KEYS = [
   'v', 'seat', 'kind', 'hand', 'hand_red', 'drawn', 'player_draws', 'menzen', 'self_riichi',
-  'furiten', 'melds', 'discards', 'dora_indicators', 'riichi', 'ippatsu', 'scores', 'round',
-  'tiles_left', 'dead_wall_left', 'total_discards', 'kan_count', 'any_call', 'visible',
+  'furiten', 'melds', 'discards', 'dora_indicators', 'riichi', 'ippatsu', 'scores', 'kuitan',
+  'round', 'tiles_left', 'dead_wall_left', 'total_discards', 'kan_count', 'any_call', 'visible',
   'haitei', 'houtei', 'rinshan', 'from', 'called_tile', 'win_note', 'legal',
 ].sort();
 

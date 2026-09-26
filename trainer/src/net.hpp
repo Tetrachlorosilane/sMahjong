@@ -11,7 +11,8 @@
 //   `head b[head_dim]`、`out W[head_dim]`、标量 `ob`。
 //
 // 前向（与 `nets.CandidateScorer` / `NeuralPolicy` 一一对应）：
-//   x    = Features.state(obs)                  607 = 539 基础 + 68 派生（danger / 100）
+//   x    = Features.state(obs)                  615 = 544 基础 + 71 派生（前 68 维 danger / 100，
+//                                                   后 3 维逐维分母见 ObsFeatures.kDerivedDecisionScale）
 //   cand = Features.candidate(key, perCand)      96 = 88 基础 + 8 派生（各自 / DERIVED_CAND_SCALE）
 //   h    = ReLU(W₂·ReLU(W₁·x + b₁) + b₂)                    # trunk，同一次询问的所有候选共用
 //   logit_i = o·ReLU(H·[h ‖ cand_i] + b_h) + b_o            # 逐候选打分
@@ -31,7 +32,7 @@
 namespace trainer {
 
 /** 编译期常量（= Java `mahjong.ai.Features.STATE` / `.CAND`）。 */
-inline constexpr int kNetState = 607;
+inline constexpr int kNetState = 615;
 inline constexpr int kNetCand = 96;
 /** 权重魔数（"MJNN"）与格式版本（= Java `NeuralPolicy.MAGIC` / `FORMAT_VERSION`）。 */
 inline constexpr uint32_t kNetMagic = 0x4D4A4E4EU;

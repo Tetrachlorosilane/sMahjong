@@ -1015,7 +1015,7 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 `Policies.fromAction(ActionPolicy)` 提供三道保护：动作不在本次 `legal` 里 / 返回 `null` / 抛异常，
 一律退回内置机器人。**只实现 `ActionPolicy` 就不可能让牌桌线程死掉。**
 
-### 8.2 观测（`Observation`，格式版本 `v: 1`）
+### 8.2 观测（`Observation`，格式版本 `v: 2`）
 
 只含该座位**合法可见**的信息。字段表（`toJson()` 的输出，权威）：
 
@@ -1032,7 +1032,8 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `discards` | str[4][] | 四家牌河；**被鸣走的那张已由服务端移除** |
 | `dora_indicators` | str[] | 宝牌指示牌（**里宝指示牌绝不出现**） |
 | `riichi` / `ippatsu` | bool[4] | 公开状态 |
-| `scores` | int[4] | 当前点数 |
+| `scores` | int[4] | 当前点数（**绝对座次**；特征侧会旋转成"自己在下标 0"，见 §8.5） |
+| `kuitan` | bool | 本局是否允许**食い断**（规则取舍里唯一被特征用到的位：打点粗估的断幺项要它）。三套预设都是 `true`，只有 `custom` 可能关 |
 | `round` | map | `{bakaze, kyoku, honba, dealer, riichi_sticks}` |
 | `tiles_left` / `dead_wall_left` | int | 可摸余牌 / 岭上余牌 |
 | `total_discards` / `kan_count` / `any_call` | int / bool | 公开的巡目与局面量 |
@@ -1169,10 +1170,12 @@ java -jar mahjong-server.jar --features <轨迹目录> [--workers 24]
 ```
 
 给目录里每个 `g<序号>.jsonl` 生成同名 `g<序号>.feat.bin`（**轨迹格式完全不变**）。
-派生量（逐张危险度 68 维 + 逐候选 8 个量）由服务端的权威实现
+派生量（逐决策 71 维：逐张危险度 68 + 向听/打点粗估 3；逐候选 8 个量）由服务端的权威实现
 （`mahjong/ai/ObsFeatures.java` → `HandEval` / `Danger`）算，**刻意不在 Python 里再写一份** ——
-两套实现必然漂移（`docs/TRAINING.md` §3.4）。格式见该类 javadoc；Python 侧读它的是
-`python/mahjong_ml/dataset.py`，契约由 `python/selfcheck.py` 与 `SelfTest.obsFeaturesTests` 两侧钉住
+两套实现必然漂移（`docs/TRAINING.md` §3.4）。二进制格式见 `mahjong.train.TraceFeatures` 的 javadoc
+（header + A/B/C 三段，**v3 起全部是 int16** —— 逐决策段带了点数，uint8 会截成 mod 256）；
+Python 侧读它的是 `python/mahjong_ml/dataset.py`，
+契约由 `python/selfcheck.py` 与 `SelfTest.obsFeaturesTests` 两侧钉住
 （后者是「obs 通路 == Round 通路」的逐元素 golden 对拍，带红证）。
 
 **进程内神经网络策略（B 形态）**：
@@ -1187,7 +1190,9 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 
 - 前向是**纯 Java 手写**（`mahjong/ai/NeuralPolicy.java`：trunk 两层 ReLU + 逐候选打分头），
   **零第三方依赖**、无 socket 往返；特征拼装在 `mahjong/ai/Features.java`（与
-  `python/mahjong_ml/features.py` 同规格：state 607 = 539 基础 + 68 派生，cand 96 = 88 + 8）。
+  `python/mahjong_ml/features.py` 同规格：**v3 起 state 617 = 544 基础 + 73 派生**，cand 96 = 88 + 8；
+  四家块一律**旋转到自己为下标 0**，另加 `points/5` 位置点数段与 5 维牌力/打点派生量 —— 规格表见
+  `docs/TRAINING.md` §5）。
 - **加载失败/魔数不对/特征维度不符** → **构造期**就抛错（不会打到一半才发现），
   运行期动作仍过 `Policies.fromAction` 的三道保护（非法动作 / `null` / 异常一律退回内置 teacher）。
 - **一致性**由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具

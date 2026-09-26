@@ -545,92 +545,22 @@ public final class Bot {
     // ================================================================= 打点粗估 / 押し引き
 
     /** 放铳的**平均失点**（本作口径；只在期望值比较里用，不影响任何规则判定）。 */
-    public static final int AVG_DEAL_POINTS = 5200;
+    public static final int AVG_DEAL_POINTS = HandEval.AVG_DEAL_POINTS;
 
     /**
-     * 打点**粗估**（番数）—— 押し引き与副露取舍要的是"量级对不对"，不是精确番数。
+     * 打点**粗估**（番数）—— 押し引き要的是"量级对不对"，不是精确番数。
      *
-     * <p>为什么不直接用 {@code Round.scoreIfWin}：① 它要在"假设已经鸣牌"的前提下重算
-     * （真实的 `melds[seat]` / `menzen[seat]` 都还没变，照抄会白算平和/门清符/一杯口 ——
-     * 两把尺子）；② 押し引き是**每巡**都要做的判断，一次 Evaluator 太贵。所以这里只用
-     * 公开信息数形状：
-     * <ul>
-     *   <li>宝牌（含自己手里的赤五）；</li>
-     *   <li>立直（门清且还没立直时 +1：本作策略默认会立直）；</li>
-     *   <li>役牌刻（三元牌/场风/自风，每种 1 番，可以复合）；</li>
-     *   <li>断幺九（只在食断规则下）；</li>
-     *   <li>混一色 / 清一色（按含不含字牌分，副露降一番）；</li>
-     *   <li>对对和（没有吃、且暗牌里至少两组对子/刻子）。</li>
-     * </ul>
-     * ⚠ 精确番数仍然只在两处用真货：立直/默听（`shouldDeclareRiichi` 用 `scoreIfWin`）
-     * 与训练侧的观测 —— 这里只服务"值不值得"这种粗判断。
+     * <p>⚠ 公式本体在 {@link HandEval#estimatedHan}（2026-09 特征 v3 起**押し引き与特征派生共用一份**，
+     * 原来是这里的私有实现）：这里只负责把 {@link HandState} 的几个字段喂进去。
      */
     public static int estimatedHan(HandState st, int[] counts, List<Meld> melds) {
-        final int[] c = counts == null ? new int[Tiles.KIND_COUNT] : counts;
-        final List<Meld> ms = melds == null ? List.of() : melds;
-        final boolean open = !ms.isEmpty();
-        int han = HandEval.doraCount(c, ms, st.doraIndicators) + st.akaInHand;
-        if (!open && !st.selfRiichi) {
-            han += 1;                                   // 立直
-        }
-        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
-            if (isYakuhai(st, k) && hasTriplet(c, ms, k)) {
-                han += 1;
-            }
-        }
-        if (st.kuitan && allSimplesOf(c, ms)) {
-            han += 1;
-        }
-        if (singleSuitOf(c, ms) >= 0) {
-            han += hasHonor(c, ms) ? (open ? 2 : 3) : (open ? 5 : 6);
-        }
-        if (noChi(ms)) {
-            // 对对和的**粗判**：没有吃、且暗牌里一张"单张"都没有（全是刻子/对子）。
-            // ⚠ 宁可漏算：真实的对对和途中多半还留着搭子的残张，那种形状这里不认
-            //   （认了会把"混一色 + 顺子苗头"的手白算成对对和 —— 试过，虚高得很离谱）。
-            int pairs = 0;
-            boolean single = false;
-            for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-                if (c[k] == 1) {
-                    single = true;
-                } else if (c[k] >= 2) {
-                    pairs++;
-                }
-            }
-            if (!single && pairs >= 2) {
-                han += 2;                               // 对对和
-            }
-        }
-        return han;
+        return HandEval.estimatedHan(counts, melds, st.doraIndicators, st.akaInHand, st.selfRiichi,
+                st.kuitan, st.roundWind, (st.seat - st.dealer + 4) % 4);
     }
 
-    /** 番数 → 闲家荣和的实收点数（粗表：够期望值用；庄家/自摸的差别不在这里体现）。 */
+    /** 番数 → 闲家荣和的实收点数（公式见 {@link HandEval#hanToPoints}）。 */
     public static int hanToPoints(int han) {
-        if (han >= 13) {
-            return 32000;
-        }
-        if (han >= 11) {
-            return 24000;
-        }
-        if (han >= 8) {
-            return 16000;
-        }
-        if (han >= 6) {
-            return 12000;
-        }
-        if (han >= 5) {
-            return 8000;
-        }
-        if (han >= 4) {
-            return 7700;
-        }
-        if (han >= 3) {
-            return 3900;
-        }
-        if (han >= 2) {
-            return 2000;
-        }
-        return han >= 1 ? 1000 : 0;
+        return HandEval.hanToPoints(han);
     }
 
     /**
@@ -912,88 +842,6 @@ public final class Bot {
         return pay.winnerGain;
     }
 
-    private static boolean hasTriplet(int[] counts, List<Meld> melds, int kind) {
-        if (counts[kind] >= 3) {
-            return true;
-        }
-        for (Meld m : melds) {
-            if (!m.isRun() && m.baseKind() == kind) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasHonor(int[] counts, List<Meld> melds) {
-        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
-            if (counts[k] > 0) {
-                return true;
-            }
-        }
-        for (Meld m : melds) {
-            for (int t : m.tiles) {
-                if (Tiles.kind(t) >= 27) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean noChi(List<Meld> melds) {
-        for (Meld m : melds) {
-            if (m.kind == Meld.Kind.CHI) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** 暗牌 + 副露**全是中张（2..8）**—— 断幺九的前提（对任意"假设的"手牌都能问）。 */
-    private static boolean allSimplesOf(int[] counts, List<Meld> melds) {
-        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
-            if (counts[k] > 0 && !Tiles.isSimple(k)) {
-                return false;
-            }
-        }
-        for (Meld m : melds) {
-            for (int t : m.tiles) {
-                if (!Tiles.isSimple(Tiles.kind(t))) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    /** 暗牌 + 副露只占**一种花色**（可含字牌）时返回该花色，否则 -1。 */
-    private static int singleSuitOf(int[] counts, List<Meld> melds) {
-        int suit = -1;
-        for (int k = 0; k < 27; k++) {
-            if (counts[k] > 0) {
-                int s = Tiles.suit(k);
-                if (suit >= 0 && s != suit) {
-                    return -1;
-                }
-                suit = s;
-            }
-        }
-        for (Meld m : melds) {
-            for (int t : m.tiles) {
-                int k = Tiles.kind(t);
-                if (k >= 27) {
-                    continue;
-                }
-                int s = Tiles.suit(k);
-                if (suit >= 0 && s != suit) {
-                    return -1;
-                }
-                suit = s;
-            }
-        }
-        return suit;
-    }
-
     /** 越"孤立"的牌越优先打出。 */
     private static int isolateScore(String t) {
         int k = Tiles.parseKind(t);
@@ -1226,15 +1074,7 @@ public final class Bot {
      * <p>公开给自检：场风/自风随座位与庄家变，这条判据错了整个"鸣き役"都会错。
      */
     public static boolean isYakuhai(HandState st, int kind) {
-        if (Tiles.isDragon(kind)) {
-            return true;
-        }
-        if (!Tiles.isWind(kind)) {
-            return false;
-        }
-        final int roundWindKind = 27 + st.roundWind;
-        final int seatWindKind = 27 + ((st.seat - st.dealer + 4) % 4);
-        return kind == roundWindKind || kind == seatWindKind;
+        return HandEval.isYakuhai(kind, st.roundWind, (st.seat - st.dealer + 4) % 4);
     }
 
     /**
@@ -1299,14 +1139,14 @@ public final class Bot {
     private static boolean allSimples(HandState st, int[] afterCall, Meld meld) {
         List<Meld> ms = new ArrayList<>(st.melds);
         ms.add(meld);
-        return allSimplesOf(afterCall, ms);
+        return HandEval.allSimplesOf(afterCall, ms);
     }
 
     /** 暗牌 + 副露只占一种花色（外加字牌）—— 混一色/清一色的前提。 */
     private static boolean singleSuit(HandState st, int[] afterCall, Meld meld) {
         List<Meld> ms = new ArrayList<>(st.melds);
         ms.add(meld);
-        return singleSuitOf(afterCall, ms) >= 0;
+        return HandEval.singleSuitOf(afterCall, ms) >= 0;
     }
 
     private static Map<String, Object> firstKan(Map<String, Object> kanOption) {

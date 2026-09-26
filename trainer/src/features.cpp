@@ -148,8 +148,10 @@ bool oneFile(const std::string &dir, const std::string &name, FeatStat &st) {
                 && obs->isObj()) {
             FeatureView v;
             if (featureViewOfObs(*obs, v)) {
+                // ⚠ int16：v3 起这一段混了危险度（0..100）与打点粗估（点数最大 32000），
+                //   原来按 uint8 写会把后几维**截断成 mod 256**（实测 golden 对拍直接红）。
                 for (int x : perDecision(v)) {
-                    secA.push_back(static_cast<char>(std::max(0, std::min(255, x))));
+                    putI16(secA, std::max(-32768, std::min(32767, x)));
                 }
                 const JVal *legal = row.find("legal");
                 const int n = legal != nullptr && legal->isArr()

@@ -1,14 +1,19 @@
 #include "obffeatures.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "action.hpp"
+#include "bot.hpp"
 #include "danger.hpp"
 #include "handeval.hpp"
 #include "shanten.hpp"
 
 namespace trainer {
 namespace {
+
+/** 场风字母表（= Java `Features.WINDS`）。 */
+constexpr const char *kWindNames = "ESWN";
 
 /** 34 维整数数组 → `Counts`（缺项/非数组全 0；与 Java `ObsFeatures.ints` 同口径）。 */
 void fillCounts(const JVal *a, Counts &out) {
@@ -20,6 +25,61 @@ void fillCounts(const JVal *a, Counts &out) {
         const int v = a->arr[i].asInt(0);
         out[i] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
     }
+}
+
+/** 对象取整数（= Java `Json.i`：非数字非数字串 → `def`）。 */
+int intOf(const JVal &o, const char *k, int def) {
+    const JVal *v = o.find(k);
+    if (v == nullptr) {
+        return def;
+    }
+    if (v->type == JVal::Type::Num) {
+        return static_cast<int>(v->intVal);
+    }
+    if (v->type == JVal::Type::Str) {
+        return static_cast<int>(std::strtol(v->strVal.c_str(), nullptr, 10));
+    }
+    return def;
+}
+
+/** 对象取布尔（= Java `Json.bool`：**只有真正的布尔**才算，否则 `def`）。 */
+bool boolOf(const JVal &o, const char *k, bool def) {
+    const JVal *v = o.find(k);
+    return v != nullptr && v->type == JVal::Type::Bool ? v->boolVal : def;
+}
+
+/** `hand_red`（每个牌种是否持赤五）→ 手里赤五张数（= Java `ObsFeatures.akaInHand`）。 */
+int akaInHandOf(const JVal *handRed) {
+    int n = 0;
+    if (handRed != nullptr && handRed->type == JVal::Type::Arr) {
+        for (size_t k = 0; k < handRed->arr.size() && k < static_cast<size_t>(kKindCount); k++) {
+            if (handRed->arr[k].type == JVal::Type::Bool && handRed->arr[k].boolVal) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+/** `"ESWN"` 的**首字符**、大小写不敏感、钳到 0..3（= Java `Features.windIndex`）。 */
+int windIndexOfField(const JVal &o, const char *k, const char *def) {
+    const JVal *v = o.find(k);
+    std::string s = (v != nullptr && v->type == JVal::Type::Str) ? v->strVal : std::string(def);
+    int idx = -1;
+    if (!s.empty()) {
+        char c = s[0];
+        if (c >= 'a' && c <= 'z') {
+            c = static_cast<char>(c - 'a' + 'A');
+        }
+        for (int i = 0; i < 4; i++) {
+            if (kWindNames[i] == c) {
+                idx = i;
+                break;
+            }
+        }
+    }
+    const int clamped = idx < 0 ? 0 : idx;
+    return std::max(0, std::min(3, clamped));
 }
 
 std::string toLower(std::string s) {
@@ -244,6 +304,14 @@ bool featureViewOfObs(const JVal &obs, FeatureView &v) {
     if (called != nullptr && called->type == JVal::Type::Str && !called->strVal.empty()) {
         v.calledTile = called->strVal;
     }
+    // 自家立直 / 赤五 / 场风与庄家 / 食い断规则（打点粗估要用；轨迹里没有 `kuitan` 就按默认 true）
+    v.selfRiichi = boolOf(obs, "self_riichi", false);
+    v.akaInHand = akaInHandOf(obs.find("hand_red"));
+    const JVal *rnd = obs.find("round");
+    const bool hasRound = rnd != nullptr && rnd->type == JVal::Type::Obj;
+    v.roundWind = hasRound ? windIndexOfField(*rnd, "bakaze", "E") : 0;
+    v.dealer = hasRound ? intOf(*rnd, "dealer", 0) : 0;
+    v.kuitan = boolOf(obs, "kuitan", true);
     // `turn` 的口径与 `Bot.HandState.of` 完全一致（已打出的总张数 / 4）
     const JVal *td = obs.find("total_discards");
     v.turn = (td == nullptr ? 0 : td->asInt(0)) / 4;
@@ -258,6 +326,28 @@ std::array<int, kPerDecision> perDecision(const FeatureView &v) {
         out[static_cast<size_t>(kKindCount + k)]
                 = dangerWorstAgainstRiichi(k, v.visible, v.rivers, v.riichi, v.turn, v.seat);
     }
+    // 自家牌力 / 打点：**与押し引き同一把尺子**（`Bot::estimatedHan` → `HandEval.estimatedHan`）。
+    // 加这三条的理由：向听与役种·符数·点数都不是 2 层 MLP 能从 34 维计数里"顺手算出来"的，
+    // 而 teacher（Bot）每一步都在用它们 —— 不给显式输入，学生只能在平均意义上逼近老师。
+    // ⚠ 只用一次 `Shanten.min`：完整的 `HandEval.of` 要跑 34 次，Java 实测 ≈0.95 ms/决策
+    //   （状态段开销 ×20）。C++ 侧同一条 A/B 实测只慢 ≈3%（`HandEval.of` 在 C++ 里是 ~5 µs 级），
+    //   **但布局仍以 Java 为准**：进张留在逐候选段，状态段只放"便宜且别处没有"的两个量。
+    //   而"打完之后的进张"逐候选段里已经有了（见 `obffeatures.hpp` 的布局注释）。
+    const int sh = shantenMin(v.hand, static_cast<int>(v.melds.size()));
+    out[2 * kKindCount] = sh <= 0 ? 0 : sh;
+    Bot::HandState st;                       // 只填 estimatedHan 要用的那几个字段
+    st.counts = v.hand;
+    st.melds = v.melds;
+    st.doraIndicators = v.dora;
+    st.akaInHand = v.akaInHand;
+    st.selfRiichi = v.selfRiichi;
+    st.kuitan = v.kuitan;
+    st.roundWind = v.roundWind;
+    st.seat = v.seat;
+    st.dealer = v.dealer;
+    const int han = Bot::estimatedHan(st, v.hand, v.melds);
+    out[2 * kKindCount + 1] = han;
+    out[2 * kKindCount + 2] = Bot::hanToPoints(han);
     return out;
 }
 
@@ -379,7 +469,7 @@ std::array<int, kPerCandidate> perCandidate(const FeatureView &v, const std::str
 std::string featureLayout() {
     return "ObsFeatures v" + std::to_string(kFeatureVersion)
             + " perDecision=" + std::to_string(kPerDecision)
-            + "（danger_worst[34] + danger_riichi[34]）"
+            + "（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points）"
             + " perCandidate=" + std::to_string(kPerCandidate)
             + "（shanten, advance_types, advance_tiles, wait_types, wait_tiles,"
               " good_wait_types, good_wait_tiles, dora_count）";

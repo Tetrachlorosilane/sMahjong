@@ -1,6 +1,6 @@
 // 手牌评估：向听 / 进张 / 听牌形 —— 与 Java `mahjong.rules.HandEval` **同值**。
 //
-// 这一层是观测特征（607/96）里最贵的一块：`ObsFeatures.perCandidate` 会对每个候选打牌调用
+// 这一层是观测特征（615/96）里最贵的一块：`ObsFeatures.perCandidate` 会对每个候选打牌调用
 // 一次 `HandEval.of`，而 `of` 至少要跑 1 + 34 次向听（听牌时还要对每个听牌张做一次和了形分解）。
 // 实测（见 docs/TRAINING.md §3.3）：**一次决策九成时间花在这里**（≈0.5~0.8 ms/候选）。
 #pragma once

@@ -76,7 +76,7 @@ def save_weights(model: nets.CandidateScorer, out: str | Path) -> Path:
 def full_features(obs: dict, legal: list[str],
                   danger: np.ndarray | None = None,
                   cand_derived: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """`features.py` 的完整向量（状态 607 / 候选 n×96）—— 夹具与训练都用它，保证同源。"""
+    """`features.py` 的完整向量（状态 615 / 候选 n×96，v3）—— 夹具与训练都用它，保证同源。"""
     state = features.state_vector(obs, None if danger is None else danger.tolist())
     cand = features.candidates(state, legal, None if cand_derived is None else cand_derived.tolist())
     return state, cand

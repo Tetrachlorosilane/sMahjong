@@ -15,23 +15,33 @@ import mahjong.util.Json;
  * one-hot 槽位映射全集中在这里；Python 侧由 `features.describe()` 打印同一张表。
  * 一致性由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具**逐元素**钉住（容差 1e-4）。
  *
- * <h2>布局（state 607 = 539 基础 + 68 派生；cand 96 = 88 基础 + 8 派生）</h2>
+ * <h2>布局（state 617 = 544 基础 + 73 派生；cand 96 = 88 基础 + 8 派生）</h2>
  * <pre>
  *   state: hand/34(×0.25) · hand_red/34 · meld_kind/4×5 · meld_tiles/4×34(×0.25)
  *          · river/4×34(×0.25) · dora/34(×0.25) · riichi/4 · ippatsu/4
- *          · scores/4(相对 25000，/1000) · round/5 · state/5 · self/4 · ctx/4
+ *          · scores/4(相对 25000，/1000)
+ *          · points/5（自己点数 · 与三家均值差 · 顺位 · 与上一名差 · 与下一名差；后四项 /1000、顺位 /3）
+ *          · round/5 · state/5 · self/4 · ctx/4
  *          · visible/34(×0.25) · drawn/37 · called_tile/37 · from/4 · win_note/3
- *          · danger 68（{@link ObsFeatures#perDecision}，/100）
+ *          · derived 73（{@link ObsFeatures#perDecision}；**逐维分母不同**，见
+ *            {@link ObsFeatures#DERIVED_DECISION_SCALE}）
  *   cand:  type/9 · tile/37 · tiles/37 · tsumogiri/1 · kan_kind/3 · noarg/1
  *          · derived 8（{@link ObsFeatures#perCandidate}，除以 {@link #DERIVED_CAND_SCALE}）
  * </pre>
+ *
+ * <p>⚠ **v3 起四家块一律旋转到"自己 = 下标 0"**（0=自己 / 1=下家 / 2=对家 / 3=上家）：
+ * {@code meld_kind} / {@code meld_tiles} / {@code river} / {@code riichi} / {@code ippatsu} /
+ * {@code scores} 的第 j 格都是座位 {@code (seat + j) % 4}。理由（实测，见 NOTES §6.5）：
+ * 不旋转时输入里**没有任何"哪一格是我"的锚**（{@code seat} 只以两个相对量进入向量），
+ * 于是"自己多少点 / 第几名"读不出来，连"哪条牌河是我自己的"都只能靠账目恒等式反推
+ * （真实轨迹上仅 15.5% 的决策能唯一锁定，开局阶段 90.7% 四家全自洽 = 完全不可分）。
  */
 public final class Features {
 
     /** 特征版本（与 `features.FEATURE_VERSION` 同号；变了要两边一起改 + 重建数据集）。 */
-    public static final int VERSION = 2;
+    public static final int VERSION = 3;
 
-    public static final int BASE_STATE = 539;
+    public static final int BASE_STATE = 544;
     public static final int BASE_CAND = 88;
     public static final int STATE = BASE_STATE + ObsFeatures.PER_DECISION;      // 607
     public static final int CAND = BASE_CAND + ObsFeatures.PER_CANDIDATE;       // 96
@@ -69,11 +79,13 @@ public final class Features {
             f[i++] = boolAt(handRed, k) ? 1f : 0f;
         }
         // 四家副露：种类计数 + 牌种计数（只统计"牌种"，与 Python 同）
+        // ⚠ 四家块一律写到**相对下标** `(s - seat + 4) % 4`（自己 = 0），见类注释的 v3 说明。
         float[] meldKind = new float[4 * MELD_KINDS.length];
         float[] meldTiles = new float[4 * KIND_COUNT];
         List<Object> melds = Json.list(obs, "melds");
         if (melds != null) {
             for (int s = 0; s < 4 && s < melds.size(); s++) {
+                final int j = (s - seat + 4) % 4;
                 for (Object mo : Json.asArr(melds.get(s)) == null ? List.of() : Json.asArr(melds.get(s))) {
                     Map<String, Object> m = Json.asObj(mo);
                     if (m == null) {
@@ -81,12 +93,12 @@ public final class Features {
                     }
                     int ki = indexOf(MELD_KINDS, Json.str(m, "kind", ""));
                     if (ki >= 0) {
-                        meldKind[s * MELD_KINDS.length + ki] += 1f;
+                        meldKind[j * MELD_KINDS.length + ki] += 1f;
                     }
                     for (Object code : Json.list(m, "tiles")) {
                         int k = Tiles.parseKind(String.valueOf(code));
                         if (k >= 0) {
-                            meldTiles[s * KIND_COUNT + k] += 1f;
+                            meldTiles[j * KIND_COUNT + k] += 1f;
                         }
                     }
                 }
@@ -105,10 +117,11 @@ public final class Features {
                 if (row == null) {
                     continue;
                 }
+                final int j = (s - seat + 4) % 4;
                 for (Object code : row) {
                     int k = Tiles.parseKind(String.valueOf(code));
                     if (k >= 0) {
-                        river[s * KIND_COUNT + k] += 1f;
+                        river[j * KIND_COUNT + k] += 1f;
                     }
                 }
             }
@@ -127,16 +140,38 @@ public final class Features {
         i = put(f, i, dora);
         List<Object> riichi = Json.list(obs, "riichi");
         List<Object> ippatsu = Json.list(obs, "ippatsu");
-        for (int s = 0; s < 4; s++) {
-            f[i++] = boolAt(riichi, s) ? 1f : 0f;
+        for (int j = 0; j < 4; j++) {
+            f[i++] = boolAt(riichi, (seat + j) % 4) ? 1f : 0f;
         }
-        for (int s = 0; s < 4; s++) {
-            f[i++] = boolAt(ippatsu, s) ? 1f : 0f;
+        for (int j = 0; j < 4; j++) {
+            f[i++] = boolAt(ippatsu, (seat + j) % 4) ? 1f : 0f;
         }
         List<Object> scores = Json.list(obs, "scores");
-        for (int s = 0; s < 4; s++) {
-            f[i++] = (numAt(scores, s, 25000f) - 25000f) / 1000f;
+        for (int j = 0; j < 4; j++) {
+            f[i++] = (numAt(scores, (seat + j) % 4, 25000f) - 25000f) / 1000f;
         }
+        // ---- 位置与点数（v3 新增）：自己那一格 + 顺位/分差这类**四家点数的非线性组合**。
+        // 旋转到"自己 = 0"只解决了"哪一格是我"，顺位与分差仍要显式给（网络推不出来，见类注释）。
+        final float self = numAt(scores, seat, 25000f);
+        float sumOthers = 0f;
+        int rank = 1;
+        float nearUp = Float.MAX_VALUE;
+        float nearDown = Float.MAX_VALUE;
+        for (int j = 1; j < 4; j++) {
+            float sc = numAt(scores, (seat + j) % 4, 25000f);
+            sumOthers += sc;
+            if (sc > self) {                           // 同点不比自己高：并列取**最好**名次
+                rank++;
+                nearUp = Math.min(nearUp, sc - self);
+            } else if (sc < self) {
+                nearDown = Math.min(nearDown, self - sc);
+            }
+        }
+        f[i++] = (self - 25000f) / 1000f;              // 自己点数（与 scores[0] 同值，刻意冗余：直读）
+        f[i++] = (self - sumOthers / 3f) / 1000f;      // 与三家均值之差（正 = 领先）
+        f[i++] = (rank - 1) / 3f;                      // 顺位 1..4 → 0..1
+        f[i++] = (nearUp == Float.MAX_VALUE ? 0f : nearUp) / 1000f;      // 与上一名（更近的那个）分差
+        f[i++] = (nearDown == Float.MAX_VALUE ? 0f : nearDown) / 1000f;  // 与下一名分差
         Map<String, Object> rnd = Json.map(obs, "round");
         f[i++] = windIndex(rnd == null ? "E" : Json.str(rnd, "bakaze", "E")) / 4f;
         f[i++] = (rnd == null ? 1f : Json.i(rnd, "kyoku", 1)) / 4f;
@@ -174,7 +209,8 @@ public final class Features {
         i += WIN_NOTES.length + 1;
         int[] dec = ObsFeatures.perDecision(v);
         for (int x = 0; x < ObsFeatures.PER_DECISION; x++) {
-            f[i++] = dec[x] / DERIVED_DANGER_SCALE;
+            // ⚠ 逐维分母：前 68 维危险度是 /100，后 5 维（向听/进张/打点）各有各的量纲
+            f[i++] = dec[x] / (float) ObsFeatures.DERIVED_DECISION_SCALE[x];
         }
         if (i != STATE) {
             throw new IllegalStateException("状态维度拼装错误：" + i + " != " + STATE);

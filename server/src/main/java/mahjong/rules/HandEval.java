@@ -262,4 +262,196 @@ public final class HandEval {
         }
         return of(c, melds, visible);
     }
+
+    // ================================================================== 打点粗估
+
+    /**
+     * 放铳的**平均失点**（本作口径；只在期望值比较里用，不影响任何规则判定）。
+     */
+    public static final int AVG_DEAL_POINTS = 5200;
+
+    /**
+     * 打点**粗估**（番数）—— 押し引き与特征派生**共用同一把尺子**（原实现是 {@code Bot} 的私有方法，
+     * 2026-09 特征 v3 起提到这里：训练侧要把它当输入，不能再有两份）。
+     *
+     * <p>为什么不直接用 {@code Round.scoreIfWin}：① 它要在"假设已经鸣牌"的前提下重算
+     * （真实的 {@code melds[seat]} / {@code menzen[seat]} 都还没变，照抄会白算平和/门清符/一杯口 ——
+     * 两把尺子）；② 押し引き是**每巡**都要做的判断，一次 Evaluator 太贵。所以这里只用
+     * 公开信息数形状：宝牌（含赤五）、立直、役牌刻、断幺九（食い断规则下）、
+     * 混一色/清一色（副露降番）、对对和（没有吃且没有单张）。
+     *
+     * @param counts       暗牌计数（34）
+     * @param melds        自家副露
+     * @param doraIndicators 宝牌指示牌的**牌种 kind**
+     * @param akaInHand    手里赤五张数
+     * @param selfRiichi   自家是否已立直（没立直且门清 → 计一根立直）
+     * @param kuitan       规则是否允许食い断
+     * @param roundWind    场风（0=东）
+     * @param seatWind     自风（0=东，即自家是庄家）
+     */
+    public static int estimatedHan(int[] counts, List<Meld> melds, List<Integer> doraIndicators,
+                                   int akaInHand, boolean selfRiichi, boolean kuitan,
+                                   int roundWind, int seatWind) {
+        final int[] c = counts == null ? new int[Tiles.KIND_COUNT] : counts;
+        final List<Meld> ms = melds == null ? List.of() : melds;
+        final boolean open = !ms.isEmpty();
+        int han = doraCount(c, ms, doraIndicators) + akaInHand;
+        if (!open && !selfRiichi) {
+            han += 1;                                   // 立直
+        }
+        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
+            if (isYakuhai(k, roundWind, seatWind) && hasTriplet(c, ms, k)) {
+                han += 1;
+            }
+        }
+        if (kuitan && allSimplesOf(c, ms)) {
+            han += 1;
+        }
+        if (singleSuitOf(c, ms) >= 0) {
+            han += hasHonor(c, ms) ? (open ? 2 : 3) : (open ? 5 : 6);
+        }
+        if (noChi(ms)) {
+            // 对对和的**粗判**：没有吃、且暗牌里一张"单张"都没有（全是刻子/对子）。
+            // ⚠ 宁可漏算：真实的对对和途中多半还留着搭子的残张，那种形状这里不认
+            //   （认了会把"混一色 + 顺子苗头"的手白算成对对和 —— 试过，虚高得很离谱）。
+            int pairs = 0;
+            boolean single = false;
+            for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+                if (c[k] == 1) {
+                    single = true;
+                } else if (c[k] >= 2) {
+                    pairs++;
+                }
+            }
+            if (!single && pairs >= 2) {
+                han += 2;                               // 对对和
+            }
+        }
+        return han;
+    }
+
+    /** 番数 → 闲家荣和的实收点数（粗表：够期望值用；庄家/自摸的差别不在这里体现）。 */
+    public static int hanToPoints(int han) {
+        if (han >= 13) {
+            return 32000;
+        }
+        if (han >= 11) {
+            return 24000;
+        }
+        if (han >= 8) {
+            return 16000;
+        }
+        if (han >= 6) {
+            return 12000;
+        }
+        if (han >= 5) {
+            return 8000;
+        }
+        if (han >= 4) {
+            return 7700;
+        }
+        if (han >= 3) {
+            return 3900;
+        }
+        if (han >= 2) {
+            return 2000;
+        }
+        return han >= 1 ? 1000 : 0;
+    }
+
+    /** 役牌（三元牌 / 场风 / 自风）—— 与 {@code Bot.isYakuhai} 同一把尺子。 */
+    public static boolean isYakuhai(int kind, int roundWind, int seatWind) {
+        if (Tiles.isDragon(kind)) {
+            return true;
+        }
+        if (!Tiles.isWind(kind)) {
+            return false;
+        }
+        return kind == 27 + roundWind || kind == 27 + seatWind;
+    }
+
+    /** 手里或副露里有这个牌种的刻子/杠。 */
+    public static boolean hasTriplet(int[] counts, List<Meld> melds, int kind) {
+        if (counts[kind] >= 3) {
+            return true;
+        }
+        for (Meld m : melds) {
+            if (!m.isRun() && m.baseKind() == kind) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 暗牌 + 副露里有没有字牌。 */
+    public static boolean hasHonor(int[] counts, List<Meld> melds) {
+        for (int k = 27; k < Tiles.KIND_COUNT; k++) {
+            if (counts[k] > 0) {
+                return true;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                if (Tiles.kind(t) >= 27) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 副露里没有吃。 */
+    public static boolean noChi(List<Meld> melds) {
+        for (Meld m : melds) {
+            if (m.kind == Meld.Kind.CHI) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 暗牌 + 副露**全是中张（2..8）** —— 断幺九的前提（对任意"假设的"手牌都能问）。 */
+    public static boolean allSimplesOf(int[] counts, List<Meld> melds) {
+        for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+            if (counts[k] > 0 && !Tiles.isSimple(k)) {
+                return false;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                if (!Tiles.isSimple(Tiles.kind(t))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** 暗牌 + 副露只占**一种花色**（可含字牌）时返回该花色，否则 -1。 */
+    public static int singleSuitOf(int[] counts, List<Meld> melds) {
+        int suit = -1;
+        for (int k = 0; k < 27; k++) {
+            if (counts[k] > 0) {
+                int s = Tiles.suit(k);
+                if (suit >= 0 && s != suit) {
+                    return -1;
+                }
+                suit = s;
+            }
+        }
+        for (Meld m : melds) {
+            for (int t : m.tiles) {
+                int k = Tiles.kind(t);
+                if (k >= 27) {
+                    continue;
+                }
+                int s = Tiles.suit(k);
+                if (suit >= 0 && s != suit) {
+                    return -1;
+                }
+                suit = s;
+            }
+        }
+        return suit;
+    }
 }

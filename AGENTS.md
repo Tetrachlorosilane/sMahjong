@@ -548,6 +548,10 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
   （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另两条硬口径：**λ=1**、
   **优势只在 `is_student==1` 的行上归一化**。回归：`SelfTest.samplingPolicyTests` + `python/selfcheck.py` 的 P4 组。
+- **特征 v3（2026-09）**：state **615** = 544 + 71（`VERSION=3`）。三条硬判据：① 四家块**旋转到自己为
+  下标 0**（不旋转就没有"哪一格是我"的锚）；② 状态段只放**便宜且别处没有**的派生量（完整
+  `HandEval.of` ≈0.94 ms/决策 ⇒ **进张留在逐候选段**）；③ sidecar 逐决策段 **int16**，老 607 维
+  权重/紧凑集作废、**构造期拒绝**。实测见 NOTES §6.5。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），

@@ -26,9 +26,20 @@ import mahjong.util.Json;
  *
  * <h2>布局（自检里钉着；改动要同步 {@code docs/TRAINING.md} §5 与 Python 侧）</h2>
  * <pre>
- *   逐决策（{@link #PER_DECISION} = 68）：
+ *   逐决策（{@link #PER_DECISION} = 71）：
  *     [0,34)   danger_worst[k]    —— 对四家最坏的放铳危险度（0..100，含"鸣き手威胁"口径由消费侧决定）
  *     [34,68)  danger_riichi[k]   —— 只对立直家最坏（弃和口径）
+ *     [68]     shanten_now        —— 当前手牌的向听数（听牌记 0；与逐候选同一根轴）
+ *     [69]     value_han          —— 打点粗估番数（{@link HandEval#estimatedHan}，与押し引き同一把尺子）
+ *     [70]     value_points       —— 打点粗估点数（{@link HandEval#hanToPoints}）
+ *
+ *   ⚠ 归一化分母**逐维不同**（见 {@link #DERIVED_DECISION_SCALE}）：危险度是 0..100，
+ *   而向听 0..8、番数 0..13、点数 0..32000 —— 用一个常数除会把后几维压成 0。
+ *
+ *   ⚠ **为什么不把"当前进张种数/枚数"也放进状态段**（v3 设计时试过）：那要跑一次完整的
+ *   {@link HandEval#of}（34 次 `Shanten.min`），实测**≈0.95 ms/决策**，把状态段的开销抬了 20 倍；
+ *   而"打完这张之后"的进张本来就在**逐候选段**里（`advance_types/advance_tiles`），
+ *   决策时真正要的是"候选之间比大小"，所以这段信息并不缺。只留 `Shanten.min` 一次（≈30 µs）。
  *   逐候选（{@link #PER_CANDIDATE} = 8，顺序固定）：
  *     shanten, advance_types, advance_tiles, wait_types, wait_tiles,
  *     good_wait_types, good_wait_tiles, dora_count
@@ -46,11 +57,30 @@ import mahjong.util.Json;
 public final class ObsFeatures {
 
     /** 派生特征的版本（变了就要 +1：数据集靠它判兼容）。 */
-    public static final int FEATURE_VERSION = 1;
-    /** 逐决策段长度。 */
-    public static final int PER_DECISION = 2 * Tiles.KIND_COUNT;
+    public static final int FEATURE_VERSION = 2;
+    /** 逐决策段长度（68 危险度 + 3 自家牌力/打点）。 */
+    public static final int PER_DECISION = 2 * Tiles.KIND_COUNT + 3;
     /** 逐候选段长度。 */
     public static final int PER_CANDIDATE = 8;
+
+    /**
+     * 逐决策段**每一维的归一化分母**（与 {@code Features.DERIVED_CAND_SCALE} 同一个套路）。
+     *
+     * <p>⚠ v3 起这一段不再同量纲：前 68 维是危险度（0..100），后 5 维是向听/进张/打点。
+     * 用一个常数去除，后 5 维会被压成 0（等于白加）。
+     */
+    public static final int[] DERIVED_DECISION_SCALE = decisionScale();
+
+    private static int[] decisionScale() {
+        int[] s = new int[PER_DECISION];
+        for (int i = 0; i < 2 * Tiles.KIND_COUNT; i++) {
+            s[i] = (int) Features.DERIVED_DANGER_SCALE;
+        }
+        s[2 * Tiles.KIND_COUNT] = 8;                 // 向听
+        s[2 * Tiles.KIND_COUNT + 1] = 13;            // 打点粗估番数
+        s[2 * Tiles.KIND_COUNT + 2] = 32000;         // 打点粗估点数
+        return s;
+    }
 
     private ObsFeatures() {
     }
@@ -71,6 +101,15 @@ public final class ObsFeatures {
         public String kind = "turn";
         /** 被鸣 / 被荣那张的**牌码**（鸣牌询问才有；`chi` 合成面子时需要它才知道第三张是什么）。 */
         public String calledTile;
+        /** 自家是否已立直（打点粗估：门清且未立直时按"会立直"加一根）。 */
+        public boolean selfRiichi;
+        /** 自家手里的**赤五**张数。 */
+        public int akaInHand;
+        /** 场风（0=东）与庄家座位：打点粗估算役牌的自风要用。 */
+        public int roundWind;
+        public int dealer;
+        /** 规则是否允许食い断（打点粗估的断幺项；轨迹里没有规则字段时用三套预设的默认值 true）。 */
+        public boolean kuitan = true;
 
         public int meldCount() {
             return melds.size();
@@ -130,9 +169,29 @@ public final class ObsFeatures {
         v.dora = dora;
         Object called = obs.get("called_tile");
         v.calledTile = called instanceof String s && !s.isEmpty() ? s : null;
+        // 自家立直 / 赤五 / 场风与庄家 / 食い断规则（打点粗估要用；轨迹里没有 `kuitan` 就按默认 true）
+        v.selfRiichi = Json.bool(obs, "self_riichi", false);
+        v.akaInHand = akaInHand(Json.list(obs, "hand_red"));
+        Map<String, Object> rnd = Json.map(obs, "round");
+        v.roundWind = rnd == null ? 0 : (int) Features.windIndex(Json.str(rnd, "bakaze", "E"));
+        v.dealer = rnd == null ? 0 : Json.i(rnd, "dealer", 0);
+        v.kuitan = Json.bool(obs, "kuitan", true);
         // `turn` 的口径与 `Bot.HandState.of` 完全一致（已打出的总张数 / 4）
         v.turn = Json.i(obs, "total_discards", 0) / 4;
         return v;
+    }
+
+    /** `hand_red`（每个牌种是否持赤五）→ 手里赤五张数（每种赤五只有一张，数标志位即可）。 */
+    private static int akaInHand(List<Object> handRed) {
+        int n = 0;
+        if (handRed != null) {
+            for (int k = 0; k < handRed.size() && k < Tiles.KIND_COUNT; k++) {
+                if (Boolean.TRUE.equals(handRed.get(k))) {
+                    n++;
+                }
+            }
+        }
+        return n;
     }
 
     /** 从**内存里的牌局**填视图（golden 对拍的另一条通路；与 {@code Bot.HandState.of} 同源）。 */
@@ -157,6 +216,17 @@ public final class ObsFeatures {
         v.riichi = r.riichi.clone();
         v.dora = List.copyOf(r.doraIndicators());
         v.turn = r.totalDiscards / 4;
+        v.selfRiichi = r.riichi[seat];
+        int aka = 0;
+        for (int id : r.hand[seat]) {
+            if (Tiles.isRedId(id)) {
+                aka++;
+            }
+        }
+        v.akaInHand = aka;
+        v.roundWind = r.roundWind;
+        v.dealer = r.dealer;
+        v.kuitan = r.rules == null || r.rules.kuitan;
         return v;
     }
 
@@ -217,6 +287,17 @@ public final class ObsFeatures {
             }
         }
         v.dora = dora;
+        v.selfRiichi = o.selfRiichi;
+        int aka2 = 0;
+        for (int k = 0; k < o.handRed.length && k < Tiles.KIND_COUNT; k++) {
+            if (o.handRed[k]) {
+                aka2++;
+            }
+        }
+        v.akaInHand = aka2;
+        v.roundWind = o.roundWind;
+        v.dealer = o.dealer;
+        v.kuitan = o.kuitan;
         v.turn = o.totalDiscards / 4;
         return v;
     }
@@ -246,7 +327,7 @@ public final class ObsFeatures {
 
     // ================================================================= 逐决策
 
-    /** 68 维：两套逐张危险度。 */
+    /** 71 维：两套逐张危险度（68）+ 自家牌力与打点（3，见类注释的布局表）。 */
     public static int[] perDecision(View v) {
         int[] out = new int[PER_DECISION];
         for (int k = 0; k < Tiles.KIND_COUNT; k++) {
@@ -254,6 +335,17 @@ public final class ObsFeatures {
             out[Tiles.KIND_COUNT + k] =
                     Danger.worstAgainstRiichi(k, v.visible, v.rivers, v.riichi, v.turn, v.seat).score;
         }
+        // 自家牌力 / 打点：**与押し引き同一把尺子**（HandEval.estimatedHan）。
+        // 加这三条的理由：向听与役种·符数·点数都不是 2 层 MLP 能从 34 维计数里"顺手算出来"的，
+        // 而 teacher（Bot）每一步都在用它们 —— 不给显式输入，学生只能在平均意义上逼近老师。
+        // ⚠ 只用一次 `Shanten.min`（≈30 µs）：完整的 `HandEval.of` 要跑 34 次，实测 ≈0.95 ms/决策，
+        //   而"打完之后的进张"逐候选段里已经有了（见类注释）。
+        int sh = Shanten.min(v.hand, v.melds.size());
+        out[2 * Tiles.KIND_COUNT] = sh <= 0 ? 0 : sh;
+        int han = HandEval.estimatedHan(v.hand, v.melds, v.dora, v.akaInHand, v.selfRiichi, v.kuitan,
+                v.roundWind, (v.seat - v.dealer + 4) % 4);
+        out[2 * Tiles.KIND_COUNT + 1] = han;
+        out[2 * Tiles.KIND_COUNT + 2] = HandEval.hanToPoints(han);
         return out;
     }
 
@@ -444,7 +536,8 @@ public final class ObsFeatures {
     /** 布局自述（Java 与 Python 两侧都要照它对齐）。 */
     public static String describe() {
         return "ObsFeatures v" + FEATURE_VERSION
-                + " perDecision=" + PER_DECISION + "（danger_worst[34] + danger_riichi[34]）"
+                + " perDecision=" + PER_DECISION
+                + "（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points）"
                 + " perCandidate=" + PER_CANDIDATE
                 + "（shanten, advance_types, advance_tiles, wait_types, wait_tiles,"
                 + " good_wait_types, good_wait_tiles, dora_count）";
