@@ -1177,9 +1177,13 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       两侧都加了门口防护（`agari.cpp::agariWaits` / `handeval.cpp::waits`：任一牌种 > 4 → 返回空集，
       让对拍**响亮失败**而不是把进程挂掉），语料生成器也改成**按 4 张封顶**。修后默认规模
       `node tools\trainer-settle-parity.mjs` → **118,869/118,869 行一致**。
-    - **仍未实现**（显式报错，不静默降级）：`--features`（sidecar 是下一块，参考值 19,050 B）、
-      `teacher`/`net:` 策略、`--teacher-label`；`--workers` 只接受、串行跑（每场种子与调度无关，
-      所以结果与并行逐字节相同）。
+    - **`--features` 已落地**（`danger.hpp` + `obffeatures.*` + `jsonscan.*` + `features.*`，照
+      `TraceFeatures`/`ObsFeatures` 的格式与派生量）：基准单场 `g0.feat.bin` **19,050 B / sha256`
+      fc7bcf27eceea3b2…`**，40 场完整半庄 **40/40**、100 场完整半庄 **100/100**、teacher 轨迹（吃碰杠立直
+      多指示牌）**2/2**、合成边界语料（`called_tile` 缺失的兜底补张 / 非法键 / 赤五取法）**1/1** ——
+      全部逐字节一致；`python -m mahjong_ml.dataset build` 正常出 `state 607 / cand 96`（含 `nLegal` 对账，
+      反向破坏会报 `ValueError`）。合成语料生成器已进仓库：`tools/trainer-features-synth.mjs`。
+    - **仍未实现**（显式报错，不静默降级）：`teacher`/`net:` 策略、`--teacher-label`（`--features` 已完成）。
     - **性能实测（本机，20/40 场 × 2 小局 × `first`，同工作量两边比）**：Java 单核 **786** 决策/秒 vs
       C++ 单核 **16,630**（**21.2×**）；Java 8 workers **3,690** vs C++ 8 workers **17,230**（**4.7×**）。
       C++ 的 `--workers` 目前**串行**（8 workers 与单核同速），所以这个倍数还会随真并行继续拉大；
@@ -1191,7 +1195,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
     - **独立校验器在 C++ 产物上 PASS**：`node tools\selfplay-check.mjs trainer\build\perf-c8` →
       **DATASET PASS**（40 场 / 80 小局 / 7,043 决策；动作分布 `discard=6270 chi=478 pon=292 ron=3`）。
       它只校验轨迹本身（不读 sidecar），所以这一项**不依赖 `--features`** 就能定；
-      Python 侧的 `dataset build` 则必须有 sidecar（`nLegal` 对账），仍等 ① 落地。
+      Python 侧的 `dataset build` 必须有 sidecar（`nLegal` 对账）—— 该 sidecar 现已由 C++ `features` 产出。
     - **数百场规模通过，并修掉校验器一条过严规则**：`300 场 × 2 小局 × first × seed 20260101` →
       **逐字节 300/300 一致**（Java 7.9s vs C++ 2.9s，同 8 workers），C++ 产物的 `selfplay-check`
       **DATASET PASS**（300 场 / 600 小局 / 52,856 决策）。过程中报红的那一处（`g63` 第 2 小局只有
