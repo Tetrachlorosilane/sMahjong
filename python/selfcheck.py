@@ -1076,6 +1076,11 @@ ok(_th.shape == (60, 3) and abs(_med - _pd["delta"]) < 0.02,
 # ⑪ 策略位移矩阵（P4 的"步长体检"）：Elo 的分辨率有限，一代只改 2% 决策时"没有趋势"是必然的 ——
 #    所以先量位移。纯函数，直接喂合成数组。
 from mahjong_ml import online as ml_online                    # noqa: E402
+# ⚠ 2+2 配对**必须跑两种座位配置**：轮转公式 `src=(seat+game)%4` 保持策略表的块结构 ⇒
+# `A,A,B,B` 只采样相邻两席、`A,B,A,B` 只采样对家两席（2026-09-26 用户指出后补的）。
+eq("2+2 的两种座位配置（相邻 A,A,B,B / 对家 A,B,A,B）",
+   ml_online._arrangement_specs("A", "B"),
+   [("相邻", "A,A,B,B", "pair"), ("对家", "A,B,A,B", "pairX")])
 _a = np.arange(100) % 4
 _b = (np.arange(100) + 1) % 4                                  # 与 a 完全错开（循环移位）
 _c = np.arange(100) % 4

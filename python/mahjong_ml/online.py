@@ -292,6 +292,45 @@ def paired_report(run_dir: Path, a: str, b: str, metric: str = "rank_points") ->
             "required_n_delta2": ml_eval.required_n(p.sd, 2.0)}
 
 
+def paired_report_multi(run_dirs: list[Path], a: str, b: str, metric: str = "rank_points") -> dict:
+    """把**多个 run** 的逐场配对结果并成一个（用于"相邻 + 对家"两种座位配置一起判）。
+
+    实现复用 `eval.py`：逐场序列**按 seed 索引**（跨 run 不撞车，前提是两个 run 用不同的 seed 基），
+    拼接后只调用一次 `paired_test` —— 统计口径与单 run 完全一致，只是样本量翻倍、
+    且**两种座位配置都被覆盖**。
+    """
+    from . import eval as ml_eval
+    sa: dict[int, float] = {}
+    sb: dict[int, float] = {}
+    for d in run_dirs:
+        run = ml_eval.load_run(d)
+        la, lb = ml_eval.resolve_label(run, a), ml_eval.resolve_label(run, b)
+        sa.update(ml_eval.per_game_series(run, la, metric))
+        sb.update(ml_eval.per_game_series(run, lb, metric))
+    p = ml_eval.paired_test(sa, sb, a, b, metric)
+    return {"runs": [str(d) for d in run_dirs], "a": a, "b": b, "metric": metric, "n": p.n,
+            "delta": p.mean, "sd": p.sd, "ci": [float(p.ci[0]), float(p.ci[1])], "p": p.p,
+            "win": p.win, "lose": p.lose, "tie": p.tie,
+            "required_n_delta2": ml_eval.required_n(p.sd, 2.0)}
+
+
+def _arrangement_specs(a: str, b: str) -> list[tuple[str, str, str]]:
+    """2+2 的**两种座位配置**（`--rotate` 下 `A,A,B,B` 与 `A,B,A,B` 占的座位完全不同）：
+
+    | 写法 | `--rotate` 下 A（前者）占的座位 | 关系 |
+    | --- | --- | --- |
+    | `A,A,B,B` | {0,1} {0,3} {1,2} {2,3} | A 的两席**相邻**（上下家） |
+    | `A,B,A,B` | {0,2} {1,3} | A 的两席**对家** |
+
+    ⚠ 为什么必须两组都跑：轮转公式是 `src = (seat + game) % 4`，它**保持策略表的块结构** ——
+    所以 `A,A,B,B` 永远只采样相邻对，**从不会出现对家配置**；反过来 `A,B,A,B` 也只有对家。
+    只跑其中一组，等于把"相邻两席之间的系统性效应（互相喂牌/一炮双响/同巡同判断）"或
+    "对家之间的效应"留成未采样偏差。
+    """
+    return [("相邻", f"{a},{a},{b},{b}", "pair"),
+            ("对家", f"{a},{b},{a},{b}", "pairX")]
+
+
 def cmd_ladder(args) -> int:
     paths.ensure_root()
     league_dir = paths.allocate("league", args.label)
@@ -309,23 +348,38 @@ def cmd_ladder(args) -> int:
                  seed=args.seed + 100000 + i * 1000, workers=args.workers, sample=args.sample)
         runs.append(out)
     # 判据①（Elo）用上面那批；判据②（顺位点配对）另跑 **2+2** —— 一席自己一席老师时
-    # sd(Δ)≈80，同样场次的精度差一倍（实测 60 场），所以主判据不在 ladder run 里读
+    # sd(Δ)≈80，同样场次的精度差一倍（实测 60 场），所以主判据不在 ladder run 里读。
+    # ⚠ 2+2 要跑**两种座位配置**（相邻 `A,A,B,B` + 对家 `A,B,A,B`）：轮转公式保持策略表的块结构，
+    #    单跑一组只会采样到一种关系（见 `_arrangement_specs`）。两组用**不同的 seed 基**（互不撞车、
+    #    是独立样本），最后再合成一个总 Δ。
     pair_runs = []
     pairs = []
     if args.pair_games > 0:
         for i, (name, spec) in enumerate(entries):
-            out = paths.allocate("raw", f"{args.label}-pair-{name}")
-            selfplay(out, args.pair_games, f"{spec},{spec},teacher,teacher",
-                     seed=args.seed + 200000 + i * 1000, workers=args.workers,
-                     sample=args.sample)
-            pair_runs.append(out)
-            runpy(["mahjong_ml.eval", str(out), "--labels", f"{name},teacher",
-                   "--json", str(league_dir / f"pair-{name}.json")], f"配对评测 {name} vs teacher")
-            pr = paired_report(out, name, "teacher")
+            per_arr = []
+            for k, (arr_name, spec_str, tag2) in enumerate(_arrangement_specs(spec, "teacher")):
+                out = paths.allocate("raw", f"{args.label}-{tag2}-{name}")
+                selfplay(out, args.pair_games, spec_str,
+                         seed=args.seed + 200000 + k * 100000 + i * 1000,
+                         workers=args.workers, sample=args.sample)
+                pair_runs.append(out)
+                runpy(["mahjong_ml.eval", str(out), "--labels", f"{name},teacher",
+                       "--json", str(league_dir / f"{tag2}-{name}.json")],
+                      f"配对评测 {name} vs teacher（{arr_name}座位）")
+                pr = paired_report(out, name, "teacher")
+                pr["arrangement"] = arr_name
+                pr["tag"] = tag2
+                per_arr.append(pr)
+                print(f"  ⇒ {name} − teacher（**{arr_name}**座位）：Δ={pr['delta']:+.2f} 顺位点，"
+                      f"95%CI [{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]，p={pr['p']:.3f}，"
+                      f"胜/负/平 {pr['win']}/{pr['lose']}/{pr['tie']}，sd={pr['sd']:.2f}"
+                      f"（检出 Δ=2 需 {pr['required_n_delta2']} 场）")
+            pr = paired_report_multi([Path(p["run"]) for p in per_arr], name, "teacher")
+            pr["per_arrangement"] = per_arr
+            pr["arrangements"] = [p["arrangement"] for p in per_arr]
             pairs.append(pr)
-            print(f"  ⇒ {name} − teacher：Δ={pr['delta']:+.2f} 顺位点，95%CI "
-                  f"[{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]，p={pr['p']:.3f}，"
-                  f"胜/负/平 {pr['win']}/{pr['lose']}/{pr['tie']}，sd={pr['sd']:.2f}"
+            print(f"  ⇒ {name} − teacher（**两种座位配置合计** n={pr['n']}）：Δ={pr['delta']:+.2f} "
+                  f"顺位点，95%CI [{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]，p={pr['p']:.3f}"
                   f"（检出 Δ=2 需 {pr['required_n_delta2']} 场）")
         (league_dir / "pairs.json").write_text(
             json.dumps(pairs, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -393,20 +447,38 @@ def cmd_pair(args) -> int:
     """
     a, b = resolve_spec(args.a), resolve_spec(args.b)
     tag = args.tag or f"{_short_of_spec(a)}-vs-{_short_of_spec(b)}"
-    out = paths.allocate("raw", tag)
-    spec = f"{a},{a},{b},{b}"
-    print(f"配对：{_short_of_spec(a)} ×2  vs  {_short_of_spec(b)} ×2（{args.games} 场，seed={args.seed}）")
-    t = selfplay(out, args.games, spec, seed=args.seed, workers=args.workers, sample=args.sample)
-    pr = paired_report(out, _short_of_spec(a), _short_of_spec(b))
-    print(f"\n  Δ = {pr['delta']:+.2f} 顺位点（正 = 前者更好）｜95%CI "
-          f"[{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]｜p={pr['p']:.3f}｜"
-          f"胜/负/平 {pr['win']}/{pr['lose']}/{pr['tie']}｜sd={pr['sd']:.2f}｜"
-          f"检出 Δ=2 需 {pr['required_n_delta2']} 场｜{args.games} 场用了 {t:.0f}s")
-    pr["games"] = args.games
-    pr["seconds"] = t
-    pr["raw"] = str(out)
+    na, nb = _short_of_spec(a), _short_of_spec(b)
+    per_arr = []
+    total_s = 0.0
+    for k, (arr_name, spec_str, tag2) in enumerate(_arrangement_specs(a, b)):
+        out = paths.allocate("raw", f"{tag}-{tag2}")
+        print(f"配对（**{arr_name}**座位）：{na} ×2 vs {nb} ×2 —— {spec_str}（{args.games} 场，"
+              f"seed={args.seed + k * 100000}）")
+        t = selfplay(out, args.games, spec_str, seed=args.seed + k * 100000,
+                     workers=args.workers, sample=args.sample)
+        total_s += t
+        pr = paired_report(out, na, nb)
+        pr["arrangement"] = arr_name
+        pr["tag"] = tag2
+        pr["games"] = args.games
+        pr["seconds"] = t
+        pr["raw"] = str(out)
+        per_arr.append(pr)
+        print(f"  Δ = {pr['delta']:+.2f} 顺位点（正 = 前者更好）｜95%CI "
+              f"[{pr['ci'][0]:+.2f}, {pr['ci'][1]:+.2f}]｜p={pr['p']:.3f}｜"
+              f"胜/负/平 {pr['win']}/{pr['lose']}/{pr['tie']}｜sd={pr['sd']:.2f}｜"
+              f"检出 Δ=2 需 {pr['required_n_delta2']} 场｜{t:.0f}s")
+    combined = paired_report_multi([Path(p["raw"]) for p in per_arr], na, nb)
+    combined["per_arrangement"] = per_arr
+    combined["arrangements"] = [p["arrangement"] for p in per_arr]
+    combined["games"] = args.games
+    combined["seconds"] = total_s
+    print(f"\n  **两种座位配置合计**（n={combined['n']}，{total_s:.0f}s）："
+          f"Δ = {combined['delta']:+.2f} 顺位点｜95%CI "
+          f"[{combined['ci'][0]:+.2f}, {combined['ci'][1]:+.2f}]｜p={combined['p']:.3f}｜"
+          f"检出 Δ=2 需 {combined['required_n_delta2']} 场")
     dest = Path(args.json) if args.json else (paths.allocate("league", args.label) / f"pair-{tag}.json")
-    dest.write_text(json.dumps(pr, ensure_ascii=False, indent=2), encoding="utf-8")
+    dest.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  已写出 {dest}")
     return 0
 
