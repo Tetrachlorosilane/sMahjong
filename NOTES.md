@@ -1283,6 +1283,8 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | **进程内策略只对机器人座位生效** | `Table.policy[seat]` 只在 `seats[seat].bot == true` 时被问到；真人座位的决策从网线上来 |
 | **鸣牌段不走 `Round.ask()`** | 所以 `Table.debugAskTap` 看不到鸣牌询问；要两段都看必须用 `debugChoiceTap` |
 | **观测字段是"合法可见信息"的封闭集合** | 新增字段要先过 `tools/selfplay-check.mjs` 的字段白名单（防泄漏），并给 `Observation.v` 递增 |
+| **数据集不记录规则预设** | `summary.json` / compact `meta.json` 里**没有 `preset` 字段**：当前所有数据都是"服务端默认预设 = M.League"（`Rules.defaults()`；`python/` 侧从不传 `--preset`），但"哪份数据是哪套规则采的"只能靠这个默认事实推断。要钉死就得把 `preset` 写进自对弈汇总 —— ⚠ **改产出格式要三处一起改**（`TraceRecorder`/`SelfPlay` 汇总 + `PROTOCOL.md` §8.4 + `tools/selfplay-check.mjs`）。口径与影响见 `docs/TRAINING.md` §0 |
+| **策略看不见"场外"规则设定** | 网络只吃 `obs`：与规则相关的只有 `hand_red`（赤牌）、宝牌/杠宝、余牌；**uma / 一位必要点数 / 食替设置都不在观测里**。线上房间逐项改规则（`tenhou`/`majsoul`/`custom`）时合法性仍由服务端强制，但"用 M.League 数据训出来的取舍"是否仍然合适，没有据可依 |
 
 ### 10.5 文档/验证层面仍然欠着的（改动时小心）
 
