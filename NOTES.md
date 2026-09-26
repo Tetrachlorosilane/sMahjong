@@ -1146,6 +1146,9 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       （`perDecision=68`：`danger_worst[34]` + `danger_riichi[34]`；`perCandidate=8`）；
       `python -m mahjong_ml.dataset build <dir> <紧凑目录>` → **训练 81 条 / state 607 维 / cand 96 维 /
       float16 / 特征版本 2**。
+      **字段级定位工具**：`node tools\trainer-jsonl-diff.mjs <a.jsonl> <b.jsonl>` —— 键序/缺键/数组长度/类型/值，
+      任一处不同都点名到具体路径（如 `obs.round.riichi_sticks`）并给出两边的值；逐字节对拍只说"第 N 个字节"，
+      而一行里嵌着 `obs` 的 29 个字段，光看截断没法定位。
       **接管验收**（整条链、命令由 Python 的 `producer` 模块自己组）已就位：`node tools\trainer-takeover-check.mjs`
       —— 采集 → 逐字节比轨迹 → `--features` → 逐字节比 sidecar → `selfplay-check` → `dataset build`；
       现在跑它会停在"`未知子命令：selfplay`"（C++ 侧还没实现），这正是它该有的样子。
