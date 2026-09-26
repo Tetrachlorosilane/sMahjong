@@ -1204,6 +1204,11 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       （7.4 s）vs C++ **20,508**（3.8 s）—— C++ **单线程已约等于 Java 24 线程的 2×**，且这 100 场
       **逐字节 100/100 一致**。绝对数随策略/局数变（`teacher` 比 `first` 重得多），**只有同工作量比值有意义**；
       `--workers` 仍是串行，真并行后倍数还会拉大。
+    - **合规矩阵（我自己逐条复核过的，全部逐字节一致）**：极端种子 6/6 · 三预设各 2/2 ·
+      `--rotate`（takeover 链内含）· `--sample 2` 2/2 · `--no-claims` 2/2 · `--sample 3 --no-claims` 2/2 ·
+      `--hands 0` 完整半庄 100/100 · `--hands 2` 300/300 · sidecar 100/100（基准单场 19,050 B 同 sha256）·
+      `selfplay-check` 在 C++ 产物上 DATASET PASS（40 / 300 / 完整半庄）· `takeover-check` 整条链 PASS。
+      服务端与客户端零改动（`git diff … -- server client` 为空）。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。
