@@ -63,7 +63,7 @@
 
 电脑玩家默认是**内置牌效 AI**。发布页另外给了几代**训练出来的网络**，按代一个 zip：
 
-    sMahjong-bot-ai-v1.10.4.zip  ← 一包全给（解压即得 bot-ai/，推荐）
+    sMahjong-bot-ai-v1.10.5.zip  ← 一包全给（解压即得 bot-ai/，推荐）
     teacher.zip first.zip pass.zip random.zip         内置启发搜索 / 三个对照臂
     bc-003.zip awr-002.zip ppo-g04.zip ppo2-g04.zip   训练网络（各约 1 MB）
 
