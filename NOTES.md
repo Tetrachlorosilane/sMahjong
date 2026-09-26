@@ -1188,6 +1188,10 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
     - **极端种子合规检查（对拍口径的边界）**：`0 / 1 / -1 / 9223372036854775807 / -9223372036854775808 /
       4294967296` 六个种子各 1 场 → **全部逐字节一致**（133,287～142,750 B）。这条同时钉住了
       Java `long` 溢出与 C++ `uint64_t` 回绕的同源性（`mixSeed`/`seedFor` 那一串乘加全靠它）。
+    - **独立校验器在 C++ 产物上 PASS**：`node tools\selfplay-check.mjs trainer\build\perf-c8` →
+      **DATASET PASS**（40 场 / 80 小局 / 7,043 决策；动作分布 `discard=6270 chi=478 pon=292 ron=3`）。
+      它只校验轨迹本身（不读 sidecar），所以这一项**不依赖 `--features`** 就能定；
+      Python 侧的 `dataset build` 则必须有 sidecar（`nLegal` 对账），仍等 ① 落地。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。
