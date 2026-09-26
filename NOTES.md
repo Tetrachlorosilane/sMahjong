@@ -424,7 +424,16 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   - **三张牌底部齐平**：横置那张（宽 = 牌河牌高、高 = 牌河牌宽）的顶边是
     `my + (riverH − riverW)`，**不是** `(riverH − riverW)/2` —— 后者让它"浮"在副露中间。
     ⚠ **牌河里的横置牌不改**：那是网格里的一格（`paintRiver` 里按高度居中，注释写明了原因）。
-  - 加杠第 4 张**叠在第 1 格**（不占新槽位），宽度按三格算。
+  - ⚠ **加杠（小明杠）的"横置的是哪一张"曾经搞错**（2026-09 报障：
+    「加杠显示仍有问题，在碰的基础上加杠，加杠的那张牌应该紧贴横置在原本碰中横置的那一张的上面」）。
+    旧实现给 `meldSidewaysIndex()` 单开了加杠分支，把**第 4 张**当横置张 → 横置张摆到中间格，
+    而真正被鸣的那张立起来了，整副杠"看起来像换了一副牌"。
+    **现在没有加杠分支**：横置的仍是**原碰里被鸣的那一张**（按来源方位定位，`rel` 1 上家 → 最左、
+    2 対面 → 中间、3 下家 → 最右），加上的第 4 张（下标 3）**也横置**、`slotCount` 仍是 3，
+    画在 `(sideLeft, sideTop − riverW, riverH, riverW)`：它与横置张**同一格、同一左沿/宽度**，
+    底边正好贴上横置张的顶边（`add.bottom() == side.top()`），**不占新槽位**、不撑宽副露块。
+    自检把这两条几何都钉住了（`client --selftest` 的副露组），肉眼判据用
+    `node tools\mock-server.mjs 10999 allmeld` 截图（该模式已加一条 9s 碰 + 加杠）。
 - **名牌（ID 框）四角轮转一位**（`TableLayout::computeLayout()`，2026-09 用户口径）：
   自家在**右下**，其余三家跟着转一格（下家→右上、对家→左上、上家→左下）。
   ⚠ 四个角**必须各占一个**：只挪自家会与下家的名牌重叠。角落预留 `plateReserve` 在
@@ -447,6 +456,36 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   `stop()+play()` 热路径（而且它**忽略了 `allowOverlap` 参数**——调用方明确要求"别叠"）。
   排查工具：`MAHJONG_SFX_TRACE=1` 跑一局，stderr 会打出每个音效的
   开关/可用/音量/池子状态/`play()` 之后是否真的 playing。
+  - ⚠⚠ **第三个报障（2026-09）：两个音效撞进竞态会让"整块音频"死掉** ——
+    原文「当两个音效播放进入冲突竞态，会导致所有音效失效，及时重新开始对局也不行，
+    要重新启动客户端才能恢复」。关键在**最后半句**：重开一局都不恢复 ⇒ 不是"某条音效被跳过"，
+    而是**整条音频通道**（或 `QSoundEffect` 内部共享的队列/后端）**打结了**：
+    此后**每次** `play()` 都既不发声、`isPlaying()` 也不置位，而服务端与客户端逻辑都一切正常
+    （上面那条"只有第一小局有音效"的现场实测恰好证明：日志里 play 在调、Qt 报 Ready）。
+    这是"池子 + 时长对账"**修不到**的一类 —— 卡死判据只能识别"`isPlaying()` 恒真"，
+    而这种是"恒假"，池子看起来永远空闲，于是每次都挑一个"空闲"的实例去播，播多少都无声。
+  - **修法（自愈，不要求重启）**：给 `Player` 记 `m_consecutiveFailures` ——
+    每次 `play()` 之后 `!e->isPlaying()`（紧接着检查，`QSoundEffect` 是异步起播但状态同步可见）
+    就 +1，成功就清零；达到 **`kRebuildAfterFailures = 3`** 就 `rebuildStack()`：
+    **停掉并 `deleteLater()` 全部池实例**（不是复用）、清空 `m_effects` / `m_startedAt`、
+    计数器归零、然后按当前 `QAudioDevices::defaultAudioOutput()` **重建整池**。
+    下一次音效请求自然落在新实例上 → 恢复可闻。判据抽成纯函数
+    `sound::shouldRebuildStack(连续失败数)`（自检喂 0/1/2/3/8：阈值前 false、阈值起 true），
+    另断言"刚构造时 `rebuildCountForTest() == 0`"（不许一开局就重建）。
+    ⛔ **别把失败做成"永久静音"或"每 1 次失败就重建"**：前者就是这次报障，
+    后者会在正常设备上（首播瞬间 `isPlaying()` 还没置位）反复拆池、把声音拆成断续的。
+  - ⚠⚠ **重建必须"清完立刻建"**（写这一版时自己踩的）：`emitSound()` 开头是
+    `pool.isEmpty() → return`，所以 `rebuildStack()` 清空 `m_effects` 之后**必须立刻 `init()`**
+    把池子建回来（与 `clearCache()` 同一套）。只清不建 = **此后每次播放都静默返回**，
+    等于把"哑掉"换成"永久静音"，比原 bug 更难查。自检直接看**池子大小**
+    （`rebuildStackForTest()` 之后 `poolSizeForTest(Draw)` 必须还是 3）——
+    **红证**：去掉 `rebuildStack()` 末尾那句 `init()`，L2 立刻红一条。
+  - **池子构造时显式绑定输出设备**（`new QSoundEffect(QMediaDevices::defaultAudioOutput(), this)`，
+    取不到设备才回退无参构造）：设备切换/拔出后，旧实例会永远停在无效后端上 ——
+    这也是"重开一局也不恢复"的候选机制之一。
+  - ⚠ **`MAHJONG_SFX_TRACE=1` 在"恒假"这一支下的读法**：正常行是 `playing=1 status=2`；
+    真出问题时能看到连续的 `playing=0` 行（三次之后就应紧跟一行"重建音频池"）。
+    用 `node tools\mock-server.mjs 10999 sfxburst`（连发多条音效、专门制造竞态）验证。
 - **「手牌 + 摸牌」块的边界避让：一次算完 + 右移封顶**（同一个坑踩了三次，别简化）：
   - `layoutHand()` 里只允许**一个** `over`，且必须先取 `max`（①副露 ②角落名牌）再让 ③行首角落让步。
     分成两段钳制时，后一段会算出**负的 over**，`handLeft -= over` 等于把整块往右推，把前一段让出的空间又吃回去。
@@ -1569,8 +1608,10 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | **鸣牌时看不出/选不了用赤五还是普通五** | `pon`/`kan(daiminkan)` 的选项必须带 `tiles`（赤五 `0p`），默认取法**普通牌优先**（`Round.pickAuto`）。见 PROTOCOL §3.6 与 `SelfTest.meldAkaPickTests` |
 | **只有第一小局有音效** | 先跑 `MAHJONG_SFX_TRACE=1 client --demo ...` 看 stderr：每一条都会打出开关/可用/音量/池子状态（`pool3(ready/playing/stale/err)`）/`play()` 后是否 playing。客户端实测**每局都在播**，所以重点查 `stop()+play()` 那条路径（已改成实例池；池子真满时不再硬插），见 §6.2 |
 | **音效在"有副露 / 可副露时选择不副露"之后消失** | 同一个 `MAHJONG_SFX_TRACE=1`：看有没有 `stale`（自称在播但其实早该结束）。真因是 **`QSoundEffect::isPlaying()` 在设备异常后会永远为真**，而旧判据"还在播就跳过"会因此把那条音效永久静音 —— 现在按 **WAV 时长**对账（卡死则 `stop` 后复用），见 §6.2。⚠ 本机压测（85 次播放 / 池子打满）**复现不出来**：真机上请把 trace 发回来，`stale` 与 `放弃` 两行能直接定位 |
+| **所有音效一起失效，重开一局也不恢复，必须重启客户端** | 两个音效撞进竞态把音频通道打结了（此后 `play()` 既不响、`isPlaying()` 也不置位 ⇒ 池子看起来永远空闲）。现在连续 3 次"play 了却没 playing"就**整池重建**（`shouldRebuildStack`），见 §6.2。定性：`MAHJONG_SFX_TRACE=1` + `node tools\mock-server.mjs 10999 sfxburst` |
 | **赤宝不该拼在「碰/吃」后面** | 用户口径：`碰` = 一个按钮，赤宝放进**副露子列表**；只有一种取法时**不区分**。`ActionBar::buildPonMenu/buildKanMenu` 是子列表的唯一来源（自检 `menuEntriesForTest` 直接读它），见 §6.2/PROTOCOL §3.6 |
 | **副露里横置的那张"浮"在中间** | 横置牌顶边必须是 `my + (riverH − riverW)`（底部与另两张齐平），见 §6.2 与 `TableView::meldSlotRects` |
+| **加杠看起来"换了副牌" / 第 4 张跑到中间格** | 横置的必须是**原碰里被鸣的那一张**，加上的第 4 张也横置并紧贴叠在它上方（同一格、不占新槽位）。旧实现给加杠单开分支、横置第 4 张 → 就是这个症状。见 §6.2 |
 | **名牌（ID 框）位置不对** | 四角**轮转一位**：自家右下、下家右上、对家左上、上家左下，见 §6.2 与 `TableLayout::computeLayout` |
 
 ---

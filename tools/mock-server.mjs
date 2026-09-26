@@ -328,6 +328,9 @@ const srv = net.createServer((sock) => {
       send({ ev: 'meld', seat, kind, tiles, from, called_tile: called, aka, called_index: 0 });
     };
     setTimeout(() => { meld(0, 'pon', ['9s','9s','9s'], 1, '9s', [false,false,false]); }, d); d += 350;
+    // ③ **加杠**：在刚碰的那副上面加杠 —— 加上的第 4 张要**横置着紧贴叠在原碰横置那张的上方**
+    //   （用户报障口径；几何断言在 client --selftest，这里给的是"用眼睛再确认一次"的素材）。
+    setTimeout(() => { meld(0, 'kakan', ['9s','9s','9s','9s'], 1, '9s', [false,false,false,false]); }, d); d += 350;
     setTimeout(() => { meld(0, 'pon', ['8s','8s','8s'], 3, '8s', [false,false,false]); }, d); d += 350;
     setTimeout(() => { meld(1, 'chi', ['3p','4p','5p'], 0, '4p', [false,false,false]); }, d); d += 350;
     setTimeout(() => { meld(2, 'pon', ['7z','7z','7z'], 1, '7z', [false,false,false]); }, d); d += 350;

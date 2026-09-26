@@ -224,7 +224,7 @@ java -jar server\build\mahjong-server.jar --selftest
 
 ```powershell
 client\dist\mahjong-client.exe --selftest client\build\st
-# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 841 项）；并产出 tiles.png / table.png / river_overflow.png
+# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 852 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
 覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
@@ -398,7 +398,9 @@ mahjong/
   ⚠ **删那圈线框时不要连预算一起删**（预算没了四家的河会压上手牌）。
 - **牌河不得压到邻家的河**：界限用 `max(cw,ch)/2 + kGap`（**不是 min**）。
 - **副露几何只有一份**（`meldSlotRects()`，绘制与自检共用）：三张**底边齐平**
-  （横置那张顶边 = `my + (riverH − riverW)`，**不是** `(riverH − riverW)/2`）；加杠第 4 张**叠在第 1 格**；
+  （横置那张顶边 = `my + (riverH − riverW)`，**不是** `(riverH − riverW)/2`）；
+  ⚠ **加杠**：横置的仍是**原碰里被鸣的那一张**（按来源定位置），加上的第 4 张**也横置**并
+  **紧贴叠在它上方**（同一格、底边贴顶边，不占新槽位）—— 旧实现把"横置的"记成第 4 张、摆到中间格；
   ⚠ 牌河里那张横置牌**不改**（它是网格里的一格，按高度居中）。
 - **名牌（ID 框）四角轮转一位**：自家**右下**，其余三家跟着转（下家→右上、对家→左上、上家→左下）；
   四个角**必须各占一个**（只挪自家会与下家重叠）。
@@ -409,7 +411,13 @@ mahjong/
   ⚠ **"还在播"不能只信 `QSoundEffect::isPlaying()`**（设备异常后它恒为真 → 会把该音效**永久静音**），
   要与 **WAV 时长**对账判"卡死"。判据抽成**纯函数** `sound::pickSlot(playing[], ageMs[], durMs,
   allowOverlap)`（自检直接喂合成输入）：卡死 → `stop()` 后复用；`allowOverlap=false` 的"别叠"
-  只对真在播生效；池子都在真播时**放弃这一次**。排查：`MAHJONG_SFX_TRACE=1`。
+  只对真在播生效；池子都在真播时**放弃这一次**。
+  ⚠ **两个音效撞进竞态会"整块静音"**（内部队列打结后**既不出声、`isPlaying()` 也不置位** →
+  池子看着永远空闲，此后**所有**音效都没了，**重开一局也不恢复**）：故**连续 3 次**
+  "`play()` 了却 `!isPlaying()`"即**整池重建**（`rebuildStack()`：停掉并销毁全部实例、重建池子）。
+  判据 = 纯函数 `sound::shouldRebuildStack(连续失败数)`（阈值 `kRebuildAfterFailures = 3`）；
+  ⛔ 别做成"失败就永久静音"，也别 1 次失败就重建（首播异步未置位时会拆成断续）。
+  排查：`MAHJONG_SFX_TRACE=1`；复现用 `mock-server … sfxburst`。
 - **座位方位**：`pos = (seat − mySeat + 4) % 4` → `0=下(自己) 1=右 2=上 3=左`。每家在自己**局部坐标系**
   里绘制再整体旋转到屏幕 —— 侧家的牌自然横置、"横置以牌主视角判定"自动成立。
 ### 6.3 牌桌行为、规则与资源

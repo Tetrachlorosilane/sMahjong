@@ -452,11 +452,12 @@ QVector<QRectF> TableView::meldSlotRects(const QStringList& disp, const Meld& m,
     const int cnt = disp.size();
     if (cnt <= 0)
         return {};
-    // 加杠：第 4 张（加上的那张）**叠在碰的中张（下标 1）之上**，不占新槽位。
-    // 排布仍是一横排三格，所以这里先按"前 3 张"算出每格的左缘，再把叠上去的那张
-    // 画到第 1 格的位置上（后画即在上层）。
+    // 加杠：第 4 张（加上的那张）**横置**着**紧贴叠在原碰那张横置牌的上方**（用户口径），
+    // 不占新槽位：横排仍只有 3 格（横置那张占牌高），所以这里先按"前 3 张"算每格左缘，
+    // 再把第 4 张画到**横置那一格的正上方**（底边贴它的顶边，后画即在上层）。
     const bool stacked = (m.kind == QLatin1String("kakan") && cnt >= 4);
     const int slotCount = stacked ? 3 : cnt;
+    const int sideIdx = qBound(0, rotIdx, slotCount - 1);   // 横置那张在第几格
     QVector<qreal> slotLeft(slotCount + 1, 0.0);
     qreal acc = left;                       // 本副露内部是从左到右
     for (int ti = 0; ti < slotCount; ++ti) {
@@ -468,8 +469,15 @@ QVector<QRectF> TableView::meldSlotRects(const QStringList& disp, const Meld& m,
     QVector<QRectF> out;
     out.reserve(cnt);
     for (int ti = 0; ti < cnt; ++ti) {
-        // 叠放时第 4 张落在第 1 格的左缘上；其余每张走自己的格
-        const qreal sx = slotLeft.at(stacked && ti == 3 ? 1 : ti);
+        if (stacked && ti == 3) {
+            // 加上的第 4 张：与下面那张**同向横置**，紧贴在它的上沿（同一格、底边贴顶边）
+            const qreal sx = slotLeft.at(sideIdx);
+            const qreal sideTop = my + (m_layout.m_riverH - m_layout.m_riverW);
+            out.append(QRectF(sx, sideTop - m_layout.m_riverW, m_layout.m_riverH,
+                              m_layout.m_riverW));
+            continue;
+        }
+        const qreal sx = slotLeft.at(ti);
         if (ti == rotIdx) {
             // 横置那张：宽 = 牌河牌高、高 = 牌河牌宽，且**底边与同组另两张齐平**
             //（用户口径：三张牌底部要平；旧实现按高度居中，看着像"浮"在中间）。

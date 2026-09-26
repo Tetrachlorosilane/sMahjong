@@ -525,16 +525,17 @@ int run(const QString& outDir)
         checkEq(QString::number(TableView::meldRotatedIndexForTest(a, 0)), QStringLiteral("-1"),
                 QStringLiteral("暗杠不横置"));
 
-        // 加杠（小明杠）：横的是**第 4 张（加上的那张）**，它叠在碰的中张之上。
-        // 旧实现横下标 1 → 加上的那张被排成一个新槽位，整副多占一格（报障：加杠跑到一边）。
+        // 加杠（小明杠）：横置的**仍然是原碰里被鸣的那一张**（按来源定位置），
+        // 加上的第 4 张横置着**紧贴叠在它的上方**（用户口径：「加杠的那张牌应该紧贴横置在
+        // 原本碰中横置的那一张的上面」）。旧实现把"横置的"记成第 4 张、摆到中间格。
         Meld k;
         k.kind = QStringLiteral("kakan");
         k.tiles = QStringList { QStringLiteral("6z"), QStringLiteral("6z"),
                                 QStringLiteral("6z"), QStringLiteral("6z") };
         k.calledTile = QStringLiteral("6z");
-        k.from = 1;
-        checkEq(QString::number(TableView::meldRotatedIndexForTest(k, 0)), QStringLiteral("3"),
-                QStringLiteral("加杠横置的是第 4 张（加上的那张）"));
+        k.from = 1;                       // 自家(0) 的下家 → 碰的横置位在最右（下标 2）
+        checkEq(QString::number(TableView::meldRotatedIndexForTest(k, 0)), QStringLiteral("2"),
+                QStringLiteral("加杠横置的仍是原碰被鸣的那一张（下家 → 最右那一格）"));
         // 宽度按"三格一横排"算：叠上去那张不占新槽位
         const qreal kw = TableLayout::meldWidthOf(k, 0, 10.0, 13.6, 1.0);
         const qreal expectKw = 2.0 * 10.0 + 13.6 + 2.0 * 1.0;   // 两竖直 + 一横置 + 两个间隔
@@ -574,6 +575,37 @@ int run(const QString& outDir)
                   .arg(rRot.width()).arg(rRot.height()));
         check(rRot.height() < r0.height() + 0.01,
               QStringLiteral("横置那张的高 = 牌河牌宽（比竖直的矮）"));
+    }
+
+    // ---- 回归：加杠的第 4 张**横置着紧贴叠在原碰横置那张的上方** ----
+    // 报障原文：「加杠显示仍有问题，在碰的基础上加杠，加杠的那张牌应该紧贴横置在原本碰中
+    // 横置的那一张的上面」。断言读绘制用的同一份几何（`meldSlotRectForTest`）。
+    {
+        TableModel tm;
+        const auto feed = [&tm](const char* json) {
+            tm.applyEvent(proto::decodeLine(QByteArray(json), nullptr));
+        };
+        feed(R"({"ev":"round_start","round":{"bakaze":"E","kyoku":1,"honba":0,"riichi_sticks":0},"seat":0,"dealer":0,"scores":[25000,25000,25000,25000],"hand":["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p"],"dora_indicators":[],"tiles_left":60,"dead_wall_left":4})");
+        // 自家碰下家的 5z（横置位在最右），再在它上面加杠
+        feed(R"({"ev":"meld","seat":0,"kind":"pon","tiles":["5z","5z","5z"],"from":1,"called_tile":"5z","aka":[false,false,false],"called_index":0})");
+        feed(R"({"ev":"meld","seat":0,"kind":"kakan","tiles":["5z","5z","5z","5z"],"from":1,"called_tile":"5z","aka":[false,false,false,false],"called_index":-1})");
+        TableView tv;
+        tv.resize(900, 640);
+        tv.setModel(&tm);
+        tv.updateLayoutForTest();
+        const QRectF side = tv.meldSlotRectForTest(0, 0, 2);   // 原碰横置那张
+        const QRectF add = tv.meldSlotRectForTest(0, 0, 3);    // 加上的第 4 张
+        check(side.isValid() && add.isValid(), QStringLiteral("加杠四格的几何都算得出来"));
+        check(add.width() > add.height(),
+              QStringLiteral("加上的第 4 张也是横置的（宽 %1 > 高 %2）")
+                  .arg(add.width()).arg(add.height()));
+        check(qAbs(add.left() - side.left()) < 0.01 && qAbs(add.width() - side.width()) < 0.01,
+              QStringLiteral("它与横置那张**同一格**（左缘 %1 vs %2）").arg(add.left()).arg(side.left()));
+        check(qAbs(add.bottom() - side.top()) < 0.01,
+              QStringLiteral("它的底边紧贴横置那张的顶边：期望 %1 实际 %2")
+                  .arg(side.top()).arg(add.bottom()));
+        check(tv.meldSlotRectForTest(0, 0, 0).width() > 0.0,
+              QStringLiteral("加杠不占新槽位（前两张仍按竖直牌算）"));
     }
 
     // ---- 回归：名牌（ID 框）在**右下**，四家角位轮转一位 ----
@@ -3778,6 +3810,34 @@ int run(const QString& outDir)
             // 自检期间真的播过之后，卡死计数**不该**被无端增加（没有假阳性）
             checkEq(QString::number(sp.stuckStopCountForTest()), QStringLiteral("0"),
                     QStringLiteral("正常播放不该被判成卡死（无假阳性）"));
+            // ---- 「两个音效撞进竞态之后全哑」的自愈判据 ----
+            // 报障：两个音效同时播进去之后所有音效全哑，连重开一局都不行，必须重启客户端。
+            // 现象是 `play()` 不报错、status 仍 Ready，但后端再也没出声 —— 唯一可观测的就是
+            // "刚 play 完 isPlaying() 立刻为假"。连续 K 次 → 判定整套音频栈哑掉 → 重建。
+            check(!sound::shouldRebuildStack(0) && !sound::shouldRebuildStack(1)
+                          && !sound::shouldRebuildStack(sound::kRebuildAfterFailures - 1),
+                  QStringLiteral("偶发一两次没响不该重建（设备切换的瞬间会这样）"));
+            check(sound::shouldRebuildStack(sound::kRebuildAfterFailures)
+                          && sound::shouldRebuildStack(sound::kRebuildAfterFailures + 5),
+                  QStringLiteral("连续 %1 次「按了没响」→ 重建整套音频栈（自愈，不用重启客户端）")
+                      .arg(sound::kRebuildAfterFailures));
+            checkEq(QString::number(sp.rebuildCountForTest()), QStringLiteral("0"),
+                    QStringLiteral("正常播放不该触发音频栈重建"));
+            // ⚠ **重建之后池子必须真的又建起来**：`rebuildStack()` 只清不建的话，
+            //   `emitSound()` 开头 `pool.isEmpty() → return` 会让此后**每一次**播放都静默返回 ——
+            //   等于把"哑掉"换成"永久静音"（红证：把 `rebuildStack()` 末尾那句 `init()` 去掉，
+            //   下面这条立刻变红）。所以判据直接看池子大小，不看"重建计数"。
+            const int poolBefore = sp.poolSizeForTest(QLatin1String(sound::name::Draw));
+            if (poolBefore > 0) {
+                sp.rebuildStackForTest();
+                checkEq(QString::number(sp.rebuildCountForTest()), QStringLiteral("1"),
+                        QStringLiteral("手动重建把重建计数走到"));
+                checkEq(QString::number(sp.consecutiveFailuresForTest()), QStringLiteral("0"),
+                        QStringLiteral("重建后「连续失败」计数清零（否则会每播一次重建一次）"));
+                checkEq(QString::number(sp.poolSizeForTest(QLatin1String(sound::name::Draw))),
+                        QString::number(poolBefore),
+                        QStringLiteral("重建后**立刻**把池子建回来（只清不建 = 永久静音）"));
+            }
         }
     }
 

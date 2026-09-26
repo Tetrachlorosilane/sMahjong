@@ -31,8 +31,8 @@ struct Meld {
  * **与点数顺序无关**：吃了上家的 3s（手里 2s、4s），三张显示成 `3s-2s-4s`（3s 横置在最左），
  * 而不是按点数排成 `2s-3s-4s`。这纯粹是显示顺序，服务端仍按顺子判定。
  *
- * 暗杠不横置（两端画牌背）；加杠横的**是第四张（加上的那张）**，它叠在碰的中张上方
- * ——见下面 `meldSidewaysIndex` 的说明。
+ * 暗杠不横置（两端画牌背）；**加杠横置的仍是原碰里被鸣的那一张**，加上的第 4 张横置着
+ * **紧贴叠在它的上方** ——见下面 `meldSidewaysIndex` 的说明。
  *
  * ⚠ 牌桌（TableView）与结算界面（ResultDialog）**必须共用本函数**：
  *   结算界面曾按「牌码 == calledTile」自己判断该横置哪一张，而**碰/杠的三四张牌码完全相同**，
@@ -43,13 +43,10 @@ inline int meldSidewaysIndex(const Meld& m, int ownerSeat)
     if (m.tiles.isEmpty() || m.kind == QLatin1String("ankan")) {
         return -1;
     }
-    if (m.kind == QLatin1String("kakan")) {
-        // 加杠（小明杠）：碰的三张不动，**加上的第 4 张横置并叠在中间那张之上**
-        // （真实麻将就是这么摆的）。所以要横的是下标 3，而绘制时它落在下标 1 的槽位中心。
-        // 旧实现横的是下标 1（"加杠横在第二张"），于是加上的那张被当成一个**新槽位**
-        // 排到行末 —— 整副牌多占一格、看起来像"加杠跑到了一边"。
-        return m.tiles.size() >= 4 ? 3 : 0;
-    }
+    // ⚠ 加杠（小明杠）**没有**自己的分支：横置的仍然是**原碰里被鸣的那一张**（按来源定位置），
+    //   加上的第 4 张横置着**紧贴叠在它的上方**（叠放位置由 TableView::meldSlotRects 算）。
+    //   旧实现把"横置的"记成第 4 张（下标 3）并把它摆到中间格 —— 用户报障：
+    //   「在碰的基础上加杠，加杠的那张牌应该紧贴横置在原本碰中横置的那一张的上面」。
     const int rel = ((m.from - ownerSeat) % 4 + 4) % 4;
     if (rel == 3) {
         return 0;                                  // 上家 → 最左
@@ -57,7 +54,7 @@ inline int meldSidewaysIndex(const Meld& m, int ownerSeat)
     if (rel == 2) {
         return 1;                                  // 对家 → 中间
     }
-    return qMin(2, m.tiles.size() - 1);            // 下家 → 最右
+    return qMin(2, m.tiles.size() - 1);            // 下家 → 最右（加杠时仍是碰的那三张之一）
 }
 
 class TableModel : public QObject

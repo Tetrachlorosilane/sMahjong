@@ -22,6 +22,8 @@
 #include <cstdio>
 
 #if MAHJONG_HAVE_MULTIMEDIA
+#include <QAudioDevice>
+#include <QMediaDevices>
 #include <QSoundEffect>
 #endif
 
@@ -187,6 +189,11 @@ int pickSlot(const QVector<bool>& playing, const QVector<qint64>& ageMs, int dur
     return -2;                  // 都在真播：叠放口径下也不再 stop() 硬插（那条路径最可疑）
 }
 
+bool shouldRebuildStack(int consecutiveFailures)
+{
+    return consecutiveFailures >= kRebuildAfterFailures;
+}
+
 QStringList allNames()
 {
     return { QLatin1String(name::Chi),    QLatin1String(name::Pon),
@@ -258,8 +265,12 @@ void Player::init()
             const QUrl url = QUrl::fromLocalFile(tmp->fileName());
             QVector<QSoundEffect*> pool;
             pool.reserve(kPoolPerSound);
+            // ⚠ **显式绑当前默认输出设备**（不是让它自己取默认）：设备被别的进程抢占、或
+            //   睡眠唤醒之后，效果对象仍记得那个已经死掉的设备；`rebuildStack()` 会把这些
+            //   对象整个重建一遍，那时这里会重新解析一次默认设备 —— 这就是"不用重启客户端"的凭据。
+            const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
             for (int i = 0; i < kPoolPerSound; ++i) {
-                auto* eff = new QSoundEffect(this);
+                auto* eff = dev.isNull() ? new QSoundEffect(this) : new QSoundEffect(dev, this);
                 eff->setSource(url);
                 eff->setVolume(m_volume / 100.0);
                 pool.append(eff);
@@ -444,6 +455,20 @@ void Player::emitSound(const QString& sfx, const QByteArray& bytes, bool allowOv
     updated[idx] = now;
     m_startedAt.insert(sfx, updated);
     m_plays[sfx] = m_plays.value(sfx) + 1;
+    // ④ **哑掉自愈**（用户报障：两个音效撞在一起进入竞态后，所有音效全哑，连重开一局都不行，
+    //    必须重启客户端）。`play()` 不报错、`status()` 仍是 Ready，但后端其实再也没出声 ——
+    //    唯一能客观观测到的信号就是"刚 play 完 isPlaying() 就是假"。
+    //    连续几次都这样 → 判定整套音频栈已经死了 → `rebuildStack()` 把效果对象**整个重建**
+    //    （顺带重新解析默认输出设备），下一次播放就恢复，**不需要重启客户端**。
+    if (e->isPlaying()) {
+        m_consecutiveFailures = 0;
+    } else {
+        ++m_consecutiveFailures;
+        if (shouldRebuildStack(m_consecutiveFailures)) {
+            rebuildStack();
+            return;                       // 这一声已经错过了；下一次播放用的是新栈
+        }
+    }
     if (traceEnabled()) {
         // 「play() 之后还响不响」是这类报障唯一能客观观测的点：效果被卡死时
         // `play()` 不报错、`status()` 仍是 Ready，但 `isPlaying()` 立刻回落。
@@ -489,6 +514,31 @@ void Player::stopAll()
     }
 #elif defined(Q_OS_WIN)
     PlaySoundA(nullptr, nullptr, 0);
+#endif
+}
+
+void Player::rebuildStack()
+{
+#if MAHJONG_HAVE_MULTIMEDIA
+    ++m_rebuilds;
+    trace(QStringLiteral("  ↳ 音频栈疑似哑掉（连续 %1 次 play 之后立刻 isPlaying=false）→ 整套重建")   // i18n-keep
+              .arg(m_consecutiveFailures));
+    for (QVector<QSoundEffect*>& pool : m_effects) {
+        for (QSoundEffect* e : pool) {
+            if (e != nullptr) {
+                e->stop();
+            }
+        }
+        qDeleteAll(pool);
+    }
+    m_effects.clear();
+    m_startedAt.clear();
+    m_consecutiveFailures = 0;
+    // ⚠ **必须立刻重建**（与 `clearCache()` 同一套）：`init()` 只跳过"池子还在"的音效，
+    //   池子被清空后它就是"按当前默认输出设备重新建池"的唯一入口。漏掉这一句，
+    //   `emitSound()` 开头那句 `pool.isEmpty() → return` 会让此后**每一次**播放都静默返回 ——
+    //   等于把"哑掉"换成了"永久静音"，比原 bug 更难查（自检有断言钉住重建后仍能再播）。
+    init();
 #endif
 }
 

@@ -149,6 +149,22 @@ public:
     int stuckStopCountForTest() const { return m_stuckStops; }
     /** 池子里的实例**都在真播**、叠放口径下也只能放弃的次数（不再 `stop()` 硬插）。 */
     int exhaustedSkipCountForTest() const { return m_exhaustedSkips; }
+    /**
+     * 判定"整套音频栈哑掉"而**重建**的次数（用户报障：两个音效撞进竞态后全哑，
+     * 连重开一局都不行、必须重启客户端）。见 `rebuildStack()`。
+     */
+    int rebuildCountForTest() const { return m_rebuilds; }
+    /** 当前"连续几次 play 之后立刻 isPlaying=false"的计数（重建后会清零）。 */
+    int consecutiveFailuresForTest() const { return m_consecutiveFailures; }
+    /**
+     * 自检用：手动触发一次"整套音频栈重建"。
+     *
+     * <p>⚠ 这条钩子存在的意义是钉住一个**极易复发**的坑：`rebuildStack()` 清空池子之后
+     * **必须**立刻 `init()` 重建 —— 否则 `emitSound()` 开头那句 `pool.isEmpty() → return`
+     * 会让此后**每一次**播放都静默返回，等于把"哑掉"换成"永久静音"（比原 bug 更难查）。
+     * 判据写在池子大小上（见自检的音频栈重建组）。
+     */
+    void rebuildStackForTest() { rebuildStack(); }
 
     // ---- 诊断 ----
     /**
@@ -166,6 +182,13 @@ private:
     const QByteArray& data(const QString& sfx);
     /** 按三档后端真正把字节放出去。 */
     void emitSound(const QString& sfx, const QByteArray& bytes, bool allowOverlap);
+    /**
+     * 把整套音频栈**重建**（销毁所有 `QSoundEffect`、清掉计时；下次 play() 会按当前默认
+     * 输出设备重新建池）。这条路径存在的唯一理由：设备被别的进程抢占 / 睡眠唤醒 / 后端
+     * 撞竞态之后，`play()` 会**静默失败**（不报错、status 仍 Ready、isPlaying 立刻回落），
+     * 而重建效果对象 + 重新解析默认设备能让它恢复 —— **不需要重启客户端**。
+     */
+    void rebuildStack();
 
     bool m_available = false;
     QString m_backend = QStringLiteral("none");
@@ -180,6 +203,8 @@ private:
     int m_overlapSkips = 0;                            // 被 allowOverlap=false 跳过的次数
     int m_stuckStops = 0;                              // 判定某个实例"卡在 playing"并复用的次数
     int m_exhaustedSkips = 0;                          // 池子真满而放弃的次数
+    int m_consecutiveFailures = 0;                     // 连续"play 之后立刻没在播"的次数
+    int m_rebuilds = 0;                                // 整套音频栈被判哑掉并重建的次数
 };
 
 /**
@@ -199,6 +224,18 @@ int wavDurationMs(const QByteArray& wav);
  */
 int pickSlot(const QVector<bool>& playing, const QVector<qint64>& ageMs, int durMs,
              bool allowOverlap);
+
+/**
+ * 连续几次"`play()` 之后立刻 `isPlaying()==false`"就该把整套音频栈重建（纯判据，自检直接调）。
+ *
+ * <p>为什么以"立刻没在播"为准：后端哑掉时 `play()` **不报错**、`status()` 仍是 `Ready`，
+ * 唯一能观测到的就是这一条。K 取 3：单次偶发（设备切换的那一瞬间）不该触发重建，
+ * 但"两个音效撞进竞态之后全哑"这种持续性故障必须在下一次播放前就被兜住。
+ */
+bool shouldRebuildStack(int consecutiveFailures);
+
+/** 连续多少次"按了没响"就重建（见 `shouldRebuildStack`）。 */
+constexpr int kRebuildAfterFailures = 3;
 
 /** 「自称在播」最多被容忍多久（时长未知时的兜底，以及给解码/调度留的余量）。 */
 constexpr qint64 kStuckMarginMs = 800;
