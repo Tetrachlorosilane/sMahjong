@@ -5,7 +5,8 @@
 > **红线**：**发布版服务端完全不变** —— `server/` 的 jar、协议、房间行为一个字都不动；
 > 训练侧要换，就换"谁在采数据"，不换"线上跑什么"。
 
-状态：**M0（牌山/洗牌）与 M1（向听/进张/听牌形）已落地**，均与 Java 逐字节/逐字段对拍通过；M2–M4 见 §5。
+状态：**M0（牌山/洗牌）与 M1（向听/进张/听牌形）已落地**，均与 Java 逐字节/逐字段对拍通过；
+**M2 进行中**（打点内核已完成：役种/符数/点数/授受）；其余见 §5。
 
 ---
 
@@ -67,6 +68,8 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | **新增** `tools/WallProbe.java` | Java 侧牌山/配牌的**只读探针**（`Wall.debugAllTiles()`），供差分对拍取真值 |
 | **新增** `tools/RuleProbe.java` | Java 侧向听/进张/听牌形的**只读探针**（`Shanten.min` / `HandEval.of` / `afterDiscard`） |
 | **新增** `tools/trainer-rule-parity.mjs` | 上一条的对拍驱动器（确定性语料 → 两边逐行逐字段比对，含数组哈希） |
+| **新增** `tools/ScoreProbe.java` | Java 侧打点**只读探针**（`Rules.applyPreset` + `Evaluator.evaluate` + `Payments.compute`） |
+| **新增** `tools/trainer-score-parity.mjs` | 打点对拍驱动器（19 万和了手 + 上下文 → 役种/符/点数/授受逐字段比对） |
 
 ---
 
@@ -103,7 +106,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Evaluator`（役种/符数/点数）、`Payments`、`Danger` | 同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**（先 100 场，再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：打点内核（役种/符数/基本点/授受/不听罚符）✅ **已完成** —— 19 万手逐字段一致、61 个役种码全覆盖（§6.2）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -215,6 +218,55 @@ C++ 侧那 2 秒里九成是 `strtol` 逐个数解析 100 万行语料、Java �
    `std::array{}`（全 0）→ 138/200 行对不上，**而 8 个标量字段全都一样**（差异只藏在哈希里）。
    修法是让 `evalOf` **一开始就 `fill(-1)`**（与 Java `waitShapes` 的约定一致）。
 
+### 6.2 M2（前半）：役种 / 符数 / 打点 / 授受（已完成）
+
+**为什么先做这一块**：`Round` 流程再复杂，错了也只是"这局怎么走"；而打点错了是
+**数据集里的钱不对**（`score` / `hand_delta` / 奖励全歪），且照常写出"看起来正常"的轨迹。
+
+**怎么验的**：`tools/ScoreProbe.java`（`Rules.applyPreset` + `Evaluator.evaluate` + `Payments.compute`）
+与 `trainer score <corpus> <out>` 跑同一份确定性语料，逐行比 **17 个字段**：
+`valid / 役番 / 总番 / 符 / 役满倍数 / 宝牌 / 里宝 / 赤宝 / 基本点 / 打点档位 / 原因标签 /
+和了形签名（含枚举顺序）/ 役种列表（码:折算番:倍数:牌）/ 四家收支 / 和牌者收入 / 点数部分 / 立直棒`
+—— 役种列表里带**顺序**，所以"同分不同解释"也会被抓出来。
+
+语料 = 手写特型（七对子 / 国士十三面与普通国士 / 九莲与纯正 / 字一色 / 绿一色 / 清老头 / 混老头 /
+大三元 / 小三元 / 大四喜 / 小四喜 / 三色同顺同刻 / 一气 / 二杯口 / 三连刻 / 一色三顺 / 大数邻·大车轮·
+大竹林·大七星 / 一筒摸月 / 九筒捞鱼 / 带副露的碰·吃·大明杠·暗杠·加杠 …）
++ 随机构造（0~4 副露、和了牌随机取手里一张；20% 把一张换成别的牌 → **不是和了形**那条路）
++ 上下文（自摸/荣和、立直/两立直/一发、海底/河底、抢杠/岭上、天和/地和/人和、燕返/杠振、流局满贯、
+  包牌责任、本场棒、立直棒、赤五按 copy 0 分配）
++ 规则（mleague / tenhou / majsoul × {+koyaku, +kazoe, +dbl, +renhou, +renhouy}）。
+
+| 规模 | 结果 | Java | C++ |
+| --- | --- | --- | --- |
+| **200,000 行**（131,113 手有役和了 / 8,358 手役满 / 3,846 不是和了形） | **0 处不一致**，役种码 **61/61 全覆盖** | 77,662 行/秒 | 122,139 行/秒 |
+
+```
+$ node tools\trainer-score-parity.mjs 200000
+[ScoreProbe] 语料 200000 行，用时 2.575 s（77662 行/秒） 校验和 2317805240
+[trainer] score 语料 200000 行，用时 1.637 s（122139 行/秒） 校验和 2317805240
+  [ok]   200000/200000 行逐字段一致（java 4450 ms / cpp 1653 ms → 2.69×）
+[score-parity] PASS：役种 / 符数 / 打点 / 授受与 Java 逐字段一致
+```
+
+**实现要点（都是"不这么做就会静默错"的地方）**：
+
+1. **规则的默认集是 M.League 预设，不是字段初始值**：`Rules()` 构造时先铺 `preset`（默认
+   `"mleague"`）→ `Rules.defaults() ≡ applyPreset("mleague")`。字段初始值里
+   `doubleYakuman = true` / `kazoeYakuman = true` / `kiriageMangan = false` / `doubleWindPairFu = 4`
+   **全部会被覆盖成** `false / false / true / 2`。只照抄字段初始值，打点表会整片对不上。
+2. **和了形的枚举顺序是接口**：`Evaluator` 用高点法在**所有解释**里取最优，并列时取**先出现的**
+   （`better()` 严格大于才算更好）。顺序一变，"番符一样、役种列表不同"的同分解释就互换 →
+   轨迹里的 `yaku[]` 与 Java 不同。所以 `Agari.decompose` 的枚举顺序（雀头升序、面子"刻子在前顺子在后"、
+   和了牌归属"雀头→面子顺序"）在 C++ 里逐行照抄，并在对拍输出里带**和了形签名**。
+3. **役种名保留中文**：Java 内部用中文名（`役牌 白` / `场风 东`），只在发报文时经 `YakuCodes` 翻成码。
+   C++ 同样保留中文名，另把 `YakuCodes` 的表（含参数化三码 + 打点档位 + 流局原因）一起搬过来 ——
+   这样轨迹里的码与 Java 同源，也能顺带验证码表没漏。
+4. **包牌是列表、本场棒归包牌者、不听罚符先定收方**：`Payments` 的三条"看起来能简化"的地方
+   （多个责任者按座位累加 / 包牌者出全部本场棒并按 100 点平摊余数给靠前的 / 不听罚符按"每家收多少"
+   反推付方）全部照抄，`--selftest` 里有 12 条手算定点钉住（含役满授受 48000/32000/16000+8000×2、
+   1 本场 +300、立直棒 1000、不听罚符 1000/3 家听时收付和为 0）。
+
 ---
 
 ## 7. 目录与构建
@@ -225,12 +277,18 @@ trainer/
 ├─ build.ps1            找 clang++（PATH → 常见安装位置）→ -O3 -march=native -std=c++23
 ├─ src/
 │  ├─ java_rand.hpp     java.util.Random + Collections.shuffle 的逐位等价
-│  ├─ tiles.hpp         牌码/kind/copy/赤五（与 Java Tiles 同一套编码）
-│  ├─ counts.hpp        34 维计数 + 幺九/宝牌推导的小工具
+│  ├─ tiles.hpp         牌码/kind/copy/赤五/种类判定/宝牌推导（与 Java Tiles 同一套）
+│  ├─ meld.hpp          副露（吃/碰/大明杠/暗杠/加杠）
+│  ├─ rules.hpp         规则集 + 三套预设（⚠ 默认 = M.League 预设，不是字段初始值）
+│  ├─ counts.hpp        34 维计数 + 幺九判定的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）
 │  ├─ shanten.hpp/.cpp  查表向听（花色分组 + 位并行合并）+ "参考 DFS"（Java 逐行移植，自检用）
 │  ├─ handeval.hpp/.cpp 进张 / 听牌 / 听牌形 / `HandEval.Snapshot` 的等价物
-│  └─ main.cpp          CLI：wall / rng / rules / bench / --selftest
+│  ├─ agari.hpp/.cpp    和了形分解（**枚举顺序是接口**）+ 听牌 + 和了判定
+│  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
+│  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
+│  ├─ yaku_codes.hpp/.cpp 役种名/档位/流局原因 → ASCII 码（= Java `YakuCodes`）
+│  └─ main.cpp          CLI：wall / rng / rules / bench / score / --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
 

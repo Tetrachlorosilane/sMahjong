@@ -17,12 +17,18 @@
 #include <string>
 #include <vector>
 
+#include "agari.hpp"
 #include "counts.hpp"
+#include "evaluator.hpp"
 #include "handeval.hpp"
 #include "java_rand.hpp"
+#include "meld.hpp"
+#include "payments.hpp"
+#include "rules.hpp"
 #include "shanten.hpp"
 #include "tiles.hpp"
 #include "wall.hpp"
+#include "yaku_codes.hpp"
 
 namespace {
 
@@ -273,8 +279,471 @@ int selftest() {
         check("waits() 恰好 {1m,4m,7m}", trainer::waits(a, 0) == std::vector<int>({0, 3, 6}));
     }
 
+    // ⑧ 打点定点（**手算可验**，不依赖 Java 探针）：役种 / 符数 / 基本点 / 授受
+    {
+        // 手牌串 → (牌 id 列表, 34 维计数)；同种牌按 copy 0..3 顺序发（赤五因此自然出现）
+        const auto parseHand = [](const std::string &s, std::vector<int> &ids, trainer::Counts &c) {
+            int nextCopy[trainer::kKindCount] = {0};
+            std::vector<int> digits;
+            for (char ch : s) {
+                if (ch >= '0' && ch <= '9') {
+                    digits.push_back(ch - '0');
+                    continue;
+                }
+                const int base = ch == 'm' ? 0 : (ch == 'p' ? 9 : (ch == 's' ? 18 : (ch == 'z' ? 27 : -1)));
+                if (base >= 0) {
+                    for (int d : digits) {
+                        const int k = base + d - 1;
+                        if (k >= 0 && k < trainer::kKindCount
+                                && nextCopy[k] < 4) {
+                            ids.push_back(trainer::idOf(k, nextCopy[k]));
+                            c[static_cast<size_t>(k)]++;
+                            nextCopy[k]++;
+                        }
+                    }
+                }
+                digits.clear();
+            }
+        };
+        // 一次"门清 + M.League 默认规则"的评价（winKind 取手牌串里指定的那张）
+        const auto evalHand = [&](const std::string &hand, int winKind, bool tsumo, int seat,
+                                  int dealer) {
+            trainer::WinContext ctx;
+            std::vector<int> ids;
+            trainer::Counts c{};
+            parseHand(hand, ids, c);
+            ctx.rules.applyPreset("mleague");
+            ctx.seat = seat;
+            ctx.dealerSeat = dealer;
+            ctx.roundWind = 27;
+            ctx.tsumo = tsumo;
+            ctx.winKind = winKind;
+            ctx.menzen = true;
+            ctx.allTileIds = ids;
+            return trainer::evaluate(ctx, c, {}, winKind);
+        };
+
+        // 平和 + 门前清自摸和：20 符 2 番 → 基本点 20 × 2^4 = 320
+        // ⚠ 手牌里**不要有 5m/5p/5s**：`parseHand` 从 copy 0 发牌，而 copy 0 就是赤五 → 会多算赤宝牌
+        {
+            const trainer::HandScore s = evalHand("123m678m234p678p44s", trainer::parseKind("6m"),
+                                                  true, 1, 0);
+            check("平和+门清自摸：2 番 20 符 320 点",
+                  s.valid && s.han == 2 && s.fu == 20 && s.base == 320 && s.hanYaku == 2);
+        }
+        // 无役：荣和且没有役 → invalid / reason = 无役
+        {
+            const trainer::HandScore s = evalHand("111m456m789p234s55z", trainer::parseKind("4m"),
+                                                 false, 1, 0);
+            check("无役荣和 → invalid（无役）", !s.valid && s.reason == "无役" && s.base == 0);
+        }
+        // 七对子 + 混老头（全幺九）：4 番 25 符 → 25 × 2^6 = 1600
+        {
+            const trainer::HandScore s = evalHand("11m99m11p99p11s99s11z", trainer::parseKind("1z"),
+                                                 false, 1, 0);
+            check("七对子+混老头：4 番 25 符 1600 点",
+                  s.valid && s.han == 4 && s.fu == 25 && s.base == 1600);
+        }
+        // 大三元：役满 1 倍 → 基本点 8000、limit = 役满、番数按 13 折算
+        {
+            const trainer::HandScore s = evalHand("234m55m555z666z777z", trainer::parseKind("5z"),
+                                                 false, 0, 0);
+            check("大三元：役满 1 倍 / 8000 点", s.valid && s.yakuman == 1 && s.base == 8000
+                    && s.hanYaku == 13 && s.limit == "役满");
+            // 授受：庄家荣和役满 = 48000
+            const trainer::PaymentResult p = trainer::paymentsCompute(s, 0, 1, 0, 0, 0, false, {});
+            check("庄家荣和役满：放铳者 −48000", p.delta[1] == -48000 && p.delta[0] == 48000);
+            // 授受：闲家荣和役满 = 32000
+            const trainer::PaymentResult p2 = trainer::paymentsCompute(s, 1, 2, 0, 0, 0, false, {});
+            check("闲家荣和役满：放铳者 −32000", p2.delta[2] == -32000 && p2.delta[1] == 32000);
+            // 授受：闲家自摸役满 = 庄家 16000 + 闲家各 8000
+            const trainer::PaymentResult p3 = trainer::paymentsCompute(s, 1, -1, 0, 0, 0, true, {});
+            check("闲家自摸役满：16000 / 8000 / 8000",
+                  p3.delta[0] == -16000 && p3.delta[2] == -8000 && p3.delta[3] == -8000
+                  && p3.delta[1] == 32000);
+            // 授受：1 本场荣和 → 放铳者多付 300
+            const trainer::PaymentResult p4 = trainer::paymentsCompute(s, 1, 2, 0, 1, 0, false, {});
+            check("1 本场荣和：放铳者 −32300", p4.delta[2] == -32300 && p4.delta[1] == 32300);
+            // 授受：1 根立直棒归和牌者
+            const trainer::PaymentResult p5 = trainer::paymentsCompute(s, 1, 2, 0, 0, 1, false, {});
+            check("1 根立直棒：和牌者 +33000", p5.delta[1] == 33000 && p5.riichiTaken == 1000);
+        }
+        // 不听罚符：3000 / 1 家听牌 → 听牌者 +3000、三家各 −1000（收付严格相等）
+        {
+            const std::array<bool, 4> tenpai = {true, false, false, false};
+            const std::array<int, 4> d = trainer::notenPenalty(tenpai, 3000);
+            check("不听罚符 3000 / 1 家听：+3000 与 −1000×3",
+                  d[0] == 3000 && d[1] == -1000 && d[2] == -1000 && d[3] == -1000);
+            // 非 100 整除的总量也不能凭空生灭（AUDIT F11）
+            const std::array<bool, 4> t3 = {true, true, true, false};
+            const std::array<int, 4> d3 = trainer::notenPenalty(t3, 1000);
+            int sum = 0;
+            for (int v : d3) {
+                sum += v;
+            }
+            check("不听罚符 1000 / 3 家听：收付和为 0", sum == 0 && d3[0] == 300 && d3[3] == -900);
+        }
+    }
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- 打点对拍（`score`）
+//
+// 语料格式（`tools/trainer-score-parity.mjs` 生成，Java 侧 `tools/ScoreProbe.java` 同样解析）：
+//   每行 15 个空格分隔的字段：
+//     preset winKind flags roundWind seat dealerSeat menzen honba sticks loser dora ura pao hand melds
+//   · `flags` = 位掩码：0 tsumo / 1 riichi / 2 doubleRiichi / 3 ippatsu / 4 chankan / 5 rinshan /
+//     6 haitei / 7 houtei / 8 tenhou / 9 chiihou / 10 renhou / 11 tsubame / 12 kanburi / 13 nagashi
+//   · `preset` 可带 `+koyaku` / `+kazoe` / `+dbl` 后缀（先铺预设再点这几个开关，两边同义）
+//   · 列表字段：`-` = 空；`dora`/`ura` 是 kind；`pao` = `seat:base;…`；`hand` = 牌 id
+//   · `melds` = `ro:4,5,6;tc:52,53,54;…`（type ∈ r/t/q，open ∈ o/c，随后是牌 id）
+//
+// 输出每行 17 个字段（与 Java 探针**逐字节**可比，见 `tools/trainer-score-parity.mjs`）。
+struct ScoreRow {
+    std::string preset;
+    int winKind = 0;
+    int flags = 0;
+    int roundWind = 27;
+    int seat = 0;
+    int dealerSeat = 0;
+    int menzen = 1;
+    int honba = 0;
+    int sticks = 0;
+    int loser = -1;
+    std::vector<int> dora;
+    std::vector<int> ura;
+    std::vector<trainer::Pao> paos;
+    std::vector<int> hand;
+    std::vector<trainer::Meld> melds;
+};
+
+std::vector<std::string> splitOn(const std::string &s, char sep) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (true) {
+        const size_t pos = s.find(sep, start);
+        if (pos == std::string::npos) {
+            out.push_back(s.substr(start));
+            break;
+        }
+        out.push_back(s.substr(start, pos - start));
+        start = pos + 1;
+    }
+    return out;
+}
+
+std::vector<int> parseIntList(const std::string &s) {
+    std::vector<int> out;
+    if (s.empty() || s == "-") {
+        return out;
+    }
+    for (const std::string &item : splitOn(s, ',')) {
+        if (!item.empty()) {
+            out.push_back(std::atoi(item.c_str()));
+        }
+    }
+    return out;
+}
+
+bool readScoreRow(const std::string &line, ScoreRow &row) {
+    std::vector<std::string> f;
+    size_t start = 0;
+    while (start <= line.size()) {
+        const size_t pos = line.find(' ', start);
+        if (pos == std::string::npos) {
+            f.push_back(line.substr(start));
+            break;
+        }
+        if (pos > start) {
+            f.push_back(line.substr(start, pos - start));
+        }
+        start = pos + 1;
+    }
+    if (f.size() < 15) {
+        return false;
+    }
+    row.preset = f[0];
+    row.winKind = std::atoi(f[1].c_str());
+    row.flags = std::atoi(f[2].c_str());
+    row.roundWind = std::atoi(f[3].c_str());
+    row.seat = std::atoi(f[4].c_str());
+    row.dealerSeat = std::atoi(f[5].c_str());
+    row.menzen = std::atoi(f[6].c_str());
+    row.honba = std::atoi(f[7].c_str());
+    row.sticks = std::atoi(f[8].c_str());
+    row.loser = std::atoi(f[9].c_str());
+    row.dora = parseIntList(f[10]);
+    row.ura = parseIntList(f[11]);
+    row.paos.clear();
+    if (f[12] != "-") {
+        for (const std::string &item : splitOn(f[12], ';')) {
+            const size_t c = item.find(':');
+            if (c == std::string::npos) {
+                continue;
+            }
+            trainer::Pao p;
+            p.seat = std::atoi(item.substr(0, c).c_str());
+            p.base = std::atoi(item.substr(c + 1).c_str());
+            row.paos.push_back(p);
+        }
+    }
+    row.hand = parseIntList(f[13]);
+    row.melds.clear();
+    if (f[14] != "-") {
+        for (const std::string &item : splitOn(f[14], ';')) {
+            const size_t c = item.find(':');
+            if (c < 2) {
+                continue;
+            }
+            trainer::Meld m;
+            switch (item[0]) {
+                case 'r': m.kind = trainer::Meld::Kind::CHI; break;            // 顺子（只可能明）
+                case 't': m.kind = trainer::Meld::Kind::PON; break;            // 碰
+                case 'q': m.kind = (item[1] == 'c') ? trainer::Meld::Kind::ANKAN
+                                                    : trainer::Meld::Kind::DAIMINKAN;
+                          break;
+                case 'k': m.kind = trainer::Meld::Kind::KAKAN; break;          // 加杠（明）
+                default: continue;
+            }
+            const std::vector<int> ids = parseIntList(item.substr(c + 1));
+            m.tileCount = static_cast<int>(ids.size());
+            for (size_t i = 0; i < ids.size() && i < 4; i++) {
+                m.tiles[i] = ids[i];
+            }
+            row.melds.push_back(m);
+        }
+    }
+    return true;
+}
+
+/** 预设串：`mleague` / `tenhou` / `majsoul`，可带 `+koyaku` / `+kazoe` / `+dbl` / `+renhou[y]` 后缀。 */
+trainer::Rules rulesOfPreset(const std::string &spec) {
+    std::string base = spec;
+    bool koyaku = false;
+    bool kazoe = false;
+    bool dbl = false;
+    std::string renhou;
+    while (true) {
+        const size_t pos = base.find('+');
+        if (pos == std::string::npos) {
+            break;
+        }
+        const std::string opt = base.substr(pos + 1);
+        if (opt == "koyaku") {
+            koyaku = true;
+        } else if (opt == "kazoe") {
+            kazoe = true;
+        } else if (opt == "dbl") {
+            dbl = true;
+        } else if (opt == "renhou") {
+            renhou = "mangan";
+        } else if (opt == "renhouy") {
+            renhou = "yakuman";
+        }
+        base = base.substr(0, pos);
+    }
+    trainer::Rules r;
+    r.applyPreset(base.empty() ? "mleague" : base);
+    if (koyaku) {
+        r.koyaku = true;
+    }
+    if (kazoe) {
+        r.kazoeYakuman = true;
+    }
+    if (dbl) {
+        r.doubleYakuman = true;
+    }
+    if (!renhou.empty()) {
+        r.renhou = renhou;
+    }
+    return r;
+}
+
+void winContextOf(const ScoreRow &row, trainer::WinContext &ctx) {
+    ctx.rules = rulesOfPreset(row.preset);
+    ctx.seat = row.seat;
+    ctx.dealerSeat = row.dealerSeat;
+    ctx.roundWind = row.roundWind;
+    ctx.tsumo = (row.flags & (1 << 0)) != 0;
+    ctx.riichi = (row.flags & (1 << 1)) != 0;
+    ctx.doubleRiichi = (row.flags & (1 << 2)) != 0;
+    ctx.ippatsu = (row.flags & (1 << 3)) != 0;
+    ctx.chankan = (row.flags & (1 << 4)) != 0;
+    ctx.rinshan = (row.flags & (1 << 5)) != 0;
+    ctx.haitei = (row.flags & (1 << 6)) != 0;
+    ctx.houtei = (row.flags & (1 << 7)) != 0;
+    ctx.tenhou = (row.flags & (1 << 8)) != 0;
+    ctx.chiihou = (row.flags & (1 << 9)) != 0;
+    ctx.renhou = (row.flags & (1 << 10)) != 0;
+    ctx.tsubame = (row.flags & (1 << 11)) != 0;
+    ctx.kanburi = (row.flags & (1 << 12)) != 0;
+    ctx.nagashi = (row.flags & (1 << 13)) != 0;
+    ctx.winKind = row.winKind;
+    ctx.doraIndicators = row.dora;
+    ctx.uraIndicators = row.ura;
+    ctx.menzen = row.menzen != 0;
+    ctx.allTileIds = row.hand;
+    for (const trainer::Meld &m : row.melds) {
+        for (int i = 0; i < m.tileCount; i++) {
+            ctx.allTileIds.push_back(m.tiles[static_cast<size_t>(i)]);
+        }
+    }
+}
+
+const char *reasonTag(const std::string &reason) {
+    if (reason.empty()) {
+        return "-";
+    }
+    if (reason == "不是和了形") {
+        return "not_agari";
+    }
+    if (reason == "无役") {
+        return "no_yaku";
+    }
+    if (reason == "番缚不足") {
+        return "han_shibari";
+    }
+    return "?";
+}
+
+void appendFormSig(std::string &out, const trainer::HandScore &s) {
+    if (!s.hasForm) {
+        out += "-";
+        return;
+    }
+    const trainer::Form &f = s.form;
+    out += std::to_string(f.type);
+    out += ':';
+    out += std::to_string(f.pair);
+    out += ':';
+    out += std::to_string(f.winSet);
+    out += ':';
+    out += std::to_string(f.waitType);
+    out += ':';
+    out += std::to_string(f.nSets);
+    for (int i = 0; i < f.nSets; i++) {
+        out += ':';
+        out += (f.setType[static_cast<size_t>(i)] == trainer::kSetRun)
+                       ? 'r'
+                       : (f.setType[static_cast<size_t>(i)] == trainer::kSetTriplet ? 't' : 'q');
+        out += std::to_string(f.setStart[static_cast<size_t>(i)]);
+        out += f.setConcealed[static_cast<size_t>(i)] ? 'c' : 'o';
+        out += f.setFromMeld[static_cast<size_t>(i)] ? 'm' : '-';
+    }
+}
+
+int cmdScore(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "用法：trainer score <corpus> <out>\n");
+        return 2;
+    }
+    std::FILE *in = std::fopen(argv[1], "rb");
+    if (in == nullptr) {
+        std::fprintf(stderr, "读不到语料：%s\n", argv[1]);
+        return 2;
+    }
+    std::FILE *out = std::fopen(argv[2], "wb");
+    if (out == nullptr) {
+        std::fprintf(stderr, "写不了输出：%s\n", argv[2]);
+        std::fclose(in);
+        return 2;
+    }
+    char line[8192];
+    long long rows = 0;
+    long long checksum = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::fgets(line, sizeof(line), in) != nullptr) {
+        std::string text(line);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        ScoreRow row;
+        if (!readScoreRow(text, row)) {
+            continue;
+        }
+        trainer::WinContext ctx;
+        winContextOf(row, ctx);
+        trainer::Counts concealed{};
+        for (int id : row.hand) {
+            concealed[static_cast<size_t>(trainer::kindOf(id))]++;
+        }
+        const trainer::HandScore s = trainer::evaluate(ctx, concealed, row.melds, row.winKind);
+        const trainer::PaymentResult p = trainer::paymentsCompute(
+                s, row.seat, row.loser, row.dealerSeat, row.honba, row.sticks, ctx.tsumo, row.paos);
+
+        checksum += s.base + p.winnerGain;
+        std::string outLine;
+        outLine += s.valid ? '1' : '0';
+        outLine += ' ';
+        outLine += std::to_string(s.hanYaku);
+        outLine += ' ';
+        outLine += std::to_string(s.han);
+        outLine += ' ';
+        outLine += std::to_string(s.fu);
+        outLine += ' ';
+        outLine += std::to_string(s.yakuman);
+        outLine += ' ';
+        outLine += std::to_string(s.dora);
+        outLine += ' ';
+        outLine += std::to_string(s.ura);
+        outLine += ' ';
+        outLine += std::to_string(s.aka);
+        outLine += ' ';
+        outLine += std::to_string(s.base);
+        outLine += ' ';
+        const std::string limitCode = trainer::limitCodeOf(s.limit);
+        outLine += limitCode.empty() ? "-" : limitCode;
+        outLine += ' ';
+        outLine += reasonTag(s.reason);
+        outLine += ' ';
+        appendFormSig(outLine, s);
+        outLine += ' ';
+        if (s.yaku.empty()) {
+            outLine += '-';
+        } else {
+            for (size_t i = 0; i < s.yaku.size(); i++) {
+                if (i > 0) {
+                    outLine += ',';
+                }
+                const trainer::Yaku &y = s.yaku[i];
+                const std::string code = trainer::yakuCodeOf(y.name);
+                outLine += code;
+                outLine += ':';
+                outLine += std::to_string(y.equivalentHan());
+                outLine += ':';
+                outLine += std::to_string(y.yakuman);
+                outLine += ':';
+                outLine += trainer::yakuTileOf(y.name);
+            }
+        }
+        outLine += ' ';
+        for (int i = 0; i < 4; i++) {
+            if (i > 0) {
+                outLine += ',';
+            }
+            outLine += std::to_string(p.delta[static_cast<size_t>(i)]);
+        }
+        outLine += ' ';
+        outLine += std::to_string(p.winnerGain);
+        outLine += ' ';
+        outLine += std::to_string(p.winnerPoints);
+        outLine += ' ';
+        outLine += std::to_string(p.riichiTaken);
+        outLine += '\n';
+        std::fwrite(outLine.data(), 1, outLine.size(), out);
+        rows++;
+    }
+    std::fclose(in);
+    std::fclose(out);
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "[trainer] score 语料 %lld 行，用时 %.3f s（%.0f 行/秒） 校验和 %lld\n",
+                 rows, sec, rows / sec, checksum);
+    return 0;
 }
 
 // ---------------------------------------------------------------- 语料对拍 / 基准
@@ -427,11 +896,12 @@ int cmdRules(int argc, char** argv, bool bench) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "用法：trainer <wall|rng|rules|bench|--selftest> …\n"
+                     "用法：trainer <wall|rng|rules|bench|score|--selftest> …\n"
                      "  wall  <seed> [aka] [dealer]      牌山/配牌/指示牌/岭上（JSON）\n"
                      "  rng   <seed> <n>                 java.util.Random.nextInt(136) 前 n 个\n"
                      "  rules <corpus> <mode> <out>      语料 → 逐行结果（mode = shanten|of|discard）\n"
-                     "  bench <corpus> <mode> <reps>     同语料计时（性能基准）\n");
+                     "  bench <corpus> <mode> <reps>     同语料计时（性能基准）\n"
+                     "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n");
         return 2;
     }
     const std::string cmd = argv[1];
@@ -440,6 +910,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "rng") {
         return cmdRng(argc, argv);
+    }
+    if (cmd == "score") {
+        return cmdScore(argc - 1, argv + 1);
     }
     if (cmd == "rules") {
         return cmdRules(argc - 1, argv + 1, false);

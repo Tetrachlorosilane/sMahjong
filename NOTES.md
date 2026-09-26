@@ -997,6 +997,25 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
    - ⚠ 对拍脚本的**墙钟倍率会被语料解析吞掉**：`trainer rules` 内部计时从 `readCorpus` 之后开始，
      100 万行语料的 `strtol` 要 ~1.8 s，比被测路径（0.22 s）还贵 —— 所以判据用**两边自报的纯计算
      时间**，墙钟只作参考（`strtol` 只影响对拍脚本，不影响引擎）。
+   - **M2 前半（打点内核）已完成**（`rules.hpp` / `meld.hpp` / `agari` / `evaluator` / `payments` /
+     `yaku_codes` + `tools/ScoreProbe.java` + `tools/trainer-score-parity.mjs`）：
+     **20 万行逐字段一致、61 个役种码全覆盖**（131,113 手有役和了 / 8,358 手役满 / 3,846 不是和了形），
+     表格与四类实现要点见 `docs/TRAINER-CPP.md` §6.2。
+   - **打点这块的第一个坑是"规则的默认值"**：`Rules()` 构造时先铺 `preset`（默认 `"mleague"`），
+     所以 `Rules.defaults() ≡ applyPreset("mleague")` —— 字段初始值里的
+     `doubleYakuman=true` / `kazoeYakuman=true` / `kiriageMangan=false` / `doubleWindPairFu=4`
+     **全会被覆盖成 false/false/true/2**。只照抄字段初始值，打点表整片对不上（而且不报警）。
+   - **和了形的枚举顺序是接口，不是实现细节**：`Evaluator` 在**所有**解释里取高点法最优，
+     并列时取**先出现的**（`better()` 是严格大于）。顺序一变，"番符相同、役种列表不同"的同分解释
+     就互换 → 轨迹里的 `yaku[]` 与 Java 不同。所以 C++ 的 `decompose` 逐行照抄 Java 的枚举顺序，
+     对拍输出里也带一个**和了形签名**（type:pair:winSet:waitType:每个面子的类型/起张/明暗/来源）。
+   - **`Payments` 的三条"看着能简化"的地方**照抄不误：包牌责任是**列表**（一手牌可有两个各有责任者
+     的役满，同一家出现多次要按座位累加）、包牌时**本场棒整体由包牌者出**（多家按 100 点平摊、
+     余数给列表里靠前的）、不听罚符**先定"每家收多少"再让付方凑出同一总量**（收付各自取整会让点数
+     凭空生灭，AUDIT F11）。`--selftest` 里 12 条手算定点钉住（役满授受 48000/32000/16000+8000×2、
+     1 本场 +300、立直棒 +1000、不听罚符 1000/3 家听时收付和为 0）。
+   - ⚠ 自检用"手牌串"构造定点时注意：串里出现 **5m/5p/5s 会按 copy 0 发牌 = 赤五**，
+     于是凭空多 3 番赤宝牌（第一次写"平和 2 番"就因此变成 5 番满贯）——要么避开五，要么把赤算进去。
 
 
 ---

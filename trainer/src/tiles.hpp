@@ -48,4 +48,83 @@ inline std::string kindToStr(int kind, bool red) {
 
 inline std::string tileToStr(int id) { return kindToStr(kindOf(id), isRedId(id)); }
 
+// ---------------------------------------------------------------- 种类判定（与 Java `Tiles` 同名同义）
+
+inline constexpr int suitOf(int kind) { return kind < 27 ? kind / 9 : -1; }     // 0=m 1=p 2=s，字牌 -1
+inline constexpr int numOf(int kind) { return kind < 27 ? kind % 9 + 1 : kind - 26; }
+inline constexpr bool isHonor(int kind) { return kind >= 27; }
+inline constexpr bool isWind(int kind) { return kind >= 27 && kind <= 30; }
+inline constexpr bool isDragon(int kind) { return kind >= 31 && kind <= 33; }
+inline constexpr bool isTerminal(int kind) { return kind < 27 && (kind % 9 == 0 || kind % 9 == 8); }
+inline constexpr bool isYaochu(int kind) { return isHonor(kind) || isTerminal(kind); }
+inline constexpr bool isSimple(int kind) { return !isYaochu(kind); }
+
+/** 绿一色用牌：2s3s4s6s8s + 发(6z)。 */
+inline constexpr bool isGreen(int kind) {
+    return kind == 19 || kind == 20 || kind == 21 || kind == 23 || kind == 25 || kind == 32;
+}
+
+/** 指示牌 → 宝牌 kind（与 Java `Tiles.doraFrom` 逐分支一致）。 */
+inline constexpr int doraFrom(int indicatorKind) {
+    if (indicatorKind < 27) {
+        const int suit = indicatorKind / 9;
+        const int num = indicatorKind % 9;
+        return suit * 9 + (num + 1) % 9;
+    }
+    if (indicatorKind < 31) {
+        return 27 + (indicatorKind - 27 + 1) % 4;
+    }
+    return 31 + (indicatorKind - 31 + 1) % 3;
+}
+
+/** 解析 kind 字符串（可带赤：0m/0p/0s）；非法返回 -1。 */inline int parseKind(const std::string &s) {
+    if (s.size() != 2) {
+        return -1;
+    }
+    const char c0 = s[0];
+    const char c1 = s[1];
+    if (c0 == '0') {
+        if (c1 == 'm') {
+            return kAkaM;
+        }
+        if (c1 == 'p') {
+            return kAkaP;
+        }
+        if (c1 == 's') {
+            return kAkaS;
+        }
+        return -1;
+    }
+    if (c0 < '1' || c0 > '9') {
+        return -1;
+    }
+    const int n = c0 - '0';
+    switch (c1) {
+        case 'm': return n - 1;
+        case 'p': return 9 + n - 1;
+        case 's': return 18 + n - 1;
+        case 'z': return (n >= 1 && n <= 7) ? 27 + n - 1 : -1;
+        default: return -1;
+    }
+}
+
+/** 中文名（日志/调试/役种名拼装用）—— 与 Java `Tiles.cnName` 逐字一致。 */
+inline std::string cnName(int kind) {
+    if (kind < 0 || kind >= kKindCount) {
+        return "?";
+    }
+    static const std::array<const char *, 9> kNums = {"一", "二", "三", "四", "五", "六", "七", "八", "九"};
+    if (kind < 9) {
+        return std::string(kNums[static_cast<size_t>(kind % 9)]) + "万";
+    }
+    if (kind < 18) {
+        return std::string(kNums[static_cast<size_t>(kind % 9)]) + "筒";
+    }
+    if (kind < 27) {
+        return std::string(kNums[static_cast<size_t>(kind % 9)]) + "索";
+    }
+    static const std::array<const char *, 7> kHonors = {"东", "南", "西", "北", "白", "发", "中"};
+    return kHonors[static_cast<size_t>(kind - 27)];
+}
+
 }  // namespace trainer
