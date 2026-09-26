@@ -215,7 +215,8 @@ java -jar server\build\mahjong-server.jar --selftest
 **训练接口的全部不变式**（§6.5）、**teacher 的取舍**（§6.6），以及 **3 次「4 机器人整场半庄」**的
 点数守恒。**改了 `rules/` / `game/` 下任何东西都要重跑。**
 
-> ⏱ 全量约 **110~130 秒**（慢的是十来个"整场模拟"用例，不是断言数）。
+> ⏱ 全量耗时与"哪些用例慢"见 NOTES §4。
+
 > 新用例**优先用 `Table.debugMaxHands` 限小局数**；要"定向局面"就用现成钩子
 > （`debugClaimOutcome` / `debugRonDeltas` / `debugTurnKan` / `debugDoRiichi` /
 > `debugDrainWallTo` / `debugPushDiscard`），别靠发牌运气。
@@ -262,9 +263,10 @@ node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
-node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形**逐字段**对拍
-node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受对拍
-node tools\trainer-settle-parity.mjs      # 同上：顺位点精算/余棒/连庄/种子链对拍
+node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
+node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受
+node tools\trainer-settle-parity.mjs      # 同上：精算/连庄/种子链
+node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落位
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
@@ -327,7 +329,7 @@ mahjong/
 │                    test-client.mjs = 联调共用小客户端 · doc-refs-check.mjs = 文档引用自检 ·
 │                    package-release.ps1 + make-zip.mjs = 发布打包（NOTES §9.5）
 ├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，build/ 不进仓库）：java_rand/tiles/wall/
-│                    counts/shanten/handeval/agari/evaluator/payments/seed/roundscoring + main；
+│                    counts/shanten/handeval/agari/evaluator/payments/seed/roundscoring/action + main；
 │                    `pwsh -File trainer\build.ps1`；对拍见 §4；设计见 **`docs/TRAINER-CPP.md`**（服务端**不变**）
 └─ 运行时数据（**都不进仓库**，见 .gitignore）：`replays/` 对局记录 · `players/` 玩家档案 ·
                      `bot-ai/` 机器人 AI 包（与 jar/start.sh 同层，启动时自动挂载）

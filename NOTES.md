@@ -1031,6 +1031,17 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
    - ⚠ **浮点对拍要比原始位模式**：Java 最短往返字符串与 C++ `printf %.17g` 的十进制表示不同，
      "值相同但文本不同"会被误判；两边都打印 `%016x`（`doubleToLongBits` / `bit_cast<uint64_t>`）
      才既能比得准、又能保证写进数据集的是同一个数。
+   - **M2 下半之一（动作空间）已完成**（`action.hpp/.cpp` + `tools/ActionProbe.java` +
+     `tools/trainer-action-parity.mjs`）：键 / 固定头下标 / 回包 / 落位 **369 行逐字符一致**
+     （含全部 37 个牌槽、赤五两种碰法、三种杠、18 个非法键）。表格见 `docs/TRAINER-CPP.md` §6.4。
+   - **动作键是数据集的动作空间**，三条踩过坑的细节：① **碰与大明杠的键必须带"从手里取哪几张"**
+     （`pon:5p+5p` / `kan:daiminkan:5s+5s+0s`）—— 手里同时有赤五与普通五时那是两个不同的合法动作，
+     折成裸 `pon` 会让 `legal` 出现重复键、`chosen_index` 无从分辨（2026-09 被 `selfplay-check` 抓出来）；
+     ② **牌码槽位 37 个**（34 种牌 + 赤 5m/5p/5s）：`0p` 与 `5p` **kind 相同但槽位不同**（35 vs 13）；
+     ③ `resolve` 只在**碰/杠**上允许"同类型第一条"的退让，其余动作必须精确匹配 —— 绝不挑一个像的。
+   - ⚠ **"文本口径"的第二个坑：JSON 字段顺序**。回包（`toCmd()`）的字段插入顺序与探针自己拼的顺序
+     不同 → 同一份回包打印出不同 token 串，把纯粹的顺序差异误报成不一致。口径：两边**按类型固定顺序**
+     （discard/riichi → type;tile[;tsumogiri]；kan → type;kind;tile[;tiles]；pon/chi → 见实现）。
 
 
 ---

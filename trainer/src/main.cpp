@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "action.hpp"
 #include "agari.hpp"
 #include "counts.hpp"
 #include "evaluator.hpp"
@@ -494,6 +495,52 @@ int selftest() {
         }
     }
 
+    // ⑩ 动作空间定点（键 / 下标 / 落位 —— 轨迹里的 `legal` / `chosen` 就是这些键）
+    {
+        bool ok = false;
+        const trainer::Action d = trainer::actionParse("discard:5m/tsumogiri", ok);
+        check("discard 键：解析 + 下标 4（5m 的 kind）", ok && d.key() == "discard:5m/tsumogiri"
+                && d.index() == 4 && d.tsumogiri);
+        const trainer::Action r = trainer::actionParse("riichi:0p", ok);
+        check("riichi 赤五：键与下标 37+35", ok && r.key() == "riichi:0p"
+                && r.index() == trainer::kActionRiichiBase + 35);
+        const trainer::Action p = trainer::actionParse("pon:5p+0p", ok);
+        check("碰（带取法）：参数化动作 → 下标 −1", ok && p.key() == "pon:5p+0p" && p.index() == -1);
+        const trainer::Action pn = trainer::actionParse("pon", ok);
+        check("裸 pon（老数据）：固定槽位 76", ok && pn.index() == trainer::kActionPonId);
+        const trainer::Action k = trainer::actionParse("kan:daiminkan:5s+5s+0s", ok);
+        check("大明杠（带取法）：键保留取法", ok
+                && k.key() == "kan:daiminkan:5s+5s+0s" && k.index() == -1);
+        const trainer::Action kj = trainer::actionParse("kan:ankan:5s+5s+5s", ok);
+        check("暗杠键里带 + 也会被规范化成取法形态（与 Java 同判）", ok
+                && k.tiles.size() == 3);
+        check("牌码槽位：0p=35 / 5p=13 / 5z=31",
+                trainer::actionTileIndex("0p") == 35 && trainer::actionTileIndex("5p") == 13
+                && trainer::actionTileIndex("5z") == 31);
+        check("槽位逆映射：35→0p、13→5p", trainer::actionTileCode(35) == "0p"
+                && trainer::actionTileCode(13) == "5p");
+        int badAccepted = 0;
+        for (const char *bad : {"discard:", "discard:0z", "pon:5p", "chi:1m", "kan:ankan:0z",
+                                "nosuch", ""}) {
+            ok = true;
+            trainer::actionParse(bad, ok);
+            if (ok) {
+                badAccepted++;
+            }
+        }
+        check("非法键全部判 null（7 个）", badAccepted == 0);
+        // 落位：精确匹配优先；裸 pon 退让到"第一条"；打牌必须精确（不在 legal 就是 null）
+        const std::vector<std::string> legalPon = {"pon:5p+5p", "pon:5p+0p"};
+        check("落位：裸 pon → legal 第一条",
+                trainer::actionResolveKey("type=pon", legalPon, ok) == "pon:5p+5p" && ok);
+        check("落位：精确匹配优先",
+                trainer::actionResolveKey("type=pon;tiles=5p+0p", legalPon, ok) == "pon:5p+0p" && ok);
+        const std::vector<std::string> legalTurn = {"discard:1m", "riichi:1m"};
+        ok = true;
+        trainer::actionResolveKey("type=discard;tile=9m", legalTurn, ok);
+        check("落位：打牌不许退让（不在 legal → null）", !ok);
+    }
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
 }
@@ -776,6 +823,85 @@ std::string intsCsv(const int *v, int n) {
         out += std::to_string(v[i]);
     }
     return out;
+}
+
+// ---------------------------------------------------------------- 动作空间对拍（`action`）
+//
+// 语料（`tools/trainer-action-parity.mjs` 生成，Java 侧 `tools/ActionProbe.java` 同样解析）：
+//   key     <cmdTokens>              token 串 → 动作 → key/index/cmdTokens
+//   parse   <key>                    key → 动作（键的逆）
+//   tile    <code>                   牌码 ↔ 槽位
+//   resolve <cmdTokens> <legalCsv>   回包落位到 legal 里的那一个（碰/杠才允许"同类型第一条"）
+// 输出：每行 `key index cmdTokens`（`parse`/`key`）、`index code`（`tile`）、`resolvedKey`（`resolve`）。
+int cmdAction(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "用法：trainer action <corpus> <out>\n");
+        return 2;
+    }
+    std::FILE *in = std::fopen(argv[1], "rb");
+    if (in == nullptr) {
+        std::fprintf(stderr, "读不到语料：%s\n", argv[1]);
+        return 2;
+    }
+    std::FILE *out = std::fopen(argv[2], "wb");
+    if (out == nullptr) {
+        std::fprintf(stderr, "写不了输出：%s\n", argv[2]);
+        std::fclose(in);
+        return 2;
+    }
+    char line[8192];
+    long long rows = 0;
+    while (std::fgets(line, sizeof(line), in) != nullptr) {
+        std::string text(line);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        const size_t sp = text.find(' ');
+        const std::string kind = sp == std::string::npos ? text : text.substr(0, sp);
+        const std::string rest = sp == std::string::npos ? std::string() : text.substr(sp + 1);
+        std::string outLine;
+        if (kind == "key") {
+            bool ok = false;
+            const trainer::Action a = trainer::actionFromCmdTokens(rest, ok);
+            outLine = ok ? (a.key() + " " + std::to_string(a.index()) + " " + a.cmdTokens())
+                         : "- - -";
+        } else if (kind == "parse") {
+            bool ok = false;
+            const trainer::Action a = trainer::actionParse(rest, ok);
+            outLine = ok ? (a.key() + " " + std::to_string(a.index()) + " " + a.cmdTokens())
+                         : "- - -";
+        } else if (kind == "tile") {
+            const int idx = trainer::actionTileIndex(rest);
+            const std::string code = trainer::actionTileCode(idx);
+            outLine = std::to_string(idx) + " " + (code.empty() ? "-" : code);
+        } else if (kind == "resolve") {
+            const size_t sp2 = rest.find(' ');
+            const std::string cmd = sp2 == std::string::npos ? rest : rest.substr(0, sp2);
+            const std::string legalText = sp2 == std::string::npos ? "-" : rest.substr(sp2 + 1);
+            std::vector<std::string> legal;
+            if (legalText != "-") {
+                legal = splitOn(legalText, ',');
+            }
+            bool ok = false;
+            const std::string resolved = trainer::actionResolveKey(cmd, legal, ok);
+            outLine = ok ? resolved : "-";
+        } else {
+            std::fprintf(stderr, "认不出的语料行：%s\n", text.c_str());
+            std::fclose(in);
+            std::fclose(out);
+            return 2;
+        }
+        outLine += '\n';
+        std::fwrite(outLine.data(), 1, outLine.size(), out);
+        rows++;
+    }
+    std::fclose(in);
+    std::fclose(out);
+    std::fprintf(stderr, "[trainer] action 语料 %lld 行\n", rows);
+    return 0;
 }
 
 int cmdSettle(int argc, char **argv) {
@@ -1208,7 +1334,8 @@ int main(int argc, char** argv) {
                      "  rules <corpus> <mode> <out>      语料 → 逐行结果（mode = shanten|of|discard）\n"
                      "  bench <corpus> <mode> <reps>     同语料计时（性能基准）\n"
                      "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n"
-                     "  settle <corpus> <out>            语料 → 顺位点/余棒/连庄判据（与 SettleProbe.java 对拍）\n");
+                     "  settle <corpus> <out>            语料 → 顺位点/余棒/连庄判据（与 SettleProbe.java 对拍）\n"
+                     "  action <corpus> <out>            语料 → 动作键/下标/回包（与 ActionProbe.java 对拍）\n");
         return 2;
     }
     const std::string cmd = argv[1];
@@ -1220,6 +1347,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "score") {
         return cmdScore(argc - 1, argv + 1);
+    }
+    if (cmd == "action") {
+        return cmdAction(argc - 1, argv + 1);
     }
     if (cmd == "settle") {
         return cmdSettle(argc - 1, argv + 1);

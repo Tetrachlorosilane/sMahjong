@@ -72,6 +72,8 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | **新增** `tools/trainer-score-parity.mjs` | 打点对拍驱动器（19 万和了手 + 上下文 → 役种/符/点数/授受逐字段比对） |
 | **新增** `tools/SettleProbe.java` | Java 侧**精算/连庄判据/种子链**只读探针（`RoundScoring.*` + `SelfPlay.seedFor`） |
 | **新增** `tools/trainer-settle-parity.mjs` | 上一条的对拍驱动器（顺位点按**位模式**比对，见 §6.3） |
+| **新增** `tools/ActionProbe.java` | Java 侧**动作空间**只读探针（`Action` 的键/下标/回包/落位） |
+| **新增** `tools/trainer-action-parity.mjs` | 上一条的对拍驱动器（含全部 37 个牌槽与一批**非法键**，见 §6.4） |
 
 ---
 
@@ -108,7 +110,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核（役种/符数/基本点/授受/不听罚符）✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间（键/下标/回包/落位）✅ 369 行逐字符一致（§6.4）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -315,6 +317,34 @@ $ node tools\trainer-score-parity.mjs 200000
    `requiredPoints`（一位必要点数），**不是** `returnScore`（返点 = 精算基准）——《雀魂》
    正是"30000 vs 25000"。
 
+### 6.4 M2（下半之一）：动作空间（已完成）
+
+**为什么先做它**：轨迹里的 `legal` / `chosen` 写的就是 `Action.key()` —— 它是**数据集的动作空间**，
+也是外部训练器唯一需要认的字串。而键的构造规则里有三条踩过坑的细节：
+
+1. **碰与大明杠的键必须带"从手里取哪几张"**（`pon:5p+5p` / `kan:daiminkan:5s+5s+0s`）：
+   手里同时有赤五与普通五时，服务端为两种取法**各下发一条**选项，是两个不同的合法动作；
+   折成裸 `pon` 会让 `legal` 出现重复键、`chosen_index` 无从分辨（2026-09 被
+   `tools/selfplay-check.mjs` 抓出来）。裸 `pon` 只作为**老数据**的兼容形态保留，落位走
+   `resolve` 的"同类型第一条"。
+2. **牌码槽位是 37 个**（34 种牌 + 赤 5m/5p/5s 三个槽）：`"0p"` 与 `"5p"` 的 **kind 相同但槽位不同**
+   （35 vs 13），固定头下标必须按槽位算。
+3. **合法动作集 = 展开后的具体动作**：`enumerate(options)` 出来每一项都保证被状态机接受，
+   训练侧不需要知道任何规则；而 `resolve(cmd, legal)` 只在**碰/杠**上允许"同类型（同杠种）第一条"
+   的退让 —— 其余动作必须精确匹配，**绝不挑一个像的**（那会把错标签写进数据集）。
+
+**怎么验的**：`tools/ActionProbe.java` 与 `trainer action <corpus> <out>` 跑同一份语料，
+逐行比对（键 / 固定头下标 / 回包 token 串 / 落位结果）。
+
+| 覆盖面 | 结果 |
+| --- | --- |
+| **369 行**：全部 37 槽 × {打牌, 摸切打牌, 立直} + 单类型动作 + 吃/碰（含赤五两种取法）+ 三种杠（含大明杠取法+顺序规范化）+ **18 个非法键** + 落位（精确/裸 pon 退让/打牌不许退让） | **0 处不一致** |
+
+⚠ **浮点之外的第二个"文本口径"坑**：回包的 **JSON 字段顺序**在两边可能不同（`toCmd()` 的插入顺序
+vs 探针自己拼的顺序），于是"同一份回包"打印出不同 token 串、把纯粹的顺序差异误报成不一致。
+现在两边都**按类型固定顺序**（discard/riichi → type;tile[;tsumogiri]、kan → type;kind;tile[;tiles]、
+pon → type[;tiles]、chi → type;tiles）。
+
 ---
 
 ## 7. 目录与构建
@@ -330,6 +360,7 @@ trainer/
 │  ├─ rules.hpp         规则集 + 三套预设（⚠ 默认 = M.League 预设，不是字段初始值）
 │  ├─ seed.hpp          种子链（`mixSeed` / 每局种子 / `SelfPlay.seedFor` / 顺位）
 │  ├─ roundscoring.hpp/.cpp 顺位点精算 + 连庄/本场/和了止/延长战/终局余棒（= Java `RoundScoring`）
+│  ├─ action.hpp/.cpp   动作空间（键 / 固定头下标 / 回包 / 落位 = Java `Action`）
 │  ├─ counts.hpp        34 维计数 + 幺九判定的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）
 │  ├─ shanten.hpp/.cpp  查表向听（花色分组 + 位并行合并）+ "参考 DFS"（Java 逐行移植，自检用）
@@ -338,7 +369,7 @@ trainer/
 │  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
 │  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
 │  ├─ yaku_codes.hpp/.cpp 役种名/档位/流局原因 → ASCII 码（= Java `YakuCodes`）
-│  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / --selftest
+│  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / action / --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
 
