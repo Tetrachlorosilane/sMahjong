@@ -970,6 +970,7 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 > node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101   # 采集：C++ ↔ Java（g*.jsonl 逐字节）
 > node tools\trainer-features-parity.mjs                       # 派生特征：sidecar 逐字节
 > node tools\selfplay-check.mjs <C++ 产出的目录>               # 独立校验器（Python 侧同一份）
+> node tools\trainer-takeover-check.mjs 1 1 pass 20260101      # 整条链（命令由 producer 模块自己组）
 > ```
 > `trainer-features-parity.mjs --self-check` 是**自检模式**（两边都跑 Java）—— 用来验证脚本本身与
 > Java 侧可复现性，不需要 C++ 就绪；`--hands 1 --policy pass --seed 20260101` 这一场的参考 sidecar

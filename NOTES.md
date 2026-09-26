@@ -1146,6 +1146,9 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       （`perDecision=68`：`danger_worst[34]` + `danger_riichi[34]`；`perCandidate=8`）；
       `python -m mahjong_ml.dataset build <dir> <紧凑目录>` → **训练 81 条 / state 607 维 / cand 96 维 /
       float16 / 特征版本 2**。
+      **接管验收**（整条链、命令由 Python 的 `producer` 模块自己组）已就位：`node tools\trainer-takeover-check.mjs`
+      —— 采集 → 逐字节比轨迹 → `--features` → 逐字节比 sidecar → `selfplay-check` → `dataset build`；
+      现在跑它会停在"`未知子命令：selfplay`"（C++ 侧还没实现），这正是它该有的样子。
       ⇒ C++ 生产者只要把这三样（`g*.jsonl`、`g*.feat.bin`、`summary.json`）**逐字节**产出来，
       `MAHJONG_PRODUCER=cpp` 就能直接接管，Python 侧一行不用改。
     - ⚠ **实局移植当场抓出一个潜伏 bug**（`wall.hpp::atLastLiveTile`）：原来是
