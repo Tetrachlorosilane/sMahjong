@@ -137,8 +137,8 @@ function buildCorpus(want) {
         rows.push(`alllast ${pick(PRESETS)} ${Math.floor(r() * 4)} ${r() < 0.5 ? 1 : 0} `
             + `${r() < 0.3 ? 1 : 0} ${Math.floor(r() * 16)} ${score()} ${score()} ${score()} ${score()}`);
     }
-    // ⑤ 延长战门槛
-    for (const preset of ['mleague', 'tenhou', 'majsoul']) {
+    // ⑤ 延长战门槛（⚠ 必须开 westExtension，否则那条分支永远比不到 —— 之前这里全是 0 值）
+    for (const preset of ['mleague', 'mleague+west', 'tenhou+west', 'majsoul+west']) {
         for (const top of [0, 29000, 30000, 31000, 40000]) {
             for (let nw = 0; nw <= 3; nw++) {
                 for (let lw = 0; lw <= 2; lw++) {
@@ -188,6 +188,49 @@ function buildCorpus(want) {
         const s = [score(), score(), score(), score()];
         if (r() < 0.4) s[1] = s[0];
         rows.push(`place ${s.join(' ')}`);
+    }
+    // ⑨ 鸣牌仲裁判据（`RoundClaims`）：等级 / 能否压过 / 荣和收齐 / 收工 / 回包认领
+    //    —— 这一层最容易写错的是"提前收工改变赢家"（AGENTS §2.3-10）
+    for (const t of ['ron', 'kan', 'pon', 'chi', 'pass', 'tsumo', 'nosuch', '']) {
+        rows.push(`rank ${t}`);
+    }
+    for (const bestRank of [-1, 0, 1, 2, 3]) {
+        for (const bestDist of [0, 1, 2, 3]) {
+            for (const rank of [-1, 0, 1, 2, 3]) {
+                for (const dist of [0, 1, 2, 3]) {
+                    rows.push(`beat ${bestRank}:${bestDist} ${rank} ${dist}`);
+                    rows.push(`beat - ${rank} ${dist}`);          // 还没有任何人鸣牌
+                }
+            }
+        }
+    }
+    for (const ron of ['-', '0', '1', '2', '3', '0,2', '1,2,3']) {
+        for (const answered of ['-', '0', '0,1', '0,1,2,3', '1,3']) {
+            rows.push(`allron ${ron} ${answered}`);
+        }
+    }
+    const SEATS = ['-', '0', '1', '0,1', '1,2', '0,1,2,3', '2,3'];
+    const RANKS = [-1, 0, 1, 2, 3];
+    for (let i = 0; i < want; i++) {
+        const asked = pick(SEATS);
+        const ron = pick(SEATS);
+        const answered = pick(SEATS);
+        const remain = pick([-1, 0, 1, 500, 5000]);
+        const best = r() < 0.25 ? '-' : `${pick(RANKS)}:${1 + Math.floor(r() * 3)}`;
+        const askedBestRank = r() < 0.2 ? '-' : asked === '-' ? '-'
+            : asked.split(',').filter((s) => r() < 0.8)
+                .map((s) => `${s}:${pick(RANKS)}`).join(';') || '-';
+        const seatDist = r() < 0.2 ? '-' : '0:1;1:2;2:3;3:1';
+        rows.push(`stop ${asked} ${ron} ${answered} ${remain} ${best} ${askedBestRank} ${seatDist}`);
+    }
+    for (const seatIsAsked of [0, 1]) {
+        for (const pending of ['-', '7']) {
+            for (const hasReplyId of [0, 1]) {
+                for (const replyId of [0, 7, 8]) {
+                    rows.push(`accept ${seatIsAsked} ${pending} ${hasReplyId} ${replyId}`);
+                }
+            }
+        }
     }
     return rows;
 }

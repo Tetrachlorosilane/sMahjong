@@ -17,8 +17,10 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import mahjong.core.Rules;
+import mahjong.game.RoundClaims;
 import mahjong.game.RoundScoring;
 import mahjong.train.SelfPlay;
 
@@ -41,6 +43,7 @@ public final class SettleProbe {
         boolean koyaku = false;
         boolean kazoe = false;
         boolean dbl = false;
+        boolean west = false;
         String renhou = null;
         String base = spec;
         while (true) {
@@ -59,6 +62,8 @@ public final class SettleProbe {
                 renhou = "mangan";
             } else if (opt.equals("renhouy")) {
                 renhou = "yakuman";
+            } else if (opt.equals("west")) {
+                west = true;
             }
             base = base.substring(0, pos);
         }
@@ -72,6 +77,9 @@ public final class SettleProbe {
         }
         if (dbl) {
             r.doubleYakuman = true;
+        }
+        if (west) {
+            r.westExtension = true;
         }
         if (renhou != null) {
             r.renhou = renhou;
@@ -222,6 +230,23 @@ public final class SettleProbe {
                         }
                         sb.append(((Number) place.get(i)).intValue());
                     }
+                } else if (kind.equals("rank") && f.length >= 2) {
+                    sb.append(RoundClaims.rankOf(f[1]));
+                } else if (kind.equals("beat") && f.length >= 4) {
+                    RoundClaims.Claim best = parseClaim(f[1]);
+                    sb.append(RoundClaims.canBeat(best, Integer.parseInt(f[2]),
+                                                  Integer.parseInt(f[3])) ? 1 : 0);
+                } else if (kind.equals("allron") && f.length >= 3) {
+                    sb.append(RoundClaims.allRonAnswered(parseIntList(f[1]), intSetOf(f[2])) ? 1 : 0);
+                } else if (kind.equals("stop") && f.length >= 8) {
+                    boolean v = RoundClaims.shouldStop(
+                            parseIntList(f[1]), parseIntList(f[2]), intSetOf(f[3]),
+                            Long.parseLong(f[4]), parseClaim(f[5]), intMapOf(f[6]), intMapOf(f[7]));
+                    sb.append(v ? 1 : 0);
+                } else if (kind.equals("accept") && f.length >= 5) {
+                    Long pending = f[2].equals("-") ? null : Long.valueOf(f[2]);
+                    sb.append(RoundClaims.acceptsReply(Integer.parseInt(f[1]) != 0, pending,
+                            Integer.parseInt(f[3]) != 0, Long.parseLong(f[4])) ? 1 : 0);
                 } else {
                     System.err.println("认不出的语料行：" + line);
                     System.exit(2);
@@ -238,6 +263,36 @@ public final class SettleProbe {
     private static int[] splitRemainder(int total, int n, int unit) {
         final int each = Math.floorDiv(total, n * unit) * unit;
         return new int[]{each, total - each * n};
+    }
+
+    /** `rank:dist` 或 `-`（= 还没有任何有效鸣牌）。 */
+    private static RoundClaims.Claim parseClaim(String s) {
+        if (s == null || s.isEmpty() || s.equals("-")) {
+            return null;
+        }
+        String[] p = s.split(":");
+        return new RoundClaims.Claim(Integer.parseInt(p[0]),
+                                     p.length > 1 ? Integer.parseInt(p[1]) : 0);
+    }
+
+    private static java.util.Set<Integer> intSetOf(String s) {
+        java.util.Set<Integer> out = new java.util.LinkedHashSet<>(parseIntList(s));
+        return out;
+    }
+
+    private static Map<Integer, Integer> intMapOf(String s) {
+        Map<Integer, Integer> out = new java.util.LinkedHashMap<>();
+        if (s == null || s.isEmpty() || s.equals("-")) {
+            return out;
+        }
+        for (String item : s.split(";", -1)) {
+            int c = item.indexOf(':');
+            if (c < 0) {
+                continue;
+            }
+            out.put(Integer.parseInt(item.substring(0, c)), Integer.parseInt(item.substring(c + 1)));
+        }
+        return out;
     }
 
     private SettleProbe() {

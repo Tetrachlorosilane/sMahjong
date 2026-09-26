@@ -25,6 +25,7 @@
 #include "java_rand.hpp"
 #include "meld.hpp"
 #include "payments.hpp"
+#include "roundclaims.hpp"
 #include "roundscoring.hpp"
 #include "rules.hpp"
 #include "seed.hpp"
@@ -541,6 +542,45 @@ int selftest() {
         check("落位：打牌不许退让（不在 legal → null）", !ok);
     }
 
+    // ⑪ 鸣牌仲裁判据定点（等级 / 压过 / 荣和收齐 / 收工 / 回包认领）
+    {
+        check("等级：荣和 3 > 杠 2 > 碰 1 > 吃 0 > pass −1",
+              trainer::claimRankOf("ron") == 3 && trainer::claimRankOf("kan") == 2
+              && trainer::claimRankOf("pon") == 1 && trainer::claimRankOf("chi") == 0
+              && trainer::claimRankOf("pass") == -1 && trainer::claimRankOf("tsumo") == -1);
+        check("压过：高等级赢", trainer::claimCanBeat(true, {1, 2}, 2, 0));
+        check("压过：同级看座次距离（近的赢）",
+              trainer::claimCanBeat(true, {1, 2}, 1, 1) && !trainer::claimCanBeat(true, {1, 1}, 1, 2));
+        check("压过：pass 永远压不过", !trainer::claimCanBeat(false, {}, -1, 1));
+        check("荣和收齐：没有荣和者时返回 false（还要等碰/吃）",
+              !trainer::claimAllRonAnswered({}, {0, 1}));
+        check("荣和收齐：都答了才 true",
+              trainer::claimAllRonAnswered({0}, {0, 1}) && !trainer::claimAllRonAnswered({0, 2}, {0}));
+        // 收工：荣和没答完 → 继续等；低优先级压不过 → 收工；缺 askedBestRank → 保守继续等
+        const std::map<int, int> dist = {{0, 1}, {1, 2}, {2, 3}};
+        check("收工：asked 空 → true", trainer::claimShouldStop({}, {0}, {}, 5000, false, {}, {}, {}));
+        check("收工：超时 → true",
+              trainer::claimShouldStop({1}, {}, {}, 0, false, {}, {{1, 0}}, dist));
+        check("收工：荣和没答完 → false",
+              !trainer::claimShouldStop({0, 1}, {0}, {}, 5000, false, {}, {{1, 0}}, dist));
+        check("收工：荣和已答完而无人能压过 → true",
+              trainer::claimShouldStop({1}, {0}, {0}, 5000, false, {}, {{1, 0}}, dist));
+        // ⚠ 要走到 canBeat 那一步，`ronCapable` 里必须**有未答、但又不在 asked 里**的座位
+        //（否则要么前面 `allRonAnswered` 直接收工、要么循环里因为"可能荣和"继续等）
+        check("收工：手上有更大鸣牌 → false",
+              !trainer::claimShouldStop({1}, {0}, {}, 5000, true, {1, 2}, {{1, 2}}, dist));
+        check("收工：askedBestRank 缺项 → 保守继续等",
+              !trainer::claimShouldStop({1}, {0}, {}, 5000, false, {}, {}, dist));
+        check("收工：都没人能压过 → true",
+              trainer::claimShouldStop({1}, {0}, {}, 5000, true, {2, 2}, {{1, 1}}, dist));
+        check("回包认领：没被问 / 没挂起 / ask_id 过期都丢",
+              !trainer::claimAcceptsReply(false, true, 7, false, 0)
+              && !trainer::claimAcceptsReply(true, false, 0, false, 0)
+              && !trainer::claimAcceptsReply(true, true, 7, true, 8));
+        check("回包认领：没带 ask_id 时按座位认（兼容老客户端）",
+              trainer::claimAcceptsReply(true, true, 7, false, 0));
+    }
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
 }
@@ -680,6 +720,7 @@ trainer::Rules rulesOfPreset(const std::string &spec) {
     bool koyaku = false;
     bool kazoe = false;
     bool dbl = false;
+    bool west = false;
     std::string renhou;
     while (true) {
         const size_t pos = base.find('+');
@@ -697,6 +738,8 @@ trainer::Rules rulesOfPreset(const std::string &spec) {
             renhou = "mangan";
         } else if (opt == "renhouy") {
             renhou = "yakuman";
+        } else if (opt == "west") {
+            west = true;
         }
         base = base.substr(0, pos);
     }
@@ -710,6 +753,9 @@ trainer::Rules rulesOfPreset(const std::string &spec) {
     }
     if (dbl) {
         r.doubleYakuman = true;
+    }
+    if (west) {
+        r.westExtension = true;
     }
     if (!renhou.empty()) {
         r.renhou = renhou;
@@ -821,6 +867,31 @@ std::string intsCsv(const int *v, int n) {
             out += ',';
         }
         out += std::to_string(v[i]);
+    }
+    return out;
+}
+
+/** `1,2` → set（`-` = 空集）。 */
+std::set<int> intSetOf(const std::string &s) {
+    std::set<int> out;
+    for (int v : parseIntList(s)) {
+        out.insert(v);
+    }
+    return out;
+}
+
+/** `1:2;3:1` → map（`-` = 空表）。 */
+std::map<int, int> intMapOf(const std::string &s) {
+    std::map<int, int> out;
+    if (s.empty() || s == "-") {
+        return out;
+    }
+    for (const std::string &item : splitOn(s, ';')) {
+        const size_t c = item.find(':');
+        if (c == std::string::npos) {
+            continue;
+        }
+        out[std::atoi(item.substr(0, c).c_str())] = std::atoi(item.substr(c + 1).c_str());
     }
     return out;
 }
@@ -1050,6 +1121,39 @@ int cmdSettle(int argc, char **argv) {
             }
             const std::array<int, 4> p = trainer::placementOf(scores);
             outLine = intsCsv(p.data(), 4);
+        } else if (kind == "rank" && f.size() >= 2) {
+            outLine = std::to_string(trainer::claimRankOf(f[1]));
+        } else if (kind == "beat" && f.size() >= 4) {
+            bool hasBest = f[1] != "-";
+            trainer::Claim best;
+            if (hasBest) {
+                const std::vector<std::string> bd = splitOn(f[1], ':');
+                best.rank = std::atoi(bd[0].c_str());
+                best.seatDist = bd.size() > 1 ? std::atoi(bd[1].c_str()) : 0;
+            }
+            const bool v = trainer::claimCanBeat(hasBest, best, std::atoi(f[2].c_str()),
+                                                 std::atoi(f[3].c_str()));
+            outLine = v ? "1" : "0";
+        } else if (kind == "allron" && f.size() >= 3) {
+            const bool v = trainer::claimAllRonAnswered(parseIntList(f[1]), intSetOf(f[2]));
+            outLine = v ? "1" : "0";
+        } else if (kind == "stop" && f.size() >= 8) {
+            bool hasBest = f[5] != "-";
+            trainer::Claim best;
+            if (hasBest) {
+                const std::vector<std::string> bd = splitOn(f[5], ':');
+                best.rank = std::atoi(bd[0].c_str());
+                best.seatDist = bd.size() > 1 ? std::atoi(bd[1].c_str()) : 0;
+            }
+            const bool v = trainer::claimShouldStop(parseIntList(f[1]), parseIntList(f[2]),
+                                                    intSetOf(f[3]), std::stoll(f[4]), hasBest, best,
+                                                    intMapOf(f[6]), intMapOf(f[7]));
+            outLine = v ? "1" : "0";
+        } else if (kind == "accept" && f.size() >= 5) {
+            const bool v = trainer::claimAcceptsReply(
+                    std::atoi(f[1].c_str()) != 0, f[2] != "-", std::stoll(f[2] == "-" ? "0" : f[2]),
+                    std::atoi(f[3].c_str()) != 0, std::stoll(f[4]));
+            outLine = v ? "1" : "0";
         } else {
             std::fprintf(stderr, "认不出的语料行：%s\n", text.c_str());
             std::fclose(in);

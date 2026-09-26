@@ -70,7 +70,7 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | **新增** `tools/trainer-rule-parity.mjs` | 上一条的对拍驱动器（确定性语料 → 两边逐行逐字段比对，含数组哈希） |
 | **新增** `tools/ScoreProbe.java` | Java 侧打点**只读探针**（`Rules.applyPreset` + `Evaluator.evaluate` + `Payments.compute`） |
 | **新增** `tools/trainer-score-parity.mjs` | 打点对拍驱动器（19 万和了手 + 上下文 → 役种/符/点数/授受逐字段比对） |
-| **新增** `tools/SettleProbe.java` | Java 侧**精算/连庄判据/种子链**只读探针（`RoundScoring.*` + `SelfPlay.seedFor`） |
+| **新增** `tools/SettleProbe.java` | Java 侧**精算/连庄判据/种子链/鸣牌仲裁判据**只读探针（`RoundScoring.*` / `RoundClaims.*` / `SelfPlay.seedFor`） |
 | **新增** `tools/trainer-settle-parity.mjs` | 上一条的对拍驱动器（顺位点按**位模式**比对，见 §6.3） |
 | **新增** `tools/ActionProbe.java` | Java 侧**动作空间**只读探针（`Action` 的键/下标/回包/落位） |
 | **新增** `tools/trainer-action-parity.mjs` | 上一条的对拍驱动器（含全部 37 个牌槽与一批**非法键**，见 §6.4） |
@@ -110,7 +110,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间（键/下标/回包/落位）✅ 369 行逐字符一致（§6.4）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -345,6 +345,30 @@ vs 探针自己拼的顺序），于是"同一份回包"打印出不同 token �
 现在两边都**按类型固定顺序**（discard/riichi → type;tile[;tsumogiri]、kan → type;kind;tile[;tiles]、
 pon → type[;tiles]、chi → type;tiles）。
 
+### 6.5 M2（下半之二）：鸣牌仲裁判据（已完成）
+
+**为什么单独做**：这一层决定"什么时候可以不再等别家的应答"，而它最容易写错的地方是
+**提前收工改变赢家**（AGENTS §2.3-10）。四条判据（`RoundClaims`）全是纯函数：
+
+1. **等级尺子**：`荣和 3 > 杠 2 > 碰 1 > 吃 0 > pass −1` —— 它必须与真实仲裁循环**同一把**；
+2. **同级看座次距离**（离打牌者近的赢）—— 所以 `canBeat` 必须**同时**看等级与距离；
+3. **荣和要收齐**（多荣和）：`ronCapable` 还有人没答就绝不能收工；反过来"谁都不能荣和"时
+   这条不成立（否则会立刻收工、把碰/吃的机会整片丢掉）；
+4. **`askedBestRank` 缺项 → 保守继续等**（"继续等"只是慢一点，"收工"却可能丢掉他的碰/杠）。
+
+外加**回包认领**（`acceptsReply`）：没被问 / 没有挂起询问 / `ask_id` 过期的回包一律丢弃 ——
+否则上一轮的迟到回包会被当成本轮应答（症状："莫名其妙按了别家上一巡的选择出牌"）。
+
+**怎么验的**：在 `trainer settle` / `SettleProbe.java` 里加了五种语料行
+（`rank` / `beat` / `allron` / `stop` / `accept`），穷举小域 + 随机组合。
+
+| 覆盖面 | 结果 |
+| --- | --- |
+| **12,567 行**（含 `beat` 800 行两个分支各半、`stop` 2000 行 true:false ≈ 2:1、`accept` 24 行、`allron` 35 行） | **0 处不一致** |
+
+⚠ **顺手补了个休眠覆盖**：延长战那条分支原来在语料里**全是 0 值**（三套预设的 `westExtension`
+都是关的），等于没比过。现在加了 `+west` 预设后缀（两边同义），`west` 用例里 36/240 为 true。
+
 ---
 
 ## 7. 目录与构建
@@ -361,6 +385,7 @@ trainer/
 │  ├─ seed.hpp          种子链（`mixSeed` / 每局种子 / `SelfPlay.seedFor` / 顺位）
 │  ├─ roundscoring.hpp/.cpp 顺位点精算 + 连庄/本场/和了止/延长战/终局余棒（= Java `RoundScoring`）
 │  ├─ action.hpp/.cpp   动作空间（键 / 固定头下标 / 回包 / 落位 = Java `Action`）
+│  ├─ roundclaims.hpp   鸣牌仲裁判据（等级/压过/收工/回包认领 = Java `RoundClaims`）
 │  ├─ counts.hpp        34 维计数 + 幺九判定的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）
 │  ├─ shanten.hpp/.cpp  查表向听（花色分组 + 位并行合并）+ "参考 DFS"（Java 逐行移植，自检用）
