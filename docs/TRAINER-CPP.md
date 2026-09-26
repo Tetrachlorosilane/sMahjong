@@ -112,7 +112,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；`Round` 摸打/鸣牌/立直/杠/流局循环 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ **9.77 万次真实询问逐字符一致**（§6.11）；`Round` 摸打/鸣牌/立直/杠/流局循环 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -480,6 +480,47 @@ M2 走到 `Round` 门口、去读 `Round.setup()` 时发现：**M0 的"配牌逐
 
 **总计 14,319 行逐字节一致**（含 `ropts` 320 行）。
 
+### 6.11 M2（下半之七）：自家回合的询问内容 `turnOptions`（已完成）
+
+`turnoptions.hpp` —— Java `Round.turnOptions` 的等价物。**选项顺序是协议的一部分**：
+`Action.enumerate` 按 `discard → riichi → tsumo → kan → kyuushu` 展开，而 `legal` 的下标就是
+轨迹里的 `chosen_index` —— 少一个选项或换个顺序，训练标签会整体错位而且**不报错**。
+
+对拍走**真实牌局**：`tools/RoundProbe.java` 用 `Table.playGame()` + 真实策略（`teacher`/`first`/
+`pass`/`random`）推进牌局，每次自家回合把「局面 + Java 自己的 `Decision.options`」写成一行；
+C++ 只吃局面那半、重算选项文本，逐字符比（`node tools/trainer-opts-parity.mjs`）。
+
+| 覆盖面（`teacher` 12 局 × 20 场 = 10,204 次询问） | 计数 |
+| --- | --- |
+| `discard=` 只有打牌候选 | 9,730 |
+| 带 `riichi=`（含"打 5z 后听 9s"这类真听牌形） | 384 |
+| 带 `tsumo`（门前一気通貫等真和了形） | 54 |
+| 带 `kan=`（`ankan:` 143 / `kakan:` 36） | 42 |
+| 食替禁打非空的行（吃/碰之后那一巡） | 140 |
+| **差异** | **0** |
+
+**放大到四种策略 × 24 局 × 40 场 = 97,686 次询问，仍然 0 处差异**（`teacher` 21,694 /
+`first` 28,536 / `random` 24,916 / `pass` 22,540）：`riichi=` 1,001 行、`tsumo` 125 行、
+`kan=` 1,425 行，组合形（`riichi=;tsumo`、`riichi=;kan=`、`tsumo;kan=`）也都有。
+
+钉住的几条（自检里也各有断言）：
+
+- **`discard` 永远存在且第一**；已立直时**只剩摸切那一张**；**食替禁打按牌种**过滤。
+- **`riichi` 候选**：`riichiAllowed`（门前 / 未立直 / 分数 / 残牌 / **海底禁立直**）→
+  对每个 **id** 试算"去掉这一张还听不听"（⚠ 去的是**这一张 id**，不是整个牌种）。
+- **`tsumo` 闸门**就是 `checkWin(..., tsumo=true, ...)`：张数契约（14 − 3×副露、自摸时和了牌已在手里）
+  → `WinContext`（`riichi/doubleRiichi/ippatsu` 的组合口径、`tenhou/chiihou`、天地人、
+  `doraIndicators` + **`includeUra=true`**（实局判定算里宝）→ `allTileIds` = 副露真实 id +
+  和了牌 + **合成的赤五 id**（`i%3` 轮转 `5m/5p/5s`，条数 = 暗牌里的赤五数）。
+- **杠**：闸门 `canKan() && !haitei`（海底那一巡不给杠）；候选 = 暗杠（牌种升序，
+  手里真有 4 张且过 `kanAllowedByRiichi`：①听牌集合不变 ②M.League 的**面子构成不变**）+
+  加杠（`PON` 副露且手里还有该种），**暗杠在前、加杠在后，同一个 `kan` 选项里**。
+- **九种九牌**：M.League 的 `kyuushuAbort=false` ⇒ 这条分支在训练口径下**永不亮**；
+  换成《天凤》预设才亮（自检两条都断言了，所以"永不亮"是**被验证过的**，不是漏了）。
+
+⚠ **未覆盖**：鸣牌段（`claimOptions`）—— 它**不走 `Round.ask()`**，是下一步；
+`RoundProbe` 已经把那些询问计数打了日志（`teacher` 20 场共 2,846 次），下一轮按同一套路做。
+
 ---
 
 ## 7. 目录与构建
@@ -500,6 +541,7 @@ trainer/
 │  ├─ furiten.hpp       振听记账（三种振听 + 唯一记账点 = Java `Round` 的那几个字段）
 │  ├─ visible.hpp       可见牌统计 + 和了形纯判断（= Java `Visible` / `WinCheck`）
 │  ├─ roundoptions.hpp  选项生成的第一层（可打牌 / 食替 / 立直后杠 / 吃搭子 = Java `RoundOptions`）
+│  ├─ turnoptions.hpp   自家回合的询问内容（discard→riichi→tsumo→kan→kyuushu 的闸门与顺序）
 │  ├─ roundstate.hpp    `Round` 状态容器 + 构造 + 配牌（`setup()`）
 │  ├─ counts.hpp        34 维计数 + 幺九判定的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）

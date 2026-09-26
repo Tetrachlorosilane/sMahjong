@@ -1104,6 +1104,20 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       语料也只在"手里真有 4 张"时生成。**教训：跨语言对拍的输入前提要显式写进两侧的门口。**
     - 顺带核了一遍 `rules.hpp` ↔ `Rules.applyPreset` 三套预设的**逐字段**覆盖（含
       `kokushiTenhou13`/`kokushiAnkan` 只有 majsoul 会置 true、切预设不会清回 false 这个 Java 怪癖）。
+    - **M2 下半之七（自家回合的询问内容 `turnOptions`）已完成**（`turnoptions.hpp` + 新探针
+      `tools/RoundProbe.java` + `tools/trainer-opts-parity.mjs`）：四种策略 × 24 局 × 40 场 =
+      **97,686 次真实询问逐字符一致**（另有 `teacher` 12 局 × 20 场那轮的 10,204 次；见
+      `docs/TRAINER-CPP.md` §6.11）。
+    - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
+      构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
+      **选项文本直接来自 Java 自己的 `Decision.options`**。
+    - **覆盖看取值分布**（不是行数）：带 `riichi=` 384 行、带 `tsumo` 54 行、带 `kan=` 42 行
+      （`ankan:` 143 / `kakan:` 36）、食替禁打非空 140 行、其余 9,730 行只有打牌候选。
+    - **踩到的两个小坑**：① 自检里写 id 时把 `1z` 算成 `111..114`（正确的是 `108..111`，
+      `id = kind<<2|copy`）→ "手里没有 4 张"所以没有 ankan 选项；② 暗杠与加杠**在同一个 `kan`
+      选项里**（暗杠在前、加杠在后），断言写成 `kan=kakan:5z` 找不到 —— 这两条现在都钉在自检里了。
+    - **九种九牌在训练口径下永不亮**（M.League 的 `kyuushuAbort=false`）：自检同时断言
+      "M.League 不给 / 换《天凤》预设才给"，所以"没覆盖到"是被**验证过的**，不是漏了。
 
 
 ---

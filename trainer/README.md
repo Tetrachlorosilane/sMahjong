@@ -52,6 +52,7 @@ trainer\build\trainer.exe bench <corpus> of 20            # 同语料跑 20 遍�
 trainer\build\trainer.exe score <corpus> <out>            # 语料 → 役种/符/点数/授受（供对拍）
 trainer\build\trainer.exe settle <corpus> <out>           # 语料 → 顺位点/余棒/连庄判据/种子链（供对拍）
 trainer\build\trainer.exe action <corpus> <out>           # 语料 → 动作键/下标/回包/落位（供对拍）
+trainer\build\trainer.exe turnopts <javaCorpus> <out>     # 真实牌局的自家回合询问 → 选项文本（供对拍）
 ```
 
 ## 与 Java 对拍（**核心判据**）
@@ -68,7 +69,11 @@ node tools\trainer-rule-parity.mjs of 20000 --tenpai-only # 只量"听牌形"那
 node tools\trainer-score-parity.mjs         # M2：役种 / 符数 / 打点 / 授受（默认 20 万行）
 node tools\trainer-settle-parity.mjs        # M2：顺位点精算 / 余棒 / 连庄判据 / 种子链（默认 2 万）
 node tools\trainer-action-parity.mjs        # M2：动作键 / 下标 / 回包 / 落位（369 行，含非法键）
+node tools\trainer-opts-parity.mjs 12 teacher 20   # M2：自家回合询问内容（真实牌局，默认 4 局 × 3 策略）
 ```
+
+⚠ `trainer-opts-parity.mjs` 的**采样**参数是 `<每场小局数> <策略逗号列表> <场数>`：`teacher` 才是最
+"会打"的那一个（会立直、会杠、会副露），`first/pass/random` 主要用来压"只有打牌"的那条路。
 
 对拍用的是五个 Java 侧**只读探针**（只 import jar 的公开 API，不修改服务端）：
 
@@ -94,7 +99,7 @@ node tools\trainer-action-parity.mjs        # M2：动作键 / 下标 / 回包 /
 | --- | --- | --- |
 | **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 512/512 组逐整数一致** |
 | **M1 向听/进张/和了** | ✅ | 查表式向听（花色分组 + **位并行合并**）+ 进张/听牌/听牌形；**100 万手向听 + 21.7 万手派生评估逐字段一致**；向听 **31.5×** / 进张 **19×** / 听牌形 **44×**（纯计算口径，见 `docs/TRAINER-CPP.md` §6.1） |
-| **M2 规则与打点** | 🔄 打点内核 ✅ / 精算与种子链 ✅ / 动作空间 ✅ / 鸣牌仲裁判据 ✅ | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；③ 动作键/下标/回包/落位：**369 行逐字符一致**（§6.4）；④ 鸣牌仲裁判据（等级/压过/收工/回包认领）：**1.26 万行一致**（§6.5）；⑤ 振听记账（三种振听，用**真实 Round** 驱动）：**354 行一致**（§6.6）；⑥ 可见牌统计 + 和了形纯判断：**1.37 万行一致**（§6.8）；⑦ 配牌顺序的假阳性已修正（探针改用真实 `Round`）并重验 **512/512**（§6.7）；⑧ `Round` 状态容器 + 配牌（`menzen` 全真 / 牌山 122→69 / 庄家第 14 张）：**1.4 万行一致，含 260 行 `rinit`**（§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌 / 食替 / 立直后杠 / 吃搭子）：**320 行一致**（§6.10）；`Round` 摸打/鸣牌/流局循环 ⏳ |
+| **M2 规则与打点** | 🔄 打点内核 ✅ / 精算与种子链 ✅ / 动作空间 ✅ / 鸣牌仲裁判据 ✅ | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；③ 动作键/下标/回包/落位：**369 行逐字符一致**（§6.4）；④ 鸣牌仲裁判据（等级/压过/收工/回包认领）：**1.26 万行一致**（§6.5）；⑤ 振听记账（三种振听，用**真实 Round** 驱动）：**354 行一致**（§6.6）；⑥ 可见牌统计 + 和了形纯判断：**1.37 万行一致**（§6.8）；⑦ 配牌顺序的假阳性已修正（探针改用真实 `Round`）并重验 **512/512**（§6.7）；⑧ `Round` 状态容器 + 配牌（`menzen` 全真 / 牌山 122→69 / 庄家第 14 张）：**1.4 万行一致，含 260 行 `rinit`**（§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌 / 食替 / 立直后杠 / 吃搭子）：**320 行一致**（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）：**9.77 万次真实询问逐字符一致**（§6.11）；`Round` 摸打/鸣牌/流局循环 ⏳ |
 | M3 策略与网络 | ⏳ | teacher / first/pass/random / `NeuralPolicy` 前向；轨迹直接喂通现有 Python 管线 |
 | M4 性能与工程化 | ⏳ | 线程池、AVX2 向听表、批量前向；**同核数下决策/秒 ≥ Java 3×** |
 
@@ -119,6 +124,7 @@ trainer/
 │  ├─ visible.hpp     可见牌统计 + 和了形纯判断（观测特征的底座）
 │  ├─ roundstate.hpp  `Round` 状态容器 + 构造函数 + `setup()` 配牌（M2 打牌循环的地基）
 │  ├─ roundoptions.hpp 选项生成的第一层：可打牌 / 食替 / 立直后杠 / 吃搭子（= Java `RoundOptions`）
+│  ├─ turnoptions.hpp 自家回合的询问内容：discard→riichi→tsumo→kan→kyuushu 的闸门与顺序
 │  ├─ counts.hpp      34 维计数 + 幺九判定
 │  ├─ wall.hpp/.cpp   牌山 + 王牌（两个账分开记：开杠动 liveEnd、岭上摸牌动 rinshan）
 │  ├─ shanten.hpp/.cpp 查表向听（位并行合并）+ 参考 DFS（自检交叉验证）

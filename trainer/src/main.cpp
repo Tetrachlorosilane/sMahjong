@@ -34,6 +34,7 @@
 #include "seed.hpp"
 #include "shanten.hpp"
 #include "tiles.hpp"
+#include "turnoptions.hpp"
 #include "visible.hpp"
 #include "wall.hpp"
 #include "yaku_codes.hpp"
@@ -730,6 +731,102 @@ int selftest() {
             const auto cs = trainer::chiSets(cross, 9);
             check("吃搭子：不吃到相邻花色（8m9m 在手里也算不进 1p 的搭子）",
                   cs.size() == 1 && cs[0][0] == "2p" && cs[0][1] == "3p");
+        }
+
+        // ---- 自家回合的询问内容（`turnOptions`）
+        {
+            // 牌 id 速查：id = (kind<<2)|copy；赤五 = kind∈{4,13,22} 且 copy 0（下面一律用 copy!=0）
+            auto ask = [](std::vector<int> ids, int drawnKind, int drawnId) {
+                trainer::TurnAsk a;
+                a.seat = 0;
+                a.roundWind = 0;
+                a.kyoku = 1;
+                a.dealer = 0;
+                a.scores = {25000, 25000, 25000, 25000};
+                a.tilesLeft = 69;
+                a.deadWallLeft = 4;
+                a.playerDraws = 3;
+                a.menzen = true;
+                a.handIds = std::move(ids);
+                for (int id : a.handIds) {
+                    a.hand[static_cast<size_t>(trainer::kindOf(id))]++;
+                }
+                a.drawnKind = drawnKind;
+                a.drawnId = drawnId;
+                return a;
+            };
+            auto has = [](const std::string &s, const std::string &sub) {
+                return s.find(sub) != std::string::npos;
+            };
+
+            // ① 自摸闸门：123m456m789m 11p 999s 摸 9s → 一気通貫（门前 2 番）→ 给 tsumo
+            {
+                trainer::TurnAsk a = ask({3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 39, 107, 107, 107},
+                                         26, 107);
+                const std::string txt = trainer::turnOptionsText(a);
+                check("自家回合：门前一気通貫自摸 → 选项里有 tsumo", has(txt, ";tsumo") || has(txt, "tsumo"));
+                check("自家回合：选项顺序 = discard 在最前", txt.rfind("discard=", 0) == 0);
+            }
+            // ② 无役自摸（鸣了一副 123m，剩 456p789p11s999s）→ 不给 tsumo
+            {
+                trainer::TurnAsk a = ask({51, 55, 59, 63, 67, 71, 75, 75, 107, 107, 107}, 26, 107);
+                trainer::Meld chi;
+                chi.kind = trainer::Meld::Kind::CHI;
+                chi.tiles = {3, 7, 11};
+                chi.tileCount = 3;
+                chi.from = 3;
+                chi.calledId = 3;
+                a.melds.push_back(chi);
+                a.menzen = false;
+                const std::string txt = trainer::turnOptionsText(a);
+                check("自家回合：副露无役自摸 → 选项里没有 tsumo", !has(txt, "tsumo"));
+            }
+            // ③ 立直门槛：123m456m789m 11p 99s + 摸 5z → 可以宣（打 5z 后听 9s）
+            {
+                trainer::TurnAsk a = ask({3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 39, 107, 107, 127},
+                                         31, 127);
+                const std::string txt = trainer::turnOptionsText(a);
+                check("自家回合：打 5z 后听 9s → 选项里有 riichi=5z", has(txt, "riichi=5z"));
+                // ⚠ M.League：摸到海底后**不许**立直（`riichiNoHaitei`）
+                a.atLastLive = true;
+                check("自家回合：海底那一巡不给 riichi（M.League 的 riichiNoHaitei）",
+                      !has(trainer::turnOptionsText(a), "riichi="));
+            }
+            // ④ 杠：手里 4 张 1z（非立直）→ ankan；PON 了 5z 且手里还有 5z → kakan
+            {
+                trainer::TurnAsk a = ask({108, 109, 110, 111, 3, 7, 11, 15, 19, 23, 27, 31, 35, 39},
+                                         9, 39);
+                const std::string txt = trainer::turnOptionsText(a);
+                check("自家回合：暗杠候选（手里真有 4 张）→ kan=ankan:1z", has(txt, "kan=ankan:1z"));
+                a.melds.clear();
+                trainer::Meld pon;
+                pon.kind = trainer::Meld::Kind::PON;
+                pon.tiles = {125, 126, 127};
+                pon.tileCount = 3;
+                pon.from = 2;
+                pon.calledId = 127;
+                a.melds.push_back(pon);
+                a.handIds.push_back(124);                       // 手里还有一张 5z
+                a.hand[31]++;
+                const std::string t2 = trainer::turnOptionsText(a);
+                check("自家回合：暗杠在前、加杠在后（同一个 kan 选项里）→ ankan:1z,kakan:5z",
+                      has(t2, "ankan:1z,kakan:5z"));
+                // ⚠ 海底那一巡不给杠（`!haitei`）
+                a.atLastLive = true;
+                check("自家回合：海底那一巡不给 kan", !has(trainer::turnOptionsText(a), "kan="));
+            }
+            // ⑤ 九种九牌：M.League 关着（`kyuushuAbort=false`）→ 永远不给；《天凤》开着才给
+            {
+                trainer::TurnAsk a = ask({3, 35, 39, 71, 75, 107, 111, 115, 119, 123, 127, 131, 135,
+                                          0},
+                                         0, 0);
+                a.playerDraws = 1;
+                check("自家回合：九种九牌在 M.League 下不给（kyuushuAbort=false）",
+                      !has(trainer::turnOptionsText(a), "kyuushu"));
+                a.rules.applyPreset("tenhou");
+                check("自家回合：换成《天凤》预设（kyuushuAbort=true）才给 kyuushu",
+                      has(trainer::turnOptionsText(a), "kyuushu"));
+            }
         }
     }
 
@@ -1844,17 +1941,182 @@ int cmdRules(int argc, char** argv, bool bench) {
 
 }  // namespace
 
+// ---------------------------------------------------------------- 自家回合询问（`turnopts`）
+//
+// 语料由 `tools/RoundProbe.java` 产出（**真实牌局**，不是构造局面）：每次自家回合询问一行
+//   <state> @ <javaOptions>
+// 本命令只读 `@` 左边那半（局面），用 `turnOptionsText` 重算一遍选项，与 Java 那半逐字符比
+// （比较在 `tools/trainer-opts-parity.mjs` 里做）。
+std::vector<std::string> splitWs(const std::string &s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) {
+            i++;
+        }
+        if (i >= s.size()) {
+            break;
+        }
+        const size_t start = i;
+        while (i < s.size() && s[i] != ' ' && s[i] != '\t' && s[i] != '\r') {
+            i++;
+        }
+        out.push_back(s.substr(start, i - start));
+    }
+    return out;
+}
+
+/** `chi:2:52:51,52,53;pon:1:8:8,8,8` → 副露列表（`-` = 无）。 */
+bool parseMelds(const std::string &spec, std::vector<trainer::Meld> &out) {
+    if (spec == "-" || spec.empty()) {
+        return true;
+    }
+    for (const std::string &one : splitOn(spec, ';')) {
+        const std::vector<std::string> parts = splitOn(one, ':');
+        if (parts.size() != 4) {
+            return false;
+        }
+        trainer::Meld m;
+        const std::string &w = parts[0];
+        if (w == "chi") {
+            m.kind = trainer::Meld::Kind::CHI;
+        } else if (w == "pon") {
+            m.kind = trainer::Meld::Kind::PON;
+        } else if (w == "ankan") {
+            m.kind = trainer::Meld::Kind::ANKAN;
+        } else if (w == "kakan") {
+            m.kind = trainer::Meld::Kind::KAKAN;
+        } else if (w == "daiminkan") {
+            m.kind = trainer::Meld::Kind::DAIMINKAN;
+        } else {
+            return false;
+        }
+        m.from = std::atoi(parts[1].c_str());
+        m.calledId = std::atoi(parts[2].c_str());
+        const std::vector<int> tiles = parseIntList(parts[3]);
+        m.tileCount = static_cast<int>(tiles.size());
+        for (size_t i = 0; i < tiles.size() && i < 4; i++) {
+            m.tiles[i] = tiles[i];
+        }
+        out.push_back(m);
+    }
+    return true;
+}
+
+int cmdTurnOpts(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "用法：trainer turnopts <RoundProbe 语料> <out>\n");
+        return 2;
+    }
+    std::FILE *in = std::fopen(argv[1], "rb");
+    if (!in) {
+        std::fprintf(stderr, "读不到语料：%s\n", argv[1]);
+        return 2;
+    }
+    std::FILE *out = std::fopen(argv[2], "wb");
+    if (!out) {
+        std::fprintf(stderr, "写不了输出：%s\n", argv[2]);
+        std::fclose(in);
+        return 2;
+    }
+    char line[16384];
+    long rows = 0;
+    long long checksum = 0;
+    while (std::fgets(line, sizeof line, in)) {
+        std::string text = line;
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        const size_t at = text.find(" @ ");
+        if (at == std::string::npos) {
+            std::fprintf(stderr, "语料行没有 ` @ `：%s\n", text.c_str());
+            std::fclose(in);
+            std::fclose(out);
+            return 2;
+        }
+        const std::vector<std::string> f = splitWs(text.substr(0, at));
+        // t seat drawn rinshan atLastLive handIds melds menzen riichi dbl ippatsu scores
+        //   roundWind kyoku honba dealer tilesLeft deadWallLeft kanCount anyCall playerDraws
+        //   doraKinds uraKinds forbidden preset   → 25 个 token
+        if (f.size() < 25 || f[0] != "t") {
+            std::fprintf(stderr, "认不出的语料行（%zu 个 token）：%s\n", f.size(),
+                         text.substr(0, 40).c_str());
+            std::fclose(in);
+            std::fclose(out);
+            return 2;
+        }
+        trainer::TurnAsk a;
+        a.seat = std::atoi(f[1].c_str());
+        if (f[2] != "-") {
+            const int k = trainer::parseKind(f[2]);
+            const bool red = !f[2].empty() && f[2][0] == '0';
+            a.drawnKind = k;
+            a.drawnId = k < 0 ? -1 : trainer::idOf(k, red ? 0 : 3);
+        }
+        a.rinshan = std::atoi(f[3].c_str()) != 0;
+        a.atLastLive = std::atoi(f[4].c_str()) != 0;
+        a.handIds = parseIntList(f[5]);
+        for (int id : a.handIds) {
+            a.hand[static_cast<size_t>(trainer::kindOf(id))]++;
+        }
+        if (!parseMelds(f[6], a.melds)) {
+            std::fprintf(stderr, "认不出的副露：%s\n", f[6].c_str());
+            std::fclose(in);
+            std::fclose(out);
+            return 2;
+        }
+        a.menzen = std::atoi(f[7].c_str()) != 0;
+        a.riichi = std::atoi(f[8].c_str()) != 0;
+        a.doubleRiichi = std::atoi(f[9].c_str()) != 0;
+        a.ippatsu = std::atoi(f[10].c_str()) != 0;
+        {
+            const std::vector<int> sc = parseIntList(f[11]);
+            for (size_t i = 0; i < sc.size() && i < 4; i++) {
+                a.scores[i] = sc[i];
+            }
+        }
+        a.roundWind = std::atoi(f[12].c_str());
+        a.kyoku = std::atoi(f[13].c_str());
+        a.honba = std::atoi(f[14].c_str());
+        a.dealer = std::atoi(f[15].c_str());
+        a.tilesLeft = std::atoi(f[16].c_str());
+        a.deadWallLeft = std::atoi(f[17].c_str());
+        a.kanCount = std::atoi(f[18].c_str());
+        a.anyCall = std::atoi(f[19].c_str()) != 0;
+        a.playerDraws = std::atoi(f[20].c_str());
+        a.doraKinds = parseIntList(f[21]);
+        a.uraKinds = parseIntList(f[22]);
+        a.forbiddenKinds = parseIntList(f[23]);
+        a.rules = rulesOfPreset(f[24]);
+
+        const std::string res = trainer::turnOptionsText(a);
+        std::fprintf(out, "%s\n", res.c_str());
+        rows++;
+        for (char ch : res) {
+            checksum = checksum * 131 + static_cast<unsigned char>(ch);
+        }
+    }
+    std::fclose(in);
+    std::fclose(out);
+    std::fprintf(stderr, "[trainer] turnopts %ld 行 校验和 %lld\n", rows, checksum);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "用法：trainer <wall|rng|rules|bench|score|settle|--selftest> …\n"
+                     "用法：trainer <wall|rng|rules|bench|score|settle|action|turnopts|--selftest> …\n"
                      "  wall  <seed> [aka] [dealer]      牌山/配牌/指示牌/岭上（JSON）\n"
                      "  rng   <seed> <n>                 java.util.Random.nextInt(136) 前 n 个\n"
                      "  rules <corpus> <mode> <out>      语料 → 逐行结果（mode = shanten|of|discard）\n"
                      "  bench <corpus> <mode> <reps>     同语料计时（性能基准）\n"
                      "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n"
                      "  settle <corpus> <out>            语料 → 顺位点/余棒/连庄判据（与 SettleProbe.java 对拍）\n"
-                     "  action <corpus> <out>            语料 → 动作键/下标/回包（与 ActionProbe.java 对拍）\n");
+                     "  action <corpus> <out>            语料 → 动作键/下标/回包（与 ActionProbe.java 对拍）\n"
+                     "  turnopts <javaCorpus> <out>       真实牌局的自家回合询问 → 选项文本（与 RoundProbe.java 对拍）\n");
         return 2;
     }
     const std::string cmd = argv[1];
@@ -1872,6 +2134,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "settle") {
         return cmdSettle(argc - 1, argv + 1);
+    }
+    if (cmd == "turnopts") {
+        return cmdTurnOpts(argc - 1, argv + 1);
     }
     if (cmd == "rules") {
         return cmdRules(argc - 1, argv + 1, false);

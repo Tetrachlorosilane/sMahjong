@@ -139,7 +139,7 @@
 ### 3.1 工具链：脚本自己找，不写死路径
 
 构建脚本按「显式参数 → 环境变量 → PATH → 常见安装位置 → 仓库内缓存 → **自动下载**」解析依赖，
-所以**不必预装 Qt**（见 §3.3）。**本机实测可用的位置清单见 `NOTES.md` §3.1**（仅供参考，不是硬编码）。
+所以**不必预装 Qt**（见 §3.3）。**本机实测可用的位置清单见 `NOTES.md` §3.1**（非硬编码）。
 
 > **系统 PATH 里没有 g++**，构建脚本自己拼 PATH（`client/build.ps1` / `server/build.ps1` 已处理）。
 
@@ -170,7 +170,7 @@ client\dist\mahjong-client.exe         # 可直接双击，无需装 Qt / 配 PA
 本项目用「构建后把 Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 已自动化。
 
 **Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（qtbase+qtsvg ≈ 22 MB → 仓库根 `.qt/`，
-已 gitignore；MinGW/CMake/Ninja 缺失时同样取），实现在 `tools/qt-provision.ps1`。
+已 gitignore；MinGW/CMake/Ninja 缺失时同样取）。
 开关 `-Provision always|never` / `-QtDir` / `-Plan`，细节见 `client/README.md`。
 
 ### `build\` 与 `dist\` 的关系（两者**不应该**整目录相同）
@@ -266,7 +266,7 @@ node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌�
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
 node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受
 node tools\trainer-settle-parity.mjs      # 同上：精算/连庄/种子链
-node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落位
+node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落位；trainer-opts-parity.mjs = 自家回合询问内容
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
