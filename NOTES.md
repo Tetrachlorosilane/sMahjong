@@ -1118,6 +1118,12 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       选项里**（暗杠在前、加杠在后），断言写成 `kan=kakan:5z` 找不到 —— 这两条现在都钉在自检里了。
     - **九种九牌在训练口径下永不亮**（M.League 的 `kyuushuAbort=false`）：自检同时断言
       "M.League 不给 / 换《天凤》预设才给"，所以"没覆盖到"是被**验证过的**，不是漏了。
+    - **推送退路（broker 502 时）**：`github_git_push` 走 broker→github.com，常被 502 挡住；REST 走
+      api.github.com 是另一条路 —— blobs（**由 Node 读文件 + `JSON.stringify`**，PowerShell 的文本往返
+      会改字节，实测 8/8 sha 不符）→ tree（`base_tree` = 远端 head 的 tree）→ commit（`parents` =
+      远端 head 的 sha）→ PATCH ref。请求体生成脚本在 `trainer/build/rest/prep.mjs`（不进仓库）。
+      ⚠ **GitHub 会把提交日期规范化成 UTC**，所以远端 commit 的 **sha 与本地不同**（内容相同）：
+      下一轮照旧以**远端 head** 为 parent 走 REST，别指望 `git push` 能快进。
 
 
 ---
