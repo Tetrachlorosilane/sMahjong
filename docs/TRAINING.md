@@ -988,10 +988,12 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 > **工作流里省掉编后自检**：`pwsh -File trainer\build.ps1 -NoSelfTest` 或 `$env:TRAINER_NO_SELFTEST='1'`
 > （该开关进构建指纹，所以带不带它会触发一次重编 —— 这是刻意的，一眼看出 exe 是哪一代）。
 >
-> **能力口径（⚠ 缺省仍是 `java`）**：C++ 侧目前只支持 `--policy pass|first|random`；
-> `teacher` / `net:<路径>` / `--teacher-label` / `--sample` **未实现** → `producer.py` 直接**显式报错**，
-> **不悄悄降级**成另一种数据集。所以完整的采集口径目前只有 Java 能出，C++ 适用于"基线臂"与
-> "派生特征"这两条已经逐字节验过的路径（要跑 `teacher` 标签/网络策略就把 `MAHJONG_PRODUCER` 切回 `java`）。
+> **能力口径（⚠ 缺省仍是 `java`）**：C++ 侧现在覆盖 `pass` / `first` / `random` /
+> **`net:<权重文件>[@0][#T]`** / **`teacher`** 五种策略与 `--features`、`--sample`，都已逐字节验过
+> （`docs/TRAINER-CPP.md` §6.16/§6.17）—— 也就是说 **P5 的联赛世代（2 席自己 + 2 席对手、老师常驻一席）
+> 可以整条跑在 C++ 生产者上**（实测：2000 场采集 40.3 s vs Java 的 730–833 s，§6.18）。
+> 还差两项：`net:…@<α>`（P5b 混合臂）与 `--teacher-label`（DAgger 标注）—— `producer.py` 对它们
+> **显式报错**，**不悄悄降级**成另一种数据集。缺省仍是 `java`（发布版权威实现）。
 >
 > **端到端验收链**（`MAHJONG_PRODUCER=cpp` 下整条走通，`trainer-takeover-check.mjs` PASS）：
 > ```
