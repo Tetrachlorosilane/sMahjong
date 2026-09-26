@@ -1,0 +1,231 @@
+// 一张牌桌 = 一整场（半庄）的推进器 —— 与 Java `mahjong.game.Table` 的
+// `playGame()` / `decideBot()` 同口径；只保留训练端用得上的那部分。
+//
+// 与 Java 的差异（都是**训练端不存在的东西**，不是行为差异）：
+//   · 没有网络/座位/房间/回放/投票 —— 四个座位恒为机器人（`addBot`），决策一律走
+//     `decideBot`（= 唯一的决策漏斗，AGENTS §6.5）；
+//   · 没有报文，只有一个 `debugEventTap`（轨迹记录器只认 `round_end`，与 Java 的
+//     `TraceRecorder.onEvent` 认的是同一件事）；
+//   · 局间没有 `sleepMs` / `awaitRoundConfirm`（Java 那两步对轨迹的**唯一**影响是
+//     `round_wait` 事件，而记录器不认它；四个机器人本来就"视为立即确认"）。
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <string>
+
+#include "observation.hpp"
+#include "policies.hpp"
+#include "round.hpp"
+#include "roundscoring.hpp"
+#include "rules.hpp"
+#include "seed.hpp"
+#include "yaku_codes.hpp"
+
+namespace trainer {
+
+/** 座位（Java `Table.Seat` 的训练端子集）。 */
+struct Seat {
+    int index = 0;
+    int score = 25000;
+    bool bot = true;
+    int timeBankMs = 20000;
+};
+
+/** `round_end` 报文里轨迹需要的那些字段（Java `Table.playGame` 广播的那一条）。 */
+struct RoundEndEvent {
+    int roundWind = 0;                 // `round.bakaze` 的数字形式（0=E）
+    int kyoku = 1;
+    int honba = 0;
+    int sticks = 0;                    // `round.riichi_sticks` = `res.sticksLeft`
+    std::array<int, 4> scores{};       // 本局结算后的四家点数
+    bool agari = false;
+    bool abortive = false;
+    std::string reason;                // 已是码（`YakuCodes.reasonOf(res.abortReason)`）
+    bool renchan = false;
+    const RoundResult *result = nullptr;   // = `Table.lastResult`
+};
+
+class Table {
+public:
+    explicit Table(const Rules &r) : rules(r) {
+        for (int i = 0; i < 4; i++) {
+            seats[static_cast<size_t>(i)].index = i;
+            seats[static_cast<size_t>(i)].score = r.startScore;
+            seats[static_cast<size_t>(i)].bot = true;
+            seats[static_cast<size_t>(i)].timeBankMs = r.thinkingBankMs;
+        }
+    }
+
+    Rules rules;
+    std::array<Seat, 4> seats;
+    /** 每场种子基准（`SelfPlay.oneGame` 写死它，`--seed`）。 */
+    int64_t seedBase = 0;
+    /** 自对弈恒为真（Java `SelfPlay.oneGame`）：每局种子走 `mixSeed(seedBase + 局序号)`。 */
+    bool debugDeterministicSeed = true;
+    /** `--hands n`（0 = 打完整场）：跑满 n 小局就收尾，**仍然走终局余棒分配**。 */
+    int debugMaxHands = 0;
+    /** 按座位注入的策略（每场一份实例，见 `PolicyFactory`）。 */
+    std::array<Policy, 4> policy;
+    /** 唯一的决策漏斗（Java `Table.decideBot`）。 */
+    std::function<void(const Observation &, const std::string &kind, const Action &cmd,
+                       const std::string &roundKey)>
+        debugChoiceTap;
+    /** 出站报文旁路（训练端只有 `round_end`）。 */
+    std::function<void(const RoundEndEvent &)> debugEventTap;
+    Round *currentRound = nullptr;
+    /** 最近一局的结算结果（轨迹记录器在 `round_end` 的钩子里读它）。 */
+    RoundResult lastResult;
+    /** 策略层违规（Java 会退回内置机器人，训练端没有 Bot）→ 上层据此报错退出。 */
+    std::string fatal;
+
+    void addBot(int at) {
+        if (at < 0 || at >= 4) {
+            return;
+        }
+        seats[static_cast<size_t>(at)].bot = true;
+        seats[static_cast<size_t>(at)].score = rules.startScore;
+    }
+
+    Seat &seat(int i) { return seats[static_cast<size_t>(i)]; }
+    const Seat &seat(int i) const { return seats[static_cast<size_t>(i)]; }
+
+    /** 唯一的决策漏斗：策略 → （异常/null → 内置机器人）；训练端没有 Bot，违规即报错。 */
+    Cmd decideBot(int seatIdx, const Observation &obs, const std::string &kind,
+                  const std::string &roundKey) {
+        Decision d;
+        d.obs = &obs;
+        d.kind = kind;
+        Cmd cmd;
+        if (policy[static_cast<size_t>(seatIdx)]) {
+            cmd = policy[static_cast<size_t>(seatIdx)](d);
+        }
+        if (!cmd.valid) {
+            fatal = "策略没有返回回包（座位 " + std::to_string(seatIdx)
+                    + "）—— 训练端没有内置 Bot 兜底（见 policies.hpp 顶部注释）";
+        } else if (obs.indexOfKey(cmd.action.key()) < 0 && cmd.action.type != kActPon
+                   && cmd.action.type != kActKan) {
+            // Java `Policies.fromAction` 在"回包不在本次 legal 里"时会退回**内置机器人**；
+            // 训练端没有 Bot，所以这里显式失败（绝不悄悄换一个动作 —— 那等于伪造标签）。
+            fatal = "策略回包不在本次 legal 里（座位 " + std::to_string(seatIdx) + "，键 "
+                    + cmd.action.key() + "）—— 训练端没有内置 Bot 兜底";
+        }
+        if (debugChoiceTap) {
+            debugChoiceTap(obs, kind, cmd.action, roundKey);
+        }
+        return cmd;
+    }
+
+    /** 跑完一整场（Java `Table.playGame` 的训练端等价物）。 */
+    void playGame() {
+        std::array<int, 4> scores{};
+        for (int i = 0; i < 4; i++) {
+            scores[static_cast<size_t>(i)] = rules.startScore;
+            seats[static_cast<size_t>(i)].score = rules.startScore;
+            seats[static_cast<size_t>(i)].timeBankMs = rules.thinkingBankMs;
+        }
+        int roundWind = 0;
+        int kyoku = 1;
+        int honba = 0;
+        int dealer = 0;
+        int sticks = 0;
+        int roundIndex = 0;                // `Table.roundSeedIndex`
+        bool gameOver = false;
+        int handsPlayed = 0;
+        while (!gameOver && (debugMaxHands <= 0 || handsPlayed < debugMaxHands)) {
+            handsPlayed++;
+            // 额外思考时长**每小局重置**（训练端不用它，但账要与 Java 一致）
+            for (int i = 0; i < 4; i++) {
+                seats[static_cast<size_t>(i)].timeBankMs = rules.thinkingBankMs;
+            }
+            // `Table.nextRoundSeed()` 的**确定性岔路**（debugDeterministicSeed = true）：
+            // 第 i 局的种子 = `mixSeed(seedBase + i)`，i 从 0 起（生产路径是时刻种子，训练端不用）
+            const int64_t seed = roundSeedAt(seedBase, roundIndex++);
+            Round r(this, roundWind, kyoku, honba, dealer, scores, sticks, seed);
+            const RoundResult res = r.play();
+            currentRound = nullptr;
+            scores = r.scores;
+            sticks = res.sticksLeft;
+            for (int i = 0; i < 4; i++) {
+                seats[static_cast<size_t>(i)].score = scores[static_cast<size_t>(i)];
+            }
+            lastResult = res;                              // 必须在 `round_end` **之前**赋值
+            if (debugEventTap) {
+                RoundEndEvent ev;
+                ev.roundWind = roundWind;
+                ev.kyoku = kyoku;
+                ev.honba = honba;
+                ev.sticks = sticks;
+                ev.scores = scores;
+                ev.agari = res.agari;
+                ev.abortive = res.abortive;
+                ev.reason = reasonCodeOf(res.abortReason);  // ⚠ 认不出的（含 ""）→ 空串
+                ev.renchan = res.dealerRenchan;
+                ev.result = &lastResult;
+                debugEventTap(ev);
+            }
+            // 局间：Java 会 `sleepMs(roundDelayMs)` + `awaitRoundConfirm()`；两者都不产生
+            // 轨迹记录器认得的事件（四个机器人视为立即确认），所以训练端直接跳过。
+            if (rules.tobi) {                              // 击飞
+                for (int v : scores) {
+                    if (v < 0) {
+                        gameOver = true;
+                    }
+                }
+            }
+            if (!gameOver) {
+                honba = nextHonba(honba, res.dealerRenchan, res.agari, res.nagashi);
+                if (res.dealerRenchan) {
+                    // 和了止 / 听牌止（三条件：`agariyame` 开、庄家和了或庄家听牌、庄家 1 位且达门槛）
+                    if (kyoku == 4 && roundWind == lastWindOf(rules)
+                            && stopAtAllLast(dealer, res.agari, res.nagashi, res.tenpai, scores,
+                                             rules)) {
+                        gameOver = true;
+                    }
+                } else {
+                    const int nd = (dealer + 1) % 4;
+                    int nw = roundWind;
+                    int nk;
+                    if (nd == 0) {
+                        nw = roundWind + 1;
+                        nk = 1;
+                    } else {
+                        nk = nd + 1;
+                    }
+                    if (nw > lastWindOf(rules)) {
+                        int top = -1;
+                        for (int v : scores) {
+                            top = v > top ? v : top;
+                        }
+                        // 延长战（南入 / 西入）：门槛是 `requiredPoints`，**不是** `returnScore`
+                        if (keepPlayingWest(rules, top, nw, lastWindOf(rules))) {
+                            roundWind = nw;
+                            kyoku = nk;
+                            dealer = nd;
+                        } else {
+                            gameOver = true;
+                        }
+                    } else {
+                        roundWind = nw;
+                        kyoku = nk;
+                        dealer = nd;
+                    }
+                }
+            }
+        }
+        // 终局时供托中的立直棒按 M.League 原文分给 1 位（只有"最后一局是流局"才走这里）
+        if (sticks > 0) {
+            const std::array<int, 4> add = endGameSticks(scores, sticks);
+            for (int i = 0; i < 4; i++) {
+                if (add[static_cast<size_t>(i)] != 0) {
+                    scores[static_cast<size_t>(i)] += add[static_cast<size_t>(i)];
+                    seats[static_cast<size_t>(i)].score = scores[static_cast<size_t>(i)];
+                }
+            }
+        }
+        // sendGameEnd / saveReplay：训练端不需要（记录器只认 `round_end`）
+    }
+};
+
+}  // namespace trainer

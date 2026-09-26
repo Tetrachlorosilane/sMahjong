@@ -253,8 +253,17 @@ function buildCorpus(want) {
     for (let i = 0; i < Math.floor(want / 8); i++) {
         const mc = Math.floor(r() * 3);
         const size = 13 - 3 * mc;
+        // ⚠ 同一牌种**最多 4 张**：`Math.floor(r()*34)` 直接 push 会造出"5 张 3s"这种不可能的手牌，
+        //   而 C++ 的查表向听下标只覆盖 0..4 → 越界崩（实测 0xC0000005；Java 的 DFS 不崩）。
+        //   真实牌局不会出现，所以这里**按 4 张封顶**，让语料始终是合法输入。
         const kinds = [];
-        for (let k = 0; k < size; k++) kinds.push(Math.floor(r() * 34));
+        const seen = new Array(34).fill(0);
+        for (let k = 0; k < size; k++) {
+            let kk = Math.floor(r() * 34);
+            for (let tries = 0; tries < 34 && seen[kk] >= 4; tries++) kk = (kk + 1) % 34;
+            seen[kk]++;
+            kinds.push(kk);
+        }
         const size2 = 13 - 3 * mc;
         const c = new Array(34).fill(0);
         for (const k of kinds) c[k]++;

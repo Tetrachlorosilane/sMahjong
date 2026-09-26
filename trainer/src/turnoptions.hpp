@@ -15,6 +15,7 @@
 #include "evaluator.hpp"
 #include "handeval.hpp"
 #include "meld.hpp"
+#include "options.hpp"
 #include "roundoptions.hpp"
 #include "rules.hpp"
 #include "shanten.hpp"
@@ -202,36 +203,24 @@ inline bool canWinTsumo(const TurnAsk &a) {
 }
 
 /**
- * `Round.turnOptions` 的规范文本（与 `tools/RoundProbe.java` 逐字符一致）：
- *   `discard=…;riichi=…;tsumo;kan=ankan:5m,kakan:7s;kyuushu`（没有的段直接不出现）
+ * `Round.turnOptions` 的**结构化**结果 —— 动作空间（`legal` / `chosen_index`）与选项文本
+ * 都从它派生（单一来源，见 `options.hpp`）。顺序 `discard → riichi → tsumo → kan → kyuushu`
+ * **是协议的一部分**：`Action.enumerate` 的展开序就是 `legal` 的下标。
  */
-inline std::string turnOptionsText(const TurnAsk &a) {
-    std::string out;
-    auto add = [&out](const std::string &seg) {
-        if (seg.empty()) {
-            return;
-        }
-        if (!out.empty()) {
-            out += ';';
-        }
-        out += seg;
-    };
+inline std::vector<Option> turnOptionsOf(const TurnAsk &a) {
+    std::vector<Option> opts;
 
     // ① 打牌（永远存在且第一）：已立直 → 只剩摸切那一张；否则手牌去重 − 食替禁打
     {
-        std::string seg = "discard=";
-        const std::vector<std::string> v
-            = discardChoices(a.handIds, a.riichi, a.drawnId, a.forbiddenKinds);
-        for (size_t i = 0; i < v.size(); i++) {
-            seg += (i ? "," : "");
-            seg += v[i];
-        }
-        add(seg);
+        Option o;
+        o.type = kActDiscard;
+        o.tiles = discardChoices(a.handIds, a.riichi, a.drawnId, a.forbiddenKinds);
+        opts.push_back(o);
     }
     // ② 立直（未立直时按手牌序、按牌码去重）
-    {
-        std::string seg = "riichi=";
-        bool any = false;
+    if (!a.riichi) {
+        Option o;
+        o.type = kActRiichi;
         std::vector<std::string> seen;
         for (int id : a.handIds) {
             if (!canRiichi(a, id)) {
@@ -249,31 +238,27 @@ inline std::string turnOptionsText(const TurnAsk &a) {
                 continue;
             }
             seen.push_back(code);
-            if (any) {
-                seg += ",";
-            }
-            seg += code;
-            any = true;
+            o.tiles.push_back(code);
         }
-        add(any ? seg : "");
+        if (!o.tiles.empty()) {
+            opts.push_back(o);
+        }
     }
     // ③ 自摸
     if (canWinTsumo(a)) {
-        add("tsumo");
+        Option o;
+        o.type = kActTsumo;
+        opts.push_back(o);
     }
     // ④ 杠（暗杠按牌种升序在前，加杠按副露顺序在后；同一个选项里）
     if (canKan(a) && !a.atLastLive) {
-        std::string seg = "kan=";
-        bool any = false;
+        Option o;
+        o.type = kActKan;
         for (int k = 0; k < kKindCount; k++) {
             if (a.hand[static_cast<size_t>(k)] != 4 || !kanAllowedByRiichi(a, k)) {
                 continue;
             }
-            if (any) {
-                seg += ",";
-            }
-            seg += "ankan:" + kindToStr(k, false);
-            any = true;
+            o.kans.push_back(KanEntry{"ankan", kindToStr(k, false), {}, false});
         }
         for (const Meld &m : a.melds) {
             if (m.kind != Meld::Kind::PON) {
@@ -283,19 +268,25 @@ inline std::string turnOptionsText(const TurnAsk &a) {
             if (a.hand[static_cast<size_t>(k)] <= 0) {
                 continue;
             }
-            if (any) {
-                seg += ",";
-            }
-            seg += "kakan:" + kindToStr(k, false);
-            any = true;
+            o.kans.push_back(KanEntry{"kakan", kindToStr(k, false), {}, false});
         }
-        add(any ? seg : "");
+        if (!o.kans.empty()) {
+            opts.push_back(o);
+        }
     }
     // ⑤ 九种九牌
     if (canKyuushu(a)) {
-        add("kyuushu");
+        Option o;
+        o.type = kActKyuushu;
+        opts.push_back(o);
     }
-    return out;
+    return opts;
 }
+
+/**
+ * `Round.turnOptions` 的规范文本（与 `tools/RoundProbe.java` 逐字符一致）：
+ *   `discard=…;riichi=…;tsumo;kan=ankan:5m,kakan:7s;kyuushu`（没有的段直接不出现）
+ */
+inline std::string turnOptionsText(const TurnAsk &a) { return optionsToText(turnOptionsOf(a)); }
 
 }  // namespace trainer

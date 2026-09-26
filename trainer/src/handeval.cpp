@@ -167,6 +167,15 @@ int advanceTiles(const std::array<uint8_t, kKindCount> &adv, const Counts &own,
 
 std::vector<int> waits(const Counts &counts13, int meldCount) {
     std::vector<int> out;
+    // ⚠ 非法输入防护：真实牌局里同一牌种最多 4 张，但**语料可以手写**（`trainer settle` 的
+    //   `furiten` 行就撞到过同种 5 张）。查表向听的下标只覆盖 0..4，多一张就**越界崩**
+    //   （实测 `0xC0000005`）。Java 的 DFS 对这份输入不崩，但那是"两个实现都接受非法输入"的
+    //   另一回事 —— 这里只保证 **C++ 侧不崩**：返回空集，于是对拍会**响亮地失败**而不是挂掉。
+    for (int k = 0; k < kKindCount; k++) {
+        if (counts13[static_cast<size_t>(k)] > 4) {
+            return out;
+        }
+    }
     Counts probe = counts13;
     for (int k = 0; k < kKindCount; k++) {
         if (probe[static_cast<size_t>(k)] >= 4) {

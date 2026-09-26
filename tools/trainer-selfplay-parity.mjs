@@ -2,7 +2,11 @@
 /**
  * **训练端 C++ 自对弈 ↔ Java `--selfplay` 逐字节对拍**（把 C++ 接进训练工作流的硬判据）。
  *
- *   node tools/trainer-selfplay-parity.mjs [场数] [每场小局数] [策略] [种子]
+ *   node tools/trainer-selfplay-parity.mjs [场数] [每场小局数] [策略] [种子] [额外开关…]
+ *
+ * 第 5 个及以后的参数**原样透传**给两侧（`--rotate` / `--sample k` / `--no-claims` /
+ * `--preset xxx`）—— 前四个位置参数的行为与加这个透传之前**完全一致**。
+ * ⚠ 别透传 `--out`（脚本自己管输出目录）。
  *
  * 判据（与 `docs/TRAINER-CPP.md` §2 的契约一致）：
  *   · 同一 `(seedBase, 策略串, 小局数)` ⇒ `g<g>.jsonl` **逐字节相同**（含 CRLF 与键序）；
@@ -31,6 +35,12 @@ const GAMES = Number(argv[0] ?? 1);
 const HANDS = Number(argv[1] ?? 1);
 const POLICY = argv[2] ?? 'pass';
 const SEED = argv[3] ?? '20260101';
+/** 第 5 个及以后的参数：原样透传给两侧（`--rotate` / `--sample` / `--no-claims` / `--preset`）。 */
+const EXTRA = argv.slice(4);
+if (EXTRA.includes('--out')) {
+    console.error('[selfplay-parity] 别透传 --out（脚本自己管输出目录）');
+    process.exit(2);
+}
 
 if (!existsSync(JAR)) {
     console.error(`[selfplay-parity] 找不到 ${JAR} —— 先 pwsh -File server\\build.ps1`);
@@ -53,7 +63,8 @@ function runToFile(cmd, cmdArgs, outFile) {
 
 const dirJava = join(BUILD, 'sp-java');
 const dirCpp = join(BUILD, 'sp-cpp');
-const common = ['--workers', '1', '--policy', POLICY, '--seed', SEED, '--hands', String(HANDS)];
+const common = ['--workers', '1', '--policy', POLICY, '--seed', SEED, '--hands', String(HANDS),
+    ...EXTRA];
 
 runToFile('java', ['-jar', JAR, '--selfplay', String(GAMES), ...common, '--out', dirJava],
     join(BUILD, 'sp-java.log'));
@@ -122,7 +133,9 @@ if (existsSync(sj) && existsSync(sc)) {
 }
 
 if (fails) {
-    console.error(`[selfplay-parity] FAIL：${fails} 处不一致（策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局）`);
+    console.error(`[selfplay-parity] FAIL：${fails} 处不一致（策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局`
+        + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''}）`);
     process.exit(1);
 }
-console.log(`[selfplay-parity] PASS：策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局 逐字节一致`);
+console.log(`[selfplay-parity] PASS：策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局`
+    + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''} 逐字节一致`);

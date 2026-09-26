@@ -212,6 +212,15 @@ std::vector<Form> decompose(const Counts &counts, const std::vector<Meld> &melds
 
 std::vector<int> agariWaits(const Counts &counts13, int meldCount) {
     std::vector<int> out;
+    // ⚠ 非法输入防护：真实牌局里同一牌种最多 4 张，但**语料可以手写**（`trainer settle` 的 `furiten`
+    //   行撞到过同种 5 张）。`isAgari` 走查表向听，而表的计数维只覆盖 0..4 → 多一张就**越界崩**
+    //   （实测 `0xC0000005`）。Java 的 DFS 对这份输入不崩，但那是"两边都接受非法输入"的另一回事 ——
+    //   这里只保证 **C++ 侧不崩**：返回空集，于是对拍会**响亮地失败**而不是把进程挂掉。
+    for (int k = 0; k < kKindCount; k++) {
+        if (counts13[static_cast<size_t>(k)] > 4) {
+            return out;
+        }
+    }
     Counts c = counts13;
     for (int k = 0; k < kKindCount; k++) {
         if (c[static_cast<size_t>(k)] >= 4) {

@@ -41,8 +41,18 @@ public:
         }
     }
 
-    int tilesLeft() const { return liveEnd_ - livePos_; }
-    bool atLastLiveTile() const { return livePos_ == liveEnd_ - 1; }
+    /** 可摸牌山还剩几张（报文里的 `tiles_left`）—— Java 同名方法带 `Math.max(0, …)` 的钳制。 */
+    int tilesLeft() const { return liveEnd_ - livePos_ > 0 ? liveEnd_ - livePos_ : 0; }
+
+    /**
+     * 这一张是不是海底 / 河底（摸到 / 打出它之后就荒牌流局）。
+     *
+     * ⚠ 口径是 Java `Wall.atLastLiveTile()` 的 `livePos >= liveEnd`（**已经摸完**最后一张），
+     * 不是"还剩一张"：调用点（立直条件、河底闸门、海底摸月）问的都是"这一张是不是最后一张"。
+     * 这里原来是 `livePos_ == liveEnd_ - 1`（差一位），因为当时只有 `turnoptions` 的语料对拍
+     * 用到它、而那一项由 Java 探针喂进来，所以一直没被抓住 —— 实局用上就会整片偏一巡。
+     */
+    bool atLastLiveTile() const { return livePos_ >= liveEnd_; }
     int rinshanLeft() const { return kRinshanTiles - rinshanPos_; }
     int doraCount() const { return doraRevealed_; }
 

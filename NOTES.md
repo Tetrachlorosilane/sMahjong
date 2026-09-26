@@ -1161,6 +1161,25 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       探测值，不是 C++ 自己算的）—— 一旦实局用它判海底/河底/立直条件，就会**整片偏一巡**。
       已在移植自对弈时改正，并加注释说明口径。**教训：对拍里"由探针喂进来的派生量"会掩盖
       C++ 自己那份实现的分歧；凡是实局要用的量，迟早要让 C++ 自己算一遍再对拍。**
+    - **M2 收官：C++ 自对弈跑通，轨迹与 Java 逐字节相同**（新增 `round.hpp/.cpp` + `table.hpp` +
+      `trace.hpp/.cpp` + `selfplay.hpp/.cpp` + `observation.hpp`/`options.hpp`/`policies.hpp`/`jsonw.hpp`）。
+      `node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101` → `g0.jsonl` **134,375 B 逐字节一致**
+      （SHA256 两边同为 `5385a50a978fd777…`；83 行 = 81 decision + 1 hand + 1 game），`summary.json`
+      **除计时/核数外逐字段一致**；`--selftest` 135 项全绿；13 个 .cpp 一次编过（0 错 0 警）。
+    - **往上加层也都逐字节过**（每层都重跑对拍）：4 场 `pass`；`pass,first,random` × `--rotate`；
+      `2 3 first`（含吃碰/荣和/不听罚符）；`2 2 random`；**完整半庄** `1 0 first 8888`（1,689,740 B）
+      与 `1 0 random 4242`；`--sample 2/3`、`--no-claims`；**三套预设**（mleague/tenhou/majsoul），
+      并在 tenhou 下撞到**九种九牌中途流局**、**立直宣言 + 终局余棒**、**自摸和了**等分支。
+      ⚠ 未撞到（代码已移植但整局路径未实测）：抢杠 / 岭上开花 / 燕返 / 流局满贯 / 国士抢暗杠 /
+      三家和了·四风连打·四家立直·四杠散了（这些在 mleague/tenhou 下要极端局面）。
+    - **顺手又堵了一个"非法输入就崩"的健壮性缺口**：`trainer settle` 的 `furiten` 行若手写同种
+      **5 张**（真实牌局不可能），`agariWaits` 走查表向听时下标越界 → `0xC0000005`（Java 的 DFS 不崩）。
+      两侧都加了门口防护（`agari.cpp::agariWaits` / `handeval.cpp::waits`：任一牌种 > 4 → 返回空集，
+      让对拍**响亮失败**而不是把进程挂掉），语料生成器也改成**按 4 张封顶**。修后默认规模
+      `node tools\trainer-settle-parity.mjs` → **118,869/118,869 行一致**。
+    - **仍未实现**（显式报错，不静默降级）：`--features`（sidecar 是下一块，参考值 19,050 B）、
+      `teacher`/`net:` 策略、`--teacher-label`；`--workers` 只接受、串行跑（每场种子与调度无关，
+      所以结果与并行逐字节相同）。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。

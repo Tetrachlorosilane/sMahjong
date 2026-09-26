@@ -33,6 +33,7 @@
 #include "roundstate.hpp"
 #include "rules.hpp"
 #include "seed.hpp"
+#include "selfplay.hpp"
 #include "shanten.hpp"
 #include "tiles.hpp"
 #include "turnoptions.hpp"
@@ -2270,10 +2271,26 @@ int main(int argc, char** argv) {
                      "  score <corpus> <out>             语料 → 役种/符/点数/授受（与 ScoreProbe.java 对拍）\n"
                      "  settle <corpus> <out>            语料 → 顺位点/余棒/连庄判据（与 SettleProbe.java 对拍）\n"
                      "  action <corpus> <out>            语料 → 动作键/下标/回包（与 ActionProbe.java 对拍）\n"
-                     "  turnopts <javaCorpus> <out>       真实牌局的自家回合询问 → 选项文本（与 RoundProbe.java 对拍）\n");
+                     "  turnopts <javaCorpus> <out>       真实牌局的自家回合询问 → 选项文本（与 RoundProbe.java 对拍）\n"
+                     "  selfplay <games> [--workers K] [--policy P] [--seed S] [--hands H] [--out DIR]\n"
+                     "                                   [--rotate] [--sample K] [--no-claims] [--preset NAME]\n"
+                     "                                   自对弈并写出轨迹（与 Java --selfplay 逐字节对拍）\n"
+                     "  --features <dir>                  派生特征 sidecar（**本轮未实现**，显式报错）\n");
         return 2;
     }
     const std::string cmd = argv[1];
+    if (cmd == "selfplay") {
+        return trainer::selfplayCli(argc - 1, argv + 1);
+    }
+    if (cmd == "--features") {
+        // 轨迹侧（`g*.jsonl` / `summary.json`）已与 Java 逐字节一致；**派生特征 sidecar**
+        // （`g*.feat.bin`，Java `TraceFeatures`）是下一轮（M3）的事。
+        // ⚠ 显式报错、绝不静默降级（AGENTS §6.5 的"能力缺失要报错"）。
+        std::fprintf(stderr, "[trainer] --features（派生特征 sidecar `g*.feat.bin`）这一轮还没实现"
+                             "（docs/TRAINER-CPP.md §5 的 M3）；本轮的产物是轨迹 `g*.jsonl` + "
+                             "`summary.json`\n");
+        return 2;
+    }
     if (cmd == "wall") {
         return cmdWall(argc, argv);
     }

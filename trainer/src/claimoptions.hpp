@@ -14,6 +14,7 @@
 #include "evaluator.hpp"
 #include "handeval.hpp"
 #include "meld.hpp"
+#include "options.hpp"
 #include "roundoptions.hpp"
 #include "rules.hpp"
 #include "visible.hpp"
@@ -198,67 +199,73 @@ inline bool canDaiminkan(const ClaimAsk &a) {
            && a.hand[static_cast<size_t>(a.calledKind)] >= 3;
 }
 
-/** `Round.claimOptions` 的规范文本（与 `tools/RoundProbe.java` 逐字符一致）。 */
-inline std::string claimOptionsText(const ClaimAsk &a) {
-    std::string out;
-    auto add = [&out](const std::string &seg) {
-        if (seg.empty()) {
-            return;
-        }
-        if (!out.empty()) {
-            out += ';';
-        }
-        out += seg;
-    };
+/**
+ * `Round.claimOptions` 的**结构化**结果（与 `turnOptionsOf` 对称；文本与动作空间都从它派生）。
+ * 顺序：`ron` →（河底 / 已立直时到此为止）→ `pon`×取法 → `kan`(大明杠) → `chi`（只有下家）→ `pass`。
+ */
+inline std::vector<Option> claimOptionsOf(const ClaimAsk &a) {
+    std::vector<Option> opts;
 
     // ① 荣和（振听时连问都不问）
     if (!isFuritenClaim(a) && canWinRon(a)) {
-        add("ron");
+        Option o;
+        o.type = kActRon;
+        opts.push_back(o);
     }
     // ② 河底：只能荣和或过
     if (a.houtei) {
-        add("pass");
-        return out;
+        Option o;
+        o.type = kActPass;
+        opts.push_back(o);
+        return opts;
     }
     // ③ 已立直：只能荣和或过
     if (a.riichi) {
-        add("pass");
-        return out;
+        Option o;
+        o.type = kActPass;
+        opts.push_back(o);
+        return opts;
     }
-    // ④ 碰（每种赤宝取法一条）
+    // ④ 碰（每种赤宝取法一条选项 —— 它是两个不同的合法动作，见 `action.hpp` 顶部注释）
     if (a.calledKind >= 0 && a.hand[static_cast<size_t>(a.calledKind)] >= 2) {
         for (const auto &v : akaVariants(a, a.calledKind, 2)) {
-            add("pon=" + v[0] + "+" + v[1]);
+            Option o;
+            o.type = kActPon;
+            o.tiles = v;
+            opts.push_back(o);
         }
     }
     // ⑤ 大明杠（同一个选项里列出各取法）
     if (canDaiminkan(a)) {
-        std::string seg = "kan=";
-        bool any = false;
+        Option o;
+        o.type = kActKan;
         for (const auto &v : akaVariants(a, a.calledKind, 3)) {
-            if (any) {
-                seg += ",";
-            }
-            seg += "daiminkan:" + kindToStr(a.calledKind, false) + ":" + v[0] + "+" + v[1] + "+" + v[2];
-            any = true;
+            o.kans.push_back(KanEntry{"daiminkan", kindToStr(a.calledKind, false), v, true});
         }
-        add(any ? seg : "");
+        if (!o.kans.empty()) {
+            opts.push_back(o);
+        }
     }
     // ⑥ 吃（只有下家；组合枚举与自家回合的 `chiSets` 同源）
     if (a.from >= 0 && a.seat == (a.from + 1) % 4) {
         const auto sets = chiSets(a.hand, a.calledKind);
         if (!sets.empty()) {
-            std::string seg = "chi=";
-            for (size_t i = 0; i < sets.size(); i++) {
-                seg += (i ? "," : "");
-                seg += sets[i][0] + "+" + sets[i][1];
-            }
-            add(seg);
+            Option o;
+            o.type = kActChi;
+            o.sets = sets;
+            opts.push_back(o);
         }
     }
     // ⑦ 过（永远最后）
-    add("pass");
-    return out;
+    {
+        Option o;
+        o.type = kActPass;
+        opts.push_back(o);
+    }
+    return opts;
 }
+
+/** `Round.claimOptions` 的规范文本（与 `tools/RoundProbe.java` 逐字符一致）。 */
+inline std::string claimOptionsText(const ClaimAsk &a) { return optionsToText(claimOptionsOf(a)); }
 
 }  // namespace trainer
