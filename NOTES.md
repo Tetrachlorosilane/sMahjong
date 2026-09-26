@@ -1140,6 +1140,21 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       `--self-check` 模式两边都跑 Java —— 已实测 PASS（Java 侧可复现），参考值：
       `--hands 1 --policy pass --seed 20260101` → `g0.feat.bin` = **19,050 B**
       `sha256=fc7bcf27eceea3b2…`。C++ 侧实现 `features` 后要正好落在这个字节数上。
+    - **端到端验收链已用 Java 侧产物跑通**（这就是 C++ 生产者要接管的那条链）：
+      `node tools/selfplay-check.mjs <dir>` → **DATASET PASS**（1 场 / 1 小局 / 81 决策 = 自家回合 70 +
+      鸣牌 11；动作分布 `discard=70 pass=11`）；`java -jar … --features <dir>` → `g0.feat.bin` **19,050 B**
+      （`perDecision=68`：`danger_worst[34]` + `danger_riichi[34]`；`perCandidate=8`）；
+      `python -m mahjong_ml.dataset build <dir> <紧凑目录>` → **训练 81 条 / state 607 维 / cand 96 维 /
+      float16 / 特征版本 2**。
+      ⇒ C++ 生产者只要把这三样（`g*.jsonl`、`g*.feat.bin`、`summary.json`）**逐字节**产出来，
+      `MAHJONG_PRODUCER=cpp` 就能直接接管，Python 侧一行不用改。
+    - ⚠ **实局移植当场抓出一个潜伏 bug**（`wall.hpp::atLastLiveTile`）：原来是
+      `livePos_ == liveEnd_ - 1`（"还剩一张"），而 Java `Wall.atLastLiveTile()` 是
+      **`livePos >= liveEnd`**（"已经摸完最后一张"）。它一直没被抓住，是因为在此之前
+      **只有 `turnoptions` 的语料用到它，而那一项是 Java 探针喂进来的**（`atLastLive` 走的是
+      探测值，不是 C++ 自己算的）—— 一旦实局用它判海底/河底/立直条件，就会**整片偏一巡**。
+      已在移植自对弈时改正，并加注释说明口径。**教训：对拍里"由探针喂进来的派生量"会掩盖
+      C++ 自己那份实现的分歧；凡是实局要用的量，迟早要让 C++ 自己算一遍再对拍。**
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。

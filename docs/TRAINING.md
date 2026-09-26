@@ -974,6 +974,16 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 > `trainer-features-parity.mjs --self-check` 是**自检模式**（两边都跑 Java）—— 用来验证脚本本身与
 > Java 侧可复现性，不需要 C++ 就绪；`--hands 1 --policy pass --seed 20260101` 这一场的参考 sidecar
 > 是 **19,050 B**（sha256 `fc7bcf27eceea3b2…`）。
+>
+> **端到端验收链**（C++ 生产者就绪后必须整条走通，现在已用 Java 侧产物验证过一遍）：
+> ```
+> node tools\selfplay-check.mjs <dir>                       # DATASET PASS
+> java -jar server\build\mahjong-server.jar --features <dir> # → g<N>.feat.bin（或 trainer features <dir>）
+> python -m mahjong_ml.dataset build <dir> <紧凑目录>        # → 81 条 / state 607 / cand 96 / float16
+> ```
+> 参考轨迹（1 场 1 小局 `pass`）：`g0.jsonl` 134,375 B / 81 决策（自家回合 70 + 鸣牌 11）、
+> `g0.feat.bin` 19,050 B（perDecision 68 + perCandidate 8）、`summary.json` 553 B；
+> 紧凑集构建输出 `训练 81 条（1 场）… state 607 维 / cand 96 维`。
 > 接线处在 `python/mahjong_ml/producer.py`（`online.py` / `dagger.py` 都走它）；C++ 侧还没实现的
 > 能力（`--teacher-label`、`--sample` 等）会**显式报错**，不悄悄降级成另一种数据集。
 
