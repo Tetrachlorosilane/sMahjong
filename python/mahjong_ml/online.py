@@ -232,8 +232,10 @@ def cmd_run(args) -> int:
                    "--ent-coef", str(args.ent_coef), "--max-kl", str(args.max_kl),
                    "--rank-weight", str(args.rank_weight), "--threads", str(args.threads),
                    "--seed", str(args.seed + g)]
-        if g == 1 and args.init_value:
-            # 只有第一代需要冷启动价值头；之后每一代的 checkpoint 里都带着 value（`--init` 自动继承）
+        if g == start and args.init_value:
+            # **这一跑的第一代**才做价值头冷启动；之后每一代的 checkpoint 里都带着 value（`--init` 继承）
+            # ⚠ 原来写的是 `g == 1`：`--start-gen 2` 续跑时 g 从 2 起 ⇒ 冷启动**被静默忽略**
+            #   （2026-09-26 实测踩到：`--start-gen 2 --init-value <iql>` 跑完价值头还是上一代的）
             ppo_cmd += ["--init-value", str(args.init_value)]
         runpy(ppo_cmd, f"PPO 第 {g} 代")
         ckpt = new_ckpt_dir / "model.pt"
@@ -490,9 +492,12 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="跑 N 代（采集→特征→紧凑→PPO→导出）")
     r.add_argument("--init", required=True, help="起始 checkpoint（P4 必须从 BC/AWR 初始化）")
     r.add_argument("--init-value", default=None,
-                   help="第一代的价值头冷启动：P3 的 IQL critic（`ckpt/iql-00N/model.pt`）")
+                   help="**这一跑的第一代**（`--start-gen` 那一代）的价值头冷启动："
+                        "P3 的 IQL critic（`ckpt/iql-00N/model.pt`）；续跑时同样生效")
     r.add_argument("--label", default="ppo")
-    r.add_argument("--generations", type=int, default=4)
+    r.add_argument("--generations", type=int, default=4,
+                   help="**跑到第几代（含）**，不是「再跑几代」—— 实现是 `range(start_gen, generations+1)`；"
+                        "例：只跑第 2 代 = `--start-gen 2 --generations 2`")
     r.add_argument("--start-gen", type=int, default=1,
                    help="从第几代开始（断点续跑：`--start-gen 4 --init <第 3 代的 model.pt>`）")
     r.add_argument("--gen-games", type=int, default=2000, help="每代采集场次（写 raw/，约 1.1 MB/场）")

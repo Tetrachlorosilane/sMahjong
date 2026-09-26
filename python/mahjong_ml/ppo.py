@@ -222,21 +222,27 @@ def train(args) -> dict:
     for p in snapshot.parameters():
         p.requires_grad_(False)
     value = nets.build_value(features.state_dim(), hidden=args.hidden, head=args.head).to(device)
-    if init is not None and "value" in init:
+    # ⚠ **显式 `--init-value` 优先于 `--init` 里继承来的 value**（2026-09-26 改）。
+    #   原来 `--init` 带了 value 就跳过 `--init-value` ⇒ 那个显式参数在 P5 续跑里**被静默忽略**
+    #   （实测：v3 g02 跑完才发现"价值头初始化自 --init 里的 value"）。判据是二者的校准质量：
+    #   IQL critic val MAE 6.09 / episode ρ +0.677 vs 继承来的 7.16 / +0.640 —— 显式指定应当赢。
+    if args.init_value:
+        # 从 P3 的 IQL critic 里**只取 trunk + v_head**（`CriticScorer` 与 `ValueNet` 这两段同名同形）。
+        # 为什么值得这一步：价值头从零开始时，前几代的优势基本是"回报减一个常数"，
+        # 策略梯度方差极大；IQL 的 V 已经在同一批状态上训过（判据①：episode 级 ρ≈+0.6）。
+        ck = torch.load(args.init_value, map_location="cpu", weights_only=False)
+        sub = {k: v for k, v in ck["model"].items() if k.startswith(("trunk.", "v_head."))}
+        missing, unexpected = value.load_state_dict(sub, strict=False)
+        override = "　（显式 --init-value 覆盖了 --init 继承的 value）" if (
+            init is not None and "value" in init) else ""
+        print(f"价值头初始化自 {args.init_value}（trunk.* + v_head.*，{len(sub)} 个张量；"
+              f"缺 {len(missing)} / 多 {len(unexpected)}）{override}")
+    elif init is not None and "value" in init:
         try:
             value.load_state_dict(init["value"])
             print("价值头初始化自 --init 里的 value")
         except Exception as e:                              # noqa: BLE001
             print(f"（提示）--init 里的 value 装不上，价值头从零开始：{e}")
-    elif args.init_value:
-        # 从 P3 的 IQL critic 里**只取 trunk + v_head**（`CriticScorer` 与 `ValueNet` 这两段同名同形）。
-        # 为什么值得这一步：价值头从零开始时，前几代的优势基本是"回报减一个常数"，
-        # 策略梯度方差极大；IQL 的 V 已经在同一批状态上训过（判据①：episode 级 ρ≈+0.55）。
-        ck = torch.load(args.init_value, map_location="cpu", weights_only=False)
-        sub = {k: v for k, v in ck["model"].items() if k.startswith(("trunk.", "v_head."))}
-        missing, unexpected = value.load_state_dict(sub, strict=False)
-        print(f"价值头初始化自 {args.init_value}（trunk.* + v_head.*，{len(sub)} 个张量；"
-              f"缺 {len(missing)} / 多 {len(unexpected)}）")
 
     if args.temp <= 0:
         raise SystemExit("--temp 必须 > 0（行为策略是 softmax(z/T)，T=0 采不出随机数据）")
