@@ -960,6 +960,23 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   想量**端到端**（含引擎与并行度）就直接 `--selfplay N --workers K --policy "net:…,…"`
   （**不给 `--out` 就不落盘**，这时打印的场/秒、决策/秒才是纯 CPU 吞吐：
   24 核上 `teacher×4` 2.28 场/秒、纯网络 1.73、出厂 `@2` 混合 1.08）。
+- **训练端 C++ 引擎**（2026-09 起，`trainer/`）：同一份 JFR 剖面显示 **99% 的样本落在
+  `Shanten.dfs`**，所以决定用 C++ 把训练回路（数据生成）单独重写成**独立数据生成器**，
+  **发布版服务端一行不改**。路线是"先把向听/进张这条路径做快"（换算法为主、换语言为辅），
+  其余按**同种子逐字节等价**的对拍契约逐块搬。设计、里程碑与判据：**`docs/TRAINER-CPP.md`**。
+  - 现状：**M0（牌山/配牌）已完成** —— `trainer/src/java_rand.hpp` 逐位复刻
+    `java.util.Random`（48 位 LCG + `nextInt` 的取模拒绝）与 `Collections.shuffle` 的
+    RandomAccess 分支；`wall.hpp/.cpp` 与 Java `Wall` 同构。对拍：
+    `node tools\trainer-parity-check.mjs 24` → **96/96 组逐整数一致**（136 张牌山 + 四家配牌
+    + 表/里宝指示牌 + 4 张岭上），128 组种子（512 组）同样全绿。
+  - 两个"契约细节"值得记牢：① `Wall.doraIndicators()/uraIndicators()` 返回的是 **kind** 而且
+    **张数 = 已翻开张数**（开局 1 张、里宝与表宝同长）；② 配牌是
+    `13 巡 × 4 家（从庄家起）` → 庄家第 14 张 → `finishDealing`，手牌按
+    `Round.compareTile`（先 kind、再"赤五在前"、最后比 id）排序。
+  - ⚠ 沙箱坑：Node 不能用管道接子进程输出（`spawnSync … EPERM`）——对拍脚本让子进程
+    **直接写文件描述符**（`stdio: ['ignore', fd, 'inherit']`）再读文件。
+  - ⚠ 构建脚本的增量指纹**必须含头文件**：只盯 `.cpp` 时改 `wall.hpp` 不会重编（踩过一次，
+    表现为"改了代码但对拍结果没变"）。
 
 
 ---
