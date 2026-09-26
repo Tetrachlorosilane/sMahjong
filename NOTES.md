@@ -1120,6 +1120,19 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       "能荣和"的行被观察到（191 行，其中仍带吃碰杠 = **0**）。自检里另配了构造用例补齐这三条。
     - 自检 123 → **135 项**全绿（新增鸣牌：pass 在最后 / 无役不给荣和 / 役牌荣和 / 舍张振听 /
       赤五两条取法 / 大明杠 / 立直与河底只给荣和或过 / 只有下家能吃）。
+    - **把 C++ 接进训练工作流：先接线，再补生产者**（2026-09，用户点名"直接让其完全进入训练工作流"）。
+      ① 新增 `python/mahjong_ml/producer.py`：`MAHJONG_PRODUCER=java|cpp`（缺省 java）决定**采集**与
+      `--features` 两步用谁跑；`online.py`/`dagger.py` 的 4 处 java 调用全部改走它。
+      ⚠ C++ 侧还没实现的能力（`--teacher-label` / `--sample`）**显式报错**，不悄悄产出另一种数据集。
+      ② 新增 `tools/trainer-selfplay-parity.mjs`：跑 Java 与 C++ 两个 `--selfplay`，**逐字节**比
+      `g<g>.jsonl`（并比 `summary.json` 除计时/核数之外的字段），失败时报**第一个不同字节的偏移**。
+      ③ Java 侧标准答案已生成：`--selfplay 1 --workers 1 --policy pass --seed 20260101 --hands 1`
+      → `g0.jsonl` = **134,375 B / 83 行**（81 decision + 1 hand + 1 game，CRLF 结尾，一小局荒牌流局）。
+      ④ 接线本身已验：`online.selfplay()` 走新模块后产出的 `g0.jsonl` 与直接调 jar **逐字节相同**
+      （134,375 B）。
+      ⚠ 一个坑：`online.selfplay()` 的 `--out` 我一开始传了相对路径（在 `python/` 下 `../trainer/...`
+      只上跳一级 → 落到**工作区外**），沙箱拒绝写入而 Java **只打一行 WARN、静默降级**（"采集看起来成功、
+      却只有 summary.json"）。接 C++ 生产者时同样要传**绝对路径**。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。

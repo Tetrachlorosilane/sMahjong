@@ -30,6 +30,7 @@ import numpy as np
 import torch
 
 from . import bc, dataset as ds, export, features, guard, nets, paths
+from . import producer as producers
 
 ROOT = Path(__file__).resolve().parents[2]          # 仓库根（python/mahjong_ml/dagger.py → 上三级）
 JAR = ROOT / "server" / "build" / "mahjong-server.jar"
@@ -244,9 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     # ① 采集：学生在场打球 → 学生状态；学生座位额外记一次老师的动作（DAgger 的核心）
     if not args.skip_collect:
         timings["collect"] = run(
-            ["java", "-jar", str(JAR), "--selfplay", str(args.games), "--workers", str(args.workers),
-             "--rotate", "--teacher-label", "--policy", policy_string(net_bin),
-             "--seed", str(args.seed), "--out", str(raw_dir)],
+            producers.selfplay_cmd(args.games, args.workers, policy_string(net_bin), args.seed,
+                                   raw_dir, teacher_label=True),
             f"采集 {args.games} 场（老师标注学生座位）")
     else:
         print(f"跳过采集（用已有的 {raw_dir}）")
@@ -257,14 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         n_side = len(list(ctrl_raw.glob("g*.feat.bin"))) if ctrl_raw.is_dir() else 0
         if not have_traces and not args.skip_collect:
             timings["control_collect"] = run(
-                ["java", "-jar", str(JAR), "--selfplay", str(args.control_games),
-                 "--workers", str(args.workers), "--rotate", "--seed", str(args.seed + 1),
-                 "--out", str(ctrl_raw)],
+                producers.selfplay_cmd(args.control_games, args.workers, "teacher",
+                                       args.seed + 1, ctrl_raw),
                 f"采集对照臂 {args.control_games} 场（纯 teacher）")
         elif not have_traces:
             raise SystemExit(f"对照臂轨迹不在 {ctrl_raw} —— 去掉 --skip-collect（或 --control-games 0）")
         if n_side < n_jsonl and not args.skip_features:
-            timings["control_features"] = run(["java", "-jar", str(JAR), "--features", str(ctrl_raw)],
+            timings["control_features"] = run(producers.features_cmd(ctrl_raw),
                                               "对照臂派生特征 sidecar")
         elif n_side < n_jsonl:
             raise SystemExit(f"对照臂 sidecar 不全（{n_side}/{n_jsonl}）—— 去掉 --skip-features")
@@ -280,10 +279,9 @@ def main(argv: list[str] | None = None) -> int:
               f"平均顺位 {v['avg_place']:.3f}，顺位点 {v['avg_rank_points']:+.1f}，"
               f"和了 {v['win_rate'] * 100:.1f}%，放铳 {v['deal_in_rate'] * 100:.1f}%")
 
-    # ② 派生特征（危险度/向听/dora… 由 Java 算，Python 只读 —— 不许两边各算一份）
+    # ② 派生特征（危险度/向听/dora… 由服务端算，Python 只读 —— 不许两边各算一份）
     if not args.skip_features:
-        timings["features"] = run(["java", "-jar", str(JAR), "--features", str(raw_dir)],
-                                  "派生特征 sidecar")
+        timings["features"] = run(producers.features_cmd(raw_dir), "派生特征 sidecar")
     else:
         print("跳过特征生成（假定 sidecar 已在）")
 

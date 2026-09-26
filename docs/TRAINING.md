@@ -962,6 +962,17 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 
 ## 5. 数据管线
 
+> **生产者可切换**（`MAHJONG_PRODUCER=java|cpp`，缺省 `java`）：上面两步"采集"与"派生特征"
+> 都由**服务端实现**，训练端 C++ 引擎是它的**同种子逐字节等价重写**（见 `docs/TRAINER-CPP.md`），
+> 目标是把这两步换成 C++ 跑（同核数下决策/秒 ≥ 3×）。切换**不应改变数据集内容** ——
+> 所以判据是同种子产物逐字节相同，而不是"能跑"：
+> ```
+> node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101   # C++ 生产者 ↔ Java 生产者
+> node tools\selfplay-check.mjs <C++ 产出的目录>               # 独立校验器（Python 侧同一份）
+> ```
+> 接线处在 `python/mahjong_ml/producer.py`（`online.py` / `dagger.py` 都走它）；C++ 侧还没实现的
+> 能力（`--teacher-label`、`--sample` 等）会**显式报错**，不悄悄降级成另一种数据集。
+
 - **采集**：`--selfplay <n> --workers 24 --rotate --sample <k> --out S:\mahjong-training\raw\<标签>`
   （`PROTOCOL.md` §8.4；⚠ **workers 必须显式写 24**，见 §0.1.2）。
   - **落 S 盘 + 配额闸门**（§0.1.1）：写前查剩余、超配额滚动淘汰最旧的；`compact/` 转完就删 `raw/`。

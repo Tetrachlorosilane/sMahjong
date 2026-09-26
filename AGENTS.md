@@ -170,8 +170,7 @@ client\dist\mahjong-client.exe         # 可直接双击，无需装 Qt / 配 PA
 本项目用「构建后把 Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 已自动化。
 
 **Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（qtbase+qtsvg ≈ 22 MB → 仓库根 `.qt/`，
-已 gitignore；MinGW/CMake/Ninja 缺失时同样取）。
-开关 `-Provision always|never` / `-QtDir` / `-Plan`，细节见 `client/README.md`。
+已 gitignore；MinGW/CMake/Ninja 缺失时同样取）。参数见 `client/README.md`。
 
 ### `build\` 与 `dist\` 的关系（两者**不应该**整目录相同）
 
@@ -281,17 +280,14 @@ node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整
 
 ```powershell
 node tools\mock-server.mjs 10999 turn|claim|note|river|agari|yakuman|kan|twoturn|sticks|hand2meld|allmeld|sfx|sfxburst|vote
-# turn 自摸/立直/杠 · claim 荣和/碰/跳过 · note 无役提示 · river 横置顺延（顺带压测 5 张宝牌栏）
-# agari 结算 + round_wait 倒计时 · yakuman 须写「2倍役满」不得出现「0 番」 · kan 岭上 4→3→2
-# twoturn 跨局首巡不得只剩 1 秒 · sticks 立直棒按座位/供託居中 · hand2meld 自己 N 副露
-# allmeld 四家都有副露（横置张与另两张**底边齐平** + 四角名牌互不重叠）
-# sfx / sfxburst 音效场景驱动器（配 MAHJONG_SFX_TRACE=1）
-# vote 结束对局投票界面（「同意/不同意」可点 + 状态行票数 + 「结束对局」置灰）
+# 每个模式把客户端推到对应局面再截图（turn 自摸/立直/杠 · claim 荣和/碰 · note 无役提示 ·
+# river 横置顺延 · agari 结算倒计时 · kan 岭上 4→3→2 · sticks 立直棒 · allmeld 四家副露）
+# yakuman 须写「2倍役满」不得出现「0 番」；allmeld 横置张与另两张**底边齐平**、四角名牌互不重叠
 client\dist\mahjong-client.exe --demo 127.0.0.1 10999 --bots 3 --no-answer --shot client\build\shot.png --after 6
 ```
 
 假服务端也带**身份握手**（连接即发 `uuid_ask`、收到 `uuid` 回 `uuid_ok{issued:true}`）——
-顺带验证"客户端会把身份落盘"。**模式清单之外的细节见 NOTES §4 L4。**
+顺带验证"客户端会把身份落盘"。**细节见 NOTES §4 L4。**
 
 ### L5 真机联调（最贵，改动涉网络/流程时跑）
 
@@ -552,6 +548,9 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   末决策记一次，λ<1 是系统性偏差；λ=1 时 GAE 恰好塌成 `A=R−V`）、**优势只在 `is_student==1` 的行上
   归一化**（对手行不进策略损失）。回归：`SelfTest.samplingPolicyTests` + `python/selfcheck.py` 的 P4 组。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
+- **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
+  `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），
+  不是"能跑"。C++ 侧还没实现的能力（`--teacher-label` / `--sample`）**显式报错**，不悄悄降级。
 ### 6.6 teacher（内置机器人）的五层取舍
 
 `Bot` 同时是**补位机器人**和**训练用的 teacher**：它怎么打，直接决定自对弈数据集里的标签质量

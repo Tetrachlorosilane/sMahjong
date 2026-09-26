@@ -39,6 +39,7 @@ import numpy as np
 import torch
 
 from . import league, paths
+from . import producer as producers
 
 #: 仓库根（`python/mahjong_ml/online.py` → 上三级）
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,15 +84,12 @@ def selfplay(out_dir: Path, games: int, policy: str, *, seed: int, workers: int,
     """
     for spec in policy.split(","):
         _check_policy(spec)
-    cmd = ["java", "-jar", str(JAR), "--selfplay", str(games), "--workers", str(workers),
-           "--rotate", "--policy", policy, "--seed", str(seed), "--out", str(out_dir)]
-    if hands:
-        cmd += ["--hands", str(hands)]
-    if sample:
-        cmd += ["--sample", str(sample)]
+    # 生产者可切（`MAHJONG_PRODUCER=java|cpp`）：两版**同种子逐字节等价**（docs/TRAINER-CPP.md §2）
+    cmd = producers.selfplay_cmd(games, workers, policy, seed, out_dir,
+                                 hands=hands, sample=sample)
     # ⚠ 必须 `return`：调用方拿它写台账（`generations.json` 的 `collect_seconds`）。
     # 漏了 return 时字段是 null —— 不会报错，只是台账里那一列永远是空的（踩过一次）。
-    return run(cmd, f"自对弈 {games} 场 → {out_dir.name}")
+    return run(cmd, f"自对弈 {games} 场 → {out_dir.name}（{producers.label()}）")
 
 
 #: 内置策略名（与 `Policies.byName` 的 switch 一一对应 —— 加一个就两处一起加）
@@ -222,9 +220,8 @@ def cmd_run(args) -> int:
         t_collect = selfplay(raw, args.gen_games, ",".join([spec, spec] + opps),
                             seed=args.seed + g * 1000, workers=args.workers,
                             hands=args.hands, sample=args.sample)
-        # ③ 派生特征（Java 算）+ 紧凑集（Python 打包）
-        run(["java", "-jar", str(JAR), "--features", str(raw), "--workers", str(args.workers)],
-            "派生特征")
+        # ③ 派生特征（服务端算）+ 紧凑集（Python 打包）；生产者与采集同源（MAHJONG_PRODUCER）
+        run(producers.features_cmd(raw, args.workers), "派生特征")
         comp = paths.allocate("compact", tag)
         runpy(["mahjong_ml.dataset", "build", str(raw), str(comp)], "建紧凑集")
         # ④ PPO 一代
