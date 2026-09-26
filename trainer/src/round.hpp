@@ -230,8 +230,15 @@ private:
     void updatePao(int seat, int from, const Meld &m);
     void addPao(int seat, int payer, const std::string &yaku);
 
-    /** 喂给策略的一次询问（四个座位恒为机器人 → 直接走 `Table::decideBot`）。 */
-    Cmd ask(int seat, const std::string &kind, const Observation &obs);
+    /**
+     * 喂给策略的一次询问（四个座位恒为机器人 → 直接走 `Table::decideBot`）。
+     *
+     * @param opts        本次询问的**原始选项**（Java `Decision.options`）—— teacher 的取舍
+     *                    按它走（`first`/`pass`/`random`/`net` 只用 `obs.legal`）
+     * @param calledTileId 鸣牌询问的"被鸣那张牌 id"（= Java `extra.tile` 的来源）；自家回合传 -1
+     */
+    Cmd ask(int seat, const std::string &kind, const Observation &obs,
+            const std::vector<Option> &opts, int calledTileId);
 };
 
 }  // namespace trainer

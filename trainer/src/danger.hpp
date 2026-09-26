@@ -53,21 +53,33 @@ inline bool dangerIsSuji(int kind, const Counts *rivers) {
     return false;
 }
 
-/** 对**一家**打 `kind` 的危险度**分数**（`Danger.Report.score`；级别只用来取基准分）。 */
-inline int dangerScore(int kind, const Counts &visible, const Counts *rivers, bool theirRiichi,
-                       int turn) {
+/**
+ * 级别 + 分数 —— Java `Danger.Report` 的二元组（`code` / `genbutsu` / `suji` / `wall` 在
+ * 训练端没人读，所以不搬）。
+ *
+ * <p>为什么要连级别一起给：teacher（`bot.cpp`）有两处闸门看的是**级别**
+ * （`dealScore` 的"已经是 DANGEROUS 就不再抬档"、`shouldKan` 的加杠危险闸门），
+ * 而特征工程（`obffeatures.cpp`）只看**分数**。两处必须**同一份实现**，否则"抬档"与
+ * "特征里的危险度"会各算一遍、迟早漂 —— 所以分数也从这个函数派生。
+ */
+struct DangerReport {
+    int level = kDangerSuspicious;
+    int score = 0;
+};
+
+/** 对**一家**打 `kind` 的危险度（级别 + 分数）= Java `Danger.of`。 */
+inline DangerReport dangerOf(int kind, const Counts &visible, const Counts *rivers,
+                             bool theirRiichi, int turn) {
     const bool inRange = kind >= 0 && kind < kKindCount;
     if (rivers != nullptr && inRange && (*rivers)[static_cast<size_t>(kind)] > 0) {
-        return 0;                                        // 现物：`Report(SAFE, 0, …)`
+        return {kDangerSafe, 0};                         // 现物：唯一的硬保证
     }
     const bool suji = dangerIsSuji(kind, rivers);
     const bool wall = inRange && visible[static_cast<size_t>(kind)] >= 3;
     int level;
-    if (suji && wall) {
-        level = kDangerRelativelySafe;                   // 两个理由同时成立仍是同一档（Java 也是）
-    } else if (suji) {
-        level = kDangerRelativelySafe;
-    } else if (wall) {
+    if (suji || wall) {
+        // 三个"筋/壁"分支在 Java 里各写一条（`suji && wall` / `suji` / `wall`），但**取同一档**；
+        // 这里合并成一条 —— 级别与分数都只由 `level` 决定，故逐位等价。
         level = kDangerRelativelySafe;
     } else if (theirRiichi) {
         level = kDangerDangerous;
@@ -75,51 +87,72 @@ inline int dangerScore(int kind, const Counts &visible, const Counts *rivers, bo
         level = kDangerSuspicious;
     }
     const int t = std::max(0, std::min(turn, 18));
-    return std::min(100, kDangerBase[level] + t);
+    return {level, std::min(100, kDangerBase[level] + t)};
 }
 
-/** 对**四家**取最危险的那一家（排除自己）—— `Danger.worst`。 */
-inline int dangerWorst(int kind, const Counts &visible, const std::array<Counts, 4> &rivers,
-                       const std::array<bool, 4> &riichi, int turn, int selfSeat) {
+/** 对**一家**打 `kind` 的危险度**分数**（`Danger.Report.score`）。 */
+inline int dangerScore(int kind, const Counts &visible, const Counts *rivers, bool theirRiichi,
+                       int turn) {
+    return dangerOf(kind, visible, rivers, theirRiichi, turn).score;
+}
+
+/** 对**四家**取最危险的那一家（排除自己）—— `Danger.worst`（级别 + 分数）。 */
+inline DangerReport dangerWorstReport(int kind, const Counts &visible,
+                                      const std::array<Counts, 4> &rivers,
+                                      const std::array<bool, 4> &riichi, int turn, int selfSeat) {
     bool has = false;
-    int best = 0;
+    DangerReport best{};
     for (int s = 0; s < 4; s++) {
         if (s == selfSeat) {
             continue;
         }
-        const int sc = dangerScore(kind, visible, &rivers[static_cast<size_t>(s)],
-                                   riichi[static_cast<size_t>(s)], turn);
-        if (!has || sc > best) {                         // 严格大于才替换（并列保留先出现的那家）
+        const DangerReport rep = dangerOf(kind, visible, &rivers[static_cast<size_t>(s)],
+                                          riichi[static_cast<size_t>(s)], turn);
+        if (!has || rep.score > best.score) {             // 严格大于才替换（并列保留先出现的那家）
             has = true;
-            best = sc;
+            best = rep;
         }
     }
     // 三家全被排除（`selfSeat` 越界等）时的兜底：Java 传 `null` 牌河 + 未立直
-    return has ? best : dangerScore(kind, visible, nullptr, false, turn);
+    return has ? best : dangerOf(kind, visible, nullptr, false, turn);
+}
+
+/** 对**四家**取最危险的那一家（排除自己）—— 只要分数。 */
+inline int dangerWorst(int kind, const Counts &visible, const std::array<Counts, 4> &rivers,
+                       const std::array<bool, 4> &riichi, int turn, int selfSeat) {
+    return dangerWorstReport(kind, visible, rivers, riichi, turn, selfSeat).score;
 }
 
 /**
- * 只对**立直家**取最危险 —— 弃和（ベタオリ）时该用这一支。
+ * 只对**立直家**取最危险 —— 弃和（ベタオリ）时该用这一支（级别 + 分数）。
  *
  * <p>为什么不能对四家取最坏：没人立直的对手手里是什么样无从判断，把他们算进来会让每一张牌
  * 都"一样危险"、把立直家现物那份真正有价值的安全度淹掉。没有任何立直家时**回退成 `worst`**。
  */
-inline int dangerWorstAgainstRiichi(int kind, const Counts &visible,
-                                    const std::array<Counts, 4> &rivers,
-                                    const std::array<bool, 4> &riichi, int turn, int selfSeat) {
+inline DangerReport dangerWorstAgainstRiichiReport(int kind, const Counts &visible,
+                                                   const std::array<Counts, 4> &rivers,
+                                                   const std::array<bool, 4> &riichi, int turn,
+                                                   int selfSeat) {
     bool has = false;
-    int best = 0;
+    DangerReport best{};
     for (int s = 0; s < 4; s++) {
         if (s == selfSeat || !riichi[static_cast<size_t>(s)]) {
             continue;
         }
-        const int sc = dangerScore(kind, visible, &rivers[static_cast<size_t>(s)], true, turn);
-        if (!has || sc > best) {
+        const DangerReport rep = dangerOf(kind, visible, &rivers[static_cast<size_t>(s)], true, turn);
+        if (!has || rep.score > best.score) {
             has = true;
-            best = sc;
+            best = rep;
         }
     }
-    return has ? best : dangerWorst(kind, visible, rivers, riichi, turn, selfSeat);
+    return has ? best : dangerWorstReport(kind, visible, rivers, riichi, turn, selfSeat);
+}
+
+/** 只对**立直家**取最危险 —— 只要分数。 */
+inline int dangerWorstAgainstRiichi(int kind, const Counts &visible,
+                                    const std::array<Counts, 4> &rivers,
+                                    const std::array<bool, 4> &riichi, int turn, int selfSeat) {
+    return dangerWorstAgainstRiichiReport(kind, visible, rivers, riichi, turn, selfSeat).score;
 }
 
 }  // namespace trainer

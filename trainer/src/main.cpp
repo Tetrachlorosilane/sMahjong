@@ -2283,7 +2283,7 @@ int main(int argc, char** argv) {
                      "                                   （= Java --features，逐字节对拍）\n"
                      "                                   --workers 缺省/0 = max(1, 核数×3/4)，钳制到 [1, 文件数]\n"
                      "  net <net.bin> <轨迹1.jsonl> …     逐条 decision 行打印网络 logits（与 tools/NetProbe.java 逐字符对拍）\n"
-                     "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %.9g）\n");
+                     "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %%.9g）\n");
         return 2;
     }
     const std::string cmd = argv[1];

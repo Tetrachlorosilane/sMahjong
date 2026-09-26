@@ -168,7 +168,7 @@ RoundResult Round::play() {
         }
         const Observation obs = makeObservation(turn, "turn", opts, drawn, isRinshan, -1, false, "",
                                                 hasWinNote, winNote);
-        Cmd act = ask(turn, "turn", obs);
+        Cmd act = ask(turn, "turn", obs, opts, -1);
         std::string type = "discard";
         if (act.valid && !act.action.type.empty()) {
             type = act.action.type;
@@ -918,7 +918,7 @@ Round::Claim Round::claimPhase(int from, int tileId, bool riichiDiscard) {
         askedTypes[s] = myTypes;
         const Observation obs = makeObservation(s, "claim", opts, -1, false, from, true, calledTile,
                                                hasWinNote, winNote);
-        const Cmd a = ask(s, "claim", obs);
+        const Cmd a = ask(s, "claim", obs, opts, tileId);
         if (a.valid) {
             answers[s] = a.action;
         }
@@ -1385,12 +1385,15 @@ Observation Round::makeObservation(int seat, const std::string &kind, const std:
     return o;
 }
 
-Cmd Round::ask(int seat, const std::string &kind, const Observation &obs) {
+Cmd Round::ask(int seat, const std::string &kind, const Observation &obs,
+               const std::vector<Option> &opts, int calledTileId) {
     // 训练端没有网络：四个座位恒为机器人（SelfPlay 对每个座位 addBot），
     // 所以 Java `ask()` 里的 "掉线托管" 与 "下发报文 + awaitAction" 两条分支都到不了。
     const std::string roundKey
         = std::to_string(roundWind) + "-" + std::to_string(kyoku) + "-" + std::to_string(honba);
-    return table->decideBot(seat, obs, kind, roundKey);
+    // `opts` / `calledTileId` 一起传下去：Java 的 `Decision` 带着 `round` / `options` / `extra`，
+    // teacher（`Bot.decide`）按**原始选项**取舍（见 policies.hpp 的 Decision）。
+    return table->decideBot(seat, obs, kind, roundKey, this, opts, calledTileId);
 }
 
 }  // namespace trainer

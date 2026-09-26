@@ -77,20 +77,26 @@ function runToFile(cmd, cmdArgs, outFile) {
     }
 }
 
-const dirJava = join(BUILD, 'sp-java');
-const dirCpp = join(BUILD, 'sp-cpp');
+// ⚠ 输出目录**按进程唯一化**：这两个目录以前是硬编码的 `sp-java` / `sp-cpp`，
+// 于是"两个进程同时跑这个闸门"会互相覆盖 —— 本项目真被这个坑过一次
+// （一次"30/50 不一致"的假红，其实是另一路 `net:` 闸门正在往同一对目录里写）。
+// 现在每次调用都有自己的目录（`--out` 由脚本自己管，用完即可删）。
+const RUN_TAG = process.env.SP_TAG || `p${process.pid}`;
+const dirJava = join(BUILD, `sp-${RUN_TAG}-java`);
+const dirCpp = join(BUILD, `sp-${RUN_TAG}-cpp`);
 console.log(`[selfplay-parity] 策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局 / seed ${SEED}`
     + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''}`
-    + `${CPP_WORKERS > 0 ? ` / cpp --workers ${CPP_WORKERS}` : ''}`);
+    + `${CPP_WORKERS > 0 ? ` / cpp --workers ${CPP_WORKERS}` : ''}`
+    + ` / 目录 sp-${RUN_TAG}-{java,cpp}`);
 const tail = ['--policy', POLICY, '--seed', SEED, '--hands', String(HANDS), ...EXTRA];
 // Java 参考侧恒为 `--workers 1`（参考轨迹不随核数变）；C++ 侧按 `--cpp-workers` 给定
 const javaArgs = ['--workers', '1', ...tail];
 const cppArgs = CPP_WORKERS > 0 ? ['--workers', String(CPP_WORKERS), ...tail] : tail;
 
 runToFile('java', ['-jar', JAR, '--selfplay', String(GAMES), ...javaArgs, '--out', dirJava],
-    join(BUILD, 'sp-java.log'));
+    join(BUILD, `sp-${RUN_TAG}-java.log`));
 runToFile(EXE, ['selfplay', String(GAMES), ...cppArgs, '--out', dirCpp],
-    join(BUILD, 'sp-cpp.log'));
+    join(BUILD, `sp-${RUN_TAG}-cpp.log`));
 
 let fails = 0;
 for (let g = 0; g < GAMES; g++) {

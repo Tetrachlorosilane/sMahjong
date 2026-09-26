@@ -14,8 +14,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <optional>
 #include <string>
 
+#include "java_rand.hpp"
 #include "observation.hpp"
 #include "policies.hpp"
 #include "round.hpp"
@@ -96,12 +98,39 @@ public:
     Seat &seat(int i) { return seats[static_cast<size_t>(i)]; }
     const Seat &seat(int i) const { return seats[static_cast<size_t>(i)]; }
 
+    /**
+     * 机器人专用随机源：**只用来打破平局**，不参与任何规则判定（Java `Table.botRng()`）。
+     *
+     * <p>必须由 `seedBase` 派生而不是 `std::random_device`：自测/自对弈把 `seedBase` 写死并打开
+     * `debugDeterministicSeed` 时，整场（含机器人的随机选择）必须完全可复现 —— 那是数据可复现与
+     * "配对同牌山评测"的前提（`Bot` 的九种九牌分支原来用 `Math.random()`，就是靠这里修掉的）。
+     *
+     * <p>逐位照抄 Java：**惰性创建、整场共享**，种子 =
+     * `seedBase * 0x2545F4914F6CDD1DL + 0x9E3779B9L`（long 溢出按回绕处理 → C++ 在无符号域算）。
+     * ⚠ 是**整场**一份（不是每局一份）：同一桌的多次询问共用同一条流。
+     */
+    JavaRandom &botRng() {
+        if (!botRng_.has_value()) {
+            const uint64_t z = static_cast<uint64_t>(seedBase) * 0x2545F4914F6CDD1DULL
+                               + 0x9E3779B9ULL;
+            botRng_.emplace(static_cast<int64_t>(z));
+        }
+        return *botRng_;
+    }
+
     /** 唯一的决策漏斗：策略 → （异常/null → 内置机器人）；训练端没有 Bot，违规即报错（一个例外见下）。 */
     Cmd decideBot(int seatIdx, const Observation &obs, const std::string &kind,
-                  const std::string &roundKey) {
+                  const std::string &roundKey, const Round *r, const std::vector<Option> &opts,
+                  int calledTileId) {
         Decision d;
         d.obs = &obs;
         d.kind = kind;
+        // Java `Decision(obs, this, kind, opts, extra)` 的另外三项：
+        //   `round` 只给内置 teacher 与记录用（外部策略不许读它，见 Observation 顶部注释）；
+        //   `options` / `extra.tile` 同理（teacher 的取舍要按**原始选项**走）。
+        d.round = r;
+        d.options = &opts;
+        d.calledTileId = calledTileId;
         Cmd cmd;
         const int ordinal = ++decisionOrdinal;
         if (policy[static_cast<size_t>(seatIdx)]) {
@@ -110,6 +139,18 @@ public:
         if (!cmd.valid) {
             fatal = "策略没有返回回包（座位 " + std::to_string(seatIdx)
                     + "）—— 训练端没有内置 Bot 兜底（见 policies.hpp 顶部注释）";
+        } else if (cmd.fromBot) {
+            // 内置 Bot（teacher）的回包：Java `Policies.TEACHER` **不经过** `fromAction` 的三道
+            // 保护，回包原样交给状态机（合法性由 `Round` 自己判）。所以这里**不做 legal 校验**。
+            // §6.15 的退化局面（自家回合 legal 为空）在这里走同一条兜底链（`round.cpp` 会在
+            // `discardAllowed` 失败时调 `defaultDiscardId`）—— 仍然计数 + 打一行便于对照。
+            if (obs.legal.empty() && kind == "turn") {
+                engineFallbacks++;
+                std::fprintf(stderr,
+                             "[trainer] 引擎兜底出牌（teacher，自家回合 legal 为空：与 Java 同走 "
+                             "defaultDiscardId，且这一条决策不进轨迹）座位 %d，本场第 %d 次决策\n",
+                             seatIdx, ordinal);
+            }
         } else if (obs.indexOfKey(cmd.action.key()) < 0 && cmd.action.type != kActPon
                    && cmd.action.type != kActKan) {
             // Java `Policies.fromAction` 在"回包不在本次 legal 里"时退回**内置机器人**；训练端没有 Bot。
@@ -254,6 +295,10 @@ public:
         }
         // sendGameEnd / saveReplay：训练端不需要（记录器只认 `round_end`）
     }
+
+private:
+    /** Java `Table.botRng` 字段（private，惰性创建；见上面的访问器）。 */
+    std::optional<JavaRandom> botRng_;
 };
 
 }  // namespace trainer

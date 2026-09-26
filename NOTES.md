@@ -1309,6 +1309,31 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       —— 这是"对抗训练完全走 C++"的最后一块；`net:…@α`（teacher 先验）同理，已**显式报错**。
       ⑥ 顺手删掉 `producer.py` 里那条**多余的** `--sample` 闸门（C++ 早就支持且逐字节验过）：
       它正好挡住 `online.py` 的阶梯/评测采集（那边默认 `--sample 64`）。
+    - **案例：把 `teacher`（1,443 行五层取舍）搬进训练端（M3 收尾，2026-09）** —— 它是"对抗训练上 C++"的
+      最后一块：P5 的采集席里**老师常驻一席**（`online.py` 硬编码 `picked[-1] = "teacher"`，第一代更是
+      `teacher,teacher`），没有它世代只能在 Java 上跑。要点：
+      ① **四处接缝**（缺一条就出不来逐字节）：`Round::ask` / `Table::decideBot` 要往下传**原始 options 与
+      被鸣牌 id**（Java `Decision` 带着 `round`/`options`/`extra`）；`Decision.fromBot` —— ⚠ Java 的
+      `Policies.TEACHER` **不经过** `fromAction` 的"回包必须在 legal 里"这条校验（合法性由 `Round` 自己判），
+      训练端漏斗必须同样放行，否则会出现**Java 没有的 `fatal`**；`Table::botRng`（全类唯一随机源：
+      九种九牌 `n==9` 的 `nextDouble()<0.5`，`seedBase*0x2545F4914F6CDD1DL+0x9E3779B9L`，整场共享惰性创建）；
+      `danger.hpp` 抽出 `{level, score}`（teacher 看**级别**、特征看**分数**，必须同一份实现）。
+      ② **稀有分支靠计数器，不靠"跑得多"**：终局见逃在 `seed 31337` 的 200 场里只有 **1** 条
+      （`g146 step=670 seat=3 chosen=pass legal=["ron","pass"]`，`bakaze=S kyoku=4 tiles_left=41`）；
+      两条开杠闸门（四杠散了 / 加杠危险）在 7 种子 × 200 场 = **1,400 场里恒 0** → 逐字节轨迹**覆盖不到**，
+      必须**构造局面**（`build/bot-probe.cpp` 7 用例含 4 个反例，`shouldKan`+计数器 7/7 相同）。
+      ③ **判据**：200 场完整半庄 **0/200**（私有目录）、官方闸门 1/1 + 5/2 + 30/0 PASS、
+      **13 个取舍计数器与 Java 逐项相等**、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng` 流）、
+      本节作者另跑 30/30；并且**接口改造没动其他策略**（first 30/30 · pass 10/10 · random 10/10 · net: 10/10）、
+      **danger 重构没动特征**（sidecar 30/30）。
+      ④ **吞吐**：C++ 24 核 **94,998** 决策/秒 vs Java **1,046** ⇒ **≈91×**（teacher 是 Java 侧最慢的策略：
+      逐候选向听 + 危险度，而 C++ 的查表向听把这块整个拿掉）。
+      ⑤ **并发验证会互相踩**：`tools/trainer-selfplay-parity.mjs` 曾**硬编码** `build/sp-java` / `sp-cpp`，
+      两个进程同时跑就互相覆盖 → 真出现过一次"30/50 不一致"的**假红**（并害我误判了一次前向优化，见 ⑥）。
+      现已改成**按进程唯一化目录**（`sp-p<pid>-{java,cpp}`，`SP_TAG` 可覆盖）。
+      ⑥ **教训**：**"不一致"要先确认产物是谁写的**。那次假红之后我做了 A/B（优化前后两个构建在**同一份语料**上
+      跑 `net` 子命令 → 输出**逐字节相同**，证明函数没变），才回头怀疑到目录争用 —— 顺序应该是反的：
+      先看证据的来源是否干净，再谈结论。
       而且"对拍 C++ 自己的串行/并行"永远发现不了它（`--workers` 确实没改产出，问题在**引擎**），
       **必须同时跑 Java 侧参考**。（判据见 `AGENTS.md` §6.5 与 `docs/TRAINER-CPP.md` §6.15。）
 

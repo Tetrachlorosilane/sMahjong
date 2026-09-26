@@ -1,5 +1,5 @@
 // 内置策略（训练接口的"标准件"）—— 与 Java `mahjong.ai.Policies` 的
-// `pass` / `first` / `random` 三个**逐语义**一致。
+// `pass` / `first` / `random` / `teacher` 四个**逐语义**一致。
 //
 // 复现性的两条硬口径（AGENTS §6.5）：
 //   ① **每局每席一份实例**（`PolicyFactory.create(seat, gameSeed)`）—— 策略跨局带状态
@@ -7,11 +7,12 @@
 //   ② `random` 的随机源必须逐位等于 `new java.util.Random(gameSeed * 31 + seat)`
 //      —— 所以走 `java_rand.hpp`，不用 `std::mt19937`。
 //
-// ⚠ **teacher / net: 这一轮没实现**：本层只提供"不需要 Bot 兜底"的三种策略。
-//   Java 的 `Policies.fromAction` 在"回包非法 / 返回 null / 抛异常"时会退回**内置机器人**；
-//   这三种策略只在 `legal` 为空时可能触发那条路（`Action.of(PASS)` 不在空 legal 里），
-//   而 `legal` 在实局里恒非空（自家回合至少有打牌、鸣牌段至少有 pass）——
-//   所以训练端**不需要** Bot，但一旦真触发就报错，绝不悄悄换一个动作（那等于伪造标签）。
+// `teacher`（= Java `Policies.TEACHER` → `Bot.decide`）的**本体在 `bot.cpp`**：它要读 `Round`
+//   （teacher 是训练侧唯一允许读 `Round` 的策略，AGENTS §6.5 的例外），而 `Round` 又包含本
+//   头文件 —— 包含关系只能是 `bot.hpp → policies.hpp` 这一个方向。所以这里只**前置声明**
+//   `makeTeacherPolicy()`（定义在 `bot.cpp`），避免循环包含。
+//
+// ⚠ `net:` 的 `@α` 先验要调 `Bot.decide`（现在是有的），但先验那一支仍未接（见下）。
 #pragma once
 
 #include <cstdlib>
@@ -26,16 +27,40 @@
 
 namespace trainer {
 
+class Round;
+
 /** 一次**决策机会**的信息集部分（Java `Decision` 的 `obs` / `kind`；不含 `Round`）。 */
 struct Decision {
     const Observation *obs = nullptr;
     std::string kind;                 // "turn" / "claim"
+
+    // ---- 以下三项对应 Java `Decision` 的 `round` / `options` / `extra` ----
+    // ⚠ 只有 **teacher** 允许读 `round`（Java `Decision.round` 的注释：外部策略尤其 ML 策略
+    //   不许读它，那是绕过信息集作弊）。`options` 是服务端下发的**原始选项**
+    //   （Java `Decision.options`），`first`/`pass`/`random`/`net` 都只用 `obs.legal`。
+    /** 本局的 `Round`（**只读**；Java `Decision.round`）。 */
+    const Round *round = nullptr;
+    /** 本次询问的原始选项（Java `Decision.options`）。 */
+    const std::vector<Option> *options = nullptr;
+    /** 鸣牌询问的"被鸣那张牌 id"（= Java `extra.get("tile")` 解析回来的 kind 的来源）。 */
+    int calledTileId = -1;
 };
 
 /** 策略回包（等价于 Java 的 `Map<String,Object> cmd`）。 */
 struct Cmd {
     bool valid = false;
     Action action;
+    /**
+     * 这个回包**来自内置 Bot**（= Java `Policies.TEACHER` 那条路）。
+     *
+     * <p>为什么需要它：Java 的"回包必须在本次 `legal` 里"这条校验只活在
+     * `Policies.fromAction`（`ActionPolicy` 的适配器）里 —— `TEACHER` 根本不经过它，
+     * `Table.decideBot` 直接把它交给状态机（合法性由 `Round` 自己判：`discardAllowed` /
+     * `pickAuto` / 杠校验）。所以训练端的漏斗必须**同样**对内置 Bot 的回包放行，
+     * 否则会出现 Java 没有的 `fatal`（例：teacher 在"吃之后食替锁死全部可打牌"时回 `pass`，
+     * 而本次询问还带着 `kan` 选项 → `legal` 非空却找不到 `pass`，见 docs/TRAINER-CPP.md §6.15）。
+     */
+    bool fromBot = false;
 };
 
 using Policy = std::function<Cmd(const Decision &)>;
@@ -86,6 +111,14 @@ inline Policy makeRandomPolicy(int64_t seed) {
 
 /** 每局一份策略实例的工厂（Java `PolicyFactory`）。 */
 using PolicyFactory = std::function<Policy(int seat, int64_t gameSeed)>;
+
+/**
+ * `teacher` / `bot` 策略：Java `Policies.TEACHER` = `Bot.decide(d.round, d.obs.seat, d.kind,
+ * d.options, d.extra)`。
+ *
+ * <p>**定义在 `bot.cpp`**（那里才拿得到 `Round` 的完整定义）；本头文件只前置声明，见文件顶部。
+ */
+Policy makeTeacherPolicy();
 
 /**
  * `net:<权重文件>` 的策略本体（= Java `NeuralPolicy.choose` / `chooseSampled`，**不含** `@α` 先验）。
@@ -198,9 +231,10 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
             rest = rest.substr(0, at);
         }
         if (alpha > 0.f) {
-            err = "策略 `net:<权重文件>@<α>`（P5b 的 teacher 先验）在训练端**尚未移植**：先验要调 "
-                  "`Bot.decide(Round, …)`，而 teacher 未实现（见 docs/TRAINER-CPP.md §5 的 M3）。"
-                  "纯网络（`@0` 或缺省）与 `#<T>` 温度采样已支持 —— 要跑混合臂请用 Java 生产者。";
+            err = "策略 `net:<权重文件>@<α>`（P5b 的 teacher 先验）在训练端**尚未接线**：teacher 本体"
+                  "（`Bot::decide`）已经移植（见 bot.hpp / bot.cpp），但先验那一支要按 Java "
+                  "`Policies.hybrid` 把老师动作落位到本次 legal 再改 logit，本轮没做 —— 要跑混合臂"
+                  "请先用 Java 生产者（**不静默降级**）。纯网络（`@0` 或缺省）与 `#<T>` 温度采样已支持。";
             return nullptr;
         }
         std::shared_ptr<Net> loaded = std::make_shared<Net>();
@@ -236,9 +270,10 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
         };
     }
     if (n == "teacher" || n == "bot") {
-        err = "策略 `teacher`（内置牌效机器人 Bot.decide）在训练端**这一轮还没实现**"
-              "（见 docs/TRAINER-CPP.md §5 的 M3）；本轮支持 pass / first / random / net:<权重文件>";
-        return nullptr;
+        // Java `Policies.byName` 的 `case "teacher": case "bot": return teacher();`
+        // —— `teacher()` 返回 `(seat, gameSeed) -> TEACHER`（**无状态**、与座位/种子无关；
+        //    九种九牌那条随机源在 `Table.botRng()` 上，整场共享）。
+        return [](int, int64_t) { return makeTeacherPolicy(); };
     }
     err = "未知策略名: " + name;
     return nullptr;

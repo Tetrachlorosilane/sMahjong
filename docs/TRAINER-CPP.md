@@ -113,7 +113,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | ✅ **已完成**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ 四种策略 24 局 × 40 场 = 9.77 万次（§6.11）；⑪ 鸣牌询问 `claimOptions`（ron/pon/kan/chi + 赤五取法 + 振听）✅ 1.85 万次（§6.12）—— ⑩+⑪ 合计 **116,166 次逐字符一致**；⑫ `Round` 摸打/鸣牌/立直/杠/流局循环 ✅ **完整半庄与 Java 逐字节相同**（官方闸门 300 场 × 2 小局 `--cpp-workers 8`、100 场 × 8 小局、150 场完整半庄；独立复算 **200 场完整半庄 200/200** = 155,464 决策 / 1,761 小局两侧相等；**soak 500 场 × {`first`,`random`} 各 500/500**；§6.13 / §6.14 / §6.15）。⚠ 判据里原来写的"先 100 场"**不够**：食替退化局面**跟策略走**（**实测** `first` **3/500 场 ≈ 1/167**、`random` **0/500**，且短局碰不到），完整半庄验收**至少 200 场** —— 见 §6.15 |
-| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state 607`/`candidate 96` 拼装）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 607 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⏳ **`teacher`（五层取舍）未实现** ⇒ `teacher` 席与 `@α` 先验**显式报错**（含 teacher 席的 P5 世代仍只能用 Java 生产者），**不静默降级** |
+| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state 607`/`candidate 96` 拼装）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 607 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ✅ **已完成（并行 + 对接）**：① `--workers` 真并行落地（`selfplay` + `features`），**产出逐字节不变**（300 场 × 2 小局 1 vs 8 逐字节、**200 场完整半庄 1 vs 24 逐字节 200/200**）；② **同等核数下决策/秒 = Java 的 16.7×（100 场）/ 18.7×（200 场）**（基线：24 核 1172 决策/秒、单核 88；目标 3× 超出 5 倍以上，§6.14）；③ 产出数据直接喂通 P3/P4 管线不改一行 Python（`MAHJONG_PRODUCER=cpp` + `trainer-takeover-check.mjs` PASS）；④ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 供工作流省掉编后自检。⏳ AVX2 向听表、批量前向未做（§6.14 也说明了为什么 `-flto`/`-fno-rtti` 不留） |
 
 **非目标**（明确不做，避免范围失控）：网络对战（TCP/NDJSON）、房间/等待室/身份/投票、
@@ -775,6 +775,54 @@ Java 24 workers **17.9 s 墙钟**（自身计时 17.61 s，8,827 决策/秒）vs
   这是"对抗训练完全走 C++"的**最后一块**，见 §5 M3 的 ⏳。
 - `producer.py` 的 `CPP_MISSING` 里曾挂着 `--sample`（其实早就支持且逐字节验过）—— 那条多余的门
   正好挡住世代采集（`online.py` 阶梯/评测默认 `--sample 64`），已删除。
+
+---
+
+### 6.17 M3（收尾）：`teacher`（内置机器人）的五层取舍（已完成）
+
+**为什么它是"对抗训练上 C++"的最后一块**：P5 的世代采集席固定是「2 席自己（`net:`）+ 2 席对手」，
+而 `online.py` 里**老师常驻一席**（`if "teacher" not in picked: picked[-1] = "teacher"`，
+注释写着它是"没有变弱"的基准），第一代更是 `["teacher","teacher"]` —— 没有 `teacher`，世代只能在 Java 上跑。
+
+**移植口径**：`trainer/src/bot.cpp`（≈1.4k 行）= `server/.../bot/Bot.java`（1,443 行）**逐句**移植，
+含嵌套的 `HandState`。它只依赖 `Round` / `Meld` / `Tiles` / `Agari` / `Danger` / `Evaluator` /
+`HandEval` / `Payments` / `Shanten` / `Visible` / `RoundScoring` —— 这些训练端**全都已有**，
+所以没有引入任何新依赖。
+
+**四处必须改的接缝**（都不是"顺手改"，缺一条就出不来逐字节）：
+
+| 接缝 | 为什么必须 |
+| --- | --- |
+| `Round::ask(seat, kind, obs, opts, calledTileId)` + `Table::decideBot(…, Round*, opts, calledTileId)` | Java 的 `Decision` 带着 `round` / `options` / `extra`，`Bot.decide` 按**原始选项**取舍（`first`/`pass`/`random`/`net` 仍只用 `obs.legal`）。包含关系只能是 `bot.hpp → policies.hpp`，所以 `makeTeacherPolicy()` 定义在 `bot.cpp`、`policies.hpp` 只前置声明 `Round` |
+| `Decision.fromBot` | ⚠ Java 的 `Policies.TEACHER` **不经过** `fromAction` 那条"回包必须在本次 `legal` 里"的校验（合法性由 `Round` 自己判：`discardAllowed` / `pickAuto` / 杠校验）。训练端的漏斗必须**同样放行内置 Bot 的回包**，否则会出现 Java 根本没有的 `fatal`（这正是 §6.15 那条的延伸：teacher 在食替锁死时会回 `pass`，而本次询问的 `legal` 仍非空） |
+| `Table::botRng` | Bot 全类**只有一处**随机源（九种九牌 `n == 9` 时 `nextDouble() < 0.5`），必须与 Java 同一条流：`new java.util.Random(seedBase * 0x2545F4914F6CDD1DL + 0x9E3779B9L)`，**整场共享、惰性创建** |
+| `danger.hpp` 改成 `dangerOf(...) → {level, score}` | teacher 有两处闸门看**级别**（`dealScore` 的"已经是 DANGEROUS 就不再抬档"、加杠危险闸门），而特征工程只看**分数**；两处必须同一份实现，否则"抬档"与"特征里的危险度"迟早各算一遍。分数仍从这个函数派生 ⇒ sidecar 逐字节不变（见下） |
+
+**判据与实测**：
+
+| 判据 | 结果 |
+| --- | --- |
+| `--selftest` | **135 项全绿** |
+| 官方闸门 `1 1 teacher` / `5 2 teacher` / `30 0 teacher` | 全部 **PASS**（逐字节） |
+| **200 场完整半庄**（私有目录：Java 24w vs C++ 16w） | **0/200 不一致**（两侧 2,325 小局 / 714 决策每场） |
+| **独立复算**（本节作者另跑：30 场完整半庄，两侧 24w） | **30/30 逐字节一致**（346 小局 / 21,304 决策，两侧相等） |
+| **tenhou 预设** 120 场 × 1 小局 | **120/120**，且覆盖 `kyuushu` 与 `botRng` 随机流（g17 真的走了九种九牌） |
+| **13 个取舍计数器**（弃和 / 默听 / 无役拒绝鸣牌 / 开杠与各种"不开" / 顺位翻转 / 终局见逃 / 对手模型弃和） | 与 Java **逐项相等**（3 场与 30 场两批完全相同）—— 这是"判据真的接上了"而不是"看起来对"的证据 |
+| 两条 1400 场都不触发的开杠闸门（`kan_refuse_four_kan` / `kan_refuse_danger`） | 用**定向构造探针**（`build/bot-probe.cpp` + Java 侧同批局面直接填 `HandState`）→ `shouldKan` 与四个计数器增量 **7/7 逐行相同**（含 c2-fourkan / c4-danger-kakan 与它们的反例） |
+| 接口改造**没有动到其他策略** | 独立复核：`first` 30/30 · `pass` 10/10 · `random` 10/10 · `net:` 10/10 逐字节一致 |
+| `danger.hpp` 重构**没有动到特征** | `trainer-features-parity.mjs` 在 teacher 轨迹上 **30 个 sidecar 逐字节一致** |
+| **吞吐**（100 场完整半庄 × `teacher`） | C++ 1 worker **9,004** / 24 workers **94,998** 决策/秒 vs Java 24 workers **1,046** ⇒ **≈91×**（teacher 是 Java 侧最慢的策略：每个候选都要跑向听 + 危险度，而 C++ 的查表向听把这一块整个拿掉） |
+
+**坑（都值得记）**：
+
+- **稀有分支靠"计数器相等"而不是"跑得多"**：终局见逃在 `seed 31337` 的 200 场里只出现 **1** 条
+  （`g146 step=670 seat=3 chosen=pass legal=["ron","pass"]`，`bakaze=S kyoku=4 tiles_left=41`），
+  两侧计数器都是 1 —— 全目录里"给了 ron 却见逃"的行**恰好 1 条**，与计数器一致。
+- **两条开杠闸门在 7 个种子 × 200 场 = 1,400 场里恒 0**（逐字节轨迹**覆盖不到**）→ 必须**构造局面**
+  才验得到（上面的定向探针）。
+- **并发验证会互相踩**：`tools/trainer-selfplay-parity.mjs` 曾**硬编码** `build/sp-java` / `sp-cpp`
+  两个目录，两个进程同时跑就会互相覆盖（本项目真踩过一次：一次"30/50 不一致"的假红就是这么来的）。
+  现已改成**按进程唯一化输出目录**（见 §4 的工具清单）。
 
 ---
 
