@@ -1209,6 +1209,11 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       `--hands 0` 完整半庄 100/100 · `--hands 2` 300/300 · sidecar 100/100（基准单场 19,050 B 同 sha256）·
       `selfplay-check` 在 C++ 产物上 DATASET PASS（40 / 300 / 完整半庄）· `takeover-check` 整条链 PASS。
       服务端与客户端零改动（`git diff … -- server client` 为空）。
+    - **Python 侧切换实测（`MAHJONG_PRODUCER=cpp`）**：直接调 `online.selfplay()` 本体（不是脚本代跑）
+      → 它把活派给 `trainer.exe selfplay … --rotate --policy pass --seed 20260101`，产出 `g0.jsonl`
+      **134,375 B**（= Java 参考字节数）与 `g0.feat.bin` **19,050 B**（= 基准值）；随后
+      `producer.features_cmd` 也指向 `trainer.exe features`，`python -m mahjong_ml.dataset build` 正常出
+      **训练 81 条 / state 607 / cand 96 / float16**。⇒ **一行环境变量完成切换，产出仍逐字节等价**。
     - **为什么必须用真实牌局**：询问内容里的每个闸门都读局面（残牌/海底/副露/赤五/立直后杠），
       构造局面等于把"我以为的局面"喂给自己；而 `RoundProbe` 走 `Table.playGame()`，探针只读状态、
       **选项文本直接来自 Java 自己的 `Decision.options`**。
