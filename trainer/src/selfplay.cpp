@@ -413,7 +413,9 @@ void selfplayUsage(std::FILE *out) {
                  "                `max(1, min(workers, max(1, games)))`。并行只改调度：结果汇总在\n"
                  "                join 之后按 g 升序合并，所以 `g*.jsonl` 与 `--workers 1` **逐字节相同**\n"
                  "                （summary.json 的 `workers` 字段是钳制后的线程数）。\n"
-                 "  --policy P    四家策略，逗号分隔（pass|first|random）；缺省 teacher（训练端未实现）\n"
+                 "  --policy P    四家策略，逗号分隔（teacher|pass|first|random|net:<权重文件>[@α][#T]）；\n"
+                 "                缺省 teacher。⚠ `net:` 的 `@α`（teacher 先验）**没接** → 显式报错\n"
+                 "                （见 docs/TRAINER-CPP.md §6.16 与 §6.17）\n"
                  "  --seed S      基准种子（缺省 20260101）；每场种子只与 (S, 场号) 有关\n"
                  "  --hands H     每场最多 H 小局（0 = 完整半庄）；缺省 0\n"
                  "  --rotate      按场轮转座位\n"
@@ -482,10 +484,12 @@ int selfplayCli(int argc, char **argv) {
         }
     }
     if (teacherLabel) {
-        // Java 有 `--teacher-label`（DAgger）：它要跑一次 `Bot.decide`，而 teacher 还没移植。
+        // Java 有 `--teacher-label`（DAgger）：学生座位的决策行要额外记 `teacher` / `teacher_index`
+        // 两列。⚠ teacher 本体**已经移植了**（docs/TRAINER-CPP.md §6.17）—— 这里缺的只是
+        // `TraceRecorder` 多记那两列（`trace.*` + 本文件的接线）。
         // ⚠ 显式报错，**不静默降级**（AGENTS §6.5：能力缺失要报错）。
-        std::fprintf(stderr, "[trainer] --teacher-label 需要内置 teacher（Bot.decide），"
-                             "训练端这一轮还没实现（docs/TRAINER-CPP.md §5 M3）\n");
+        std::fprintf(stderr, "[trainer] --teacher-label（DAgger 的老师标注）训练端还没接：teacher 本体"
+                             "已可用（§6.17），缺的是记录器的 `teacher`/`teacher_index` 两列（§5 M3 的 ⏳）\n");
         return 2;
     }
     std::string fatal;

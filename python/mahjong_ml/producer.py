@@ -31,7 +31,8 @@ PRODUCERS = ("java", "cpp")
 #: `… 50 0 net:<ckpt> 20260101 --sample 7` PASS；见 docs/TRAINER-CPP.md §6.16）——
 #: 留在这里会**挡住** P5 世代采集（`online.py` 的阶梯/评测默认 `--sample 64`）。
 CPP_MISSING = {
-    "--teacher-label": "DAgger 的老师标注（P2 采集用；要调 Bot.decide）",
+    "--teacher-label": "DAgger 的老师标注（P2 采集用）；teacher 本体已移植，"
+                       "缺的是记录器的 `teacher`/`teacher_index` 两列",
 }
 
 
