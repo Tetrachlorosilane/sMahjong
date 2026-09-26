@@ -327,6 +327,86 @@ function buildCorpus(want) {
         rows.push(`rinit mleague ${BigInt(Math.floor(r() * 1e15))} ${Math.floor(r() * 4)} `
             + `${Math.floor(r() * 4)} 25000 25000 25000 25000`);
     }
+    // ⑬ `RoundOptions` 的四个纯函数（选项生成的第一层：可打牌 / 食替 / 立直后杠 / 吃搭子）
+    //    为什么单独钉：它们的输出**同时**是下发选项、服务端校验和训练端动作空间 —— 三处必须同源
+    const yao = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33];
+    if (yao.length !== 13) throw new Error('幺九牌表出错');
+    // 可打牌：已立直（只剩摸切一张）/ 未立直（去重 + 振听禁打）/ 带赤五 / 振听禁打整色
+    rows.push('ropts discard 0 -1 0,1,2,4,8,9,13,36,37 -');
+    rows.push('ropts discard 1 5 0,1,2,4,8,9,13,36,37 -');
+    rows.push('ropts discard 0 5 0,1,2,4,8,9,13,36,37 0,9,13');
+    rows.push('ropts discard 1 -1 0,1,2,4,8,9,13,36,37 0');
+    rows.push('ropts discard 0 -1 4,5,6,7,52,53,54 -');       // 赤五与普通五各自成串（0m vs 5m）
+    for (let i = 0; i < 40; i++) {
+        const n = 1 + Math.floor(r() * 14);
+        const hand = [];
+        for (let j = 0; j < n; j++) hand.push(Math.floor(r() * 136));
+        const forb = [];
+        if (r() < 0.5) {
+            for (let j = 0; j < 1 + Math.floor(r() * 3); j++) forb.push(Math.floor(r() * 34));
+        }
+        rows.push(`ropts discard ${r() < 0.3 ? 1 : 0} ${r() < 0.5 ? -1 : Math.floor(r() * 136)} `
+            + `${hand.join(',')} ${forb.length ? forb.join(',') : '-'}`);
+    }
+    // 食替：三种组合 × 两侧（吃的牌在顺子下边 / 上边 / 居中）× 花色边界（1m/9m/1s）
+    for (const [ck, k0, k1] of [[2, 3, 4], [3, 4, 5], [4, 3, 5], [2, 0, 1], [0, 1, 2], [8, 6, 7],
+                                [9, 10, 11], [11, 9, 10], [17, 15, 16], [18, 19, 20], [26, 24, 25],
+                                [27, 27, 27], [31, 31, 31], [4, 0, 2], [5, 3, 4], [3, 0, 6]]) {
+        rows.push(`ropts kuikae ${ck} ${k0} ${k1}`);
+    }
+    for (let i = 0; i < 60; i++) {
+        const a = Math.floor(r() * 34);
+        const b = Math.floor(r() * 34);
+        rows.push(`ropts kuikae ${Math.floor(r() * 34)} ${a} ${b}`);
+    }
+    // 立直后杠：听牌形不变才允许（含听牌集合变大/变小/不听牌/字牌）
+    rows.push('ropts kanriichi 0,4,8 2,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 0 4');
+    rows.push('ropts kanriichi 3,6 0,0,0,1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 0 4');
+    rows.push('ropts kanriichi - 0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 0 3');
+    for (let i = 0; i < 60; i++) {
+        const mc = Math.floor(r() * 4);
+        const size = 14 - 3 * mc;                    // ⚠ 自己回合的暗牌 = 14 − 3×副露（含刚摸到那张）
+        const c = new Array(34).fill(0);
+        const kind = Math.floor(r() * 34);
+        c[kind] = 4;                                 // 要杠的那张：手里真有 4 张
+        let placed = 4;
+        while (placed < size) {
+            const k = Math.floor(r() * 34);
+            if (c[k] >= 4) continue;
+            c[k]++;
+            placed++;
+        }
+        const drawnKind = c.findIndex((v) => v > 0);
+        const wa = [];
+        const nw = Math.floor(r() * 4);
+        for (let j = 0; j < nw; j++) wa.push(Math.floor(r() * 34));
+        rows.push(`ropts kanriichi ${wa.length ? [...new Set(wa)].join(',') : '-'} `
+            + `${c.join(',')} ${mc} ${kind}`);
+        // 同一条手牌再走一遍**真实调用点**口径（`Round.kanAllowedByRiichi`）：
+        // 杠前听牌要先把刚摸到的那张减掉再算，而传给判据的计数仍是 14 张的
+        rows.push(`ropts kanauto ${c.join(',')} ${mc} ${kind} ${drawnKind}`);
+    }
+    // 文档里点名的形状（`docs/日本麻将.md` §立直）：1m1m1m2m2m3m3m3m8p8p8p6z6z 家族，摸 9m 后问杠
+    //   B：手里 8p×4 → 杠 8p 是文档里"可以"的那一手
+    //   ⚠ 别放"被杠的牌不足 4 张"的行：Java 侧 `after[kind] -= 4` 会得到**负数**，
+    //     `Shanten.dfs` 直接 StackOverflow（本轮就是这么炸的）—— C++ 侧已在门口挡住这种输入
+    rows.push('ropts kanauto 3,2,3,0,0,0,0,0,1,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0 0 16 8');
+    rows.push('ropts kanauto 4,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0 0 0 4');
+    // 吃搭子：三种组合 × 边界 × 字牌（含手里有两张同种这种"正常吃不会出现"的形状）
+    for (let k = 0; k < 34; k++) {
+        const c = new Array(34).fill(0);
+        c[k] = 1;
+        for (const d of [-2, -1, 1, 2]) {
+            const t = k + d;
+            if (t >= 0 && t < 34) c[t] = Math.min(4, c[t] + 1);
+        }
+        rows.push(`ropts chi ${c.join(',')} ${k}`);
+    }
+    for (let i = 0; i < 40; i++) {
+        const c = new Array(34).fill(0);
+        for (let j = 0; j < 6; j++) c[Math.floor(r() * 34)] = Math.min(4, c[Math.floor(r() * 34)] + 1);
+        rows.push(`ropts chi ${c.join(',')} ${Math.floor(r() * 34)}`);
+    }
     return rows;
 }
 

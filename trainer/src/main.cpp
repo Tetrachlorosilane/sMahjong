@@ -27,6 +27,7 @@
 #include "meld.hpp"
 #include "payments.hpp"
 #include "roundclaims.hpp"
+#include "roundoptions.hpp"
 #include "roundscoring.hpp"
 #include "roundstate.hpp"
 #include "rules.hpp"
@@ -646,6 +647,90 @@ int selftest() {
               && merged[3] == 2
               && !trainer::winCounts(concealed, 0, 3, true, merged)      // 自摸时已含那张 → 13 ≠ 14
               && !trainer::winCounts(concealed, 1, 3, false, merged));   // 一副露要求 11 张 → 不符
+
+        // ---- `RoundOptions`（选项生成的第一层，纯函数）
+        {
+            // 可打牌：未立直去重；已立直只剩摸切一张；振听禁打按**牌种**过滤
+            //   id 0/1/2 = 1m×3，4 = 2m，8/9 = 3m×2，13 = **4m**（kind = id>>2），108/109 = 1z×2
+            const std::vector<int> hand = {0, 1, 2, 4, 8, 9, 13, 108, 109};
+            check("可打牌：去重后按插入序（1m,2m,3m,4m,1z）",
+                  trainer::discardChoices(hand, false, -1, {}) == std::vector<std::string>({"1m", "2m", "3m", "4m", "1z"}));
+            check("可打牌：赤五 id 打成 0p 而不是 5p",
+                  trainer::discardChoices({52}, false, -1, {}) == std::vector<std::string>({"0p"}));
+            check("可打牌：已立直只剩摸切那一张",
+                  trainer::discardChoices(hand, true, 8, {}) == std::vector<std::string>({"3m"}));
+            check("可打牌：振听禁打按牌种（禁 1m → 三张同种一起去掉）",
+                  trainer::discardChoices(hand, false, -1, {0}) == std::vector<std::string>({"2m", "3m", "4m", "1z"}));
+            check("可打牌：已立直 + drawn<0 退化成手牌去重",
+                  trainer::discardChoices(hand, true, -1, {}).size() == 5);
+
+            // 食替：两侧都要禁（吃 5m 配 3m4m 禁 {5m,2m}；吃 2m 禁 {2m,5m}）；坎张只有現物
+            check("食替：吃 5m 用 3m4m → 禁 {5m,2m}",
+                  trainer::kuikaeForbidden(4, 2, 3) == std::vector<int>({4, 1}));
+            check("食替：吃 2m 用 3m4m → 禁 {2m,5m}",
+                  trainer::kuikaeForbidden(1, 2, 3) == std::vector<int>({1, 4}));
+            check("食替：坎张（4m6m 吃 5m）只有現物",
+                  trainer::kuikaeForbidden(4, 3, 5) == std::vector<int>({4}));
+            check("食替：1m 的向下补不存在（吃 1m 用 2m3m → 只有 {1m,4m}）",
+                  trainer::kuikaeForbidden(0, 1, 2) == std::vector<int>({0, 3}));
+            check("食替：吃 9m 用 7m8m → 禁 {9m, 6m}（两侧都要算）",
+                  trainer::kuikaeForbidden(8, 6, 7) == std::vector<int>({8, 5}));
+            check("食替：字牌只有現物",
+                  trainer::kuikaeForbidden(31, 31, 31) == std::vector<int>({31}));
+            check("食替：跨花色不补（吃 1p 用 8m9m → 只有 {1p}）",
+                  trainer::kuikaeForbidden(9, 7, 8) == std::vector<int>({9}));
+
+            // 立直后杠：听牌形必须**完全不变**（调用前提：手里真的有 4 张，与 Java 调用点一致）
+            //   下面两条的真值都来自 Java（`ropts kanauto` 对拍，见 tools/trainer-settle-parity.mjs）：
+            //   ① 6666m + 1s（3 副露）杠 6m → 杠前杠后都单骑 1s → **允许**
+            trainer::Counts kanHand{};
+            kanHand[5] = 4;                              // 6m×4
+            kanHand[18] = 1;                             // 1s
+            trainer::Counts before = kanHand;
+            before[5] = 3;                               // 「杠前听牌」要先把刚摸到的那张减掉（14 张口径）
+            check("立直后杠：听牌形不变 → 允许（6666m+1s / 3 副露 杠 6m，仍单骑 1s）",
+                  trainer::kanAllowedAfterRiichi(trainer::waits(before, 3), kanHand, 3, 5));
+            //   ② 8p×4 但摸的是 9m：杠 8p 会改变听牌 → **不许**
+            trainer::Counts kanHand2{};
+            kanHand2[0] = 3;
+            kanHand2[1] = 2;
+            kanHand2[2] = 3;
+            kanHand2[8] = 1;
+            kanHand2[16] = 4;                            // 8p×4
+            kanHand2[32] = 1;
+            trainer::Counts before2 = kanHand2;
+            before2[8] = 0;
+            check("立直后杠：听牌形变了 → 不许（8p×4，摸的是 9m）",
+                  !trainer::kanAllowedAfterRiichi(trainer::waits(before2, 0), kanHand2, 0, 16));
+            check("立直后杠：手里不足 4 张 → 挡在门口（Java 侧会算出负数并 StackOverflow）",
+                  !trainer::kanAllowedAfterRiichi({}, kanHand2, 0, 5));
+            trainer::Counts noWait{};                    // 4m5m + 5m×4：杠完不听牌
+            noWait[2] = 1;
+            noWait[3] = 1;
+            noWait[4] = 4;
+            check("立直后杠：杠完不听牌 → 不许",
+                  !trainer::kanAllowedAfterRiichi({}, noWait, 0, 4));
+
+            // 吃搭子：三种组合的顺序 = {-2,-1} {-1,1} {1,2}；字牌为空；越界不串花色
+            trainer::Counts chi{};
+            chi[1] = 1;                                  // 2m
+            chi[2] = 1;                                  // 3m
+            chi[3] = 1;                                  // 4m
+            chi[4] = 1;                                  // 5m
+            const auto sets = trainer::chiSets(chi, 3);  // 吃 4m → {2m3m}、{3m5m}（6m 不在手里）
+            check("吃搭子：吃 4m → 两副（2m3m / 3m5m），顺序与 Java 一致",
+                  sets.size() == 2 && sets[0][0] == "2m" && sets[0][1] == "3m"
+                  && sets[1][0] == "3m" && sets[1][1] == "5m");
+            check("吃搭子：字牌为空", trainer::chiSets(chi, 31).empty());
+            trainer::Counts cross{};                     // 8m9m + 2p3p：吃 1p 不得串到万子去
+            cross[7] = 1;
+            cross[8] = 1;
+            cross[10] = 1;
+            cross[11] = 1;
+            const auto cs = trainer::chiSets(cross, 9);
+            check("吃搭子：不吃到相邻花色（8m9m 在手里也算不进 1p 的搭子）",
+                  cs.size() == 1 && cs[0][0] == "2p" && cs[0][1] == "3p");
+        }
     }
 
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
@@ -1344,6 +1429,84 @@ int cmdSettle(int argc, char **argv) {
                     arr[k] = merged[static_cast<size_t>(k)];
                 }
                 outLine = intsCsv(arr, trainer::kKindCount);
+            }
+        } else if (kind == "ropts" && f.size() >= 4) {
+            // ropts <mode> …  —— `RoundOptions` 的四个纯函数（选项生成的第一层）：
+            //   discard    <riichi> <drawn> <handIdsCsv> <forbiddenKindsCsv|->
+            //   kuikae     <calledKind> <k0> <k1>
+            //   kanriichi  <waitsBeforeCsv|-> <concealed34Csv> <meldCount> <kind>
+            //   kanauto    <concealed14Csv> <meldCount> <kind> <drawnKind|-1>（真实调用点口径）
+            //   chi        <concealed34Csv> <calledKind>
+            const std::string mode = f[1];
+            if (mode == "discard" && f.size() >= 6) {
+                const bool riichi = std::atoi(f[2].c_str()) != 0;
+                const int drawn = std::atoi(f[3].c_str());
+                const std::vector<int> hand = parseIntList(f[4]);
+                const std::vector<int> forb = parseIntList(f[5]);
+                const std::vector<std::string> v = trainer::discardChoices(hand, riichi, drawn, forb);
+                for (size_t i = 0; i < v.size(); i++) {
+                    outLine += (i ? "," : "");
+                    outLine += v[i];
+                }
+            } else if (mode == "kuikae" && f.size() >= 5) {
+                const std::vector<int> v = trainer::kuikaeForbidden(std::atoi(f[2].c_str()),
+                                                                    std::atoi(f[3].c_str()),
+                                                                    std::atoi(f[4].c_str()));
+                for (size_t i = 0; i < v.size(); i++) {
+                    outLine += (i ? "," : "");
+                    outLine += std::to_string(v[i]);
+                }
+            } else if (mode == "kanriichi" && f.size() >= 6) {
+                const std::vector<int> waitsBefore = parseIntList(f[2]);
+                trainer::Counts concealed{};
+                {
+                    const std::vector<int> v = parseIntList(f[3]);
+                    for (size_t i = 0; i < v.size() && i < trainer::kKindCount; i++) {
+                        concealed[i] = static_cast<uint8_t>(v[i]);
+                    }
+                }
+                outLine = trainer::kanAllowedAfterRiichi(waitsBefore, concealed,
+                                                         std::atoi(f[4].c_str()),
+                                                         std::atoi(f[5].c_str())) ? "1" : "0";
+            } else if (mode == "kanauto" && f.size() >= 6) {
+                // **真实调用点**语义（`Round.kanAllowedByRiichi`）：计数是**自己回合的 14 张**，
+                // 「杠前听牌」要先把刚摸到的那张减掉再算，而传给 `kanAllowedAfterRiichi` 的仍是 14 张的
+                trainer::Counts cc{};
+                {
+                    const std::vector<int> v = parseIntList(f[2]);
+                    for (size_t i = 0; i < v.size() && i < trainer::kKindCount; i++) {
+                        cc[i] = static_cast<uint8_t>(v[i]);
+                    }
+                }
+                const int mc = std::atoi(f[3].c_str());
+                const int kk = std::atoi(f[4].c_str());
+                const int dk = std::atoi(f[5].c_str());
+                trainer::Counts before = cc;
+                if (dk >= 0 && before[static_cast<size_t>(dk)] > 0) {
+                    before[static_cast<size_t>(dk)] =
+                        static_cast<uint8_t>(before[static_cast<size_t>(dk)] - 1);
+                }
+                const std::vector<int> wa = trainer::waits(before, mc);
+                outLine = trainer::kanAllowedAfterRiichi(wa, cc, mc, kk) ? "1" : "0";
+            } else if (mode == "chi" && f.size() >= 4) {
+                trainer::Counts concealed{};
+                {
+                    const std::vector<int> v = parseIntList(f[2]);
+                    for (size_t i = 0; i < v.size() && i < trainer::kKindCount; i++) {
+                        concealed[i] = static_cast<uint8_t>(v[i]);
+                    }
+                }
+                const auto sets = trainer::chiSets(concealed, std::atoi(f[3].c_str()));
+                for (size_t i = 0; i < sets.size(); i++) {
+                    outLine += (i ? ";" : "");
+                    outLine += sets[i][0] + "," + sets[i][1];
+                }
+                if (sets.empty()) {
+                    outLine = "-";
+                }
+            } else {
+                std::fprintf(stderr, "认不出的 ropts 行：%s\n", text.c_str());
+                return 2;
             }
         } else if (kind == "rinit" && f.size() >= 8) {
             // rinit <preset> <seed> <dealer> <sticks> <s0> <s1> <s2> <s3>

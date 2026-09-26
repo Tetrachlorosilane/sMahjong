@@ -108,6 +108,9 @@ struct Rules {
             riichiMinScore = 1000; riichiMinTilesLeft = 4; riichiNoHaitei = false; ankanKeepsShape = false;
         }
         // "custom"：不铺，保留当前各项（与 Java 的 default 分支一致）
+        // ⚠ 与 Java 一样，预设**只覆盖它自己列出的字段** —— 例如 `kokushiTenhou13`/`kokushiAnkan`
+        //   只有 majsoul 分支会置 true，之后切别的预设**不会**清回 false（Java 也是这样）。
+        //   训练路径每次都是新建 `Rules`，所以碰不到；但别拿同一个对象二次 `applyPreset`。
     }
 
     static Rules defaults() { return Rules(); }

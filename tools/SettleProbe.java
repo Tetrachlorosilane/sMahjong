@@ -18,15 +18,18 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import mahjong.core.Meld;
 import mahjong.core.Rules;
 import mahjong.core.Tiles;
 import mahjong.game.Round;
 import mahjong.game.RoundClaims;
+import mahjong.game.RoundOptions;
 import mahjong.game.RoundScoring;
 import mahjong.game.Table;
 import mahjong.game.WinCheck;
+import mahjong.rules.Agari;
 import mahjong.rules.Visible;
 import mahjong.train.SelfPlay;
 
@@ -335,6 +338,64 @@ public final class SettleProbe {
                                                    Tiles.id(Integer.parseInt(f[3]), 0),
                                                    Integer.parseInt(f[4]) != 0);
                     sb.append(merged == null ? "-" : intsCsv(merged));
+                } else if (kind.equals("ropts") && f.length >= 4) {
+                    // `RoundOptions` 的四个纯函数 —— 只调 Java 自己的入口
+                    String mode = f[1];
+                    if (mode.equals("discard") && f.length >= 6) {
+                        boolean riichi = Integer.parseInt(f[2]) != 0;
+                        int drawn = Integer.parseInt(f[3]);
+                        List<Integer> hand = parseIntList(f[4]);
+                        Set<Integer> forb = intSetOf(f[5]);
+                        List<Object> v = RoundOptions.discardChoices(hand, riichi, drawn, forb);
+                        StringBuilder j = new StringBuilder();
+                        for (int i = 0; i < v.size(); i++) {
+                            if (i > 0) j.append(',');
+                            j.append(v.get(i));
+                        }
+                        sb.append(j);
+                    } else if (mode.equals("kuikae") && f.length >= 5) {
+                        Set<Integer> v = RoundOptions.kuikaeForbidden(Integer.parseInt(f[2]),
+                                Integer.parseInt(f[3]), Integer.parseInt(f[4]));
+                        StringBuilder j = new StringBuilder();
+                        for (int k : v) {
+                            if (j.length() > 0) j.append(',');
+                            j.append(k);
+                        }
+                        sb.append(j);
+                    } else if (mode.equals("kanriichi") && f.length >= 6) {
+                        List<Integer> wa = parseIntList(f[2]);
+                        int[] concealed = toCounts(parseIntList(f[3]));
+                        sb.append(RoundOptions.kanAllowedAfterRiichi(wa, concealed,
+                                Integer.parseInt(f[4]), Integer.parseInt(f[5])) ? 1 : 0);
+                    } else if (mode.equals("kanauto") && f.length >= 6) {
+                        // **真实调用点**语义（`Round.kanAllowedByRiichi`）：`c` 是**自己回合的 14 张**，
+                        // 「杠前听牌」要先把刚摸到的那张减掉再算，而计数仍传 14 张的
+                        int[] c = toCounts(parseIntList(f[2]));
+                        int mc = Integer.parseInt(f[3]);
+                        int kk = Integer.parseInt(f[4]);
+                        int dk = Integer.parseInt(f[5]);
+                        int[] before = c.clone();
+                        if (dk >= 0 && before[dk] > 0) {
+                            before[dk]--;
+                        }
+                        List<Integer> wa = Agari.waits(before, mc);
+                        sb.append(RoundOptions.kanAllowedAfterRiichi(wa, c, mc, kk) ? 1 : 0);
+                    } else if (mode.equals("chi") && f.length >= 4) {
+                        int[] concealed = toCounts(parseIntList(f[2]));
+                        List<Object> sets = RoundOptions.chiSets(concealed, Integer.parseInt(f[3]));
+                        if (sets.isEmpty()) {
+                            sb.append('-');
+                        }
+                        for (int i = 0; i < sets.size(); i++) {
+                            @SuppressWarnings("unchecked")
+                            List<Object> one = (List<Object>) sets.get(i);
+                            if (i > 0) sb.append(';');
+                            sb.append(one.get(0)).append(',').append(one.get(1));
+                        }
+                    } else {
+                        System.err.println("认不出的 ropts 行：" + line);
+                        System.exit(2);
+                    }
                 } else if (kind.equals("rinit") && f.length >= 8) {
                     // 用**真实的 Round** 打印构造后 / 配牌后的状态（不重实现任何规则）
                     Rules rules = rulesOfPreset(f[1]);

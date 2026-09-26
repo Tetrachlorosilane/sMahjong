@@ -1090,6 +1090,20 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       最后比 id）排序，对拍是**逐张 id** 比。
     - 探针仍然**只调 Java 自己的入口**（`new Round(…)` + `debugSetup()` 后读 `r.hand[i]`），
       ⛔ 不在探针里重写配牌循环 —— 这正是 `docs/TRAINER-CPP.md` §6.7（M0 假阳性）的教训。
+    - **M2 下半之六（选项生成第一层 `RoundOptions`）已完成**（`roundoptions.hpp`，接进 `trainer settle` /
+      `SettleProbe.java` 的 `ropts` 语料行）：全套语料 **14,319 行一致**（含 `ropts` 320 行，
+      `docs/TRAINER-CPP.md` §6.10）。
+    - **为什么这一层要单独钉**：它的输出**同时**是①下发选项、②服务端合法性校验、
+      ③训练端动作空间（`Action.enumerate` 的展开序 = `chosen_index` 的分母）—— 三处各算一遍迟早漂。
+    - **`kanauto` 走 Java 的真实调用点**（`Round.kanAllowedByRiichi`）：计数是**自己回合的 14 张**，
+      「杠前听牌」得**先把刚摸到的那张减掉**再算（直接拿 14 张求听牌恒为空集 → "立直后暗杠一次也发不出来"）。
+      真值分布 允许 10 / 不许 52 —— 两边都覆盖到了。
+    - ⚠ **对拍时炸出来的硬约束**：语料里放了一条"被杠的牌只有 3 张"的行，Java 的 `after[kind] -= 4`
+      得到**负数**，`Shanten.dfs` 直接 **StackOverflowError**（不是"答案不同"，是探针崩）。
+      C++ 的 `Counts` 是 `uint8_t`（减 4 会绕回 255）→ 两个引擎会看到不同输入，所以在函数门口挡住，
+      语料也只在"手里真有 4 张"时生成。**教训：跨语言对拍的输入前提要显式写进两侧的门口。**
+    - 顺带核了一遍 `rules.hpp` ↔ `Rules.applyPreset` 三套预设的**逐字段**覆盖（含
+      `kokushiTenhou13`/`kokushiAnkan` 只有 majsoul 会置 true、切预设不会清回 false 这个 Java 怪癖）。
 
 
 ---
