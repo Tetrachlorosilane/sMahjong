@@ -58,10 +58,10 @@ function producerCmd(fn, args, name) {
     return JSON.parse(readFileSync(tmp, 'utf8').trim());
 }
 
-function run(cmd, what) {
+function run(cmd, what, cwd = ROOT) {
     console.log(`\n$ ${cmd.join(' ')}`);
     try {
-        execFileSync(cmd[0], cmd.slice(1), { stdio: 'inherit', cwd: ROOT });
+        execFileSync(cmd[0], cmd.slice(1), { stdio: 'inherit', cwd });
     } catch {
         console.error(`== ${what} 失败`);
         return false;
@@ -141,18 +141,19 @@ for (let g = 0; g < GAMES; g++) {
 }
 
 // ⑤ 独立校验器（Python 侧同一份）
-try {
-    run(['node', join(ROOT, 'tools', 'selfplay-check.mjs'), dirCpp], '数据集校验');
-} catch {
+// ⚠ `run()` **只返回 false、不抛**（它自己 catch 了）—— 这里必须看返回值。
+//   原来写成 `try { run(...) } catch { bad(...) }`，于是失败被静默吞掉：脚本会一边打印
+//   "== 数据集校验 失败" 一边打印 "PASS"（2026-09 实测第六条就是这样漏的）。
+if (!run(['node', join(ROOT, 'tools', 'selfplay-check.mjs'), dirCpp], '数据集校验')) {
     bad('selfplay-check.mjs 没通过（见上面的输出）');
 }
 
 // ⑥ 紧凑集（Python 消费链；这一条不过说明 sidecar/字段契约还有问题）
+// ⚠ 必须 **cwd=python**（与文档里的调法一致）：`python -m mahjong_ml.dataset` 靠当前目录解析模块。
 const compact = join(BUILD, 'takeover-compact');
 rmSync(compact, { recursive: true, force: true });
-try {
-    run([PY, '-m', 'mahjong_ml.dataset', 'build', dirCpp, compact], '建紧凑集');
-} catch {
+if (!run([PY, '-m', 'mahjong_ml.dataset', 'build', dirCpp, compact], '建紧凑集',
+        join(ROOT, 'python'))) {
     bad('dataset build 没通过（见上面的输出）');
 }
 

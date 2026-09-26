@@ -22,6 +22,7 @@
 #include "agari.hpp"
 #include "counts.hpp"
 #include "evaluator.hpp"
+#include "features.hpp"
 #include "furiten.hpp"
 #include "handeval.hpp"
 #include "java_rand.hpp"
@@ -2263,7 +2264,7 @@ int cmdTurnOpts(int argc, char **argv) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "用法：trainer <wall|rng|rules|bench|score|settle|action|turnopts|--selftest> …\n"
+                     "用法：trainer <wall|rng|rules|bench|score|settle|action|turnopts|selfplay|features|--selftest> …\n"
                      "  wall  <seed> [aka] [dealer]      牌山/配牌/指示牌/岭上（JSON）\n"
                      "  rng   <seed> <n>                 java.util.Random.nextInt(136) 前 n 个\n"
                      "  rules <corpus> <mode> <out>      语料 → 逐行结果（mode = shanten|of|discard）\n"
@@ -2275,21 +2276,17 @@ int main(int argc, char** argv) {
                      "  selfplay <games> [--workers K] [--policy P] [--seed S] [--hands H] [--out DIR]\n"
                      "                                   [--rotate] [--sample K] [--no-claims] [--preset NAME]\n"
                      "                                   自对弈并写出轨迹（与 Java --selfplay 逐字节对拍）\n"
-                     "  --features <dir>                  派生特征 sidecar（**本轮未实现**，显式报错）\n");
+                     "  features <dir> [--workers K]      轨迹目录 → 派生特征 sidecar `g*.feat.bin`\n"
+                     "                                   （= Java --features，逐字节对拍）\n");
         return 2;
     }
     const std::string cmd = argv[1];
     if (cmd == "selfplay") {
         return trainer::selfplayCli(argc - 1, argv + 1);
     }
-    if (cmd == "--features") {
-        // 轨迹侧（`g*.jsonl` / `summary.json`）已与 Java 逐字节一致；**派生特征 sidecar**
-        // （`g*.feat.bin`，Java `TraceFeatures`）是下一轮（M3）的事。
-        // ⚠ 显式报错、绝不静默降级（AGENTS §6.5 的"能力缺失要报错"）。
-        std::fprintf(stderr, "[trainer] --features（派生特征 sidecar `g*.feat.bin`）这一轮还没实现"
-                             "（docs/TRAINER-CPP.md §5 的 M3）；本轮的产物是轨迹 `g*.jsonl` + "
-                             "`summary.json`\n");
-        return 2;
+    if (cmd == "features" || cmd == "--features") {
+        // 与 Java CLI 同名同义（`--features` 也认，省得两个生产者要记两套写法）
+        return trainer::featuresCli(argc - 1, argv + 1);
     }
     if (cmd == "wall") {
         return cmdWall(argc, argv);
