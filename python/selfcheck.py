@@ -39,6 +39,13 @@ def scratch(name: str) -> Path:
     return d
 
 
+def same_bytes(a: Path, b: Path) -> bool:
+    """两个紧凑集目录里的同名文件是否**逐字节相同**（"并行只改调度、不改产出"的判据）。"""
+    fa = {p.name: p.read_bytes() for p in sorted(Path(a).iterdir()) if p.is_file()}
+    fb = {p.name: p.read_bytes() for p in sorted(Path(b).iterdir()) if p.is_file()}
+    return fa == fb
+
+
 from mahjong_ml import bc, dataset as ds, features, guard, nets, paths   # noqa: E402
 from mahjong_ml import eval as ml_eval                    # noqa: E402
 from mahjong_ml import dagger                             # noqa: E402
@@ -357,6 +364,26 @@ same = ds.split_files(ds.trace_files(src), 0.5, 0)
 same2 = ds.split_files(ds.trace_files(src), 0.5, 0)
 eq("切分可复现（同种子同结果）", [f.name for f in same[0]], [f.name for f in same2[0]])
 ok(not (set(f.name for f in same[0]) & set(f.name for f in same[1])), "训练/验证没有交集")
+
+# ---- 紧凑集构建的**并行**路径：只改调度、不改产出（2026-09-26 加）------------------------
+# ⚠ 并行实现的两个环境坑都写在这里当回归：① 沙箱禁**命名管道** ⇒ 不能用 `multiprocessing.Pool`
+#   （`_winapi.CreateFile` → WinError 5），改用"无管道子进程 + 文件"；② 沙箱拒绝对 `mkdtemp`
+#   新建目录的写入 ⇒ scratch 用 `mkdir` 固定名。判据只有一条：**逐字节相同**。
+parsrc = scratch("dataset-par-src")                       # 4 个文件 → 训练切分里真的会并行
+for i in range(4):
+    s = src / f"g{i % 2}.jsonl"
+    shutil.copy(s, parsrc / f"g{i}.jsonl")
+    shutil.copy(ds.sidecar_path(s), ds.sidecar_path(parsrc / f"g{i}.jsonl"))
+pb1, pb4 = scratch("dataset-par1"), scratch("dataset-par4")
+ds.build(parsrc, pb1, val_frac=0.25, split_seed=0, quiet=True, workers=1)
+ds.build(parsrc, pb4, val_frac=0.25, split_seed=0, quiet=True, workers=4)
+ok(same_bytes(pb1, pb4), "并行紧凑集与串行**逐字节相同**（workers=4 vs 1）")
+ok(ds.load_split(pb4, "train")["state"].shape[0] == 6, "并行产物的条数也对"
+   f"（3 场 × 2 条 = 6，实际 {ds.load_split(pb4, 'train')['state'].shape[0]}）")
+pt1, pt4 = scratch("dataset-par1-trunc"), scratch("dataset-par4-trunc")
+ds.build(parsrc, pt1, val_frac=0.25, split_seed=0, quiet=True, workers=1, max_decisions=3)
+ds.build(parsrc, pt4, val_frac=0.25, split_seed=0, quiet=True, workers=4, max_decisions=3)
+ok(same_bytes(pt1, pt4), "并行=串行（--max-decisions 截断路径，含边界文件的 lmax 口径）")
 
 print("== DAgger 标签源与多来源合并 ==")
 eq("auto：有 teacher_index 就用它（第 2 条应为 1）",
