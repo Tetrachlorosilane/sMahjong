@@ -1068,12 +1068,28 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
    - **舍张振听 ≠ 牌河**：账记在"曾经打出过"上，**含被他家吃/碰/杠走**的舍牌（那些已从牌河移除）。
      唯一记账点是出牌那一刻（`recordDiscard`）——测试不许绕过它。
    - **M2 下半之四（可见牌统计 + 和了形纯判断）已完成**（`visible.hpp`，接进 `trainer settle` /
-     `SettleProbe.java`）：`visible` / `vis` / `wcounts` / `block` 四种语料行，**13,739 行一致**（§6.7）。
+     `SettleProbe.java`）：`visible` / `vis` / `wcounts` / `block` 四种语料行，**13,739 行一致**（`docs/TRAINER-CPP.md` §6.8）。
    - 这一块是**观测特征（M3）的底座**：`Observation.visible`、进张枚数、危险度必须**同源**，否则
      "同样一张牌桌上还剩几张"会三处各算一遍。三条口径：① 可见 = 四家牌河 + 四家副露（含被鸣那张）
      + **宝牌指示牌**；② ⛔ **里宝指示牌不算可见**；③ `unseen = 4 − 可见` 与
      `drawable = 4 − 可见 − 自己手里` 是**两个量**（混用是牌效统计最常见的错）。
      另：和了形张数校验是 `14 − 3×副露数`，自摸时暗牌里**已含**和了牌、不能重复加。
+    - **M2 下半之五（`Round` 状态容器 + 配牌）已完成**（`roundstate.hpp`，接进 `trainer settle` /
+      `SettleProbe.java` 的 `rinit` 语料行）：全套语料 **13,999 行一致**（含新增 **260 行 `rinit`**，
+      `docs/TRAINER-CPP.md` §6.9）。这是 `Round` 本体的第一块：手牌/副露/牌河/`menzen`/`riichi`/
+      `furiten`/`playerDraws`/`discardsSinceRiichi`/`openingTile`/`kanCount` + 构造函数 + `setup()`
+      + `tilesLeft`/`deadWallLeft`/`canKan`。
+    - **`rinit` 行打印什么、为什么**（一行 = 一局的初始态）：四个 `menzen` 位打进一个数（全真 = `15`）、
+      各振听/立直标志、构造后与配牌后的 `tilesLeft`、`deadWallLeft`、`openingTile`、`canKan`。
+      **把 `menzen` 打进来是刻意的**：Java `boolean[]` 默认 false，漏初始化会让所有门前役在实局失效
+      而单测照样通过（AGENTS §2.3-2）—— 这条以前只在 Java 单测里，现在它在对拍里**可见**。
+    - **牌山账**：构造后 `tilesLeft = 122`，配牌后 **69**，`deadWallLeft = 4`。122 说明**牌山在构造期
+      就备好了**（自检会拿没开打过的 `Round` 问 `canKan()`/`deadWallLeft()`，不能等到 `setup()`）。
+    - **庄家第 14 张**（`openingTile`）既进了庄家手牌、又就是"本次摸到的那张"（配牌后手牌数
+      13/13/13/**14**）—— 与 AGENTS §2.3-4 同一条口径；手牌按 `compareTile`（先 kind、赤五在前、
+      最后比 id）排序，对拍是**逐张 id** 比。
+    - 探针仍然**只调 Java 自己的入口**（`new Round(…)` + `debugSetup()` 后读 `r.hand[i]`），
+      ⛔ 不在探针里重写配牌循环 —— 这正是 `docs/TRAINER-CPP.md` §6.7（M0 假阳性）的教训。
 
 
 ---

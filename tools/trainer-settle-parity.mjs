@@ -314,6 +314,19 @@ function buildCorpus(want) {
             rows.push(`wcounts ${mc} ${c.join(',')} ${Math.floor(r() * 34)} ${tsumo}`);
         }
     }
+    // ⑫ `Round` 构造 + 配牌（真实 Round 驱动）：menzen/temp/perm/doubleRiichi/ippatsu 初值、
+    //    牌山账（构造后 122 / 配牌后 69 / 岭上 4）、庄家第 14 张、手牌、指示牌、排序
+    for (const preset of ['mleague', 'tenhou', 'majsoul']) {
+        for (const dealer of [0, 1, 2, 3]) {
+            for (const seed of ['20260101', '0', '1', '-1', '9223372036854775807']) {
+                rows.push(`rinit ${preset} ${seed} ${dealer} ${dealer} 25000 25000 25000 25000`);
+            }
+        }
+    }
+    for (let i = 0; i < Math.floor(want / 10); i++) {
+        rows.push(`rinit mleague ${BigInt(Math.floor(r() * 1e15))} ${Math.floor(r() * 4)} `
+            + `${Math.floor(r() * 4)} 25000 25000 25000 25000`);
+    }
     return rows;
 }
 

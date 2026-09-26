@@ -112,7 +112,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；`Round` 摸打/鸣牌/立直/杠/流局循环 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -431,6 +431,30 @@ M2 走到 `Round` 门口、去读 `Round.setup()` 时发现：**M0 的"配牌逐
 | 覆盖面 | 结果 |
 | --- | --- |
 | **13,739 行**（`visible` 461 行含四家牌河/两种副露串/四种宝牌串、`vis` 333 行、`wckounts` 20 行（一半故意张数错一位）、`block` 4 行两个取值） | **0 处不一致** |
+
+### 6.9 M2（下半之五）：`Round` 状态容器 + 配牌（已完成）
+
+`roundstate.hpp` —— `Round` 本体的第一块：状态容器（手牌/副露/牌河/`menzen`/`riichi`/`furiten`/
+`playerDraws`/`discardsSinceRiichi`/`openingTile`/`kanCount`）+ 构造函数 + `setup()`
++ `tilesLeft`/`deadWallLeft`/`canKan`，与 Java `mahjong.game.Round` 同口径。
+
+**对拍仍走 Java 自己的入口**（`SettleProbe` 的 `rinit` 语料行）：`new Round(…)` → 读一遍字段 →
+`debugSetup()` → 再读一遍，**探针里不重实现配牌循环**（§6.7 的教训）。
+
+| 覆盖面 | 结果 |
+| --- | --- |
+| **13,999 行**（含新增 **260 行 `rinit`**：3 套预设 × 4 个庄家 × 5 个边界种子（含 `Long.MAX_VALUE`/0/−1）+ 随机种子） | **0 处不一致** |
+
+钉住的几条：
+
+- **`menzen[]` 全 `true`**（打进 `rinit` 行是 `15`）—— Java `boolean[]` 默认 false，漏了会让
+  **所有门前役**在实局失效而单测照样通过（AGENTS §2.3-2）。现在它是**对拍里可见的**一项；
+- **`furitenTemp`/`furitenPerm`/`doubleRiichi`/`ippatsu` 初值全 0** —— 新的一局不能带上一局的振听；
+- **牌山账**：构造后 `tilesLeft = 122`（没开打过的 `Round` 也能答 `canKan()`/`deadWallLeft()`，
+  所以牌山在构造期就备好）、配牌后 **69**、`deadWallLeft = 4`、`canKan() = true`；
+- **庄家第 14 张**（`openingTile`）既进了庄家手牌、又就是"本次摸到的那张"（配牌后手牌数
+  13/13/13/**14**）；
+- 手牌按 `compareTile`（先 kind、赤五在前、最后比 id）排序 —— 逐张 id 比对。
 
 ---
 

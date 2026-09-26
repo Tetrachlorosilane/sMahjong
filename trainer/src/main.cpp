@@ -28,6 +28,7 @@
 #include "payments.hpp"
 #include "roundclaims.hpp"
 #include "roundscoring.hpp"
+#include "roundstate.hpp"
 #include "rules.hpp"
 #include "seed.hpp"
 #include "shanten.hpp"
@@ -1344,6 +1345,62 @@ int cmdSettle(int argc, char **argv) {
                 }
                 outLine = intsCsv(arr, trainer::kKindCount);
             }
+        } else if (kind == "rinit" && f.size() >= 8) {
+            // rinit <preset> <seed> <dealer> <sticks> <s0> <s1> <s2> <s3>
+            // 输出（**构造后 / 配牌后**两组）：
+            //   menzenBits tempBits permBits doubleRiichiBits ippatsuBits tilesLeftBefore
+            //   tilesLeft deadWallLeft openingTile canKan handSizes(d0..3) hand0;hand1;hand2;hand3
+            //   doraKinds uraKinds playerDraws discardsSinceRiichi
+            const trainer::Rules rules = rulesOfPreset(f[1]);
+            const int64_t seed = std::stoll(f[2]);
+            const int dealer = std::atoi(f[3].c_str());
+            std::array<int, 4> scores = {25000, 25000, 25000, 25000};
+            trainer::RoundState rs(rules, 0, 1, 0, dealer, scores, std::atoi(f[4].c_str()), seed);
+            int menzenBits = 0;
+            int tempBits = 0;
+            int permBits = 0;
+            int dblBits = 0;
+            int ippatsuBits = 0;
+            for (int i = 0; i < 4; i++) {
+                if (rs.menzen[static_cast<size_t>(i)]) {
+                    menzenBits |= 1 << i;
+                }
+                if (rs.furiten.temp[static_cast<size_t>(i)]) {
+                    tempBits |= 1 << i;
+                }
+                if (rs.furiten.perm[static_cast<size_t>(i)]) {
+                    permBits |= 1 << i;
+                }
+                if (rs.doubleRiichi[static_cast<size_t>(i)]) {
+                    dblBits |= 1 << i;
+                }
+                if (rs.ippatsu[static_cast<size_t>(i)]) {
+                    ippatsuBits |= 1 << i;
+                }
+            }
+            const int tilesLeftBefore = rs.tilesLeft();
+            rs.setup();
+            outLine = std::to_string(menzenBits) + " " + std::to_string(tempBits) + " "
+                    + std::to_string(permBits) + " " + std::to_string(dblBits) + " "
+                    + std::to_string(ippatsuBits) + " " + std::to_string(tilesLeftBefore) + " "
+                    + std::to_string(rs.tilesLeft()) + " " + std::to_string(rs.deadWallLeft()) + " "
+                    + std::to_string(rs.openingTile) + " " + (rs.canKan() ? "1" : "0");
+            std::string sizes;
+            std::string hands;
+            for (int i = 0; i < 4; i++) {
+                sizes += (i ? "," : "");
+                sizes += std::to_string(rs.hand[static_cast<size_t>(i)].size());
+                hands += (i ? ";" : "");
+                hands += intsCsv(rs.hand[static_cast<size_t>(i)].data(),
+                                 static_cast<int>(rs.hand[static_cast<size_t>(i)].size()));
+            }
+            outLine += " " + sizes + " " + hands;
+            const std::vector<int> dora = rs.wall.doraIndicators();
+            const std::vector<int> ura = rs.wall.uraIndicators();
+            outLine += " " + (dora.empty() ? "-" : intsCsv(dora.data(), static_cast<int>(dora.size())));
+            outLine += " " + (ura.empty() ? "-" : intsCsv(ura.data(), static_cast<int>(ura.size())));
+            outLine += " " + intsCsv(rs.playerDraws.data(), 4);
+            outLine += " " + intsCsv(rs.discardsSinceRiichi.data(), 4);
         } else if (kind == "accept" && f.size() >= 5) {
             const bool v = trainer::claimAcceptsReply(
                     std::atoi(f[1].c_str()) != 0, f[2] != "-", std::stoll(f[2] == "-" ? "0" : f[2]),

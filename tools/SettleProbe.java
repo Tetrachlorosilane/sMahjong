@@ -335,6 +335,42 @@ public final class SettleProbe {
                                                    Tiles.id(Integer.parseInt(f[3]), 0),
                                                    Integer.parseInt(f[4]) != 0);
                     sb.append(merged == null ? "-" : intsCsv(merged));
+                } else if (kind.equals("rinit") && f.length >= 8) {
+                    // 用**真实的 Round** 打印构造后 / 配牌后的状态（不重实现任何规则）
+                    Rules rules = rulesOfPreset(f[1]);
+                    long seed = Long.parseLong(f[2]);
+                    int dealer = Integer.parseInt(f[3]);
+                    int sticks = Integer.parseInt(f[4]);
+                    Table t = new Table("probe", "probe", rules);
+                    Round r = new Round(t, 0, 1, 0, dealer,
+                                        new int[]{25000, 25000, 25000, 25000}, sticks, seed);
+                    int menzenBits = bits(r.menzen);
+                    int tempBits = bits(r.furitenTemp);
+                    int permBits = bits(r.furitenPerm);
+                    int dblBits = bits(r.doubleRiichi);
+                    int ipBits = bits(r.ippatsu);
+                    final int tilesLeftBefore = r.tilesLeft();
+                    r.debugSetup();
+                    sb.append(menzenBits).append(' ').append(tempBits).append(' ').append(permBits)
+                      .append(' ').append(dblBits).append(' ').append(ipBits).append(' ')
+                      .append(tilesLeftBefore).append(' ').append(r.tilesLeft()).append(' ')
+                      .append(r.deadWallLeft()).append(' ').append(r.debugOpeningTile()).append(' ')
+                      .append(r.canKan() ? 1 : 0);
+                    StringBuilder sizes = new StringBuilder();
+                    StringBuilder hands = new StringBuilder();
+                    for (int i = 0; i < 4; i++) {
+                        if (i > 0) {
+                            sizes.append(',');
+                            hands.append(';');
+                        }
+                        sizes.append(r.hand[i].size());
+                        hands.append(joinCsv(r.hand[i]));
+                    }
+                    sb.append(' ').append(sizes).append(' ').append(hands).append(' ')
+                      .append(joinCsv(r.doraIndicators())).append(' ')
+                      .append(joinCsv(r.uraIndicators())).append(' ')
+                      .append(intsCsv(r.playerDraws)).append(' ')
+                      .append(intsCsv(r.discardsSinceRiichi));
                 } else if (kind.equals("accept") && f.length >= 5) {
                     Long pending = f[2].equals("-") ? null : Long.valueOf(f[2]);
                     sb.append(RoundClaims.acceptsReply(Integer.parseInt(f[1]) != 0, pending,
@@ -387,6 +423,17 @@ public final class SettleProbe {
             sb.append(v.get(i));
         }
         return sb.toString();
+    }
+
+    /** 布尔数组 → 位掩码（两边同一套打印口径）。 */
+    private static int bits(boolean[] v) {
+        int out = 0;
+        for (int i = 0; i < v.length && i < 4; i++) {
+            if (v[i]) {
+                out |= 1 << i;
+            }
+        }
+        return out;
     }
 
     private static int[] toCounts(List<Integer> v) {
