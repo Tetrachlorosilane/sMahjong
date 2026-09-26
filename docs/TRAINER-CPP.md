@@ -554,6 +554,24 @@ C++ 只吃局面那半、重算选项文本，逐字符比（`node tools/trainer
 
 ---
 
+### 6.13 M2 收官：C++ 自对弈跑通（逐字节）+ 性能实测（已完成）
+
+`round.hpp/.cpp` + `table.hpp` + `trace.hpp/.cpp` + `selfplay.hpp/.cpp` + `observation.hpp` /
+`options.hpp` / `policies.hpp` / `jsonw.hpp` —— `Round.play()` 主循环（摸打 / 鸣牌仲裁 / 立直 / 杠 /
+和了 / 流局）与 `Table.playGame()` 的局间节奏（本场 / 连庄 / 轮庄 / 终局余棒）逐句移植。
+
+| 判据 | 结果 |
+| --- | --- |
+| `trainer-selfplay-parity.mjs 1 1 pass 20260101` | `g0.jsonl` **134,375 B 逐字节一致**（SHA256 两边同为 `5385a50a978fd777…`；83 行 = 81 decision + 1 hand + 1 game），`summary.json` 除计时/核数外逐字段一致 |
+| 加层（每层都重跑） | 4 场 `pass` / 三策略 × `--rotate` / `2 3 first` / `2 2 random` / **完整半庄** `1 0 first 8888`（1,689,740 B）/ `--sample` / `--no-claims` / **三套预设**（含九种九牌流局、立直+终局余棒、自摸和了） |
+| 少量场次检验 | `40 场 × 2 小局 × first × seed 777` → **40/40 逐字节一致** |
+| **性能（同工作量，本机）** | Java 单核 **786** 决策/秒 → C++ 单核 **16,630**（**21.2×**）；Java 8 workers **3,690** → C++ 8 workers **17,230**（**4.7×**） |
+
+⚠ `--workers` 目前**串行**（8 workers 与单核同速），所以倍数还会随真并行继续拉大；
+**目标里的"同核数 ≥ 3×"在没有做任何性能优化前就已经超过**（基线：Java 24 核 1172 / 单核 88）。
+
+---
+
 ## 7. 目录与构建
 
 ```
