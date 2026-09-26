@@ -1302,6 +1302,11 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       `UTF8Encoding($false)` **无 BOM** 写请求体；③ **判据不是"看起来对"** —— 先逐文件
       `git hash-object <归一后的文件>` 必须等于 `git ls-tree HEAD` 里的 blob sha，
       再核对**远端返回的 tree sha == 本地 `HEAD^{tree}`**；两条都相等才算字节精确（本轮即如此）。
+      ⚠⚠ **本地链与远端链已经"全程分叉"了**（v1.10.5 实测：远端 `0026bcb`≡本地 `892db7b`、
+      `3b1e1e0`≡`8b8e2a7` … 内容同、sha 全不同，且远端那些提交对象本地**一个都没有**）——
+      所以 `github_git_push` 会**永远**以"非快进"被拒（不是网络问题，网络好了也一样），
+      只能继续按上面的 REST 路线往**远端 head** 上叠。判据相应地从"sha 相同"降级为
+      **"远端 tree sha == 本地 `HEAD^{tree}`"**（内容逐字节一致即算成功），发布记录里如实写这条。
     - **案例：「自家回合 `legal` 为空」是两侧同源的退化（训练端 takeover 期的真 bug）** ——
       报障：自对弈跑到某一场突然 `策略回包不在本次 legal 里（座位 1，键 pass）` 并 exit 2，
       而且**失败那一场什么都不写**（轨迹是整场结束才落盘，只写出前 N-1 个 `g*.jsonl`）。
@@ -1827,7 +1832,8 @@ teacher（约 95% 决策听老师），而"这一代比上一代强多少"必须
 后来 **v1.10.1**（牌谱导出修复，tag `eb939f8`，release #396794051）、**v1.10.2**
 （点数账修复，tag `0581d17`，release #396820517）、**v1.10.3**（导出 JSON 紧凑化，
 tag `ba294cd`，release #396851557）与 **v1.10.4**（导出侧手牌账修复，tag `99842dc`，
-release #396873201）也已发布：本仓库的版本号
+release #396873201）与 **v1.10.5**（加杠几何 + 音效竞态自愈，tag `v1.10.5` →
+  远端 `576f908b`，release #397273611）也已发布：本仓库的版本号
 **只加不改**，发布记录（资产摘要、release id、走过哪条推送通道）写在 `release/RELEASE-v<版本>.md`。
 ⚠ **tag 要先建再建 release**：`POST /releases` 的 `target_commitish` 默认是 `main`，
 tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Training`）—— 先 `POST /git/refs` 建 tag
