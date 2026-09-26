@@ -19,9 +19,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import mahjong.core.Meld;
 import mahjong.core.Rules;
+import mahjong.core.Tiles;
+import mahjong.game.Round;
 import mahjong.game.RoundClaims;
 import mahjong.game.RoundScoring;
+import mahjong.game.Table;
 import mahjong.train.SelfPlay;
 
 public final class SettleProbe {
@@ -243,6 +247,38 @@ public final class SettleProbe {
                             parseIntList(f[1]), parseIntList(f[2]), intSetOf(f[3]),
                             Long.parseLong(f[4]), parseClaim(f[5]), intMapOf(f[6]), intMapOf(f[7]));
                     sb.append(v ? 1 : 0);
+                } else if (kind.equals("furiten") && f.length >= 7) {
+                    // 用**真实的 Round**（公开字段 + debugPushDiscard）驱动振听记账，
+                    // 而不是在探针里重写一遍 —— 后者等于自己跟自己比。
+                    final int mc = Integer.parseInt(f[1]);
+                    List<Integer> handKinds = parseIntList(f[2]);
+                    List<Integer> discardKinds = parseIntList(f[3]);
+                    final int temp = Integer.parseInt(f[4]);
+                    final int perm = Integer.parseInt(f[5]);
+                    final int seat = Integer.parseInt(f[6]);
+                    Round r = probeRound();
+                    r.hand[seat].clear();
+                    int[] copies = new int[Tiles.KIND_COUNT];
+                    for (int k : handKinds) {
+                        r.hand[seat].add(Tiles.id(k, copies[k]++));
+                    }
+                    r.melds[seat].clear();
+                    for (int i = 0; i < mc; i++) {
+                        r.melds[seat].add(new Meld(Meld.Kind.CHI,
+                                new int[]{Tiles.id(0, 0), Tiles.id(1, 0), Tiles.id(2, 0)}, 0, 0));
+                    }
+                    r.menzen[seat] = true;
+                    r.furitenTemp[seat] = temp != 0;
+                    r.furitenPerm[seat] = perm != 0;
+                    for (int k : discardKinds) {
+                        r.debugPushDiscard(seat, Tiles.kindToStr(k), false);
+                    }
+                    List<Integer> own = new ArrayList<>(r.ownDiscardKinds(seat));
+                    List<Integer> waits = r.waitKinds(seat);
+                    sb.append(own.isEmpty() ? "-" : joinCsv(own)).append(' ')
+                      .append(waits.isEmpty() ? "-" : joinCsv(waits)).append(' ')
+                      .append(temp != 0 ? 1 : 0).append(' ').append(perm != 0 ? 1 : 0).append(' ')
+                      .append(r.isFuriten(seat) ? 1 : 0);
                 } else if (kind.equals("accept") && f.length >= 5) {
                     Long pending = f[2].equals("-") ? null : Long.valueOf(f[2]);
                     sb.append(RoundClaims.acceptsReply(Integer.parseInt(f[1]) != 0, pending,
@@ -273,6 +309,28 @@ public final class SettleProbe {
         String[] p = s.split(":");
         return new RoundClaims.Claim(Integer.parseInt(p[0]),
                                      p.length > 1 ? Integer.parseInt(p[1]) : 0);
+    }
+
+    /** 探针用牌桌（**不调用 `play()`**）。⚠ 每行都要**新建一个 Round**：`discardKindsEver` 是
+     *  按局累计的私有账，复用同一个 Round 会让上一行的舍张污染下一行（第一次就踩了这个坑）。 */
+    private static Table probeTable;
+
+    private static Round probeRound() {
+        if (probeTable == null) {
+            probeTable = new Table("probe", "probe", Rules.defaults());
+        }
+        return new Round(probeTable, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 20260101L);
+    }
+
+    private static String joinCsv(List<Integer> v) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < v.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(v.get(i));
+        }
+        return sb.toString();
     }
 
     private static java.util.Set<Integer> intSetOf(String s) {

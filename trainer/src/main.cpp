@@ -21,6 +21,7 @@
 #include "agari.hpp"
 #include "counts.hpp"
 #include "evaluator.hpp"
+#include "furiten.hpp"
 #include "handeval.hpp"
 #include "java_rand.hpp"
 #include "meld.hpp"
@@ -579,6 +580,28 @@ int selftest() {
               && !trainer::claimAcceptsReply(true, true, 7, true, 8));
         check("回包认领：没带 ask_id 时按座位认（兼容老客户端）",
               trainer::claimAcceptsReply(true, true, 7, false, 0));
+    }
+
+    // ⑫ 振听记账定点（三种振听 + 唯一记账点）
+    {
+        trainer::FuritenState st;
+        st.recordDiscard(0, 3);
+        st.recordDiscard(0, 6);
+        st.recordDiscard(1, 3);
+        const std::vector<int> own0 = st.ownDiscardKinds(0);
+        check("曾经打出过：按座位分开记（0 家 = 3m/6m）",
+              own0 == std::vector<int>({3, 6}) && st.ownDiscardKinds(1) == std::vector<int>({3}));
+        check("舍张振听：听的牌里有自己打过的 → 振听", st.isFuriten(0, {6, 9}));
+        check("舍张振听：听的牌都没打过 → 不振听", !st.isFuriten(0, {9, 10}));
+        check("舍张振听：被鸣走的舍牌也算（记账点在出牌那一刻，与牌河无关）",
+              st.isFuriten(1, {3}));
+        st.onRonPassed(0, false);
+        check("同巡振听：见逃即置位", st.isFuriten(0, {9}));
+        st.onOwnDraw(0);
+        check("同巡振听：自家摸牌解除", !st.isFuriten(0, {9}));
+        st.onRonPassed(1, true);
+        st.onOwnDraw(1);
+        check("立直后见逃：摸牌也不解除（到本局结束）", st.isFuriten(1, {9}));
     }
 
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
@@ -1149,6 +1172,36 @@ int cmdSettle(int argc, char **argv) {
                                                     intSetOf(f[3]), std::stoll(f[4]), hasBest, best,
                                                     intMapOf(f[6]), intMapOf(f[7]));
             outLine = v ? "1" : "0";
+        } else if (kind == "furiten" && f.size() >= 7) {
+            // furiten <mc> <handKindsCsv> <discardKindsCsv|-> <temp> <perm> <seat>
+            // 输出：ownKindsCsv waitsCsv temp perm isFuriten
+            const int mc = std::atoi(f[1].c_str());
+            const std::vector<int> handKinds = parseIntList(f[2]);
+            const std::vector<int> discards = parseIntList(f[3]);
+            const int temp = std::atoi(f[4].c_str());
+            const int perm = std::atoi(f[5].c_str());
+            const int seat = std::atoi(f[6].c_str());
+            trainer::Counts counts{};
+            for (int k : handKinds) {
+                counts[static_cast<size_t>(k)]++;
+            }
+            trainer::FuritenState st;
+            st.temp[static_cast<size_t>(seat)] = temp != 0;
+            st.perm[static_cast<size_t>(seat)] = perm != 0;
+            for (int k : discards) {
+                st.recordDiscard(seat, k);
+            }
+            const std::vector<int> own = st.ownDiscardKinds(seat);
+            const std::vector<int> waits = trainer::agariWaits(counts, mc);
+            outLine = own.empty() ? "-" : intsCsv(own.data(), static_cast<int>(own.size()));
+            outLine += ' ';
+            outLine += waits.empty() ? "-" : intsCsv(waits.data(), static_cast<int>(waits.size()));
+            outLine += ' ';
+            outLine += std::to_string(temp != 0 ? 1 : 0);
+            outLine += ' ';
+            outLine += std::to_string(perm != 0 ? 1 : 0);
+            outLine += ' ';
+            outLine += st.isFuriten(seat, waits) ? "1" : "0";
         } else if (kind == "accept" && f.size() >= 5) {
             const bool v = trainer::claimAcceptsReply(
                     std::atoi(f[1].c_str()) != 0, f[2] != "-", std::stoll(f[2] == "-" ? "0" : f[2]),

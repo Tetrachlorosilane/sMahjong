@@ -1053,6 +1053,16 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
    - ⚠ **顺手补掉一个休眠覆盖**：延长战（西入）那条分支在语料里原来**全是 0 值**
      （三套预设的 `westExtension` 都关着）—— 等于"比了但没比到"。加了 `+west` 预设后缀后
      240 条里 36 条为 true。**教训：分支覆盖要看输出的取值分布，不能只看用例数。**
+   - **M2 下半之三（振听记账）已完成**（`furiten.hpp` + `furiten` 语料行）：三种振听
+     （舍张 / 同巡 / 立直后）与 Java **354 行一致**（`isFuriten=true` 202、`temp` 127、`perm` 94），
+     顺带又交叉验证了一次 `Agari.waits` 的移植（比对面含 `waitKinds`）。表格见
+     `docs/TRAINER-CPP.md` §6.6。
+   - **这次是真差分，不是"自己跟自己比"**：探针用**真实的 `Round`**（公开字段塞手牌 + `debugPushDiscard`
+     这唯一记账点重放舍张，再读 Java 自己的 `ownDiscardKinds`/`waitKinds`/`isFuriten`）。
+     ⚠ 踩过一个坑：`discardKindsEver` 是**按局累计的私有账**，探针一开始复用了同一个 `Round`
+     → 上一行的舍张污染下一行（354 行里红了 333 行）。判据：**每行新建一个 `Round`**。
+   - **舍张振听 ≠ 牌河**：账记在"曾经打出过"上，**含被他家吃/碰/杠走**的舍牌（那些已从牌河移除）。
+     唯一记账点是出牌那一刻（`recordDiscard`）——测试不许绕过它。
 
 
 ---

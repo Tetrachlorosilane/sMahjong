@@ -232,6 +232,38 @@ function buildCorpus(want) {
             }
         }
     }
+    // ⑩ 振听记账（用**真实的 Round** 驱动：公开字段 + `debugPushDiscard` 这唯一记账点）
+    const winHands = [
+        { mc: 0, kinds: [1, 2, 3, 4, 5, 15, 16, 17, 18, 18, 18, 28, 28] },   // 听 3m/6m
+        { mc: 0, kinds: [0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8] },          // 九莲听牌
+        { mc: 1, kinds: [1, 2, 3, 4, 5, 15, 16, 17, 18, 18] },
+        { mc: 0, kinds: [0, 2, 4, 6, 8, 9, 11, 13, 15, 18, 20, 22, 24] },   // 七对子听牌
+    ];
+    for (const h of winHands) {
+        for (const discards of ['-', '1', '3', '1,6', '0,1,2,3,4,5,6,7,8', '27,33']) {
+            for (const temp of [0, 1]) {
+                for (const perm of [0, 1]) {
+                    rows.push(`furiten ${h.mc} ${h.kinds.join(',')} ${discards} ${temp} ${perm} 0`);
+                }
+            }
+        }
+        rows.push(`furiten ${h.mc} ${h.kinds.join(',')} 3 0 0 1`);
+        rows.push(`furiten ${h.mc} ${h.kinds.join(',')} 3 0 0 2`);
+    }
+    for (let i = 0; i < Math.floor(want / 8); i++) {
+        const mc = Math.floor(r() * 3);
+        const size = 13 - 3 * mc;
+        const kinds = [];
+        for (let k = 0; k < size; k++) kinds.push(Math.floor(r() * 34));
+        const size2 = 13 - 3 * mc;
+        const c = new Array(34).fill(0);
+        for (const k of kinds) c[k]++;
+        const disc = [];
+        const nd = Math.floor(r() * 5);
+        for (let k = 0; k < nd; k++) disc.push(Math.floor(r() * 34));
+        rows.push(`furiten ${mc} ${kinds.join(',')} ${disc.length ? disc.join(',') : '-'} `
+            + `${r() < 0.3 ? 1 : 0} ${r() < 0.2 ? 1 : 0} ${Math.floor(r() * 4)}`);
+    }
     return rows;
 }
 
