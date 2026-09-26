@@ -1498,6 +1498,10 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   本地不分叉，下一次 `github_git_push` 仍是快进）。
   ⚠ 取本地提交对象**别用 `Out-File`**（它会把 LF 换成 CRLF，message 字节数就变了）——
   用 `cmd /c "git cat-file commit <sha> > file"` 原样落盘。
+  ⚠ **可以省掉 `/git/blobs` 那一步**（2026-09 M1 实测）：`POST /git/trees` 的每个条目直接**内联
+  `content`**（内容从 `git cat-file blob HEAD:<path>` 导出，保证与本地 blob 逐字节相同），
+  一次调用就复现了同一个 tree sha（`ead1ee0…`），随后 commit 的 sha 也与本地完全一致
+  （`444d7bc…`，`github_git_push` 报 502 两次都没拦住）。
   ⚠ **旧的三件套已删**（`gh-push-payload.ps1` / `make-gh-tree-payload.mjs` / `push-github-api.mjs`）：
   它们是"插件还没有 `github_commit_files`"时代的绕路（自己拼 base64、自己算 commit sha），
   现在用插件一次调用即可，留着只会让人以为必须那么干。
