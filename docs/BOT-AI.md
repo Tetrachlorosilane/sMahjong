@@ -152,11 +152,15 @@ bot-ai/teacher/
 
 ```powershell
 python -m mahjong_ml.packbot --out bot-ai `
-    --from-dir S:\mahjong-training\ckpt --include ppo2-g04,ppo-g04,awr-002,bc-003 `
+    --from-dir S:\mahjong-training\ckpt --include ppo2-g05,ppo2-g04,ppo-g04,awr-002,bc-003 `
     --builtin teacher,first,pass,random `
-    --alpha auto --data S:\mahjong-training\compact\rl-001 `
     --zip release\bot-ai
 ```
+
+> ⚠ **发布资产里的深度模型包不带 teacher 先验**（`bot.json` 里**不写** `alpha` = 纯网络，α=0）。
+> `--alpha auto` / `--alpha <数值>`（P5b 混合）是**实验与评测臂**用的：带了先验的包强度基准就变成
+> teacher（约 95% 决策听老师），而"这一代比上一代强多少"要由**纯网络**的同牌山配对来量。
+> `packbot` 在 `--zip` 与 α>0 同时出现时会打一条 WARN 提醒。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -164,7 +168,7 @@ python -m mahjong_ml.packbot --out bot-ai `
 | `--from-dir` + `--include` | checkpoint 根目录 + 要哪几代（`all` = 所有含 `model.pt` 的子目录） |
 | `--from-ckpt` | 直接给一个 checkpoint 目录（可重复） |
 | `--builtin` | 要打哪些内置（启发搜索）包 |
-| `--alpha` | `<数值>` 或 **`auto`**（按让位曲线选"约 95% 决策听老师"的 α，需 `--data`） |
+| `--alpha` | 缺省 `0`（= 纯网络，**发布口径**）；`auto` = 按让位曲线选"约 95% 决策听老师"的 α（需 `--data`），**仅实验/评测臂** |
 | `--temp` | 采样温度（0 = 贪心） |
 | `--zip <目录>` | **同时**把每个包压成独立 zip（`<名字>.zip`，解压到 `bot-ai/` 下即可用） |
 | `--force` | 覆盖已存在的包 |
@@ -225,6 +229,11 @@ python -m mahjong_ml.packbot --out bot-ai `
 | `bc-003` | net | BC 基线（行为克隆） |
 | `awr-002` | net | 离线 RL（AWR）：**比 BC 显著强**（+1.89 顺位点，p<0.001，n=12000） |
 | `ppo-g04` | net | 在线 PPO 第 1 轮第 4 代 |
-| `ppo2-g04` | net | 在线 PPO 第 2 轮第 4 代 + `alpha: 2`（让位 95.1%）—— **首次显著打赢 teacher**（+2.290，p=0.006，n=5100） |
+| `ppo2-g04` | net | 在线 PPO 第 2 轮第 4 代（**纯网络**；资产里那份历史上曾带 `alpha: 2` = 让位 95.1%） |
+| `ppo2-g05` | net | 在线 PPO 第 2 轮第 5 代（**纯网络，无先验**）：2+2 同牌山配对 **+4.90 顺位点 vs teacher，CI [+1.38, +8.46]，p=0.010（n=800）**；Elo 阶梯上 θ 比 g04 再高一档（`docs/TRAINER-CPP.md` §6.18） |
+
+> ⚠ **发布口径**：深度模型包**不带 teacher 先验**（`bot.json` 不写 `alpha`）。先验（`--alpha auto`）
+> 只用于实验/评测臂 —— 带了它，包的强度基准就变成 teacher，而"这一代强多少"要用纯网络的同牌山配对来量。
+> `ppo2-g05` 就是按这个口径发的（我先前误发过一版带 `alpha: 2` 的，已删除并替换）。
 
 各代怎么训出来的、显著性怎么算的：`docs/TRAINING.md`。

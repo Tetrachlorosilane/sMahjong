@@ -1765,6 +1765,11 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 （`tools/make-zip.mjs` 打的，zip 内是 `bot-ai/…` 一整棵，含包目录里那份 `README.txt`）。
 它们是 `python -m mahjong_ml.packbot … --zip release\bot-ai` 的产物（见 `docs/BOT-AI.md` §6）：
 内置启发搜索包 ~0.2 KB、深度模型包 ~974 KB（内含 1042 KB 的 `net.bin`）。
+⚠ **发布资产里的深度模型包不带 teacher 先验**（`bot.json` 里**不写** `alpha` ⇒ 纯网络，α=0）：
+`--alpha auto` / `--alpha <数值>` 是**实验与评测臂**用的（P5b 混合），带了先验的包强度基准就变成
+teacher（约 95% 决策听老师），而"这一代比上一代强多少"必须用**纯网络**的同牌山配对来量。
+`packbot` 现在会在 `--zip` 与 α>0 同时出现时打一条 WARN；这一条是**用户定的发布口径**
+（2026-09-26：我先把 `ppo2-g05` 误发成 `alpha=2`，删掉旧资产后按纯网络重发）。
 ⚠ **两种 zip 的落点都是服务端根目录**：包内已带 `bot-ai/<名字>/` 前缀，
 所以**解压到服务端目录**（而不是解压到已存在的 `bot-ai/` 里 —— 那会多一层）。
 ⚠ 权重是**二进制发布资产**，不进仓库（`.gitignore` 里的 `bot-ai/`）：改了训练脚本要重发时重新打包。

@@ -2,9 +2,13 @@
 
     # 把各代网络 + 启发搜索（内置牌效）都打成包，放到服务端的 bot-ai/
     python -m mahjong_ml.packbot --out bot-ai \
-        --from-dir S:\\mahjong-training\\ckpt --include ppo2-g04,ppo-g04,awr-002,bc-003 \
-        --builtin teacher,first --alpha auto --data S:\\mahjong-training\\compact\\rl-001 \
-        --zip release\\bot-ai
+        --from-dir S:\\mahjong-training\\ckpt --include ppo2-g05,ppo2-g04,awr-002,bc-003 \
+        --builtin teacher,first --zip release\\bot-ai
+
+⚠ **发布资产里的深度模型包不带 teacher 先验**（`bot.json` 里就没有 `alpha` 字段 = 纯网络，α=0）：
+`--alpha auto` / `--alpha <数值>` 是**实验与评测臂**用的（P5b 混合），别拿它去打发布包 ——
+理由：带了先验的包强度基准就变成 teacher（约 95% 决策听老师），而"这一代比上一代强多少"
+要由**纯网络**的同牌山配对来量（见 `docs/BOT-AI.md` §6 与 `docs/TRAINING.md` §4 P5）。
 
 ## 包的统一接口（服务端 `mahjong/ai/BotAis.java` 读它）
 
@@ -20,8 +24,9 @@
 - `kind`：`net`（深度模型）/ `builtin`（内置 `teacher|first|pass|random`）。**没写 kind 时**按载荷猜：
   有权重就是 `net`，否则看 `policy`。
 - `alpha` / `temp`：深度模型的两个旋钮（P5b 的 teacher 先验 α、P4 的采样温度 T）。
-  **`alpha` 建议用 `--alpha auto`**：它按 `hybrid.py` 的**让位曲线**选"约 95% 决策听老师"的那个 α
-  —— α>0 的包就是"启发搜索 + 深度模型"的混合体，既保留网络的主见、又不会比老师差（可证）。
+  **发布包一律 α=0（纯网络，`bot.json` 里不写 `alpha`）**；`--alpha auto` 按 `hybrid.py` 的
+  **让位曲线**选"约 95% 决策听老师"的那个 α —— 那属于**实验/评测臂**（混合体既保留网络主见、
+  又不会比老师差，可证），不要写进发布资产。
 - 名字必须是**可打印 ASCII**（它会进报文 `hello_ok.bot_ais` / `room.bot_ai`），
   且不许含 `,` `@` `#`（那是策略串的文法）。`teacher`/`first`/`pass`/`random` 这四个是内置锚点，
   **深度模型包不许占用这些名字**；只有「`kind=builtin` 且 `policy` 同名」的包可以
@@ -211,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         for nm in names:
             ckpts.append(root / nm)
     alpha_mode = args.alpha.strip().lower()
+    any_alpha = False                                   # 有没有包带了 teacher 先验（发版时该报警）
     for ck in sorted(set(ckpts)):
         name = ck.name
         _ascii_name(name, kind="net")
@@ -228,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
                      f"数据集 {Path(args.data).name}）")
         else:
             alpha = float(alpha_mode or 0)
+        if alpha > 0:
+            any_alpha = True
         d = out / name
         if d.exists() and not args.force:
             print(f"跳过 {name}：包已存在（要覆盖加 --force）")
@@ -240,6 +248,9 @@ def main(argv: list[str] | None = None) -> int:
 
     write_readme(out)
     print(f"\n包目录：{out.resolve()}（服务端启动时自动挂载）")
+    if args.zip and any_alpha:
+        print("⚠ 发布资产按惯例**不带** teacher 先验（α=0）：上面有包带了 α>0 —— 那种包只适合"
+              "实验/评测臂，发版请用 `--alpha 0`（见 docs/BOT-AI.md §6）")
     if args.zip:
         made = zip_packages(out, Path(args.zip))
         print(f"独立分发包 {len(made)} 个 → {Path(args.zip).resolve()}")
