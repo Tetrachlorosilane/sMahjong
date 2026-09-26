@@ -262,6 +262,7 @@ node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
+node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形**逐字段**对拍
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
@@ -324,9 +325,9 @@ mahjong/
 │                    *-test.mjs = 真 socket 回归（§4 L3）· i18n-* = 文案三件套 · mock-server = L4 假服务端 ·
 │                    test-client.mjs = 联调共用小客户端 · doc-refs-check.mjs = 文档引用自检 ·
 │                    package-release.ps1 + make-zip.mjs = 发布打包（NOTES §9.5）
-├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，产物 build/ 不进仓库）：java_rand.hpp
-│                    （java.util.Random 逐位等价）· tiles/wall · main.cpp；`pwsh -File trainer\build.ps1`；
-│                    与 Java 逐整数对拍见 §4；设计与里程碑 **`docs/TRAINER-CPP.md`**（服务端**不变**）
+├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，产物 build/ 不进仓库）：java_rand/tiles/
+│                    wall/counts/shanten/handeval（查表向听，位并行合并）/main；`pwsh -File trainer\build.ps1`；
+│                    对拍见 §4；设计与里程碑 **`docs/TRAINER-CPP.md`**（服务端**不变**）
 └─ 运行时数据（**都不进仓库**，见 .gitignore）：`replays/` 对局记录 · `players/` 玩家档案 ·
                      `bot-ai/` 机器人 AI 包（与 jar/start.sh 同层，启动时自动挂载）
 ```

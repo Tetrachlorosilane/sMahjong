@@ -5,7 +5,7 @@
 > **红线**：**发布版服务端完全不变** —— `server/` 的 jar、协议、房间行为一个字都不动；
 > 训练侧要换，就换"谁在采数据"，不换"线上跑什么"。
 
-状态：**M0（牌山/洗牌逐字节对拍）已落地**；M1–M4 见 §5。
+状态：**M0（牌山/洗牌）与 M1（向听/进张/听牌形）已落地**，均与 Java 逐字节/逐字段对拍通过；M2–M4 见 §5。
 
 ---
 
@@ -65,6 +65,8 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | `SelfTest`（L1，1370 项） | 规则语义的**权威口径**：C++ 侧遇到不一致时，用它判谁对 |
 | **新增** `tools/trainer-parity-check.mjs` | Java 与 C++ 的**差分对拍**（本工程的核心判据） |
 | **新增** `tools/WallProbe.java` | Java 侧牌山/配牌的**只读探针**（`Wall.debugAllTiles()`），供差分对拍取真值 |
+| **新增** `tools/RuleProbe.java` | Java 侧向听/进张/听牌形的**只读探针**（`Shanten.min` / `HandEval.of` / `afterDiscard`） |
+| **新增** `tools/trainer-rule-parity.mjs` | 上一条的对拍驱动器（确定性语料 → 两边逐行逐字段比对，含数组哈希） |
 
 ---
 
@@ -96,11 +98,11 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 
 ---
 
-## 5. 里程碑（M1 起待做）
+## 5. 里程碑
 
-| 里程碑 | 内容 | 完成判据 |
+| 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
-| **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（suits 表 + 4 面子 1 雀头）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的 8 维派生特征 | ① 与 Java `Shanten.min`/`Agari.waits`/`HandEval.of` 在**百万级随机手牌 + 全部边界形**上逐值相等；② `tools/BenchForward.java` 那套微基准在 C++ 上重跑，**向听/进张路径 ≥ 10×** |
+| **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Evaluator`（役种/符数/点数）、`Payments`、`Danger` | 同 (seedBase, 策略串) → C++ 的 `g*.jsonl` 与 Java **逐字节相同**（先 100 场，再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
@@ -111,13 +113,15 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 
 ---
 
-## 6. 实测（M0）
+## 6. 实测
+
+### 6.0 M0：牌山与配牌
 
 ```
 $ pwsh -File trainer\build.ps1
 ==> 编译器   D:\Program Files\LLVM\bin\clang++.exe
 ==> clang version 22.1.7
-==> 源文件   2 个 .cpp（另有 3 个头文件参与指纹）→ trainer\build\trainer.exe
+==> 源文件   4 个 .cpp（另有 6 个头文件参与指纹）→ trainer\build\trainer.exe
   [ok]   洗牌结果是 0..135 的排列
   [ok]   同 seed 两次洗牌逐张相同
   [ok]   aka=0 → 无赤五
@@ -126,6 +130,8 @@ $ pwsh -File trainer\build.ps1
   [ok]   开杠 → tilesLeft 减 1
   [ok]   岭上摸牌不动 tilesLeft
   [ok]   岭上摸牌只减 rinshanLeft
+  …（M1 另加 13 条：快表向听 == 参考 DFS（20000 手）/ 七对子·国士·一般型的听牌与和了定点 /
+    听牌形定点 —— 共 **21 条**）
 TRAINER SELFTEST PASS
 
 $ node tools\trainer-parity-check.mjs 24
@@ -150,6 +156,65 @@ $ node tools\trainer-parity-check.mjs 24
 对拍脚本因此让子进程**直接写文件描述符**（`stdio: ['ignore', fd, 'inherit']`）再读文件 ——
 等价于重定向，不碰管道。
 
+### 6.1 M1：向听 / 进张 / 听牌形（已完成）
+
+**怎么验的**：`tools/RuleProbe.java`（Java 的 `Shanten.min` / `HandEval.of` / `HandEval.afterDiscard`）
+与 `trainer rules <corpus> <mode> <out>` 跑**同一份确定性语料**，然后逐行逐字段比对。
+语料 = 手写边界手（国士十三面 / 七对子 / 九莲 / `1112223334445m` / 三面听 1m4m7m / 四张同种 …）
++ 随机构造（一半"拼出和了形再拆一张"的听牌手 → 专打 `waitShapes`；一半随机暗手 → 专打 `advanceKinds`），
+副露数 0..4 均匀；`of`/`discard` 每行还比两个 34 维数组的 FNV-1a 哈希（数组级差异也逃不掉）。
+
+| 语料 | 规模 | Java | C++ | 倍率 |
+| --- | --- | --- | --- | --- |
+| `shanten`（`Shanten.min`，13−3k 张） | 1,000,000 手 | 6.96 µs/手（143,773 手/秒） | **221 ns/手（4,523,243 手/秒）** | **31.5×** |
+| `of` 随机暗手（= 进张路径） | 20,000 手 | 103 µs/手 | 5.4 µs/手 | **19.1×** |
+| `of` 听牌手（= 听牌形路径） | 20,000 手 | 512 µs/手 | 11.7 µs/手 | **43.9×** |
+| `of` 混合 | 100,000 手 | 129 µs/手 | 4.95 µs/手 | **26.1×** |
+| `discard`（14 张 × 每个可打牌种一次 `afterDiscard`） | 50,000 手 → **349,686 行** | 143 µs/行 | 4.8 µs/行 | **29.7×** |
+| 合计 | **1,000,000 + 217,000 手 / 523,413 行派生评估** | — | — | 0 处不一致 |
+
+```
+$ node tools\trainer-rule-parity.mjs all 1000000
+[rule-parity] shanten：语料 1000000 行 …
+  [ok]   1000000/1000000 行逐字段一致（java 8557 ms / cpp 2066 ms → 4.15×）
+[rule-parity] of：语料 100000 行 …
+  [ok]   100000/100000 行逐字段一致（java 14357 ms / cpp 615 ms → 23.34×）
+[rule-parity] discard：语料 50000 行 …
+  [ok]   349686/349686 行逐字段一致（java 51402 ms / cpp 1781 ms → 28.86×）
+[rule-parity] PASS：向听 / 进张 / 听牌形与 Java 逐字段一致
+```
+
+（表中倍率用**两边各自报的纯计算时间**；括号里那个"→ x×"是**含进程启动**的墙钟比值，
+C++ 侧那 2 秒里九成是 `strtol` 逐个数解析 100 万行语料、Java 侧是 JVM 启动 ——
+都不是被测路径，所以不以它为准。语料解析慢这件事只影响对拍脚本，不影响引擎。）
+
+#### M1 的实现要点：位并行合并（才是"数量级"的那一半）
+
+朴素的查表法是"每组算出一个 `(面子, 搭子, 雀头)` 可达集，再四个组两两做三重循环卷积"——
+那是 **2500 次迭代/次合并**，四次合并就比 Java 的 DFS 还慢（实测第一版只有 3.9×）。真正快的是：
+
+- 每组的可达集压成**一个 64 位掩码**，位号 `s*10 + q`（`s` = 面子数、`q` = 搭子数，**乘 10 不是乘 5**）；
+  雀头单独一个掩码（`p0` / `p1`）；
+- 合并两组 = `out |= (b & rectDom[s][q]) << (s*10 + q)`：因为 `q_a + q_b ≤ 4 < 10`，
+  **位移不会把 `q` 进位到 `s` 位**，一次移位+与就是一次"和卷积"（`rectDom` 是预计算的
+  "`s+q ≤ 4` 允许域"表）；
+- 雀头是**或**不是和（两边都出雀头也只算一个），所以 `p1' = p0·p1 | p1·p0 | p1·p1`。
+
+于是"合并"从 2500 次迭代降到**每组合并 ~25 次位移**，向听再快 ~8 倍。这一层与 Java 的
+`Shanten.dfs` 的**选择集**逐条对应（刻子/顺子/对子作雀头/对子作搭子/两面/嵌张/孤张丢弃 + `melds+partials<4`），
+自检里还有一条"快表 == 参考 DFS（Java 逐行移植）"在 2 万手上交叉验证，**双保险**。
+
+#### M1 期间踩到的两个"契约细节"
+
+1. **Java `Agari.addWinVariants` 在 `melds == null` 时会 NPE**（`for (Meld m : melds)` 没有兜底，
+   而同方法开头的 `meldCount = melds == null ? 0 : melds.size()` 又说明它本该容忍 null）。
+   服务端两个调用点传的都是列表，所以**线上打不到** —— 但探针一开始传 `null` 就当场炸。
+   口径：探针照生产走**空列表**（`Collections.nCopies(0, …)`），这条隐患记在 NOTES §6.5。
+2. **`waitShapes` 的"没有听牌张"必须编码成 `-1`，不能留 0**：Java 的 `Snapshot.waitShapes`
+   未听牌时是 `null`，哈希按全 `-1` 走；C++ 第一版只有听牌时才 `fill(-1)`，未听牌时是
+   `std::array{}`（全 0）→ 138/200 行对不上，**而 8 个标量字段全都一样**（差异只藏在哈希里）。
+   修法是让 `evalOf` **一开始就 `fill(-1)`**（与 Java `waitShapes` 的约定一致）。
+
 ---
 
 ## 7. 目录与构建
@@ -161,8 +226,11 @@ trainer/
 ├─ src/
 │  ├─ java_rand.hpp     java.util.Random + Collections.shuffle 的逐位等价
 │  ├─ tiles.hpp         牌码/kind/copy/赤五（与 Java Tiles 同一套编码）
+│  ├─ counts.hpp        34 维计数 + 幺九/宝牌推导的小工具
 │  ├─ wall.hpp/.cpp     牌山 + 王牌（账与 Java 同构）
-│  └─ main.cpp          CLI：wall / shanten / selfplay（M1 起逐步填）
+│  ├─ shanten.hpp/.cpp  查表向听（花色分组 + 位并行合并）+ "参考 DFS"（Java 逐行移植，自检用）
+│  ├─ handeval.hpp/.cpp 进张 / 听牌 / 听牌形 / `HandEval.Snapshot` 的等价物
+│  └─ main.cpp          CLI：wall / rng / rules / bench / --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
 

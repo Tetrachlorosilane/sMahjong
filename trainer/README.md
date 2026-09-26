@@ -43,34 +43,45 @@ pwsh -File trainer\build.ps1 -San       # ASan/UBSan（跑对拍时用）
 ## 跑
 
 ```powershell
-trainer\build\trainer.exe --selftest                      # 自身一致性（排列/可复现/赤五/岭上账）
+trainer\build\trainer.exe --selftest                      # 自身一致性（牌山 + 快表向听 vs 参考 DFS + 听牌形定点）
 trainer\build\trainer.exe wall 20260101 3 0               # 牌山+配牌+指示牌+岭上（JSON，供对拍）
 trainer\build\trainer.exe rng  20260101 10                # java.util.Random.nextInt(136) 前 10 个
+trainer\build\trainer.exe rules <corpus> shanten <out>    # 语料 → 向听（供对拍）
+trainer\build\trainer.exe rules <corpus> of|discard <out> # 语料 → 进张/听牌形快照（供对拍）
+trainer\build\trainer.exe bench <corpus> of 20            # 同语料跑 20 遍并计时（不写输出）
 ```
 
 ## 与 Java 对拍（**核心判据**）
 
 ```powershell
-node tools\trainer-parity-check.mjs 24      # 24 组种子 × {aka 3/0} × {dealer 0/2} = 96 组
-node tools\trainer-parity-check.mjs 128     # 512 组（慢：每组要起一个 JVM，约 2~3 分钟）
+node tools\trainer-parity-check.mjs 24      # M0：24 组种子 × {aka 3/0} × {dealer 0/2} = 96 组
+node tools\trainer-parity-check.mjs 128     # M0：512 组（慢：每组要起一个 JVM，约 2~3 分钟）
+
+node tools\trainer-rule-parity.mjs all      # M1：向听 / 进张 / 听牌形（默认 20 万 + 2 万 + 5 千行）
+node tools\trainer-rule-parity.mjs shanten 1000000        # 100 万手向听
+node tools\trainer-rule-parity.mjs of 20000 --random-only # 只量"进张"那条路
+node tools\trainer-rule-parity.mjs of 20000 --tenpai-only # 只量"听牌形"那条路
 ```
 
-对拍用的是 **`tools/WallProbe.java`** —— Java 侧**只读探针**（只 import jar 的公开 API，
-不修改服务端）。比较内容：**136 张牌山 + 四家配牌（含庄家第 14 张）+ 表/里宝指示牌 + 4 张岭上**，
-逐个整数比对。
+对拍用的是两个 Java 侧**只读探针**（只 import jar 的公开 API，不修改服务端）：
+
+- **`tools/WallProbe.java`**（M0）：136 张牌山 + 四家配牌（含庄家第 14 张）+ 表/里宝指示牌 + 4 张岭上，
+  **逐个整数**比对；
+- **`tools/RuleProbe.java`**（M1）：`Shanten.min` / `HandEval.of` / `HandEval.afterDiscard`，
+  **逐行逐字段**比对（含两个 34 维数组的 FNV-1a 哈希）。
 
 ⚠ 沙箱坑：Node 不能用管道接子进程输出（`spawnSync … EPERM`），所以脚本让子进程
 **直接写文件描述符**再读文件（等价于重定向）。
 
 ---
 
-## 现状（M0 已完成）
+## 现状（M0 / M1 已完成）
 
 | 里程碑 | 状态 | 内容 |
 | --- | --- | --- |
-| **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 96/96 组逐整数一致** |
-| **M1 向听/进张/和了** | ⏳ 下一步（收益最大） | 查表式向听 + `Agari` + `HandEval` 8 维派生；与 Java 百万级随机手牌逐值相等 + ≥10× 提速 |
-| M2 规则与牌局流程 | ⏳ | `Round`/`Evaluator`/`Payments`/`Danger`；同种子 → 轨迹**逐字节相同** |
+| **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 512/512 组逐整数一致** |
+| **M1 向听/进张/和了** | ✅ | 查表式向听（花色分组 + **位并行合并**）+ 进张/听牌/听牌形；**100 万手向听 + 21.7 万手派生评估逐字段一致**；向听 **31.5×** / 进张 **19×** / 听牌形 **44×**（纯计算口径，见 `docs/TRAINER-CPP.md` §6.1） |
+| M2 规则与牌局流程 | ⏳ 下一步 | `Round`/`Evaluator`/`Payments`/`Danger`；同种子 → 轨迹**逐字节相同** |
 | M3 策略与网络 | ⏳ | teacher / first/pass/random / `NeuralPolicy` 前向；轨迹直接喂通现有 Python 管线 |
 | M4 性能与工程化 | ⏳ | 线程池、AVX2 向听表、批量前向；**同核数下决策/秒 ≥ Java 3×** |
 
@@ -81,11 +92,14 @@ node tools\trainer-parity-check.mjs 128     # 512 组（慢：每组要起一个
 
 ```
 trainer/
-├─ build.ps1        构建（见上）
+├─ build.ps1          构建（见上）
 ├─ src/
-│  ├─ java_rand.hpp java.util.Random + Collections.shuffle 的逐位等价实现
-│  ├─ tiles.hpp     牌码编码（与 Java Tiles 同一套：id = (kind<<2)|copy，赤五 = copy 0）
-│  ├─ wall.hpp/.cpp 牌山 + 王牌（两个账分开记：开杠动 liveEnd、岭上摸牌动 rinshan）
-│  └─ main.cpp      CLI：wall / rng / --selftest
-└─ build/           产物（已 gitignore）
+│  ├─ java_rand.hpp   java.util.Random + Collections.shuffle 的逐位等价实现
+│  ├─ tiles.hpp       牌码编码（与 Java Tiles 同一套：id = (kind<<2)|copy，赤五 = copy 0）
+│  ├─ counts.hpp      34 维计数 + 幺九/宝牌推导
+│  ├─ wall.hpp/.cpp   牌山 + 王牌（两个账分开记：开杠动 liveEnd、岭上摸牌动 rinshan）
+│  ├─ shanten.hpp/.cpp 查表向听（位并行合并）+ 参考 DFS（自检交叉验证）
+│  ├─ handeval.hpp/.cpp 进张 / 听牌 / 听牌形 / 快照（= Java `HandEval`）
+│  └─ main.cpp        CLI：wall / rng / rules / bench / --selftest
+└─ build/             产物（已 gitignore）
 ```

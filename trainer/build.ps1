@@ -63,7 +63,7 @@ $sources = @($allSrc | Where-Object { $_.Extension -eq '.cpp' } | ForEach-Object
 if (-not $sources) { throw "src\ 里没有 .cpp：$srcDir" }
 $exe = Join-Path $buildDir 'trainer.exe'
 
-$flags = @('-std=c++23', '-march=native', '-fno-exceptions', '-Wall', '-Wextra', '-Wpedantic')
+$flags = @('-std=c++23', '-march=native', '-fno-exceptions', '-Wall', '-Wextra', '-Wpedantic', '-D_CRT_SECURE_NO_WARNINGS')
 if ($Dbg) { $flags += @('-O1', '-g') } else { $flags += @('-O3', '-DNDEBUG') }
 if ($San) { $flags += @('-fsanitize=address,undefined', '-fno-omit-frame-pointer') }
 
