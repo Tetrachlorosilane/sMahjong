@@ -2276,8 +2276,11 @@ int main(int argc, char** argv) {
                      "  selfplay <games> [--workers K] [--policy P] [--seed S] [--hands H] [--out DIR]\n"
                      "                                   [--rotate] [--sample K] [--no-claims] [--preset NAME]\n"
                      "                                   自对弈并写出轨迹（与 Java --selfplay 逐字节对拍）\n"
+                     "                                   --workers = 并行工作线程数；缺省/0 = 1（**不按核数自动并发**），\n"
+                     "                                   钳制到 [1, games]；只改调度、不改产出（逐字节相同）\n"
                      "  features <dir> [--workers K]      轨迹目录 → 派生特征 sidecar `g*.feat.bin`\n"
-                     "                                   （= Java --features，逐字节对拍）\n");
+                     "                                   （= Java --features，逐字节对拍）\n"
+                     "                                   --workers 缺省/0 = max(1, 核数×3/4)，钳制到 [1, 文件数]\n");
         return 2;
     }
     const std::string cmd = argv[1];

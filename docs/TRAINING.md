@@ -962,21 +962,38 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 
 ## 5. 数据管线
 
-> **生产者可切换**（`MAHJONG_PRODUCER=java|cpp`，缺省 `java`）：上面两步"采集"与"派生特征"
-> 都由**服务端实现**，训练端 C++ 引擎是它的**同种子逐字节等价重写**（见 `docs/TRAINER-CPP.md`），
-> 目标是把这两步换成 C++ 跑（同核数下决策/秒 ≥ 3×）。切换**不应改变数据集内容** ——
-> 所以判据是同种子产物逐字节相同，而不是"能跑"：
+> **生产者可切换**（`MAHJONG_PRODUCER=java|cpp`，**缺省 `java`**）：上面两步"采集"与"派生特征"
+> 都由 `python/mahjong_ml/producer.py` **自己组命令**（`online.py` / `dagger.py` 的 4 处调用都走它），
+> 训练端 C++ 引擎是服务端实现的**同种子逐字节等价重写**（见 `docs/TRAINER-CPP.md`）。
+> 切换**不应改变数据集内容** —— 所以判据是同种子产物逐字节相同，而不是"能跑"：
 > ```
-> node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101   # 采集：C++ ↔ Java（g*.jsonl 逐字节）
-> node tools\trainer-features-parity.mjs                       # 派生特征：sidecar 逐字节
-> node tools\selfplay-check.mjs <C++ 产出的目录>               # 独立校验器（Python 侧同一份）
-> node tools\trainer-takeover-check.mjs 1 1 pass 20260101      # 整条链（命令由 producer 模块自己组）
+> node tools\trainer-selfplay-parity.mjs 300 2 first 20260101 --cpp-workers 8  # 采集：g*.jsonl + summary
+> node tools\trainer-features-parity.mjs <dir> 24                            # 派生特征：sidecar
+> node tools\selfplay-check.mjs <C++ 产出的目录>                              # 独立校验器（Python 侧同一份）
+> node tools\trainer-takeover-check.mjs 1 1 pass 20260101                     # 整条链（命令由 producer 模块自己组）
 > ```
 > `trainer-features-parity.mjs --self-check` 是**自检模式**（两边都跑 Java）—— 用来验证脚本本身与
 > Java 侧可复现性，不需要 C++ 就绪；`--hands 1 --policy pass --seed 20260101` 这一场的参考 sidecar
 > 是 **19,050 B**（sha256 `fc7bcf27eceea3b2…`）。
 >
-> **端到端验收链**（C++ 生产者就绪后必须整条走通，现在已用 Java 侧产物验证过一遍）：
+> ⚠ **完整半庄验收至少 200 场**：约 **1/100 场**会踩到"食替退化"（自家回合 `legal` 为空，两侧同源）——
+> Java 会退回内置 Bot 兜底、且**这条决策不进轨迹**，训练端复现同一条兜底链；只在"整场跑满"时才出现，
+> 短局几乎碰不到（细节与红证：`docs/TRAINER-CPP.md` §6.15）。
+>
+> **实测（2026-09）**：**200 场完整半庄 × `first`（155,464 决策 / 1,761 小局）Java 24 workers vs
+> C++ 24 workers 逐字节 200/200**；sidecar 200/200；`selfplay-check` DATASET PASS；`takeover-check` PASS；
+> `random` 50 场 / `pass` 100 场完整半庄同样 100%。同 24 核下 C++ 的**决策/秒 ≈ Java 的 17–19×**
+> （`--workers` 真并行之后，见 `docs/TRAINER-CPP.md` §6.14）。
+>
+> **工作流里省掉编后自检**：`pwsh -File trainer\build.ps1 -NoSelfTest` 或 `$env:TRAINER_NO_SELFTEST='1'`
+> （该开关进构建指纹，所以带不带它会触发一次重编 —— 这是刻意的，一眼看出 exe 是哪一代）。
+>
+> **能力口径（⚠ 缺省仍是 `java`）**：C++ 侧目前只支持 `--policy pass|first|random`；
+> `teacher` / `net:<路径>` / `--teacher-label` / `--sample` **未实现** → `producer.py` 直接**显式报错**，
+> **不悄悄降级**成另一种数据集。所以完整的采集口径目前只有 Java 能出，C++ 适用于"基线臂"与
+> "派生特征"这两条已经逐字节验过的路径（要跑 `teacher` 标签/网络策略就把 `MAHJONG_PRODUCER` 切回 `java`）。
+>
+> **端到端验收链**（`MAHJONG_PRODUCER=cpp` 下整条走通，`trainer-takeover-check.mjs` PASS）：
 > ```
 > node tools\selfplay-check.mjs <dir>                       # DATASET PASS
 > java -jar server\build\mahjong-server.jar --features <dir> # → g<N>.feat.bin（或 trainer features <dir>）
@@ -985,8 +1002,6 @@ Plackett-Luce 拟合**（11 个策略：两轮各 4 代 + `teacher` + `first` + 
 > 参考轨迹（1 场 1 小局 `pass`）：`g0.jsonl` 134,375 B / 81 决策（自家回合 70 + 鸣牌 11）、
 > `g0.feat.bin` 19,050 B（perDecision 68 + perCandidate 8）、`summary.json` 553 B；
 > 紧凑集构建输出 `训练 81 条（1 场）… state 607 维 / cand 96 维`。
-> 接线处在 `python/mahjong_ml/producer.py`（`online.py` / `dagger.py` 都走它）；C++ 侧还没实现的
-> 能力（`--teacher-label`、`--sample` 等）会**显式报错**，不悄悄降级成另一种数据集。
 
 - **采集**：`--selfplay <n> --workers 24 --rotate --sample <k> --out S:\mahjong-training\raw\<标签>`
   （`PROTOCOL.md` §8.4；⚠ **workers 必须显式写 24**，见 §0.1.2）。

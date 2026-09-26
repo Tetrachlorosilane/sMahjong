@@ -30,11 +30,17 @@ JFR 剖面（40 场 teacher 自对弈、5912 个样本、**按顶层帧**）：
 ## 构建
 
 ```powershell
-pwsh -File trainer\build.ps1            # → trainer\build\trainer.exe（增量；源码/头文件变过才重编）
-pwsh -File trainer\build.ps1 -Clean     # 清 build/ 重编
-pwsh -File trainer\build.ps1 -Dbg       # -O1 -g（⚠ 别用 -Debug：那是 PowerShell 的通用参数）
-pwsh -File trainer\build.ps1 -San       # ASan/UBSan（跑对拍时用）
+pwsh -File trainer\build.ps1             # → trainer\build\trainer.exe（增量；源码/头文件变过才重编）
+pwsh -File trainer\build.ps1 -Clean      # 清**构建产物**重编（⚠ 不删 build/ 下的轨迹目录）
+pwsh -File trainer\build.ps1 -Dbg        # -O1 -g（⚠ 别用 -Debug：那是 PowerShell 的通用参数）
+pwsh -File trainer\build.ps1 -San        # ASan/UBSan（跑对拍时用）
+pwsh -File trainer\build.ps1 -NoSelfTest # 编完**不跑** --selftest（工作流/CI 省时间）
+                                          # 等价环境变量：$env:TRAINER_NO_SELFTEST = '1'
 ```
+
+⚠ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 会进**构建指纹**（`build\.stamp` 里的 `selftest=True/False`），
+所以"带不带它"会触发一次重编 —— 这是**刻意**的：一眼就能看出当前 exe 到底是"编完自检过"的哪一代。
+环境变量只在**没给** `-NoSelfTest` 时才被看（`-NoSelfTest:$false` 掰不回来）。
 
 本机实测：**`clang++ 22.1.7`**（`D:\Program Files\LLVM\bin`）；`build.ps1` 按
 「显式参数 → PATH → 常见安装位置」找编译器，找不到**明确报错**（不静默换编译器 ——
@@ -53,7 +59,25 @@ trainer\build\trainer.exe score <corpus> <out>            # 语料 → 役种/�
 trainer\build\trainer.exe settle <corpus> <out>           # 语料 → 顺位点/余棒/连庄判据/种子链（供对拍）
 trainer\build\trainer.exe action <corpus> <out>           # 语料 → 动作键/下标/回包/落位（供对拍）
 trainer\build\trainer.exe turnopts <javaCorpus> <out>     # 真实牌局的自家回合询问 → 选项文本（供对拍）
+
+# ★ 自对弈（训练端的主要用途）：写出与 Java `--selfplay` **逐字节相同**的轨迹
+trainer\build\trainer.exe selfplay 300 --workers 8 --policy first --seed 20260101 --hands 0 --out DIR
+trainer\build\trainer.exe features DIR --workers 8        # 轨迹目录 → 派生特征 sidecar g*.feat.bin
 ```
+
+`selfplay` 的开关（`trainer.exe selfplay --help`）：
+
+| 开关 | 含义 | 缺省 |
+| --- | --- | --- |
+| `--workers K` | K 个线程抢场号 `g`；**并行只改调度**，`g*.jsonl` 与 `--workers 1` 逐字节相同 | **1**（不按核数自动并发），钳制到 `[1, games]` |
+| `--policy P` | 四家策略，逗号分隔，**目前只支持 `pass` / `first` / `random`** | `teacher`（训练端**未实现** → 显式报错） |
+| `--seed S` | 基准种子；每场种子只与 `(S, 场号)` 有关 | `20260101` |
+| `--hands H` | 每场最多 H 小局 | **0 = 完整半庄** |
+| `--out DIR` | 轨迹输出目录（`g<场号>.jsonl` + `summary.json`）；不给就只算不写 | — |
+| `--sample K` / `--no-claims` / `--rotate` / `--preset X` | 与 Java 同名开关同义 | `1` / 关 / 关 / `mleague` |
+
+`features` 的 `--workers` 缺省是 **核数 × 3/4**（= Java `TraceFeatures.defaultWorkers`；与 `selfplay`
+的缺省 1 不同是刻意的，见 `docs/TRAINER-CPP.md` §6.14）。
 
 ## 与 Java 对拍（**核心判据**）
 
@@ -91,17 +115,71 @@ node tools\trainer-opts-parity.mjs 12 teacher 20   # M2：自家回合询问内�
 ⚠ 沙箱坑：Node 不能用管道接子进程输出（`spawnSync … EPERM`），所以脚本让子进程
 **直接写文件描述符**再读文件（等价于重定向）。
 
+### 自对弈 / 特征 sidecar 的对拍闸门（M2 之后的**硬判据**）
+
+```powershell
+node tools\trainer-selfplay-parity.mjs 300 2 first 20260101 --cpp-workers 8  # 轨迹 g*.jsonl + summary 逐字节
+node tools\trainer-workers-check.mjs 300 2 first 20260101 1 8               # 并行不变性：C++ 1 vs 8 逐字节
+node tools\trainer-features-parity.mjs <dir> 24 [--self-check]              # sidecar 逐字节（--self-check 两边都跑 Java）
+node tools\trainer-features-workers-check.mjs <dir> 1 8                     # sidecar 串行 vs 并行逐字节
+node tools\trainer-jsonl-diff.mjs <javaDir> <cppDir> [g]                    # 不一致时做**字段级**定位
+node tools\trainer-features-synth.mjs                                       # 合成边界语料（真实轨迹到不了的支路）
+node tools\trainer-takeover-check.mjs 1 1 pass 20260101                     # 整条链：采集 → 比 → sidecar → 比 → dataset build
+node tools\selfplay-check.mjs <dir>                                         # 独立数据集校验器（Python 侧同一份）
+```
+
+⚠ `trainer-selfplay-parity.mjs` 的位置参数是 `<场数> <小局数> <策略> <种子>`（**不是** workers），
+并行只给 C++ 侧加 `--cpp-workers K`，Java 参考侧恒 `--workers 1`。
+**场数不够会漏 bug**：`--hands 0`（完整半庄）下"食替退化"这类局面约 **1/100 场**才出现一次，
+所以完整半庄验收**至少 200 场**（`docs/TRAINER-CPP.md` §6.15 有原案）。
+
 ---
 
-## 现状（M0 / M1 已完成，M2 进行中）
+## 接进 Python 训练工作流（`MAHJONG_PRODUCER`）
+
+**开关**：`MAHJONG_PRODUCER=java|cpp`（**缺省 `java`**）—— 采集（`online.py` / `dagger.py` 的 4 处调用）
+与派生特征（`--features`）两处都走 `python/mahjong_ml/producer.py`，**命令由它自己组**，所以
+"换生产者"只是换一个环境变量，Python 侧一行不改。
+
+```powershell
+$env:MAHJONG_PRODUCER = 'cpp'
+$env:TRAINER_NO_SELFTEST = '1'      # 工作流里省掉"编完自检"（只在构建时生效）
+cd python; .\.venv\Scripts\python.exe -m mahjong_ml.dataset build <dir> <out>
+```
+
+**判据不是"能跑"，是"同种子产物逐字节相同"**：`g*.jsonl`、`g*.feat.bin`、`summary.json`（除计时/核数）
+三样都要与 Java 一致 —— 用上面的 `trainer-selfplay-parity` / `trainer-features-parity` / `takeover-check` 守。
+实测（2026-09）：**200 场完整半庄（155,464 决策）Java 24 workers vs C++ 24 workers 逐字节 200/200**，
+sidecar 200/200，`selfplay-check` DATASET PASS。
+
+**已经支持 / 还不支持**（⚠ 不支持的一律**显式报错**，绝不悄悄降级成另一种数据集）：
+
+| 能力 | Java | C++ |
+| --- | --- | --- |
+| `--policy pass` / `first` / `random` | ✅ | ✅（`random` 的 `java.util.Random` 逐位复刻） |
+| `--policy teacher` / `net:<路径>` | ✅ | ❌ 未实现（报错退出） |
+| `--teacher-label`（DAgger 的老师标注）、`--sample` | ✅ | ❌ 未实现（`producer.py` 在 cpp 下直接拒绝） |
+| `--hands` / `--rotate` / `--no-claims` / `--preset` | ✅ | ✅ |
+
+所以**缺省仍是 `java`**：完整的采集口径（`teacher` 标签 / 采样 / 网络策略）目前只有 Java 能出。
+C++ 生产者适用于"`first`/`pass`/`random` 基线臂"与**派生特征**这两条已经逐字节验过的路径。
+
+**日志里那一行 `[trainer] 引擎兜底出牌…` 是什么**：某些局面下 Java 引擎自己的"可打牌"集合会是**空**的
+（食替把暗手每种牌都禁打），两侧状态一致，Java 会退回内置 Bot 并被强制兜底出牌、**且这条决策不进轨迹**
+（所以 `summary.json` 的 `decisions` 比数据集里的决策行**多 1**）。C++ 复现同一条兜底链，并在 stderr
+打一行说明 —— 它**不是错误**，但值得计数（约 1/100 场出现一次）。详见 `docs/TRAINER-CPP.md` §6.15。
+
+---
+
+## 现状（M0–M2、M4 已完成；M3 部分完成）
 
 | 里程碑 | 状态 | 内容 |
 | --- | --- | --- |
 | **M0 牌山/配牌** | ✅ | `java.util.Random` + `Collections.shuffle` 逐位复刻；`Wall` 的账（可摸 122 / 王牌 14 = 岭上 4 + 表宝 5 + 里宝 5）；配牌顺序与 `Round.setup()` 同序；**对拍 512/512 组逐整数一致** |
 | **M1 向听/进张/和了** | ✅ | 查表式向听（花色分组 + **位并行合并**）+ 进张/听牌/听牌形；**100 万手向听 + 21.7 万手派生评估逐字段一致**；向听 **31.5×** / 进张 **19×** / 听牌形 **44×**（纯计算口径，见 `docs/TRAINER-CPP.md` §6.1） |
-| **M2 规则与打点** | 🔄 打点内核 ✅ / 精算与种子链 ✅ / 动作空间 ✅ / 鸣牌仲裁判据 ✅ | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；③ 动作键/下标/回包/落位：**369 行逐字符一致**（§6.4）；④ 鸣牌仲裁判据（等级/压过/收工/回包认领）：**1.26 万行一致**（§6.5）；⑤ 振听记账（三种振听，用**真实 Round** 驱动）：**354 行一致**（§6.6）；⑥ 可见牌统计 + 和了形纯判断：**1.37 万行一致**（§6.8）；⑦ 配牌顺序的假阳性已修正（探针改用真实 `Round`）并重验 **512/512**（§6.7）；⑧ `Round` 状态容器 + 配牌（`menzen` 全真 / 牌山 122→69 / 庄家第 14 张）：**1.4 万行一致，含 260 行 `rinit`**（§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌 / 食替 / 立直后杠 / 吃搭子）：**320 行一致**（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）：**11.6 万次真实询问逐字符一致**（§6.11/§6.12，含鸣牌段）；`Round` 摸打/鸣牌/流局循环 ⏳ |
-| M3 策略与网络 | ⏳ | teacher / first/pass/random / `NeuralPolicy` 前向；轨迹直接喂通现有 Python 管线 |
-| M4 性能与工程化 | ⏳ | 线程池、AVX2 向听表、批量前向；**同核数下决策/秒 ≥ Java 3×** |
+| **M2 规则与打点** | ✅ 全部完成 | ① 役种/符数/基本点/授受/不听罚符：**20 万行逐字段一致、61 个役种码全覆盖**（§6.2）；② 种子链 + 顺位点精算/连庄判据/终局余棒：**21 万行逐位一致**（§6.3）；③ 动作键/下标/回包/落位：**369 行逐字符一致**（§6.4）；④ 鸣牌仲裁判据（等级/压过/收工/回包认领）：**1.26 万行一致**（§6.5）；⑤ 振听记账（三种振听，用**真实 Round** 驱动）：**354 行一致**（§6.6）；⑥ 可见牌统计 + 和了形纯判断：**1.37 万行一致**（§6.8）；⑦ 配牌顺序的假阳性已修正（探针改用真实 `Round`）并重验 **512/512**（§6.7）；⑧ `Round` 状态容器 + 配牌（`menzen` 全真 / 牌山 122→69 / 庄家第 14 张）：**1.4 万行一致，含 260 行 `rinit`**（§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌 / 食替 / 立直后杠 / 吃搭子）：**320 行一致**（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）：**11.6 万次真实询问逐字符一致**（§6.11/§6.12，含鸣牌段）；⑪ `Round` 摸打/鸣牌/流局循环：**完整半庄与 Java 逐字节一致**（300×2 / 100×8 / 150 完整半庄 / **200 场完整半庄 200/200**，另 `random` 50 场、`pass` 100 场同样 100%；§6.13/§6.14/§6.15）。⚠ 完整半庄验收**至少 200 场**：食替退化局面约 1/100 场才出现（§6.15） |
+| M3 策略与网络 | 🔄 部分完成 | `first`/`pass`/`random` 三策略 ✅ **与 Java 逐字节一致**（含 `random` 的 `java.util.Random` 逐位复刻）；轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81/671 条、state 607 / cand 96 / float16）；⏳ `teacher`（五层取舍）与 `NeuralPolicy` 前向**未实现** —— 调用即**显式报错**，不静默降级 |
+| M4 性能与工程化 | ✅ 并行已落地 | `--workers` 真并行（`selfplay` + `features`，**产出逐字节不变**：C++ 1 vs 24 workers 200/200）✅；**同 24 核下决策/秒 ≈ Java 的 16.7–18.7×**（100 / 200 场完整半庄，目标 3× 已超 5 倍，§6.14）✅；⏳ AVX2 向听表、批量前向未做（§6.14 说明了为什么 `-flto` 也不留） |
 
 **非目标**：网络对战、房间/身份/投票、回放与牌谱导出、客户端相关的一切，
 以及除 **M.League 默认预设**以外的规则预设（训练只跑这一套，见 `docs/TRAINING.md` §0）。
@@ -134,6 +212,19 @@ trainer/
 │  ├─ evaluator.hpp/.cpp 役种 / 符数 / 基本点 / 高点法（= Java `Evaluator`）
 │  ├─ payments.hpp/.cpp 授受点数 + 不听罚符（= Java `Payments`）
 │  ├─ yaku_codes.hpp/.cpp 役种名 → ASCII 码（= Java `YakuCodes`）
-│  └─ main.cpp        CLI：wall / rng / rules / bench / score / settle / action / --selftest
-└─ build/             产物（已 gitignore）
+│  ├─ round.hpp/.cpp  一整局的完整状态机（摸打/鸣牌仲裁/立直/杠/和了/流局 = Java `Round.play()`）
+│  ├─ table.hpp       一整场的推进器 + **唯一的决策漏斗** `decideBot`（= Java `Table.playGame/decideBot`）
+│  ├─ trace.hpp/.cpp  轨迹记录器（`g*.jsonl` 三段式：decision → hand → game = Java `TraceRecorder`）
+│  ├─ selfplay.hpp/.cpp 自对弈编排（每场种子/策略实例/每场一文件/`summary.json` = Java `SelfPlay`）
+│  ├─ observation.hpp 观测（只含合法信息；字段白名单见 PROTOCOL §8.2）
+│  ├─ options.hpp     询问内容 → 动作空间的展开（`Action.enumerate`）
+│  ├─ policies.hpp    `pass` / `first` / `random`（teacher / net 未实现 → 显式报错）
+│  ├─ jsonw.hpp       手写 JSON 写出器（键序 = 插入序、无浮点噪声、CRLF 由 `trace.cpp` 定）
+│  ├─ danger.hpp      危险度（teacher 与特征都用 = Java `Danger`）
+│  ├─ obffeatures.hpp/.cpp 每个候选的派生特征（= Java `ObsFeatures`）
+│  ├─ jsonscan.hpp/.cpp    读回 `g*.jsonl` 的极简扫描器（`features` 用）
+│  ├─ features.hpp/.cpp    `features` 子命令：轨迹 → `g*.feat.bin`（= Java `TraceFeatures`）
+│  └─ main.cpp        CLI：wall / rng / rules / bench / score / settle / action / turnopts /
+│                     selfplay / features / --selftest
+└─ build/             产物（已 gitignore）。**轨迹目录也在 `build/` 下时，`-Clean` 只删构建产物**
 ```

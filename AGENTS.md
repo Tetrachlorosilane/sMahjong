@@ -166,11 +166,11 @@ pwsh -File client\build.ps1 -Deploy    # 编译 + 把 Qt 运行时拷到 exe 旁
 client\dist\mahjong-client.exe         # 可直接双击，无需装 Qt / 配 PATH
 ```
 
-**这套 Qt 是 shared 构建，物理上无法静态链接**（`qconfig.pri` 里 `static` 是 disabled feature）。
-本项目用「构建后把 Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 已自动化。
+**这套 Qt 是 shared 构建，物理上无法静态链接**（`static` 是 disabled feature）：本项目用「构建后把
+Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 已自动化。
 
-**Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（qtbase+qtsvg ≈ 22 MB → 仓库根 `.qt/`，
-已 gitignore；MinGW/CMake/Ninja 缺失时同样取）。参数见 `client/README.md`。
+**Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（→ 仓库根 `.qt/`，已 gitignore）。
+参数与"哪些能自动取"见 `client/README.md`。
 
 ### `build\` 与 `dist\` 的关系（两者**不应该**整目录相同）
 
@@ -324,9 +324,9 @@ mahjong/
 │                    *-test.mjs = 真 socket 回归（§4 L3）· i18n-* = 文案三件套 · mock-server = L4 假服务端 ·
 │                    test-client.mjs = 联调共用小客户端 · doc-refs-check.mjs = 文档引用自检 ·
 │                    package-release.ps1 + make-zip.mjs = 发布打包（NOTES §9.5）
-├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，build/ 不进仓库）：java_rand/tiles/wall/
-│                    counts/shanten/handeval/agari/evaluator/payments/seed/roundscoring/action + main；
-│                    `pwsh -File trainer\build.ps1`；对拍见 §4；设计见 **`docs/TRAINER-CPP.md`**（服务端**不变**）
+├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，build/ 不进仓库）：自对弈 + 派生特征，
+│                    与 Java **逐字节**同源；`pwsh -File trainer\build.ps1 [-NoSelfTest]`；对拍见 §4；
+│                    设计、口径与全部实测见 **`docs/TRAINER-CPP.md`**（服务端**不变**）
 └─ 运行时数据（**都不进仓库**，见 .gitignore）：`replays/` 对局记录 · `players/` 玩家档案 ·
                      `bot-ai/` 机器人 AI 包（与 jar/start.sh 同层，启动时自动挂载）
 ```
@@ -551,6 +551,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），
   不是"能跑"。C++ 侧还没实现的能力（`--teacher-label` / `--sample`）**显式报错**，不悄悄降级。
+  ⚠ 完整半庄验收**≥200 场**；`docs/TRAINER-CPP.md` §6.15 是训练端**唯一**"绕过内置 Bot"的例外。
 ### 6.6 teacher（内置机器人）的五层取舍
 
 `Bot` 同时是**补位机器人**和**训练用的 teacher**：它怎么打，直接决定自对弈数据集里的标签质量
@@ -659,7 +660,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 | 新增界面文案忘了搬 | 三件套流程：字面量 → `i18n-map.mjs` → `i18n-apply.mjs` → `i18n-gen.mjs`（§6.4） |
 | 牌河/副露牌太小、盘偏扁、立直棒叠点数 | §6.2 的不变量（比例、区带、固定左缘）；改完**必须看图**（L2 出 `table.png`） |
 | `dist\` 里的 exe 不是最新 | 带 `-Deploy` 重新构建（`build\` 每次更新，`dist\` 只在 `-Deploy` 时更新） |
-| **训练盘（`S:`）采集/训练中途开始报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样（目录一度还能枚举、余量正常），⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据与事故记录：`NOTES.md` §6.5、`docs/TRAINING.md` §4 P4 第二轮 |
+| **训练盘（`S:`）采集/训练中途开始报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样（目录一度还能枚举、余量正常），⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据见 `NOTES.md` §6.5 |
 ## 8. 文档维护约定（AGENTS.md / NOTES.md 的分工）
 
 **本文件是"每次会话自动加载"的工作区指令，而指令预算只有 64 KB —— 一旦超过，后面的章节会被

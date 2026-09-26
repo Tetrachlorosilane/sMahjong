@@ -37,9 +37,25 @@ const POLICY = argv[2] ?? 'pass';
 const SEED = argv[3] ?? '20260101';
 /** 第 5 个及以后的参数：原样透传给两侧（`--rotate` / `--sample` / `--no-claims` / `--preset`）。 */
 const EXTRA = argv.slice(4);
-if (EXTRA.includes('--out')) {
-    console.error('[selfplay-parity] 别透传 --out（脚本自己管输出目录）');
+if (EXTRA.includes('--out') || EXTRA.includes('--workers')) {
+    console.error('[selfplay-parity] 别透传 --out / --workers'
+        + '（--out 由脚本自己管；要并行用 `--cpp-workers K`）');
     process.exit(2);
+}
+/**
+ * `--cpp-workers K`：**只**给 C++ 侧加 `--workers K`（Java 参考侧仍串行）。
+ * 用来一次同时验两件事：C++ 并行与 Java **逐字节相同** + C++ 并行与 C++ 串行相同
+ * （后者另有 `tools/trainer-workers-check.mjs`，不依赖 JAR）。
+ * 缺省 0 = 不给这个开关（两侧都按各自缺省跑，Java 缺省是核数、C++ 缺省是 1）。
+ */
+const wi = EXTRA.indexOf('--cpp-workers');
+const CPP_WORKERS = wi >= 0 ? Number(EXTRA[wi + 1]) : 0;
+if (wi >= 0) {
+    if (!Number.isFinite(CPP_WORKERS) || CPP_WORKERS < 0) {
+        console.error('[selfplay-parity] --cpp-workers 需要一个非负整数');
+        process.exit(2);
+    }
+    EXTRA.splice(wi, 2);
 }
 
 if (!existsSync(JAR)) {
@@ -63,12 +79,17 @@ function runToFile(cmd, cmdArgs, outFile) {
 
 const dirJava = join(BUILD, 'sp-java');
 const dirCpp = join(BUILD, 'sp-cpp');
-const common = ['--workers', '1', '--policy', POLICY, '--seed', SEED, '--hands', String(HANDS),
-    ...EXTRA];
+console.log(`[selfplay-parity] 策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局 / seed ${SEED}`
+    + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''}`
+    + `${CPP_WORKERS > 0 ? ` / cpp --workers ${CPP_WORKERS}` : ''}`);
+const tail = ['--policy', POLICY, '--seed', SEED, '--hands', String(HANDS), ...EXTRA];
+// Java 参考侧恒为 `--workers 1`（参考轨迹不随核数变）；C++ 侧按 `--cpp-workers` 给定
+const javaArgs = ['--workers', '1', ...tail];
+const cppArgs = CPP_WORKERS > 0 ? ['--workers', String(CPP_WORKERS), ...tail] : tail;
 
-runToFile('java', ['-jar', JAR, '--selfplay', String(GAMES), ...common, '--out', dirJava],
+runToFile('java', ['-jar', JAR, '--selfplay', String(GAMES), ...javaArgs, '--out', dirJava],
     join(BUILD, 'sp-java.log'));
-runToFile(EXE, ['selfplay', String(GAMES), ...common, '--out', dirCpp],
+runToFile(EXE, ['selfplay', String(GAMES), ...cppArgs, '--out', dirCpp],
     join(BUILD, 'sp-cpp.log'));
 
 let fails = 0;
@@ -138,4 +159,5 @@ if (fails) {
     process.exit(1);
 }
 console.log(`[selfplay-parity] PASS：策略 ${POLICY} / ${GAMES} 场 × ${HANDS} 小局`
-    + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''} 逐字节一致`);
+    + `${EXTRA.length ? ' / ' + EXTRA.join(' ') : ''}`
+    + `${CPP_WORKERS > 0 ? ` / cpp --workers ${CPP_WORKERS}` : ''} 逐字节一致`);

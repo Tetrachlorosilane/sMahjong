@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <string>
 
@@ -79,6 +80,10 @@ public:
     RoundResult lastResult;
     /** 策略层违规（Java 会退回内置机器人，训练端没有 Bot）→ 上层据此报错退出。 */
     std::string fatal;
+    /** 本场第几次决策（1 起）：报错信息里带上，便于按"场号 + 步号"复现。 */
+    int decisionOrdinal = 0;
+    /** "自家回合 legal 为空"的次数（Java 侧同样为空 → 不是分歧，见 `decideBot` 的注释）。 */
+    int engineFallbacks = 0;
 
     void addBot(int at) {
         if (at < 0 || at >= 4) {
@@ -91,13 +96,14 @@ public:
     Seat &seat(int i) { return seats[static_cast<size_t>(i)]; }
     const Seat &seat(int i) const { return seats[static_cast<size_t>(i)]; }
 
-    /** 唯一的决策漏斗：策略 → （异常/null → 内置机器人）；训练端没有 Bot，违规即报错。 */
+    /** 唯一的决策漏斗：策略 → （异常/null → 内置机器人）；训练端没有 Bot，违规即报错（一个例外见下）。 */
     Cmd decideBot(int seatIdx, const Observation &obs, const std::string &kind,
                   const std::string &roundKey) {
         Decision d;
         d.obs = &obs;
         d.kind = kind;
         Cmd cmd;
+        const int ordinal = ++decisionOrdinal;
         if (policy[static_cast<size_t>(seatIdx)]) {
             cmd = policy[static_cast<size_t>(seatIdx)](d);
         }
@@ -106,10 +112,32 @@ public:
                     + "）—— 训练端没有内置 Bot 兜底（见 policies.hpp 顶部注释）";
         } else if (obs.indexOfKey(cmd.action.key()) < 0 && cmd.action.type != kActPon
                    && cmd.action.type != kActKan) {
-            // Java `Policies.fromAction` 在"回包不在本次 legal 里"时会退回**内置机器人**；
-            // 训练端没有 Bot，所以这里显式失败（绝不悄悄换一个动作 —— 那等于伪造标签）。
-            fatal = "策略回包不在本次 legal 里（座位 " + std::to_string(seatIdx) + "，键 "
-                    + cmd.action.key() + "）—— 训练端没有内置 Bot 兜底";
+            // Java `Policies.fromAction` 在"回包不在本次 legal 里"时退回**内置机器人**；训练端没有 Bot。
+            //
+            // 唯一的例外：**自家回合的 legal 为空**。这不是"策略回错了"，而是 Java 引擎自己的退化局面 ——
+            // 食替（`RoundOptions.kuikaeForbidden`）可能把暗手里每一种牌都禁打（例：吃 5s6s7s 时用
+            // 6s+7s 吃 5s，之后手里只剩 88s，而 8s = hi+1 是筋食替禁打），于是
+            // `discardChoices` 返回空 → `Policies.first/pass` 只能回 `Action.PASS`。
+            // 这个局面**两侧的状态完全一致**（不是分歧），后续也完全确定：
+            //   · Java：`fromAction` 退回内置 Bot → Bot 的回包被 `Round.discardAllowed` 判非法 →
+            //     强制 `defaultDiscardId` 兜底出牌。这条链与 Bot 的取舍**无关**：空 legal 意味着
+            //     手里每一张都被禁打，Bot 回哪张都会被判非法（回非打牌动作同样被拒）。
+            //   · 轨迹：记录器的 `Action.resolve(cmd, legal=[])` 也解不出来 → **这一行不进轨迹**
+            //     （Java 同：`observed` 仍 +1，`step` 不动）。
+            // 所以训练端把策略的原回包**原样**交给引擎、走同一条兜底链即可逐字节复现
+            // （`round.cpp` 的回合循环已经在 `discardAllowed` 失败时调 `defaultDiscardId`）。
+            if (obs.legal.empty() && kind == "turn") {
+                engineFallbacks++;
+                std::fprintf(stderr,
+                             "[trainer] 引擎兜底出牌（自家回合 legal 为空：与 Java 同走 "
+                             "defaultDiscardId，且这一条决策不进轨迹）座位 %d，本场第 %d 次决策\n",
+                             seatIdx, ordinal);
+            } else {
+                fatal = "策略回包不在本次 legal 里（本场第 " + std::to_string(ordinal) + " 次决策，座位 "
+                        + std::to_string(seatIdx) + "，kind=" + kind + "，键 " + cmd.action.key()
+                        + "，legal=" + std::to_string(obs.legal.size())
+                        + " 条）—— 训练端没有内置 Bot 兜底";
+            }
         }
         if (debugChoiceTap) {
             debugChoiceTap(obs, kind, cmd.action, roundKey);

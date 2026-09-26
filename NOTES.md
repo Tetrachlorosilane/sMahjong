@@ -1188,6 +1188,29 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       C++ 单核 **16,630**（**21.2×**）；Java 8 workers **3,690** vs C++ 8 workers **17,230**（**4.7×**）。
       C++ 的 `--workers` 目前**串行**（8 workers 与单核同速），所以这个倍数还会随真并行继续拉大；
       目标里的 3×（基线 24 核 1172 / 单核 88）**在没有任何性能优化前就已经超过**。
+     - **`--workers` 真并行（2026-09 收尾，Task A）**：`selfplay` 用 `std::thread` + `std::atomic<int>`
+       抢场号、`features` 抢文件号（与 Java `SelfPlay.run` / `TraceFeatures.run` 同一套调度）；
+       **结果合并全在 join 之后按 g 升序做**（浮点求和顺序、`by_policy` 插入序、`per_game` 行序
+       都与串行逐位相同）。每场失败原因**各自收在 `rowFatal[g]`** 里再按 g 取第一个 —— 所以
+       "哪一场先报错"也与调度无关（原来是把 fatal 字符串共享给所有线程写，那是数据竞争）。
+       共享可变状态只有向听缓存（`shanten.cpp` 的 `suitTable` / `honorTable`）：填槽整段进一把锁、
+       命中路径免锁（p0 是发布位），调试构建另有断言钉住"算完的槽 p0 != 0"。
+       判据：`tools\trainer-workers-check.mjs 300 2 first 20260101 1 8` → **1 vs 8 逐字节 300/300**
+       （含 summary 内容字段与文件集）；`tools\trainer-features-workers-check.mjs <dir> 1 8` →
+       **300 个 sidecar 逐字节**（4.1 s → 0.6 s）；`trainer-selfplay-parity.mjs … --cpp-workers 8`
+       一次同时验"C++ 并行 == Java"（**300/300**）。口径：`selfplay` 的 `--workers` 缺省 / 0 = **1**
+       （不按核数自动并发），`features` 的缺省 = `max(1, 核数×3/4)`（同 Java）—— 两条都写进 `--help`。
+     - **编后自检可跳过（Task B）**：`trainer\build.ps1 -NoSelfTest` 或 `$env:TRAINER_NO_SELFTEST='1'`
+       → 只多打一行 `==> 已跳过自检（-NoSelfTest）`，其余不变；它进 `.stamp` 指纹（上次跑没跑自检可查）。
+       ⚠ 顺手修了 `-Clean` 的一个真事故：它原来 `Remove-Item -Recurse` 整个 `build/`，而那个目录
+       **同时是运行产物的家**（`--out` 的轨迹 / `*.feat.bin` / 对拍中间目录）—— 实测把别人正在对拍的
+       200 场 Java 轨迹一次删光。现在只删 `.stamp` / `trainer.exe` / `*.obj`…（轨迹目录保留）。
+     - **并行后的性能（本机 32 逻辑核；100 场完整半庄 × first × seed 20260101 = 78,279 决策，两侧同一个数）**：
+       Java 24 workers **8.82 s / 9,140 决策每秒**（自身计时口径，对 Java 最有利）→ C++ 24 workers
+       **0.53 s / 153,000 决策每秒（16.7×）**；C++ 单线程 3.84 s / 20,553（2.2×）；只跑引擎不写 `--out`
+       0.44 s / ~167,000。24 workers 相对单线程 **7.3×** 并行加速。任务 C 试过 `-flto=thin -fuse-ld=lld`
+       （在噪声内无差异，编译 6 s→30.5 s，回退）与 `-fno-rtti`（`llvm-nm` 显示基线 exe 里本来就没有
+       RTTI/vtable/type_info 符号，无可省，回退）——两笔都记在 `docs/TRAINER-CPP.md` §6.14。
     - **少量场次检验已做一轮**：`40 场 × 2 小局 × first × seed 777` → **40/40 逐字节一致**（含鸣牌与和了各类型）。
     - **极端种子合规检查（对拍口径的边界）**：`0 / 1 / -1 / 9223372036854775807 / -9223372036854775808 /
       4294967296` 六个种子各 1 场 → **全部逐字节一致**（133,287～142,750 B）。这条同时钉住了
@@ -1234,6 +1257,35 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       远端 head 的 sha）→ PATCH ref。请求体生成脚本在 `trainer/build/rest/prep.mjs`（不进仓库）。
       ⚠ **GitHub 会把提交日期规范化成 UTC**，所以远端 commit 的 **sha 与本地不同**（内容相同）：
       下一轮照旧以**远端 head** 为 parent 走 REST，别指望 `git push` 能快进。
+    - **案例：「自家回合 `legal` 为空」是两侧同源的退化（训练端 takeover 期的真 bug）** ——
+      报障：自对弈跑到某一场突然 `策略回包不在本次 legal 里（座位 1，键 pass）` 并 exit 2，
+      而且**失败那一场什么都不写**（轨迹是整场结束才落盘，只写出前 N-1 个 `g*.jsonl`）。
+      频率：完整半庄约 **1/100 场**（`seed 20260101` → 第 66 场；`seed 31337` → 第 119 场）；
+      短局（`--hands 2`）几乎碰不到。三个**错误**假设先排除掉，省下次的时间：
+      ① ~~并行数据竞争~~（`--workers 1` 同样失败；并行改动 stash 回原始版重建**一样失败**）；
+      ② ~~跨局状态泄漏~~（失败场号只与 `(seedBase, 场号)` 有关；当时一次 `-Clean` 把我跑到一半的
+      输出目录删了 → 文件数变少，被我误读成"失败场号会变"）；
+      ③ ~~C++ 的分歧~~（两侧状态**逐字段一致**，是 Java 引擎自己的退化）。
+      定位链：给 `decideBot` 加临时上下文 → `kind=turn`、**`legal=0`**、座位 1 暗手 `[8s,8s]`、
+      4 副吃里有一副 `5s6s7s`（用 `6s+7s` 吃 5s）；而 `kuikaeForbidden(5s,6s,7s)` =
+      `{5s 現物, 8s = hi+1 筋食替}` → **暗手两张 8s 全被禁打** → `discardChoices` 返回空。
+      Java 同场（`trainer\build\java-g66\g66.jsonl`）：step 298 是座位 1 的**鸣牌**询问（选了 chi），
+      **step 299 直接是座位 2** —— 中间**没有**"鸣牌后打牌"那一行，而 `discards[1]` 在 299 多了一张
+      **8s**（正是食替禁打那张）。对上代码：`Policies.fromAction` 见"回包不在 legal 里" → 退回内置
+      `Bot`；`Round` 的回合循环对**任何**不可用回包一律 `discardAllowed==false → defaultDiscardId`
+      （`Round.java` 359/377），而 `defaultDiscardId` 末行是 `drawn >= 0 ? drawn : hand.get(0)`
+      —— 空 legal 时每张都被禁打 ⇒ **净效果恒为 `hand.get(0)`**（原案 8s），**与 Bot 的取舍无关**；
+      `TraceRecorder.onChoice` 的 `Action.resolve(cmd, legal=[])` 为 null → **这一行不进轨迹也不吃
+      step**（这解释 Java 轨迹"少一行"与 `summary.json` 的 `decisions` 比决策行**多 1**：200 场原案
+      155,464 vs 155,463）。修法 = `table.hpp::decideBot` 里**唯一**的放行分支：只对
+      「`kind == "turn"` 且 `legal` 为空」把策略原回包原样交给引擎走同一条兜底链，其余不可解析回包
+      仍**硬报错**（不伪造标签）；每次兜底在 stderr 打一行 `[trainer] 引擎兜底出牌…`。
+      红证：修前 100 场在第 66 场退出；修后 **100 场跑完、兜底恰好 1 次**、`g0..g66` 与 Java
+      **67/67 逐字节一致**；**200 场完整半庄**（seed 31337）Java 24w vs C++ 24w **200/200**、
+      sidecar 200/200、C++ 1w vs 24w **200/200**；`random` 50 / `pass` 100 场完整半庄同样 100%。
+      **判据教训**：1/100 频率的退化**测不到**在"100 场"这个数字上 —— 完整半庄验收**至少 200 场**；
+      而且"对拍 C++ 自己的串行/并行"永远发现不了它（`--workers` 确实没改产出，问题在**引擎**），
+      **必须同时跑 Java 侧参考**。（判据见 `AGENTS.md` §6.5 与 `docs/TRAINER-CPP.md` §6.15。）
 
 
 ---

@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <vector>
 
 namespace trainer {
@@ -138,18 +141,42 @@ void dfsGroup(uint8_t *c, int n, bool allowRuns, int from, int sets, int pair, i
     c[i]++;
 }
 
-/** 花色 / 字牌两套缓存的统一取用：算过就直接返回（未算过的槽 `p0 == 0`）。 */
+/** 花色 / 字牌两套缓存的统一取用：算过就直接返回（未算过的槽 `p0 == 0`）。
+ *
+ * ⚠ **这两张表是并行自对弈里唯一的共享可变状态**（`--workers K`，见 docs/TRAINER-CPP.md §6.13）。
+ *   `Reach` 是 16 字节、非原子：如果两个线程同时算同一个槽并各自写一半，读侧就可能看到
+ *   "`p0` 已是新值、`p1` 还是 0" 的撕裂组合 —— 那是 UB，而且**读出来的向听会静默错**。
+ *   所以"检查 → 计算 → 填槽"整段放在锁里（填槽的 `groupReach` 很可能在别的线程里已经完成，
+ *   所以锁内**再查一次**）。命中路径（`p0 != 0`）不加锁：只有持有锁的线程会写这个槽，
+ *   "先发布 `p0`、后发布 `p1`" 在源码顺序上成立，命中者拿到的就是算完整的那一份。
+ *   代价可忽略：槽被填满之后就永远走免锁路径。 */
 const Reach &groupReach(const uint8_t *c, int n, bool allowRuns, int pattern) {
+    static std::mutex mu;
     Reach &slot = allowRuns ? suitTable()[static_cast<size_t>(pattern)]
                             : honorTable()[static_cast<size_t>(pattern)];
     if (slot.p0 != 0) {
+        return slot;
+    }
+    const std::lock_guard<std::mutex> lock(mu);
+    if (slot.p0 != 0) {                                 // 锁内再查：别的线程可能刚算完
         return slot;
     }
     uint8_t tmp[9];
     for (int i = 0; i < n; i++) {
         tmp[i] = c[i];
     }
+    // DFS 先把 `p1` 写出来、最后才写 `p0`（`setBit` 里 pair==0 才碰 `p0`），
+    // 而 `p0 != 0` 正是"这一槽算完了"的标记（(s=0,q=0) 恒可达、由 `reachOfHand` 的
+    // `acc.p0 = 1` 与组内"丢孤张"分支保证）—— 所以 `p0` 就是发布位，不需要额外的标志数组。
     dfsGroup(tmp, n, allowRuns, 0, 0, 0, 0, slot);
+#ifndef NDEBUG
+    // 发布位的前提：**任何**牌型（含全 0）都至少可达 (s=0,q=0)，否则 `p0 != 0` 当不了"算完了"
+    // 的标记 —— 空槽会被反复重算（只是慢），而这个断言把它钉死在调试构建里。
+    if (slot.p0 == 0) {
+        std::fprintf(stderr, "[trainer] 向听缓存槽算完仍是空（pattern=%d）\n", pattern);
+        std::abort();
+    }
+#endif
     return slot;
 }
 

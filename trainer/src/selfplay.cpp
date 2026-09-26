@@ -1,5 +1,6 @@
 #include "selfplay.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "jsonw.hpp"
@@ -167,9 +169,12 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
 
 Summary run(const Config &c, std::string &fatal) {
     const int games = c.games < 0 ? 0 : c.games;
+    // 并行度钳制与 Java `SelfPlay.run` **同一个式子**：`max(1, min(workers, max(1, games)))`。
+    // ⚠ `--workers` 缺省 / 0 = **1**（C++ 侧的既定口径：不按核数偷偷并发 —— 同一台机器上
+    //    `--workers` 省略时跑得跟以前一样；Java 的缺省是 `availableProcessors()`）。
     const int workers = c.workers > 0
             ? (c.workers < (games > 0 ? games : 1) ? c.workers : (games > 0 ? games : 1))
-            : (games > 0 ? games : 1);
+            : 1;
     std::vector<PolicyFactory> factories(4);
     std::string err;
     if (c.seatPolicy.empty()) {
@@ -188,12 +193,36 @@ Summary run(const Config &c, std::string &fatal) {
     if (!c.outDir.empty()) {
         std::filesystem::create_directories(c.outDir, ec);
     }
-    std::vector<GameRow> rows(static_cast<size_t>(games > 0 ? games : 1));
+    const int slots = games > 0 ? games : 1;
+    std::vector<GameRow> rows(static_cast<size_t>(slots));
+    // 每场的失败原因单独收（**不共享字符串**）：合并时按 g 顺序取第一个，
+    // 所以"哪一场先报错"与调度无关 —— 并行与串行的报错文本也一致。
+    std::vector<std::string> rowFatal(static_cast<size_t>(slots));
     const auto t0 = std::chrono::steady_clock::now();
-    // ⚠ 串行跑：并行的结果与串行**逐字节相同**（每场种子与调度无关），所以先要正确性。
+    // ⚠ 并行是**纯调度**：每场的种子只与 `(seedBase, g)` 有关（`seedFor`），每场每席的策略实例
+    //   也是 `create(seat, gameSeed)` 现造 → 场与场之间没有任何共享可变状态（共享的只有向听表，
+    //   它在 `shanten.cpp` 里按槽加锁后只写一次、之后只读）。所以"谁先跑哪一场"不影响内容：
+    //   `g<g>.jsonl` 与串行时**逐字节相同**（判据见 docs/TRAINER-CPP.md 的 M4 并行一节）。
+    //   结果合并（summary / by_policy / per_game）**全部在 join 之后按 g 升序做** ——
+    //   浮点求和顺序、`by_policy` 的插入序、`per_game` 的行序因此都与串行一致。
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(workers));
+    std::atomic<int> next{0};
+    for (int w = 0; w < workers; w++) {
+        pool.emplace_back([&]() {
+            int g;
+            while ((g = next.fetch_add(1)) < games) {
+                rows[static_cast<size_t>(g)]
+                        = oneGame(c, factories, g, c.outDir, rowFatal[static_cast<size_t>(g)]);
+            }
+        });
+    }
+    for (std::thread &t : pool) {
+        t.join();
+    }
     for (int g = 0; g < games; g++) {
-        rows[static_cast<size_t>(g)] = oneGame(c, factories, g, c.outDir, fatal);
-        if (!fatal.empty()) {
+        if (!rowFatal[static_cast<size_t>(g)].empty()) {
+            fatal = rowFatal[static_cast<size_t>(g)];
             return Summary{};
         }
     }
@@ -373,6 +402,27 @@ void printFormat(const Summary &s) {
     }
 }
 
+/** `selfplay` 自己的用法（`--help` 时打；顶层 `trainer` 无参时打的是更简略的一份）。 */
+void selfplayUsage(std::FILE *out) {
+    std::fprintf(out,
+                 "用法：trainer selfplay <games> [--workers K] [--policy P] [--seed S] [--hands H]\n"
+                 "                                [--rotate] [--sample K] [--no-claims] [--preset NAME]\n"
+                 "                                [--out DIR]\n"
+                 "  --workers K   并行工作线程数：K 个线程从 g=0..games-1 里抢场号，各写各的 g<g>.jsonl；\n"
+                 "                **缺省 / 0 = 1**（不按核数自动并发），钳制到 [1, games]，与 Java 同式\n"
+                 "                `max(1, min(workers, max(1, games)))`。并行只改调度：结果汇总在\n"
+                 "                join 之后按 g 升序合并，所以 `g*.jsonl` 与 `--workers 1` **逐字节相同**\n"
+                 "                （summary.json 的 `workers` 字段是钳制后的线程数）。\n"
+                 "  --policy P    四家策略，逗号分隔（pass|first|random）；缺省 teacher（训练端未实现）\n"
+                 "  --seed S      基准种子（缺省 20260101）；每场种子只与 (S, 场号) 有关\n"
+                 "  --hands H     每场最多 H 小局（0 = 完整半庄）；缺省 0\n"
+                 "  --rotate      按场轮转座位\n"
+                 "  --sample K    每 K 次决策记 1 条（缺省 1 = 全记）\n"
+                 "  --no-claims   不记录鸣牌决策\n"
+                 "  --preset X    规则预设（mleague|tenhou|majsoul|custom）；缺省 mleague\n"
+                 "  --out DIR     轨迹输出目录（g<场号>.jsonl + summary.json）\n");
+}
+
 }  // namespace
 
 int selfplayCli(int argc, char **argv) {
@@ -423,6 +473,9 @@ int selfplayCli(int argc, char **argv) {
             c.preset = next("--preset");
         } else if (a == "--teacher-label") {
             teacherLabel = true;
+        } else if (a == "--help" || a == "-h") {
+            selfplayUsage(stdout);
+            return 0;
         } else {
             std::fprintf(stderr, "[trainer] 未知参数：%s\n", a.c_str());
             return 2;
