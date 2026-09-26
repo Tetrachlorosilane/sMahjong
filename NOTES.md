@@ -1291,11 +1291,17 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
     - **九种九牌在训练口径下永不亮**（M.League 的 `kyuushuAbort=false`）：自检同时断言
       "M.League 不给 / 换《天凤》预设才给"，所以"没覆盖到"是被**验证过的**，不是漏了。
     - **推送退路（broker 502 时）**：`github_git_push` 走 broker→github.com，常被 502 挡住；REST 走
-      api.github.com 是另一条路 —— blobs（**由 Node 读文件 + `JSON.stringify`**，PowerShell 的文本往返
-      会改字节，实测 8/8 sha 不符）→ tree（`base_tree` = 远端 head 的 tree）→ commit（`parents` =
-      远端 head 的 sha）→ PATCH ref。请求体生成脚本在 `trainer/build/rest/prep.mjs`（不进仓库）。
+      api.github.com 是另一条路 —— **一次 create-tree 调用里内联各文件的 `content`**（省掉 blobs 往返；
+      `base_tree` = 远端 head 的 tree）→ commit（`parents` = 远端 head 的 sha）→ PATCH ref。
+      请求体生成脚本在 `trainer/build/rest/prep.mjs`（不进仓库）。
       ⚠ **GitHub 会把提交日期规范化成 UTC**，所以远端 commit 的 **sha 与本地不同**（内容相同）：
       下一轮照旧以**远端 head** 为 parent 走 REST，别指望 `git push` 能快进。
+      ⚠ 生成请求体用 **Node 读文件 + `JSON.stringify`** 最省心（PowerShell 的文本往返**曾**改字节，
+      实测 8/8 sha 不符）；要用 PowerShell 也行，但三条必须一起做（2026-09 实测 10/10 逐字节一致）：
+      ① 按 UTF-8 读进来先 `CRLF→LF` 归一（工作区是 CRLF、git 里存的是 LF）；② 用
+      `UTF8Encoding($false)` **无 BOM** 写请求体；③ **判据不是"看起来对"** —— 先逐文件
+      `git hash-object <归一后的文件>` 必须等于 `git ls-tree HEAD` 里的 blob sha，
+      再核对**远端返回的 tree sha == 本地 `HEAD^{tree}`**；两条都相等才算字节精确（本轮即如此）。
     - **案例：「自家回合 `legal` 为空」是两侧同源的退化（训练端 takeover 期的真 bug）** ——
       报障：自对弈跑到某一场突然 `策略回包不在本次 legal 里（座位 1，键 pass）` 并 exit 2，
       而且**失败那一场什么都不写**（轨迹是整场结束才落盘，只写出前 N-1 个 `g*.jsonl`）。
