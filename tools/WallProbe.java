@@ -13,6 +13,8 @@ import java.util.List;
 import mahjong.core.Rules;
 import mahjong.core.Tiles;
 import mahjong.core.Wall;
+import mahjong.game.Round;
+import mahjong.game.Table;
 
 public final class WallProbe {
 
@@ -64,27 +66,23 @@ public final class WallProbe {
 
         int[] all = wall.debugAllTiles();
 
+        // ⚠ 配牌**必须拿真实的 `Round`**（`debugSetup()`）—— 不要在探针里重写配牌顺序：
+        //   2026-09 踩过一次：探针自己写成"13 巡 × 4 家 × 1 张"，而 `Round.setup()` 是
+        //   "3 轮 × 4 家 × **一次抓 4 张**" → 两边配牌其实不同，探针却和同样写错的 C++ 侧
+        //   "一致"了 512 组（**假阳性**）。判据：探针只调 Java 自己的入口，不重实现规则。
+        Table t = new Table("probe", "probe", rules);
+        Round r = new Round(t, 0, 1, 0, dealer, new int[]{25000, 25000, 25000, 25000}, 0, seed);
+        r.debugSetup();
         List<List<Integer>> hands = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
-            hands.add(new ArrayList<>());
+            hands.add(new ArrayList<>(r.hand[i]));      // `setup()` 里已按 compareTile 排好
         }
-        for (int r = 0; r < 13; r++) {
-            for (int s = 0; s < 4; s++) {
-                hands.get((dealer + s) % 4).add(wall.deal());
-            }
-        }
-        // 庄家的第 14 张随配牌一起发（`Round.setup()`：openingTile 进庄家手牌，第一巡不再摸）
-        hands.get(dealer).add(wall.deal());
-        for (List<Integer> h : hands) {
-            h.sort(WallProbe::compareTile);
-        }
-        wall.finishDealing();
 
-        List<Integer> dora = wall.doraIndicators();
-        List<Integer> ura = wall.uraIndicators();
+        List<Integer> dora = r.doraIndicators();
+        List<Integer> ura = r.uraIndicators();
         List<Integer> rinshan = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
-            rinshan.add(wall.drawRinshan());
+            rinshan.add(wall.drawRinshan());            // 同一个 seed → 同一副王牌
         }
 
         StringBuilder sb = new StringBuilder();

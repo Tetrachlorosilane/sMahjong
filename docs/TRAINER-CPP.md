@@ -90,8 +90,10 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 - `trainer/src/java_rand.hpp` —— `JavaRandom`（`setSeed/next/nextInt` 逐分支等价）+ `javaShuffle`；
 - `trainer/src/wall.{hpp,cpp}` —— `Wall(seed, aka)`：洗 0..135 → `stripRedFives`（`aka == 0` 时
   把赤五写成普通五）→ 切 `dead[122..135]`；`deal/finishDealing/draw/drawRinshan/onKan/revealDora`；
-- 配牌顺序与 `Round.setup()` 一致：`13 巡 × 4 家（从庄家起）` → 庄家第 14 张（`openingTile`）→ `finishDealing`；
-- `tools/WallProbe.java`（只读探针）+ `tools/trainer-parity-check.mjs`：
+- 配牌顺序与 `Round.setup()` 一致：**3 轮 × 4 家 × 一次抓 4 张（共 12）** → 每人补 1 张（13）
+  → 庄家第 14 张（`openingTile`）→ `finishDealing`；
+  ⚠ **2026-09 修正**：原来是"13 巡 × 4 家 × 1 张"，**是错的**（见 §6.0 的契约细节 2）；
+- `tools/WallProbe.java`（只读探针，**取真实的 `Round`**）+ `tools/trainer-parity-check.mjs`：
   **同一 (seed, aka, dealer) → 136 张牌山 + 四家配牌 + 表/里宝指示牌 + 4 张岭上，逐个整数比对**。
 
 跑法（`trainer/README.md` 有完整说明）：
@@ -110,7 +112,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | 里程碑 | 内容 | 状态 / 完成判据 |
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
-| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.7）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
+| **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | 🔄 **进行中**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；`Round` 牌局流程 ⏳（判据：同 (seedBase, 策略串) → `g*.jsonl` 与 Java **逐字节相同**，先 100 场再 2000 场） |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | ① teacher 决策序列与 Java 相同（同 seed 同场）；② 网络 logits 与 Java 逐元素 ≤1e-4（golden 夹具）；③ `selfplay-check.mjs` PASS |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ① **同等核数下决策/秒 ≥ Java 的 3×**（基线：24 核 1172 决策/秒、单核 88）；② 产出数据直接喂通 P3/P4 管线不改一行 Python |
 
@@ -154,10 +156,13 @@ $ node tools\trainer-parity-check.mjs 24
    而且**张数 = 已翻开的张数**（开局 1；`uraIndicators()` 与表宝**同长**）。
    照抄成"raw id + 固定 5 张"就会 100% 对不上 —— C++ 侧因此拆成
    `deadTile(i)`（原始 id，M2 计宝牌用）与 `doraIndicators()/uraIndicators()`（与 Java 同口径）。
-2. **配牌顺序不是"每人 13 张发完再给庄家"**：`Round.setup()` 是
-   `13 巡 × 4 家（从庄家起）` → 庄家第 14 张（`openingTile` 同时是"本次摸到的牌"）→ `finishDealing()`；
+2. **配牌顺序不是"每人一张轮 13 圈"，而是"一次抓 4 张、抓 3 轮"**：`Round.setup()` 是
+   `3 轮 × 4 家 × 4 张（共 12）` → 每人补 1 张（13）→ 庄家第 14 张（`openingTile`）→ `finishDealing()`；
    且手牌按 `Round.compareTile` 排序（**先 kind，再"赤五在前"，最后比 id**）。
-   探针第一版漏了"把第 14 张加进庄家手牌"，对拍当场红。
+   ⚠ **2026-09 修正（一次真实的假阳性）**：探针第一版自己写成了"13 巡 × 4 家 × 1 张"，
+   而 C++ 侧照着探针写 —— 于是**两边一起错、还互相印证了 512 组**。
+   判据因此加了一条：**探针只准调 Java 自己的入口**（这里改成 `new Round(...)` + `debugSetup()`
+   再读 `hand[]`），**不许在探针里重实现规则** —— 否则"对拍"退化成"和我的重实现比"。
 
 ⚠ **沙箱坑**：Node 不能用管道接子进程输出（`spawnSync … EPERM`，命名管道被禁）。
 对拍脚本因此让子进程**直接写文件描述符**（`stdio: ['ignore', fd, 'inherit']`）再读文件 ——
@@ -392,7 +397,26 @@ pon → type[;tiles]、chi → type;tiles）。
 | --- | --- |
 | **354 行**（4 种听牌形 × 6 种舍张序列 × temp/perm 组合 + 随机手牌；`isFuriten=true` 202、`temp` 127、`perm` 94） | **0 处不一致**（含 `waitKinds` —— 顺带又交叉验证了一次 `Agari.waits` 的移植） |
 
-### 6.7 M2（下半之四）：可见牌统计 + 和了形纯判断（已完成）
+### 6.7 M0 修正：配牌顺序的**假阳性**（2026-09，最值钱的一条教训）
+
+M2 走到 `Round` 门口、去读 `Round.setup()` 时发现：**M0 的"配牌逐整数一致"是假阳性**。
+
+- 真实顺序（`Round.setup()`）：**3 轮 × 4 家 × 一次抓 4 张**（共 12）→ 每人补 1 张（13）
+  → 庄家第 14 张（`openingTile`）→ `finishDealing()`；
+- 探针与 C++ 侧当时都写成：**13 巡 × 4 家 × 1 张** —— 两边**一起错**，
+  于是 512 组"逐整数一致"照常全绿。
+
+**修法（两层）**：① C++ 的 `dealHands` 改成真实顺序；② **探针改成调用 Java 自己的入口** ——
+`new Round(table, …)` + `debugSetup()`，再读 `round.hand[i]`（而不是在探针里重写配牌循环）。
+
+**判据（已写进 §4 的契约与 NOTES）**：**探针只准调 Java 自己的入口，不许重实现规则。**
+一旦探针里出现"我也写一遍这个算法"，对拍就从"和 Java 比"退化成"和我的重实现比" ——
+而重实现最容易犯的错，恰恰是它本来要抓的那些错（配牌顺序、记账口径、优先级）。
+同一条教训在振听那一轮也出现过（当时及时改成"用真实 `Round` 驱动"）。
+
+修正后：`node tools\trainer-parity-check.mjs 128` → **512/512 组逐整数一致**（含庄家第 14 张）。
+
+### 6.8 M2（下半之四）：可见牌统计 + 和了形纯判断（已完成）
 
 `visible.hpp` 与 Java `mahjong.rules.Visible` / `mahjong.game.WinCheck` 同口径。为什么这块值得单独钉：
 

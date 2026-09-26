@@ -46,14 +46,21 @@ void printIntArray(const char* name, const std::vector<int>& v, bool last) {
     std::printf("]%s", last ? "" : ",");
 }
 
-// 与 Java `Round.setup()` 同序配牌：
-//   13 巡 × 4 家（从庄家起，每人一张）→ 庄家第 14 张（openingTile）→ finishDealing → 各家按 compareTile 排序
+// 与 Java `Round.setup()` **同序**配牌（⚠ 2026-09 修正：原来是"13 巡 × 4 家 × 1 张"，
+// 那是错的 —— Java 是"3 轮 × 4 家 × **每人一次抓 4 张**"，再各补 1 张，最后庄家第 14 张）：
+//   3 轮 × 4 家 × 4 张（共 12）→ 每人再 1 张（13）→ 庄家第 14 张（openingTile）→ finishDealing → 排序
 std::vector<std::vector<int>> dealHands(trainer::Wall& wall, int dealer) {
     std::vector<std::vector<int>> hands(4);
-    for (int r = 0; r < 13; r++) {
+    for (int r = 0; r < 3; r++) {
         for (int s = 0; s < 4; s++) {
-            hands[static_cast<size_t>((dealer + s) % 4)].push_back(wall.deal());
+            auto& h = hands[static_cast<size_t>((dealer + s) % 4)];
+            for (int t = 0; t < 4; t++) {
+                h.push_back(wall.deal());
+            }
         }
+    }
+    for (int s = 0; s < 4; s++) {
+        hands[static_cast<size_t>((dealer + s) % 4)].push_back(wall.deal());
     }
     const int opening = wall.deal();
     hands[static_cast<size_t>(dealer)].push_back(opening);
