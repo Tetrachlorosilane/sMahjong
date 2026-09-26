@@ -264,6 +264,56 @@ function buildCorpus(want) {
         rows.push(`furiten ${mc} ${kinds.join(',')} ${disc.length ? disc.join(',') : '-'} `
             + `${r() < 0.3 ? 1 : 0} ${r() < 0.2 ? 1 : 0} ${Math.floor(r() * 4)}`);
     }
+    // ⑪ 可见牌统计（`Visible`）+ 和了形纯判断（`WinCheck`）—— 观测特征的底座
+    const rivers = ['-', '0,4,8', '16,17,18,52,53', '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18'];
+    const meldSpecs = ['-', '0:ro:0,1,2', '1:to:52,53,54;2:qo:88,89,90,91',
+        '3:qc:16,17,18,19;3:ko:20,21,22,23;0:ro:24,25,26'];
+    for (const r0 of rivers) {
+        for (const r1 of ['-', '52,53']) {
+            for (const ms of meldSpecs) {
+                for (const dora of ['-', '0', '8,9,27', '4,13,22']) {
+                    rows.push(`visible ${r0} ${r1} - - ${ms} ${dora}`);
+                }
+            }
+        }
+    }
+    for (let i = 0; i < Math.floor(want / 6); i++) {
+        const mkRiver = () => {
+            const n = Math.floor(r() * 6);
+            const ids = [];
+            for (let k = 0; k < n; k++) ids.push(Math.floor(r() * 136));
+            return ids.length ? ids.join(',') : '-';
+        };
+        const vis = new Array(34).fill(0);
+        for (let k = 0; k < 34; k++) vis[k] = r() < 0.3 ? Math.floor(r() * 5) : 0;
+        const own = new Array(34).fill(0);
+        for (let k = 0; k < 34; k++) own[k] = r() < 0.2 ? Math.floor(r() * 4) : 0;
+        rows.push(`visible ${mkRiver()} ${mkRiver()} ${mkRiver()} ${mkRiver()} - `
+            + `${r() < 0.5 ? '-' : String(Math.floor(r() * 34))}`);
+        rows.push(`vis ${vis.join(',')} ${own.join(',')}`);
+    }
+    for (const tsumo of [0, 1]) {
+        for (const furiten of [0, 1]) {
+            rows.push(`block ${tsumo} ${furiten}`);
+        }
+    }
+    for (const mc of [0, 1, 2, 3, 4]) {
+        for (const tsumo of [0, 1]) {
+            const size = (tsumo ? 14 : 13) - 3 * mc;
+            const c = new Array(34).fill(0);
+            let placed = 0;
+            while (placed < size) {
+                const k = Math.floor(r() * 34);
+                if (c[k] >= 4) continue;
+                c[k]++;
+                placed++;
+            }
+            rows.push(`wcounts ${mc} ${c.join(',')} ${Math.floor(r() * 34)} ${tsumo}`);
+            // 故意张数错一位 → 两边都必须判 "-"
+            c[Math.floor(r() * 34)]++;
+            rows.push(`wcounts ${mc} ${c.join(',')} ${Math.floor(r() * 34)} ${tsumo}`);
+        }
+    }
     return rows;
 }
 

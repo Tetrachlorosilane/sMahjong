@@ -26,6 +26,8 @@ import mahjong.game.Round;
 import mahjong.game.RoundClaims;
 import mahjong.game.RoundScoring;
 import mahjong.game.Table;
+import mahjong.game.WinCheck;
+import mahjong.rules.Visible;
 import mahjong.train.SelfPlay;
 
 public final class SettleProbe {
@@ -279,6 +281,60 @@ public final class SettleProbe {
                       .append(waits.isEmpty() ? "-" : joinCsv(waits)).append(' ')
                       .append(temp != 0 ? 1 : 0).append(' ').append(perm != 0 ? 1 : 0).append(' ')
                       .append(r.isFuriten(seat) ? 1 : 0);
+                } else if (kind.equals("visible") && f.length >= 7) {
+                    @SuppressWarnings("unchecked")
+                    List<Integer>[] rivers = new List[4];
+                    @SuppressWarnings("unchecked")
+                    List<Meld>[] melds = new List[4];
+                    for (int s = 0; s < 4; s++) {
+                        rivers[s] = parseIntList(f[1 + s]);
+                        melds[s] = new ArrayList<>();
+                    }
+                    if (!f[5].equals("-")) {
+                        for (String item : f[5].split(";", -1)) {
+                            int c1 = item.indexOf(':');
+                            if (c1 < 0) {
+                                continue;
+                            }
+                            int seat = Integer.parseInt(item.substring(0, c1));
+                            int c2 = item.indexOf(':', c1 + 1);
+                            if (c2 < 0 || seat < 0 || seat > 3) {
+                                continue;
+                            }
+                            Meld.Kind mk;
+                            switch (item.charAt(c1 + 1)) {
+                                case 'r': mk = Meld.Kind.CHI; break;
+                                case 't': mk = Meld.Kind.PON; break;
+                                case 'q': mk = item.charAt(c1 + 2) == 'c' ? Meld.Kind.ANKAN
+                                                                          : Meld.Kind.DAIMINKAN;
+                                          break;
+                                case 'k': mk = Meld.Kind.KAKAN; break;
+                                default: continue;
+                            }
+                            List<Integer> ids = parseIntList(item.substring(c2 + 1));
+                            int[] arr = new int[ids.size()];
+                            for (int i = 0; i < ids.size(); i++) {
+                                arr[i] = ids.get(i);
+                            }
+                            melds[seat].add(new Meld(mk, arr, 0, 0));
+                        }
+                    }
+                    int[] vis = Visible.counts(rivers, melds, parseIntList(f[6]));
+                    sb.append(intsCsv(vis)).append(' ').append(Tiles.sum(vis));
+                } else if (kind.equals("vis") && f.length >= 3) {
+                    int[] visible = toCounts(parseIntList(f[1]));
+                    int[] own = toCounts(parseIntList(f[2]));
+                    sb.append(intsCsv(Visible.unseen(visible))).append(' ')
+                      .append(intsCsv(Visible.drawable(visible, own)));
+                } else if (kind.equals("block") && f.length >= 3) {
+                    sb.append(WinCheck.blockReason(Integer.parseInt(f[1]) != 0,
+                                                   Integer.parseInt(f[2]) != 0));
+                } else if (kind.equals("wcounts") && f.length >= 5) {
+                    int[] concealed = toCounts(parseIntList(f[2]));
+                    int[] merged = WinCheck.counts(concealed, Integer.parseInt(f[1]),
+                                                   Tiles.id(Integer.parseInt(f[3]), 0),
+                                                   Integer.parseInt(f[4]) != 0);
+                    sb.append(merged == null ? "-" : intsCsv(merged));
                 } else if (kind.equals("accept") && f.length >= 5) {
                     Long pending = f[2].equals("-") ? null : Long.valueOf(f[2]);
                     sb.append(RoundClaims.acceptsReply(Integer.parseInt(f[1]) != 0, pending,
@@ -331,6 +387,14 @@ public final class SettleProbe {
             sb.append(v.get(i));
         }
         return sb.toString();
+    }
+
+    private static int[] toCounts(List<Integer> v) {
+        int[] c = new int[Tiles.KIND_COUNT];
+        for (int i = 0; i < v.size() && i < Tiles.KIND_COUNT; i++) {
+            c[i] = v.get(i);
+        }
+        return c;
     }
 
     private static java.util.Set<Integer> intSetOf(String s) {

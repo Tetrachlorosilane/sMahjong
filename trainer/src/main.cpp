@@ -32,6 +32,7 @@
 #include "seed.hpp"
 #include "shanten.hpp"
 #include "tiles.hpp"
+#include "visible.hpp"
 #include "wall.hpp"
 #include "yaku_codes.hpp"
 
@@ -602,6 +603,41 @@ int selftest() {
         st.onRonPassed(1, true);
         st.onOwnDraw(1);
         check("立直后见逃：摸牌也不解除（到本局结束）", st.isFuriten(1, {9}));
+    }
+
+    // ⑬ 可见牌统计 + 和了形纯判断定点
+    {
+        std::array<std::vector<int>, 4> rivers;
+        std::array<std::vector<trainer::Meld>, 4> melds;
+        rivers[0] = {trainer::idOf(0, 0), trainer::idOf(0, 1)};       // 1m 两张
+        rivers[1] = {trainer::idOf(27, 0)};                            // 1z 一张
+        const int chiIds[3] = {trainer::idOf(9, 0), trainer::idOf(10, 0), trainer::idOf(11, 0)};
+        melds[2].emplace_back(trainer::Meld::Kind::CHI, chiIds, 3, 0, 0);
+        const trainer::Counts vis =
+                trainer::visibleCounts(rivers, melds, std::vector<int>{8, 27});
+        check("可见 = 牌河 + 副露 + 宝牌指示牌",
+              vis[0] == 2 && vis[8] == 1 && vis[9] == 1 && vis[10] == 1 && vis[11] == 1
+              && vis[27] == 2 && trainer::sumOf(vis) == 8);
+        trainer::Counts own{};
+        own[0] = 1;
+        const trainer::Counts un = trainer::visibleUnseen(vis);
+        const trainer::Counts dr = trainer::visibleDrawable(vis, own);
+        check("unseen = 4 − 可见（下限 0）", un[0] == 2 && un[8] == 3 && un[27] == 2);
+        check("drawable 再减自己手里（1m：4−2−1=1）", dr[0] == 1 && dr[8] == 3);
+        check("挡和原因：荣和 + 振听 → furiten；其余 → no_yaku",
+              trainer::winBlockReason(false, true) == "furiten"
+              && trainer::winBlockReason(true, true) == "no_yaku"
+              && trainer::winBlockReason(false, false) == "no_yaku");
+        trainer::Counts concealed{};
+        for (int k : {1, 2, 3, 4, 5, 15, 16, 17, 18, 18, 18, 28, 28}) {
+            concealed[static_cast<size_t>(k)]++;
+        }
+        trainer::Counts merged{};
+        check("和了牌并入 + 张数校验（14−3×副露）",
+              trainer::winCounts(concealed, 0, 3, false, merged) && trainer::sumOf(merged) == 14
+              && merged[3] == 2
+              && !trainer::winCounts(concealed, 0, 3, true, merged)      // 自摸时已含那张 → 13 ≠ 14
+              && !trainer::winCounts(concealed, 1, 3, false, merged));   // 一副露要求 11 张 → 不符
     }
 
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
@@ -1202,6 +1238,105 @@ int cmdSettle(int argc, char **argv) {
             outLine += std::to_string(perm != 0 ? 1 : 0);
             outLine += ' ';
             outLine += st.isFuriten(seat, waits) ? "1" : "0";
+        } else if (kind == "visible" && f.size() >= 7) {
+            // visible <river0> <river1> <river2> <river3> <meldsSpec|-> <doraCsv|->
+            // 输出：34 维可见计数（csv）+ total
+            std::array<std::vector<int>, 4> discards;
+            std::array<std::vector<trainer::Meld>, 4> melds;
+            for (int s = 0; s < 4; s++) {
+                discards[static_cast<size_t>(s)] = parseIntList(f[static_cast<size_t>(1 + s)]);
+            }
+            if (f[5] != "-") {
+                for (const std::string &item : splitOn(f[5], ';')) {
+                    const size_t c1 = item.find(':');
+                    if (c1 == std::string::npos) {
+                        continue;
+                    }
+                    const int seat = std::atoi(item.substr(0, c1).c_str());
+                    if (seat < 0 || seat > 3) {
+                        continue;
+                    }
+                    const size_t c2 = item.find(':', c1 + 1);
+                    if (c2 == std::string::npos) {
+                        continue;
+                    }
+                    trainer::Meld m;
+                    switch (item[c1 + 1]) {
+                        case 'r': m.kind = trainer::Meld::Kind::CHI; break;
+                        case 't': m.kind = trainer::Meld::Kind::PON; break;
+                        case 'q': m.kind = (item[c1 + 2] == 'c') ? trainer::Meld::Kind::ANKAN
+                                                                 : trainer::Meld::Kind::DAIMINKAN;
+                                  break;
+                        case 'k': m.kind = trainer::Meld::Kind::KAKAN; break;
+                        default: continue;
+                    }
+                    const std::vector<int> ids = parseIntList(item.substr(c2 + 1));
+                    m.tileCount = static_cast<int>(ids.size());
+                    for (size_t i = 0; i < ids.size() && i < 4; i++) {
+                        m.tiles[i] = ids[i];
+                    }
+                    melds[static_cast<size_t>(seat)].push_back(m);
+                }
+            }
+            const trainer::Counts vis = trainer::visibleCounts(discards, melds,
+                                                               parseIntList(f[6]));
+            int visArr[trainer::kKindCount];
+            for (int k = 0; k < trainer::kKindCount; k++) {
+                visArr[k] = vis[static_cast<size_t>(k)];
+            }
+            outLine = intsCsv(visArr, trainer::kKindCount);
+            outLine += ' ';
+            outLine += std::to_string(trainer::sumOf(vis));
+        } else if (kind == "vis" && f.size() >= 3) {
+            // vis <visibleCsv34> <ownCsv34> → unseen34 drawable34
+            trainer::Counts vis{};
+            trainer::Counts own{};
+            {
+                const std::vector<int> v = parseIntList(f[1]);
+                const std::vector<int> o = parseIntList(f[2]);
+                for (size_t i = 0; i < v.size() && i < trainer::kKindCount; i++) {
+                    vis[i] = static_cast<uint8_t>(v[i]);
+                }
+                for (size_t i = 0; i < o.size() && i < trainer::kKindCount; i++) {
+                    own[i] = static_cast<uint8_t>(o[i]);
+                }
+            }
+            const trainer::Counts un = trainer::visibleUnseen(vis);
+            const trainer::Counts dr = trainer::visibleDrawable(vis, own);
+            int unArr[trainer::kKindCount];
+            int drArr[trainer::kKindCount];
+            for (int k = 0; k < trainer::kKindCount; k++) {
+                unArr[k] = un[static_cast<size_t>(k)];
+                drArr[k] = dr[static_cast<size_t>(k)];
+            }
+            outLine = intsCsv(unArr, trainer::kKindCount);
+            outLine += ' ';
+            outLine += intsCsv(drArr, trainer::kKindCount);
+        } else if (kind == "block" && f.size() >= 3) {
+            outLine = trainer::winBlockReason(std::atoi(f[1].c_str()) != 0,
+                                              std::atoi(f[2].c_str()) != 0);
+        } else if (kind == "wcounts" && f.size() >= 5) {
+            // wcounts <mc> <concealedCsv> <winKind> <tsumo> → 并入后的计数（张数不符 → -）
+            trainer::Counts concealed{};
+            {
+                const std::vector<int> v = parseIntList(f[2]);
+                for (size_t i = 0; i < v.size() && i < trainer::kKindCount; i++) {
+                    concealed[i] = static_cast<uint8_t>(v[i]);
+                }
+            }
+            trainer::Counts merged{};
+            const bool okCnt = trainer::winCounts(concealed, std::atoi(f[1].c_str()),
+                                                  std::atoi(f[3].c_str()), std::atoi(f[4].c_str()) != 0,
+                                                  merged);
+            if (!okCnt) {
+                outLine = "-";
+            } else {
+                int arr[trainer::kKindCount];
+                for (int k = 0; k < trainer::kKindCount; k++) {
+                    arr[k] = merged[static_cast<size_t>(k)];
+                }
+                outLine = intsCsv(arr, trainer::kKindCount);
+            }
         } else if (kind == "accept" && f.size() >= 5) {
             const bool v = trainer::claimAcceptsReply(
                     std::atoi(f[1].c_str()) != 0, f[2] != "-", std::stoll(f[2] == "-" ? "0" : f[2]),
