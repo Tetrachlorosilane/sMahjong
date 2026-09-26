@@ -1970,6 +1970,24 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   在 v<上个版本> 之后改过**（`git diff --name-only v1.6.0..HEAD -- client/`）—— 改过就必须重出 `dist`，
   否则包里是旧 exe（2026-09 档 C 发布时就撞到：LobbyDialog / TableModel 变了而 dist 还是旧的）。
 
+**已发布记录**（按 NOTES 的口径：「资产摘要、release id、走过哪条推送通道」）：
+
+- **v1.10.6**（2026-09-26，**特征 v3** + 新机器人包）：release id **397338153**，
+  tag `v1.10.6` → 远端 `708065d2d7faf3d743f10b8aeb24f46eb7f8ddd2`（`target_commitish = Training`）。
+  通道：`POST /git/refs` 先建 tag → `POST /releases` → 资产走 `uploads.github.com` →
+  代码/文档走 `github_commit_files`（REST；本地链与远端链各自推进，与 v1.10.5 同一套路）。
+  6 个资产（本地 sha256，已与 GitHub 的 digest 抽查一致）：
+  `sMahjong-server-v1.10.6.zip` 351,924 B `2752ad5f…`（asset 591149396）·
+  `sMahjong-client-v1.10.6-win64.zip` 38,847,613 B `33de1f2c…`（591149710）·
+  `sMahjong-bot-ai-v1.10.6.zip` 1,005,389 B `9877a3c7…`（591150164）·
+  `ppo-v3-g01-g01.zip` 1,004,715 B `00aee177…`（591149488）·
+  `first.zip` 241 B `9529f014…`（591150357）· `pass.zip` 238 B `4799cc83…`（591150440）。
+  ⚠ **本版只随附 v3 的深度模型包**：v2（607 维）的 `awr-002` / `bc-003` / `ppo-g0x` / `ppo2-g0x`
+  会被新服务端构造期拒绝，故不再附带（`docs/BOT-AI.md` §9 已注明）。
+  本地草稿与摘要表：`release\RELEASE-v1.10.6.md`（`release\` 已 gitignore）。
+  发布前实测：L1 **1370/1370**、L2 **852/852**、训练端 `--selftest` PASS、同种子自对弈逐字节
+  （1,119,860 B）、sidecar 逐字节 ×3、`net --golden` maxΔ = 0。
+
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
 **需求**：把本项目的对局导出成能被 AI 复盘工具直接吃的牌谱
