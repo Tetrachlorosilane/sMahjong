@@ -522,8 +522,10 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   用 `python -m mahjong_ml.hybrid` 量"让位曲线"再选。回归：`SelfTest.hybridPolicyTests`。
 - **P4 探索口**：策略串 `net:<权重文件>[@<α>][#<T>]` = 按温度从 `softmax(logits/T)` 采样
   （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
-  （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另两条硬口径：**λ=1**、
-  **优势只在 `is_student==1` 的行上归一化**。⚠ **跨代对局（对手也是网络）必须让紧凑集只把"这一轮
+  （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另三条硬口径：**λ=1**、
+  **优势只在 `is_student==1` 的行上归一化**、**两边同一个 `softmax(logits/T)`**
+  （温度只作用一侧 ⇒ 整网 NaN；`inf×0` 与四道闸门见 NOTES §6.5 第十轮）。
+  ⚠ **跨代对局（对手也是网络）必须让紧凑集只把"这一轮
   被训练的策略"算作学生**（`dataset build --student <学生的确切策略串>`；`online run` 自动传）——
   缺省口径是"任何 `net:`"，会把**对手网的决策算进策略损失**（实测学生行占比 0.75 而非 0.25，静默）。
   回归：`SelfTest.samplingPolicyTests` + `python/selfcheck.py` 的 P4 组。

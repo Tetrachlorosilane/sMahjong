@@ -385,7 +385,28 @@
   - **检查器** `tools/selfplay-check.mjs` 独立重算（红证实测：改一行 `reward_to_go` → 2 条报错、退出码 1）；
   - **Python**：数据集新增 `rtg` 列（千点；老轨迹写 **NaN**，不填 0）+ `--value-target final|rtg`
     （同时决定值头目标与优势的 `R`，两处必须同源）；`pretrain` 在 NaN 数据上硬拒。
-  - 判据：L1 **1429/0**、`selfcheck` **479/0**（+11）、trainer `--selftest` PASS、`v4 check` PASS。
+  - 判据：L1 **1429/0**、`selfcheck` **488/0**（+20）、trainer `--selftest` PASS、`v4 check` PASS。
+- ⚠⚠ **第一次用 `#0.5` 跑 PPO 撞上两个真 bug（本轮最值钱的产出）**：
+  **① 温度只作用一侧**：`logp_new` 忘了用同一把温度尺子 ⇒ `ρ = exp(65)`、策略损失 2.5e11、
+  **一个 step 整网 NaN**，而训练**照跑完 4 个 epoch、还落盘了一份废 checkpoint**（只有 `val top1` =
+  首合法基线 0.156 是线索）。⚠ 这个 bug 在 `#1.0` 采集下**完全不可见**（`logits/1.0 == logits`）。
+  **② 非学生行的 `inf × 0`**（修完①之后第 757 步又 NaN，指纹完全不同：`parts["policy"]=nan` 而
+  `kl/clip/gap` 全有限、`|θ|max` 不动）：teacher/随机 的动作在学生网下是零概率 ⇒ `ρ` 溢出成 inf，
+  而优势在那些行上的定义值正是 0 ⇒ `inf × 0 = NaN`。
+  **修 + 四道闸门**：`_policy_logits(out, T)`（两处同尺）· `LOG_RATIO_CLAMP = ±4` + 未选中行显式置 0 ·
+  初始化 `KL(π_old‖π_new) > 1e-2` ⇒ 退出（口径闸门）· loss 非有限 ⇒ `SystemExit`（绝不落盘废 checkpoint）；
+  另加 `logp_gap` 诊断与"`--behaviour-temp` 必须与 meta `#T` 一致"的闸门。
+  详情与定位手法见 `NOTES.md` §6.5 第十轮、判据见 `AGENTS.md` §6.5 / `docs/TRAINING-V4.md`「第六轮」。
+- **PPO 重训成功（`v4-ppo-002`）**：4 epoch / 685 s，`train 2.4412 → 2.3314`、
+  `val top1(教师一致) 0.867 → 0.879`、**学生行 top1 0.888 → 0.900**、学生行 CE 0.653 → 0.583、
+  **KL 0.0657 → 0.0105**、截断 0.171 → 0.059、`logp_gap` 2.60 → 1.04（全程有限、稳在信任域内）。
+- **采集（`#0.5`）**：`raw/v4-sp-004` = 1,000 场 / 11,430 小局 / **693,187 决策**（1,470 s，472 决策/s）；
+  学生 2 席（`net:tools\build\v4-p3-001\net.bin@0#0.5`）+ teacher 2 席；`selfplay-check` PASS、
+  §7.5 审计 **0.000% / 500×4 席 ✓**；`compact/v4-sp-004` = 658,449 / 34,738，**rtg 覆盖 100%**。
+  ⚠ **探索成本的直接对照**（同一把尺子：同批对局里的平均顺位）：
+  `#1.0` 学生 −3.78 顺位点（avg_place 2.5915 vs teacher 2.4085）→ `#0.5` **−1.26**（2.520 vs 2.481）
+  ⇒ 降温度按预期把探索代价压掉约 2/3。
+
 
 ---
 

@@ -2019,6 +2019,122 @@ try:
 except SystemExit as _e:
     ok("--behaviour" in str(_e), "PPO：缺 `--behaviour` 被硬拒 ✓", str(_e)[:60])
 
+# ---- PPO 的温度口径（2026-09-28 实测的 NaN bug：`logp_new` 忘了同一把温度尺子）----------------
+# 采集侧 `net:…#0.5` 抽的是 `softmax(logits/0.5)`；若只给 `logp_old` 除温度，ρ=exp(65)≈2e15、
+# 策略损失 2.5e11、**一个 step 整网 NaN**，而训练照跑完还落盘一份废 checkpoint。
+_lp_half = _torch.log_softmax(_outp["policy"] / 0.5, dim=-1).gather(
+    1, _spb["label"][:, None]).squeeze(1)
+_l_ok, _p_ok = v4_pt.compute_loss(_outp, _spb, _pw, row_keep=_keep4,
+                                  ppo=(_lp_half, 0.2, 0.0), policy_temp=0.5)
+ok(abs(float(_l_ok)) < 1e-5,
+   "PPO：温度口径一致（π_new 也按 T=0.5 算）时 ρ≡1 ⇒ 替代项 ≈ 0",
+   f"loss={float(_l_ok):.2e}")
+ok(abs(_p_ok["logp_gap"]) < 1e-5, "PPO：口径一致时 `logp_gap` 诊断 ≈ 0（它就是「温度没对上」的探针）",
+   f"gap={_p_ok['logp_gap']:.2e}")
+_l_bad, _p_bad = v4_pt.compute_loss(_outp, _spb, _pw, row_keep=_keep4,
+                                    ppo=(_lp_half, 0.2, 0.0), policy_temp=1.0)
+# ⚠ **这一组夹具量不出温度的量级**（实测记在这里，免得后人以为"夹具都验过了"）：
+#   未训练网 + 两个只在派生段不同的候选 ⇒ 逐候选 logits 差 ~1e-9、`KL(seed1‖seed2) ≈ −2e-6`，
+#   所以"温度只在一边生效"在这个夹具上只差 ~1e-5。红证必须用**有量级的 logits**（下面那组）。
+#   真数据上的同一组量（`compact/v4-sp-004` 前 64 行、训练过的 p3-001）：`logp_gap = 3.54`、
+#   `ratio` 最大 34.5；整份数据上是 `logp_old = −70.5`、`ρ ≈ e^65`。
+#   "有量级"的 logits：`[20, 0]` + 标签落在尾部（`logp_old=−40` vs `logp_new=−20`）⇒ ρ=e²⁰。
+_pol_hi = _torch.tensor([[20.0, 0.0]] * 4)
+_b_hi = dict(_spb)                                    # 借真夹具的 placement/effect 等键（compute_loss 直接索引）
+_b_hi["label"] = _torch.tensor([1, 1, 0, 0])
+_b_hi["value"] = _torch.tensor([5.0, -5.0, 0.0, 3.0])
+_out_hi = dict(_outp)
+_out_hi["policy"] = _pol_hi
+_lp_hi = _torch.log_softmax(_pol_hi / 0.5, dim=-1).gather(1, _b_hi["label"][:, None]).squeeze(1)
+_l_hi_ok, _p_hi_ok = v4_pt.compute_loss(_out_hi, _b_hi, _pw, row_keep=_keep4,
+                                        ppo=(_lp_hi, 0.2, 0.0), policy_temp=0.5)
+_l_hi_bad, _p_hi_bad = v4_pt.compute_loss(_out_hi, _b_hi, _pw, row_keep=_keep4,
+                                          ppo=(_lp_hi, 0.2, 0.0), policy_temp=1.0)
+ok(abs(float(_l_hi_ok)) < 1e-5,
+   "PPO 红证（有量级的 logits）：口径一致时仍 ρ≡1 ⇒ 替代项 ≈ 0（说明上一条不是夹具巧合）",
+   f"loss={float(_l_hi_ok):.2e}")
+ok(abs(float(_l_hi_bad)) > 1.0 and _p_hi_bad["logp_gap"] > 10.0,
+   "PPO 红证（有量级的 logits）：口径不一致 ⇒ 替代项被 `LOG_RATIO_CLAMP` 界住但**仍远比一致时大**、"
+   "logp_gap ~20（= 实际 NaN 事故的签名）",
+   f"loss={float(_l_hi_bad):.3g} gap={_p_hi_bad['logp_gap']:.2f}")
+# ⚠⚠ 第二类 NaN（2026-09-28 实测：训练跑到第 757 步整批 NaN）：**非学生行的零概率动作**。
+# 那些行是 teacher/随机的选择，在学生网下 `logp_new` 能到 −1000 量级 ⇒ `ρ = exp(Δ)` 溢出成 inf，
+# 而优势在非学生行上的定义值正是 0 ⇒ `inf * 0 = NaN` 污染整批。判据：手工算未夹取版**必须是 NaN**，
+# 而 `compute_loss` 必须有限（`LOG_RATIO_CLAMP` + 未选中行显式置 0 两道保险）。
+_lp_nan = _lp_hi.clone()
+_lp_nan[2] = -1e4                                  # 第 2 行是**非学生行**（`_keep4 = [1,1,0,0]`）
+_out_nan = dict(_outp)                             # logp_new ≈ 0 ⇒ 未夹取时 ρ = exp(1e4) = inf
+_adv_nan = v4_pt._advantages(_out_nan, _b_hi, _keep4, key="value")
+_raw = _torch.exp(_torch.log_softmax(_out_nan["policy"], dim=-1).gather(
+    1, _b_hi["label"][:, None]).squeeze(1) - _lp_nan)
+_manual = (-_torch.min(_raw * _adv_nan,
+                       _torch.clamp(_raw, 0.8, 1.2) * _adv_nan) * _keep4).sum()
+ok(bool(_torch.isnan(_manual)), "PPO 数值红证：非学生行的 inf×0 确实会算出 NaN（机制成立）",
+   f"manual={float(_manual)}")
+_l_nan, _p_nan = v4_pt.compute_loss(_out_nan, _b_hi, _pw, row_keep=_keep4,
+                                    ppo=(_lp_nan, 0.2, 0.01), policy_temp=1.0)
+ok(bool(_torch.isfinite(_l_nan)),
+   "PPO 数值保险：`LOG_RATIO_CLAMP` + 未选中行置 0 ⇒ 同一批 loss 有限（NaN 被堵住）",
+   f"loss={float(_l_nan):.4g}（⚠ `logp_gap` 只看学生行，所以它不会报出那一行的 1e4）")
+# `--behaviour-temp` 与数据集 `student` 串里的 `#T` 不一致 ⇒ 硬拒（口径的唯一权威是 meta）
+try:
+    v4_pt.train(argparse.Namespace(**{**_ptbase, "data": str(_sp_src / "ds"),
+                                      "label": "v4-selfcheck-ppo-badtemp", "objective": "ppo",
+                                      "behaviour": str(_beh_file), "behaviour_temp": 0.5}))
+    ok(False, "PPO：`--behaviour-temp` 与 meta 的 `#T` 冲突必须报错")
+except SystemExit as _e:
+    ok("behaviour-temp" in str(_e) or "温度" in str(_e),
+       "PPO：`--behaviour-temp` 与 meta `#T` 冲突被硬拒 ✓", str(_e)[:70])
+# 口径闸门：初始化时 π_new 必须就是 π_old（权重 + 温度都对上）——正证 + 负证
+_ppi = scratch("v4-ppo-init")
+_net_a = _ppi / "a.bin"
+_dims_a = dict(v4_model.build(seed=1).dims())
+v4_export.save_net(v4_model.build(seed=1).state_dict(), _dims_a, _net_a)
+_pt_ok = v4_pt.train(argparse.Namespace(**{
+    **_ptbase, "data": str(_sp_src / "ds"), "label": "v4-selfcheck-ppo-ok", "objective": "ppo",
+    "behaviour": str(_net_a), "init": str(_net_a), "behaviour_temp": 1.0}))
+ok(isinstance(_pt_ok, dict) and _pt_ok["history"],
+   "PPO：`--init` == `--behaviour` + 温度一致 ⇒ 口径自检通过并真的跑完一步",
+   f"top1={_pt_ok['final_val_top1']}")
+# 口径闸门的**判据本身**单独钉一遍（不依赖夹具的判别力）：`assert_behaviour_consistency`
+# 拿"正确的 logp_old"应当返回 ~0；拿"被故意改错的 logp_old"（= 权重/温度不是同一个分布）必须报错。
+# ⚠ 为什么不直接跑两份不同的权重：这个夹具里未训练网的逐候选 logits 差 ~1e-9
+#   （见上面的实测注释），两份不同的权重 KL 也只有 ~1e-6 —— 闸门**本来就该放过**那种情况，
+#   所以负证必须把"分布不同"这件事直接做出来（`logp_old + 5`）。
+_pt_model = v4_pt._load_behaviour(str(_net_a), "cpu")
+_ds_ok = v4_ds.load_split(_sp_src / "ds", "train")
+_idx_ok = np.arange(int(_ds_ok["nlegal"].shape[0]))
+_lp_chk = v4_pt._behaviour_logprobs(_pt_model, _ds_ok, "cpu", 64, 1.0)
+_kl_ok = v4_pt.assert_behaviour_consistency(_pt_model, _ds_ok, _idx_ok, _lp_chk, 1.0, "cpu")
+ok(abs(_kl_ok) < 1e-5, "PPO 口径闸门：同一份权重 + 同一温度 ⇒ KL ≈ 0（放行）", f"kl={_kl_ok:+.2e}")
+try:
+    v4_pt.assert_behaviour_consistency(_pt_model, _ds_ok, _idx_ok, _lp_chk + 5.0, 1.0, "cpu")
+    ok(False, "PPO 口径闸门：π_old 与 π_new 不是同一个分布时必须报错")
+except SystemExit as _e:
+    ok("口径不一致" in str(_e), "PPO 口径闸门：分布不一致被硬拒 ✓", str(_e)[:70])
+# 温度只在一边生效（= `#0.5` 那次的事故）在闸门眼里**也是**"分布不一致"，只是这个夹具量不出它：
+# 夹具的逐候选 logits 差 ~1e-9 ⇒ 换温度只差 ~1e-5（< 1e-2 阈值），所以上一条负证用"直接改 logp_old"。
+# 真数据上的量级：`logp_gap = 3.54`（前 64 行）/ `ρ ≈ e^65`（整份）—— 见上面的实测注释。
+# 发散就停：把 `compute_loss` 临时换成"返回 NaN"，train() 必须报错、不落盘废 checkpoint
+_orig_cl = v4_pt.compute_loss
+
+
+def _nan_loss(*_a, **_k):
+    t = _torch.tensor(float("nan"), requires_grad=True)
+    return t, {"policy": float("nan")}
+
+
+v4_pt.compute_loss = _nan_loss
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_ptbase, "data": str(_sp_src / "ds"), "label": "v4-selfcheck-ppo-nan",
+        "objective": "ppo", "behaviour": str(_net_a), "init": str(_net_a), "behaviour_temp": 1.0}))
+    ok(False, "NaN 的 loss 必须让训练当场报错（否则会落盘一份「跑完了」的废 checkpoint）")
+except SystemExit as _e:
+    ok("训练发散" in str(_e), "PPO：loss 非有限时当场报错、不落盘 ✓", str(_e)[:70])
+finally:
+    v4_pt.compute_loss = _orig_cl
+
 # ---- 第六轮：逐决策 reward-to-go（轨迹 `reward_to_go` → 数据集 `rtg` 列；λ=1 的 GAE 目标）-------
 # 为什么必须有这一组：第五轮的优势是 `A = R_整场 − E[V(s)]`，没有"这一手之后发生了什么"，
 # 于是 2,000 场 2+2 配对量到 Δ=−3.54 顺位点。这一组钉四件事：① 列真的从轨迹读进来；

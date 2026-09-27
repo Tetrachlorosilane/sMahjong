@@ -1300,18 +1300,25 @@ trainer\build\trainer.exe selfplay 800 --workers 24 --rotate \
 python -m mahjong_ml.eval <eval> --metric rank_points --labels "net:<新>,teacher"
 ```
 
-- **数据集两列（v4 起）**：`is_student`（这一行的动作是不是本轮要训练的那一代做的）与
-  `delta`（本小局该家收支，点）—— 前者遮住**对手/老师的动作**（不遮就是静默失真：实测学生行占比
-  26.1% 而非 100%），后者是 RWR 的回报来源。
+- **数据集三列（v4 起）**：`is_student`（这一行的动作是不是本轮要训练的那一代做的）、
+  `delta`（本小局该家收支，点）与 **`rtg`**（**逐决策** reward-to-go，千点 = 轨迹 `reward_to_go`/1000）
+  —— 前者遮住**对手/老师的动作**（不遮就是静默失真：实测学生行占比 26.1% 而非 100%），
+  `delta` 是 RWR 的回报来源，`rtg` 是 λ=1 的 GAE 目标。⚠ 老轨迹没有 `reward_to_go` ⇒ `rtg` 写 **NaN**
+  （显式缺席），`--value-target rtg` 在 NaN 数据上**退出** —— ⛔ 填 0 会让优势变成 `0 − V(s)`。
 - **RWR 只作用于 `policy` / `effect`**：`danger` 是**标定**目标（放铳概率），按回报加权会把"赢的局"
   （多半没放铳）放大 ⇒ 概率被系统性压低；`value/placement/belief_*` 是状态级头，不吃掩码与权重。
 - **PPO（P3 加强版）**：把 ③ 换成
   `--objective ppo --behaviour <采集用的 ckpt|net.bin> --init <上一代 ckpt|net.bin>
-   --stage-a 0 --stage-b 0 --lr 1e-4 --head-lr-mult 1`（采样温度从数据集 `student` 串里的 `#T` 解析）。
-  **三条硬口径**：① `log π_old` **现场用行为策略重算**（前向确定性 + 同一份输入/权重/温度），
-  所以 `--behaviour` 与 `--student` 缺一个就**退出**；② 优势 `A = R − E[V(s)]`（`R` 就是数据集里的
-  `value`，与值头同一量纲），**归一化只用学生行**；③ 替代项只算学生行，日志给
-  `KL` 与截断比例（都在 `train_parts` 里）—— 它们是"这一步有没有出信任域"的唯一判据。
+   --value-target rtg --stage-a 0 --stage-b 0 --lr 1e-4 --head-lr-mult 1`
+  （采样温度从数据集 `student` 串里的 `#T` 解析；`--behaviour-temp` 与它冲突会**退出**）。
+  **四条硬口径**：① `log π_old` **现场用行为策略重算**（前向确定性 + 同一份输入/权重/温度），
+  所以 `--behaviour` 与 `--student` 缺一个就**退出**；② 优势 `A = R − E[V(s)]`，`R` 取
+  **`--value-target` 指定的那一列**（`final` = 整场结果 / `rtg` = 逐决策回报，与值头目标**同源** ——
+  一个开关同时决定两处，不可能不同步），**归一化只用学生行**；③ 替代项只算学生行，日志给
+  `KL` / 截断比例 / `logp_gap`（`|log π_new − log π_old|` 最大值，比前两个更早暴露口径问题）；
+  ④ ⚠ **`logp_new` 与 `logp_old` 必须是同一个 `softmax(logits/T)`**（温度只作用一侧 ⇒
+  `ρ≈e⁶⁵`、一个 step 整网 NaN，且**照常落盘一份废 checkpoint**）——`train()` 里有**口径闸门**
+  （初始化时 `KL(π_old‖π_new) > 1e-2` 直接退出）与**发散即停**两道闸门（`NOTES.md` §6.5 第十轮）。
 - **混合阵容上的指标陷阱**：`random` 那部分行的动作在训练过的网看来几乎是零概率
   （逐行 CE 中位 0.05 / 90 分位 24 / 最大 672，纯 teacher 数据上中位 0.004）⇒
   **策略类指标只在学生行上有意义**（`evaluate` 支持 `row_keep`，输出同时给两个数）。

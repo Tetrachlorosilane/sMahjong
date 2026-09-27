@@ -261,6 +261,12 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-
 > ⚠ `--value-target rtg` 在**老数据集**（没有 `reward_to_go` 的轨迹）上会**当场报错**，
 > 这是刻意的：`rtg` 缺席写 NaN 而不是 0 —— 填 0 会让优势变成 `0 − V(s)`（训练照跑、回报没了）。
 > ⚠ 优势对学生行的**整体平移不敏感**（归一化会减掉均值）——判断"换源有没有生效"要看**逐行差非常数**的那种夹具。
+> ⚠⚠ **PPO 的四道闸门（2026-09-28 加的，都是踩出来的）**：① 初始化时 `KL(π_old‖π_new)` 必须 ≈0
+> （`--init` 与 `--behaviour` 必须是同一份权重、温度两边同尺；不一致**当场退出**）；
+> ② `--behaviour-temp` 与数据集 `student` 串里的 `#T` 冲突 ⇒ 退出（温度的权威是 meta）；
+> ③ loss 非有限 ⇒ `SystemExit`（**绝不落盘"跑完了"的废 checkpoint**）；
+> ④ `log ρ` 夹在 ±4 + 未选中行显式置 0（非学生行的动作在学生网下是零概率 ⇒ `ρ` 会溢出成 inf，
+> 而优势在那里的定义值是 0 ⇒ `inf × 0 = NaN`）。诊断看 epoch 行的 `KL / clip / |A| / gap`。
 
 > ⚠ 混合阵容（含 `random`）的数据集上，**策略 CE 只看学生行**：`random` 的动作在训练过的网看来
 > 几乎是零概率（逐行 CE 中位 0.05 / 90 分位 24 / 最大 672；纯 teacher 数据上中位 0.004）

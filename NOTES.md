@@ -2038,6 +2038,59 @@ npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14 张、
    ③ **离线指标向好 ≠ 变强**（学生行 CE 0.861→0.601、top1 0.845→0.886，强度却是 −3.54）。
    下一轮按预期收益排序：**降温度** → **逐决策 reward-to-go（才能算 GAE）** → 再放大场次。
 
+**第十轮：逐决策 reward-to-go 三端落地 + 发布 v1.13.0（2026-09-28）**
+
+1. **契约**：轨迹决策行新增 `reward_to_go`（点）= `Σ_{本局及其后} delta + 终局余棒`（PROTOCOL §8.4）。
+   三条不变式钉在两处**独立**实现上（`SelfTest.rewardToGoTests` + `tools/selfplay-check.mjs` 的后缀和重算）。
+   ⚠ **余棒必须加进去**：末局结算后供託里那批立直棒按规则归末局 1 位，不加它第 0 小局的回报会比
+   `final_scores − 起点` 少 0~3000 点的常数，值头目标与旧口径对不上。判据：**第 0 小局的
+   `reward_to_go` == `final_scores[seat] − start_score`**（这条把"后缀和"和"余棒"一起钉住了）。
+2. **三端同口径**：Java `TraceRecorder.rewardToGo`（后缀和，按 `hand_no` 显式对齐，键序在 `hand_agari`
+   之后）→ C++ `trace.cpp` 同算法 ⇒ `trainer-selfplay-parity.mjs 2 6 teacher 20260927` **逐字节一致**
+   （1,303,225 B / 1,421,771 B）；C++ 产出再过一遍独立检查器。数据集列 `rtg`（千点），
+   **老轨迹写 NaN 不写 0**（0 会让优势变成 `0 − V(s)`：训练照跑、回报没了），`--value-target rtg` 硬拒。
+3. ⚠⚠ **踩到的真 bug（`#0.5` 采集 + PPO 一个 step 整网 NaN）** —— 这一条是本轮最值钱的教训：
+   - **现象**：`pretrain --objective ppo --value-target rtg --behaviour-temp 0.5` 跑完 4 个 epoch，
+     `train nan`、各头损失 `nan`、**`val top1` = 首合法基线 0.156**（策略头塌成常数），
+     **却照常落盘了一份废 checkpoint**（`ckpt/v4-ppo-002`，已删）。
+   - **根因**：采集侧 `net:…#T` 抽的是 `softmax(logits/T)`，而 `logp_new` 当时按 `T=1` 算 ——
+     `logp_old` 到 **−70.5**、`logp_new ≈ 0` ⇒ `ρ = exp(65) ≈ 2·10^15`、策略损失 **2.5·10^11**
+     ⇒ 一个 step 之后全参数 NaN。⚠ **`--behaviour-temp` 缺省 1.0 时这个 bug 完全不可见**
+     （`logits/1.0 == logits`），所以它整整藏了一轮（第九轮的 `#1.0` 采集恰好避开了它）。
+   - **定位手法（可复用）**：把"一个 batch 上每一步中间量的有限性"打出来 —— `out[policy]` 的
+     `isfinite`、`logp_old/new` 的量级、`ratio` 的极值、`parts` 的逐项值。三个数就定位到了：
+     `logp_old min=−70.5` / `ratio max=2.07e15` / `policy loss=2.5e11`。
+   - **修法**：`_policy_logits(out, T)` 一处实现，`logp_new` 与 `logp_old` **同一把尺子**；
+     `compute_loss(..., policy_temp=T)`、`train()` 把 `p_temp` 传下去；熵奖励也用同一份 logits。
+   - **两道闸门（比修 bug 更重要）**：
+     ① `assert_behaviour_consistency()`：初始化时 **π_new 必须是 π_old**（同权重 + 同温度），
+     `KL > 1e-2` 直接报错 —— 权重不一致、温度只作用一侧，都在这里当场炸；
+     ② 训练循环里 **loss 非有限就 `SystemExit`**（`训练发散`）——⛔ 绝不落盘"跑完了"的废 checkpoint。
+   - ⚠ **夹具的判别力也要量**：这一组自检夹具是"未训练网 + 两个只在派生段不同的候选"，
+     逐候选 logits 差 ~1e-9（实测 `KL(seed1‖seed2) ≈ −2e-6`）⇒ **温度在这套夹具上量不出来**
+     （差 ~1e-5 < 阈值）。所以温度红证改用**有量级的合成 logits**（`[20,0]` + 标签落在尾部 ⇒ ρ=e²⁰），
+     闸门负证改用"直接改错 `logp_old`"。判据写清楚"夹具limit"比写一条永远为真的断言强。
+   - 真数据上的量级（`compact/v4-sp-004` 前 64 行、训练过的 p3-001）：`logp_gap = 3.54`、`ratio ≤ 34.5`。
+   - ⚠⚠ **修完温度口径之后**，第一次重训仍然在第 **757 步** NaN —— **第二个、完全不同**的原因：
+     `parts["policy"] = nan` 而 `kl`/`clip_frac`/`logp_gap` **全是有限**（它们只看学生行）、`|θ|max`
+     纹丝不动（7.659）⇒ 说明**不是参数发散，而是某一批里的算术**。定位：逐头体检发现只有
+     `policy` 是 NaN、其余头全有限、输入全有限。
+     **机制**：**非学生行**（teacher / 随机的动作）在**学生网**下几乎必然是零概率 ——
+     网的 logits 幅度到 563，`#0.5` 再翻倍 ⇒ `logp_new` 能到 −1000 量级 ⇒
+     `ρ = exp(logp_new − logp_old)` **溢出成 inf**；而优势在非学生行上的定义值正是 **0**
+     ⇒ `inf × 0 = NaN` 污染 `(per_row*use).sum()`，整批 loss 变 NaN。
+     **修法（两道保险）**：① `log ρ` 夹在 `LOG_RATIO_CLAMP = ±4`（ρ∈[0.018, 54.6]；ε=0.2 的截断区间
+     远在界内 ⇒ 正常样本逐位无影响；同时界住 `A<0` 那条**悲观支** `ρA` 的无界增长 —— dual-clip 的动机）；
+     ② 替代项在**未选中的行上显式置 0**（`where` 是选择、不是乘法，NaN 漏不过来）。
+     **判据**：`selfcheck` 里手工算一遍**未夹取版**必须是 NaN（机制成立），而 `compute_loss` 同批有限。
+   - ✅ **修完之后的训练（`v4-ppo-002`，4 epoch / 685 s）**：`train 2.4412 → 2.3314`、
+     `val top1(教师一致) 0.867 → 0.879`、**学生行 top1 0.888 → 0.900**、学生行 CE 0.653 → 0.583、
+     **KL 0.0657 → 0.0105**、截断 0.171 → 0.059、`logp_gap` 2.60 → 1.04 ⇒ 全程有限、稳在信任域内。
+4. **`logp_gap` 诊断**：`train_parts` 新增 `|log π_new − log π_old|` 的**最大值** —— 它比
+   `clip_frac`/`KL` 更早暴露"口径没对上"（正常 ≲ 1，事故里是 65）。日志行也带上它。
+5. ⚠ 学生行可能**一批里一条都没有**（`--student` 掩码 + 小 batch）⇒ 先在学生行上判空再算
+   `kl`/`clip_frac`/`logp_gap`：空张量的 `.mean()` 是 NaN、`.max()` 直接抛（`logp_gap` 后加时踩到）。
+
 ---
 
 ## 6.6 teacher（内置机器人）的五层取舍

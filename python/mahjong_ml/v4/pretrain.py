@@ -47,6 +47,12 @@ from . import spec
 #: 牌效头 3 维的归一化分母（= `features.DERIVED_SCALE_CAND[:3]`：向听 / 进张种数 / 进张枚数）
 EFFECT_SCALE = (8.0, 34.0, 136.0)
 
+#: PPO 的 `log(ρ)` 夹取范围（见 `compute_loss` 的"两道数值保险"）：
+#: ±4 ⇒ ρ ∈ [0.018, 54.6]。ε=0.2 的截断区间（[0.8, 1.2]）**远在界内** ⇒ 正常样本逐位无影响；
+#: 它界住的是"非学生行的零概率动作让 ρ 溢出"与"A<0 时悲观支 ρA 无界"这两种爆炸
+#: （2026-09-28 实测：没有它，训练跑到第 757 步整批 NaN）。
+LOG_RATIO_CLAMP = 4.0
+
 #: 事件 token 的**类型块**在 `evt` 里的前 8 维（`blocks.EVT_LAYOUT` 的 `type` one-hot）
 EVT_TYPE_DIM = 8
 
@@ -217,13 +223,57 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
     return model.to(device).eval()
 
 
+def _policy_logits(out: dict[str, torch.Tensor], temp: float) -> torch.Tensor:
+    """按**行为策略的温度**换算出策略 logits：`π(·|s;T) = softmax(logits / T)`。
+
+    ⚠ 为什么这必须是 `logp_new` 与 `logp_old` **同一把尺子**（2026-09-28 实测的坑）：
+    采集侧的策略串 `net:<权重>#T` 采的是 `softmax(logits / T)`（`Logits.sampleSoftmax`），
+    所以 `π_old` 是**带温度的那个分布**。若只把温度用在 `logp_old` 上，`logp_new` 还是 `T=1` 的分布，
+    两者不是同一个分布族 —— 温度越低差得越狠：`#0.5` 实测 `logp_old` 到 −70.5 而 `logp_new ≈ 0`，
+    `ρ = exp(65) ≈ 2·10^15`、策略损失 `2.5·10^11`、**一个 step 就把整网打成 NaN**，
+    而训练**照跑完 4 个 epoch、还落盘了一份废 checkpoint**（只有 `val top1` 掉回首合法基线 0.156 是线索）。
+    ⛔ `--behaviour-temp` 缺省 1.0 时这个 bug 完全不可见（`logits/1.0 == logits`），所以它藏了一整轮。
+    """
+    return out["policy"] if float(temp) == 1.0 else out["policy"] / float(temp)
+
+
+def assert_behaviour_consistency(model: M.V4Model, data: dict, idx: np.ndarray,
+                                 logp_old: torch.Tensor, temp: float,
+                                 device: str) -> float:
+    """**PPO 口径闸门**：初始化时 `π_new` 必须**就是** `π_old`（同权重 + 同温度）。
+
+    返回 `KL(π_old‖π_new)`（应 ≈0）；超出容差**直接报错**。为什么值得一道闸门
+    （2026-09-28 实测）：`#0.5` 采集时若忘了给 `logp_new` 同一把温度尺子，ρ 会炸到 `2·10^15`、
+    策略损失 `2.5·10^11`、**一个 step 之后整网 NaN**，而训练**照跑完 4 个 epoch、还落盘一份
+    废 checkpoint**（唯一线索是 `val top1` 掉回首合法基线）。`--behaviour-temp` 缺省 1.0 时
+    这个 bug 完全不可见（`logits/1.0 == logits`），所以它整整藏了一轮。
+
+    ⚠ 闸门查的是"**两边是不是同一个分布**"：`--init` 与 `--behaviour` 不是同一份权重、
+    或温度只用在了一侧，都会在这里当场炸。它**查不出**"温度填成了另一个值但两边一致" ——
+    那条由 `train()` 里"`--behaviour-temp` 必须与 meta 的 `#T` 一致"那条闸门管。
+    """
+    with torch.no_grad():
+        b0 = _batch(data, idx, device)
+        o0 = model(b0["tile"], b0["evt"], b0["ctx"], b0["cand"], mask=b0["mask"])
+        lp_new = torch.log_softmax(_policy_logits(o0, temp), dim=-1).gather(
+            1, b0["label"][:, None]).squeeze(1)
+        kl = float((logp_old[idx].to(device) - lp_new).mean())
+    if not math.isfinite(kl) or abs(kl) > 1e-2:
+        raise SystemExit(
+            f"PPO 口径不一致：初始化时 KL(π_old‖π_new) = {kl:.4g}（应为 ≈0）—— 检查"
+            f"① `--init` 是不是与 `--behaviour` 同一份权重；② `--behaviour-temp` 是不是与数据集"
+            f" `student` 串里的 `#T` 一致（`logp_new` 与 `logp_old` 必须在同一个 `softmax(logits/T)` 上算）")
+    return kl
+
+
 def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  weights: dict[str, float] | None = None,
                  ssl: tuple | None = None,
                  row_keep: torch.Tensor | None = None,
                  row_w: torch.Tensor | None = None,
                  ppo: tuple | None = None,
-                 value_key: str = "value") -> tuple[torch.Tensor, dict[str, float]]:
+                 value_key: str = "value",
+                 policy_temp: float = 1.0) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -239,6 +289,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     @param value_key 值头的监督目标取自哪一列：`value`（整场结果，缺省）/ `rtg`（逐决策
         reward-to-go）。⚠ 它**同时**决定优势里的 `R` —— 两处必须同源，否则 critic 与优势
         不同量纲（见 `_advantages()` 的注释）。
+    @param policy_temp 行为策略的采样温度 `T`：`logp_new` 与 `logp_old` 都必须在
+        `softmax(logits/T)` 这个**同一个分布**上算（见 `_policy_logits()` 的坑）。
+        ⚠ 它只影响 PPO 的替代项与熵，**不影响**值头/辅助头（那些是状态级的量）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -258,20 +311,43 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
 
     if ppo is not None:
         logp_old, clip_eps, ent_coef = ppo
-        logp_new = torch.log_softmax(out["policy"], dim=-1).gather(
+        logits_t = _policy_logits(out, policy_temp)
+        logp_new = torch.log_softmax(logits_t, dim=-1).gather(
             1, b["label"][:, None]).squeeze(1)
         adv = _advantages(out, b, row_keep, key=value_key)
-        ratio = torch.exp(logp_new - logp_old)
+        # ⚠⚠ **两道数值保险**（2026-09-28 实测：不加就是"训练跑到第 757 步整批 NaN"）。
+        # 机制：**非学生行**（teacher / 随机 的动作）在**学生网**下几乎必然是零概率 ——
+        # 实测 `logp_new` 能到 −1000 量级（网的 logits 幅度到 563，`#0.5` 再翻倍）⇒
+        # `ρ = exp(logp_new − logp_old)` 溢出成 **inf**；而优势在那些行上的定义值正是 **0**
+        # ⇒ `inf * 0 = NaN` 污染 `(per_row * use).sum()`，整批 loss 变 NaN。
+        # 症状很好认：`parts["policy"] = nan` 而 `kl`/`clip_frac`/`logp_gap` **全是有限**
+        # （它们只看学生行），`|θ|max` 也纹丝不动。
+        #   ① `log_ratio` 夹在 ±`LOG_RATIO_CLAMP`：既堵住 inf/NaN，也顺手界住 `A<0` 那条
+        #      **悲观支** `ρA`（它在 ρ≫1+ε 时是无界的 —— dual-clip 的动机；ε=0.2 的截断区间
+        #      远在界内，所以对正常样本**逐位无影响**）；
+        #   ② 替代项在**未选中的行上显式置 0**：`where` 是选择而不是乘法，NaN 漏不过来。
+        log_ratio = (logp_new - logp_old).clamp(-LOG_RATIO_CLAMP, LOG_RATIO_CLAMP)
+        ratio = torch.exp(log_ratio)
         surr = -torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv)
+        if row_keep is not None:
+            surr = torch.where(row_keep > 0, surr, torch.zeros_like(surr))
         l_policy = reduce_row(surr, row_keep)
         with torch.no_grad():
-            parts["kl"] = float((logp_old - logp_new)
-                                [row_keep > 0 if row_keep is not None else slice(None)].mean())
-            r = ratio[row_keep > 0 if row_keep is not None else slice(None)]
-            parts["clip_frac"] = float(((r - 1.0).abs() > clip_eps).float().mean())
+            # ⚠ 学生行可能一批里一条都没有（`--student` 掩码 + 小 batch）⇒ 先判空再算：
+            #   空张量的 `.mean()` 是 NaN、`.max()` 直接抛（`logp_gap` 是后加的，踩到了这条）
+            sel = row_keep > 0 if row_keep is not None else None
+            n_sel = int(sel.sum()) if sel is not None else int(adv.numel())
             parts["adv_abs"] = float(adv.abs().mean())
+            if n_sel > 0:
+                sub = slice(None) if sel is None else sel
+                parts["kl"] = float((logp_old - logp_new)[sub].mean())
+                r = ratio[sub]
+                parts["clip_frac"] = float(((r - 1.0).abs() > clip_eps).float().mean())
+                # `logp_gap` = `|log π_new − log π_old|` 的最大值：温度口径或权重没对上时它会先炸
+                # （`#0.5` 那次是 65 量级，正常应 ≲ 1）—— 它比 `clip_frac` 更早暴露问题
+                parts["logp_gap"] = float((logp_new - logp_old)[sub].abs().max())
         if ent_coef:
-            p = torch.softmax(out["policy"], dim=-1)
+            p = torch.softmax(logits_t, dim=-1)
             ent = -(p * torch.log(p.clamp_min(1e-9))).sum(-1)
             l_policy = l_policy - ent_coef * reduce_row(ent, row_keep)
         parts["policy"] = float(l_policy.detach())
@@ -517,18 +593,27 @@ def train(args) -> dict:
     # PPO：先重算"采集那一步"的 log π_old（行为策略 = `--behaviour`，温度 = 策略串里的 `#T`）
     logp_tr = None
     ppo_cfg = None
+    p_temp = 1.0                     # 策略温度：非 PPO 恒为 1.0（= 不缩放）
     if objective == "ppo":
         beh = getattr(args, "behaviour", None)
         if not beh:
             raise SystemExit("--objective ppo 需要 --behaviour <采集用的 ckpt/net.bin>"
                              "（要重算 log π_old，否则 PPO 的重要性比无从谈起）")
         spec = str(meta.get("student") or "")
-        temp = float(getattr(args, "behaviour_temp", 0.0) or 0.0)
-        if temp <= 0:
-            temp = float(spec.rsplit("#", 1)[1]) if "#" in spec else 1.0
+        # ⚠ 温度的**权威来源是数据集 meta 里的 `student` 串**（它逐字记录了采集时的策略串）。
+        #   `--behaviour-temp` 只在 meta 没写 `#T` 时才允许兜底；**与 meta 冲突就报错** ——
+        #   温度错了不会让训练崩，只会让 `logp_old` 是"另一个分布"，静默把重要性比带偏。
+        parsed = float(spec.rsplit("#", 1)[1]) if "#" in spec else None
+        explicit = float(getattr(args, "behaviour_temp", 0.0) or 0.0)
+        if explicit > 0 and parsed is not None and abs(explicit - parsed) > 1e-9:
+            raise SystemExit(
+                f"--behaviour-temp {explicit:g} 与数据集 student 串里的 `#T` {parsed:g} 不一致"
+                f"（{spec}）—— 温度的权威来源是采集时的策略串，别手填；要改就重采")
+        temp = explicit if explicit > 0 else (parsed if parsed is not None else 1.0)
         if keep_tr is None:
             raise SystemExit("--objective ppo 需要学生掩码：数据集要用 `--student <策略串>` 构建"
                              "（否则优势会把对手/老师的行算进来）")
+        p_temp = float(temp)         # ⚠ `logp_new` 与 `logp_old` 必须同一个 `softmax(logits/T)`
         beh_model = _load_behaviour(beh, device)
         print(f"PPO：行为策略 {beh}（温度 {temp:g}）—— 重算 log π_old（{n} 条）")
         logp_tr = _behaviour_logprobs(beh_model, train_data, device, args.eval_batch, temp)
@@ -537,6 +622,10 @@ def train(args) -> dict:
                    float(getattr(args, "ppo_entropy", 0.01) or 0.0))
         print(f"PPO：clip={ppo_cfg[0]:g} entropy={ppo_cfg[1]:g}；"
               f"优势在学生行上归一化、策略损失只算学生行")
+        # ---- 口径闸门（2026-09-28 加；这条闸门就是为了不让 `#0.5` 那个 bug 再发生一次）----
+        kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
+                                           logp_tr, temp, device)
+        print(f"PPO：口径自检 KL(π_old‖π_new)={kl0:+.2e}（≈0 = 权重与温度都对上了）")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
           f"标签侧 {'有' if meta['has_aux'] else '无'}；"
@@ -592,7 +681,14 @@ def train(args) -> dict:
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
             loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl,
-                                       row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key)
+                                       row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
+                                       policy_temp=p_temp)
+            # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
+            #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
+            #   看着跑完、实际是首合法基线的模型。
+            if not math.isfinite(float(loss)):
+                raise SystemExit(f"训练发散：第 {gstep} 步 loss={float(loss)}（epoch {epoch}）—— "
+                                 f"诊断看 train_parts 的 kl / clip_frac / logp_gap；不落盘废 checkpoint")
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -630,6 +726,7 @@ def train(args) -> dict:
               + (f" | KL {row['train_parts'].get('kl', float('nan')):.4f}"
                  f" clip {row['train_parts'].get('clip_frac', float('nan')):.3f}"
                  f" |A| {row['train_parts'].get('adv_abs', float('nan')):.2f}"
+                 f" gap {row['train_parts'].get('logp_gap', float('nan')):.2f}"
                  if "kl" in row["train_parts"] else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
