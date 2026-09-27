@@ -204,6 +204,34 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-
      --metric rank_points --labels "net:tools\build\<新代>,teacher"
 ```
 
+**P3 加强版：PPO（值头当 critic）** —— 量级 ×5 + 截断替代项 + 从上一代权重起步：
+
+```powershell
+# 采集：学生 2 席（`#1.0` 温度探索）+ teacher 2 席（这一轮 1,000 场 / 689,693 决策 ≈ 1,600 s）
+java -jar server\build\mahjong-server.jar --selfplay 1000 --workers 24 --rotate --aux `
+     --policy "net:tools/build/<上一代>/net.bin#1.0,net:tools/build/<上一代>/net.bin#1.0,teacher,teacher" `
+     --seed 20261001 --out S:\mahjong-training\raw\v4-sp-003
+java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-sp-003 --workers 24
+# 数据集：`--student` 必须与上面的策略串**逐字相同**（PPO 按它遮罩、并从 `#T` 解析采样温度）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-sp-003 `
+     S:\mahjong-training\compact\v4-sp-003 --student "net:tools/build/<上一代>/net.bin#1.0" --aux --val-frac 0.05
+# PPO：log π_old 用 `--behaviour` 现场重算；优势 A=R−E[V] 只在学生行归一化；KL/截断比例看 train_parts
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-003 `
+     --label v4-ppo-001 --epochs 4 --batch 256 --objective ppo `
+     --behaviour "tools\build\<上一代>\net.bin" --init "tools\build\<上一代>\net.bin" `
+     --stage-a 0 --stage-b 0 --lr 1e-4 --head-lr-mult 1 --mask-frac 0 --ssl-weight 0
+# 3 路同场配对（新/旧/teacher/random 一场齐 ⇒ 一次跑出两个对比，按场配对）
+trainer\build\trainer.exe selfplay 1200 --workers 24 --rotate `
+     --policy "net:tools\build\<新代>\net.bin,net:tools\build\<旧代>\net.bin,teacher,random" `
+     --seed 777003 --out S:\mahjong-training\raw\eval-ppo3way
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-ppo3way --labels "<新代>,<旧代>"
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-ppo3way --labels "<新代>,teacher"
+```
+
+> ⚠ 混合阵容（含 `random`）的数据集上，**策略 CE 只看学生行**：`random` 的动作在训练过的网看来
+> 几乎是零概率（逐行 CE 中位 0.05 / 90 分位 24 / 最大 672；纯 teacher 数据上中位 0.004）
+> —— 不遮罩的"策略 CE"会被它带跑。
+
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
 
 | 段 | 维度 | 由谁算 |

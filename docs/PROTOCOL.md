@@ -1295,6 +1295,16 @@ python -m mahjong_ml.eval <eval> --metric rank_points --labels "net:<新>,teache
   26.1% 而非 100%），后者是 RWR 的回报来源。
 - **RWR 只作用于 `policy` / `effect`**：`danger` 是**标定**目标（放铳概率），按回报加权会把"赢的局"
   （多半没放铳）放大 ⇒ 概率被系统性压低；`value/placement/belief_*` 是状态级头，不吃掩码与权重。
+- **PPO（P3 加强版）**：把 ③ 换成
+  `--objective ppo --behaviour <采集用的 ckpt|net.bin> --init <上一代 ckpt|net.bin>
+   --stage-a 0 --stage-b 0 --lr 1e-4 --head-lr-mult 1`（采样温度从数据集 `student` 串里的 `#T` 解析）。
+  **三条硬口径**：① `log π_old` **现场用行为策略重算**（前向确定性 + 同一份输入/权重/温度），
+  所以 `--behaviour` 与 `--student` 缺一个就**退出**；② 优势 `A = R − E[V(s)]`（`R` 就是数据集里的
+  `value`，与值头同一量纲），**归一化只用学生行**；③ 替代项只算学生行，日志给
+  `KL` 与截断比例（都在 `train_parts` 里）—— 它们是"这一步有没有出信任域"的唯一判据。
+- **混合阵容上的指标陷阱**：`random` 那部分行的动作在训练过的网看来几乎是零概率
+  （逐行 CE 中位 0.05 / 90 分位 24 / 最大 672，纯 teacher 数据上中位 0.004）⇒
+  **策略类指标只在学生行上有意义**（`evaluate` 支持 `row_keep`，输出同时给两个数）。
 - **均衡审计的口径**：`--expect` 的单位是**座位场**（每局座位数 × 场数），不是决策行数（一个策略打多少手
   取决于它的行为，实测 teacher 两席只拿到 1.95 倍的决策）；`--equal-shares` 只在"四席本就该等分"时开
   （1+2+1 这种刻意不对称的阵容不该被对手配额 CV 判红）。

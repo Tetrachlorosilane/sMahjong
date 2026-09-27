@@ -148,11 +148,75 @@ def _row_weights(data: dict, idx, beta: float, device: str):
     return keep, w
 
 
+def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
+                row_keep: torch.Tensor | None) -> torch.Tensor:
+    """`A = R − E[V(s)]`，**只在学生行上归一化**（设计 §7.4 / v3 P4 的硬口径）。
+
+    - `R` = 数据集里的 `value`（`final_scores − 起点`，千点）—— 与值头的监督目标**同一个量**，
+      所以 critic 与优势是自洽的（值头学的就是这个 R 的分布）；
+    - `E[V(s)]` = 值头 51 个分箱的期望（分箱中心 `linspace(-30, +30)`，与 `VALUE_RANGE` 同量纲）；
+    - ⚠ **归一化只用学生行**：把对手/老师那 3/4 的行算进均值方差，会把优势的尺度带偏
+      （v3 实测过学生行占比 0.75 而非 0.25 那种静默失真）。
+    """
+    center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS,
+                            device=out["value"].device)
+    v_hat = (torch.softmax(out["value"], dim=-1) * center).sum(-1)
+    adv = b["value"] - v_hat
+    if row_keep is not None:
+        k = row_keep > 0
+        if bool(k.any()):
+            sel = adv[k]
+            adv = torch.where(k, (adv - sel.mean()) / (sel.std(unbiased=False) + 1e-6),
+                              torch.zeros_like(adv))
+    return adv
+
+
+def _behaviour_logprobs(model: M.V4Model, data: dict, device: str, batch: int,
+                        temp: float) -> torch.Tensor:
+    """采集那一步的 `log π_old(a|s)`（**用采集时的权重重算**，不是从轨迹里读的）。
+
+    为什么能重算：前向是**确定性**的（无 dropout），输入就是同一份 obs 张量、
+    权重就是采集用的那份 checkpoint、温度就是策略串里的 `#T`
+    ⇒ 重算出来的 log-prob 与当时采样用的分布逐位相同（容差内）。这是 PPO 能离线做的前提。
+    """
+    model.eval()
+    n = int(data["nlegal"].shape[0])
+    out = torch.zeros(n, dtype=torch.float32)
+    with torch.no_grad():
+        for i0 in range(0, n, batch):
+            idx = np.arange(i0, min(i0 + batch, n))
+            b = _batch(data, idx, device)
+            logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])["policy"]
+            if temp > 0:
+                logits = logits / float(temp)
+            lp = torch.log_softmax(logits, dim=-1).gather(1, b["label"][:, None]).squeeze(1)
+            out[i0:i0 + idx.size] = lp.to("cpu")
+    return out
+
+
+def _load_behaviour(spec: str, device: str) -> M.V4Model:
+    """采集用的那份权重：`*.pt`（checkpoint）或 `net.bin`（格式 2）都收。"""
+    p = Path(spec)
+    if not p.is_file():
+        raise SystemExit(f"--behaviour 找不到文件：{p}")
+    if p.suffix == ".bin":
+        from . import export as v4export
+        parsed = v4export.read_net(p)
+        model = M.build(1, **parsed["dims"])
+        model.load_state_dict(v4export.state_from_net(parsed), strict=True)
+    else:
+        ck = torch.load(p, map_location="cpu", weights_only=False)
+        model = M.build(1, **(ck.get("config", {}).get("dims") or M.build(1).dims()))
+        model.load_state_dict(ck["model"], strict=True)
+    return model.to(device).eval()
+
+
 def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  weights: dict[str, float] | None = None,
                  ssl: tuple | None = None,
                  row_keep: torch.Tensor | None = None,
-                 row_w: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, float]]:
+                 row_w: torch.Tensor | None = None,
+                 ppo: tuple | None = None) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -162,6 +226,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     @param row_w   逐行权重（RWR）—— 与 `row_keep` 同一适用范围；
         ⚠ 状态级头（`value` / `placement` / `belief_*`）**不吃**掩码与权重：那些标签讲的是"这个局面"，
         与四条座位里谁动的手无关（吃了反而会把"对手造成的局面"也往学生的回报上算）。
+    @param ppo     `(logp_old, clip, entropy_coef)` —— 用 **PPO 截断替代项**取代策略头的交叉熵：
+        `ρ = exp(logπ_new − logπ_old)`、`−min(ρA, clip(ρ,1±ε)A) + c·H(π)`。
+        `A` 由 `_advantages()` 给（学生行归一化）；`logp_old` 由 `_behaviour_logprobs()` 重算。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -179,9 +246,30 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         denom = use.sum().clamp_min(1e-6)
         return (per_row * use).sum() / denom
 
-    l_policy = reduce_row(F.cross_entropy(out["policy"], b["label"], reduction="none"))
-    parts["policy"] = float(l_policy.detach())
-    total = total + w["policy"] * l_policy
+    if ppo is not None:
+        logp_old, clip_eps, ent_coef = ppo
+        logp_new = torch.log_softmax(out["policy"], dim=-1).gather(
+            1, b["label"][:, None]).squeeze(1)
+        adv = _advantages(out, b, row_keep)
+        ratio = torch.exp(logp_new - logp_old)
+        surr = -torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv)
+        l_policy = reduce_row(surr, row_keep)
+        with torch.no_grad():
+            parts["kl"] = float((logp_old - logp_new)
+                                [row_keep > 0 if row_keep is not None else slice(None)].mean())
+            r = ratio[row_keep > 0 if row_keep is not None else slice(None)]
+            parts["clip_frac"] = float(((r - 1.0).abs() > clip_eps).float().mean())
+            parts["adv_abs"] = float(adv.abs().mean())
+        if ent_coef:
+            p = torch.softmax(out["policy"], dim=-1)
+            ent = -(p * torch.log(p.clamp_min(1e-9))).sum(-1)
+            l_policy = l_policy - ent_coef * reduce_row(ent, row_keep)
+        parts["policy"] = float(l_policy.detach())
+        total = total + w["policy"] * l_policy
+    else:
+        l_policy = reduce_row(F.cross_entropy(out["policy"], b["label"], reduction="none"))
+        parts["policy"] = float(l_policy.detach())
+        total = total + w["policy"] * l_policy
 
     # 值头：HL-Gauss **软标签**的交叉熵（与自检里"每行和为 1"同一套目标）
     target = M.hl_gauss_targets(b["value"])
@@ -269,7 +357,12 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
             b["evt"] = evt_masked
             ssl = (ssl_head, mask_rows, target)
         out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
-        loss, parts = compute_loss(out, b, ssl=ssl)
+        # ⚠ 掩码要喂进损失：自对弈数据集里 `random` 那 1/4 行的动作在训练过的网看来**几乎是零概率**
+        #   （实测逐行 CE 中位 0.05 / 90 分位 24 / 最大 672）—— 不遮的话"策略 CE"这个指标会被它带跑，
+        #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
+        kb_e = None if row_keep is None else torch.from_numpy(
+            np.asarray(row_keep[idx], dtype=np.float32)).to(device)
+        loss, parts = compute_loss(out, b, ssl=ssl, row_keep=kb_e)
         loss_sum += float(loss) * idx.size
         for k, v in parts.items():
             parts_sum[k] = parts_sum.get(k, 0.0) + v * idx.size
@@ -358,6 +451,12 @@ def train(args) -> dict:
     rng_gen = torch.Generator(device="cpu").manual_seed(args.seed)
     model = M.build(seed=args.seed).to(device)
     ssl_head = MaskedEventHead().to(device)
+    # 初始化：`--init <ckpt|net.bin>` 时从上一代权重起步（P3/P4 都是"接着上一代练"）
+    init_spec = getattr(args, "init", None)
+    if init_spec:
+        src = _load_behaviour(init_spec, device)
+        model.load_state_dict(src.state_dict(), strict=True)
+        print(f"初始化：从 {init_spec} 载入权重")
     weights = dict(M.loss_weights())
     weights["ssl"] = args.ssl_weight
     trunk = [p for m in (model.tile, model.event, model.ctx, model.cand, model.fusion)
@@ -372,9 +471,11 @@ def train(args) -> dict:
     steps = max(1, min(args.max_steps or 10 ** 9, n // args.batch))
     total_steps = steps * args.epochs
     # 学生掩码 + RWR 权重（P3 开局；见 `_row_weights`）。⚠ 掩码/权重**只在动作相关的头上生效**。
+    # 学生掩码 + RWR 权重（P3 开局；见 `_row_weights`）。⚠ 掩码/权重**只在动作相关的头上生效**。
     # ⚠ `getattr` 取缺省：`rwr_beta` 是后加的可选开关，而 `train()` 也会被自检/脚本直接用
     #   `Namespace(**{...})` 调用（那种调用不该因为少一个可选字段就炸）
     rwr_beta = float(getattr(args, "rwr_beta", 0.0) or 0.0)
+    objective = str(getattr(args, "objective", "bc") or "bc")
     keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
     if rwr_beta > 0 and w_tr is None:
         raise SystemExit("--rwr-beta > 0 但数据集里没有 `delta` 列（老数据集）—— "
@@ -389,6 +490,29 @@ def train(args) -> dict:
     if w_tr is not None:
         print(f"RWR：β={args.rwr_beta:g} 千点 → 权重 min={float(w_tr.min()):.3f} "
               f"mean={float(w_tr.mean()):.3f} max={float(w_tr.max()):.3f}")
+    # PPO：先重算"采集那一步"的 log π_old（行为策略 = `--behaviour`，温度 = 策略串里的 `#T`）
+    logp_tr = None
+    ppo_cfg = None
+    if objective == "ppo":
+        beh = getattr(args, "behaviour", None)
+        if not beh:
+            raise SystemExit("--objective ppo 需要 --behaviour <采集用的 ckpt/net.bin>"
+                             "（要重算 log π_old，否则 PPO 的重要性比无从谈起）")
+        spec = str(meta.get("student") or "")
+        temp = float(getattr(args, "behaviour_temp", 0.0) or 0.0)
+        if temp <= 0:
+            temp = float(spec.rsplit("#", 1)[1]) if "#" in spec else 1.0
+        if keep_tr is None:
+            raise SystemExit("--objective ppo 需要学生掩码：数据集要用 `--student <策略串>` 构建"
+                             "（否则优势会把对手/老师的行算进来）")
+        beh_model = _load_behaviour(beh, device)
+        print(f"PPO：行为策略 {beh}（温度 {temp:g}）—— 重算 log π_old（{n} 条）")
+        logp_tr = _behaviour_logprobs(beh_model, train_data, device, args.eval_batch, temp)
+        del beh_model
+        ppo_cfg = (float(getattr(args, "ppo_clip", 0.2) or 0.2),
+                   float(getattr(args, "ppo_entropy", 0.01) or 0.0))
+        print(f"PPO：clip={ppo_cfg[0]:g} entropy={ppo_cfg[1]:g}；"
+              f"优势在学生行上归一化、策略损失只算学生行")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
           f"标签侧 {'有' if meta['has_aux'] else '无'}；"
@@ -440,8 +564,11 @@ def train(args) -> dict:
             out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
             kb = None if keep_tr is None else keep_tr[idx].to(device)
             wb = None if w_tr is None else w_tr[idx].to(device)
+            ppo = None
+            if logp_tr is not None:
+                ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
             loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl,
-                                       row_keep=kb, row_w=wb)
+                                       row_keep=kb, row_w=wb, ppo=ppo)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -473,7 +600,12 @@ def train(args) -> dict:
               f"danger {ev.get('loss_danger', float('nan')):.3f} "
               f"effect {ev.get('loss_effect', float('nan')):.4f} "
               f"ssl_acc {ev.get('ssl_acc', float('nan')):.3f}"
-              + (f" | **学生行 top1 {ev_stu['top1']:.3f}**(n={ev_stu['n']})" if ev_stu else ""))
+              + (f" | **学生行 top1 {ev_stu['top1']:.3f}**(n={ev_stu['n']})" if ev_stu else "")
+              + (f" | 学生行 policy {ev_stu['loss_policy']:.3f}" if ev_stu else "")
+              + (f" | KL {row['train_parts'].get('kl', float('nan')):.4f}"
+                 f" clip {row['train_parts'].get('clip_frac', float('nan')):.3f}"
+                 f" |A| {row['train_parts'].get('adv_abs', float('nan')):.2f}"
+                 if "kl" in row["train_parts"] else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
     if mon:
@@ -525,6 +657,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"
                          "0 = 关闭（纯模仿）。⚠ 只作用于 policy/effect/danger")
+    # P3 加强版：PPO（值头当 critic）+ 从上一代权重起步
+    ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="bc",
+                    help="策略损失口径：bc = 纯模仿（缺省）/ rwr = 回报加权 / ppo = 截断替代项")
+    ap.add_argument("--behaviour", default=None,
+                    help="PPO 的行为策略（采集用的 ckpt 或 net.bin）—— 用来重算 log π_old")
+    ap.add_argument("--behaviour-temp", type=float, default=0.0,
+                    help="行为策略的采样温度（缺省从数据集 meta 的 `student` 串里解析 `#T`，再缺省 1.0）")
+    ap.add_argument("--ppo-clip", type=float, default=0.2, help="PPO 截断 ε")
+    ap.add_argument("--ppo-entropy", type=float, default=0.01, help="熵奖励系数（学生行上）")
+    ap.add_argument("--init", default=None,
+                    help="从这份权重起步（ckpt 或 net.bin）—— 缺省随机初始化（纯模仿那几轮的口径）")
     # P1 自监督：掩码事件重建
     ap.add_argument("--mask-frac", type=float, default=0.15, help="掩码多少比例的真实事件 token（0 = 关）")
     ap.add_argument("--ssl-weight", type=float, default=0.2, help="掩码重建损失权重")

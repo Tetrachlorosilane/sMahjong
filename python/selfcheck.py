@@ -1978,6 +1978,47 @@ try:
 except SystemExit as _e:
     ok("学生行占比 0" in str(_e), "P3 训练：学生行占比 0 被硬拒 ✓", str(_e)[:70])
 
+# ---- P3 加强版：PPO（截断替代项 + 行为策略重算 log π_old）--------------------------------
+from mahjong_ml.v4 import export as v4_export                     # noqa: E402（P5 段还会再引一次，无害）
+_pw = {k: 0.0 for k in v4_model.loss_weights()}
+_pw["policy"] = 1.0
+_spb = v4_pt._batch(_sp, np.arange(4), "cpu")
+_spb["value"] = _torch.tensor([5.0, -5.0, 0.0, 3.0])            # 假回报（千点）
+_keep4 = _torch.tensor([1.0, 1.0, 0.0, 0.0])                    # 前两行是学生
+_v4mp = v4_model.build(seed=11)
+with _torch.no_grad():
+    _outp = _v4mp(_spb["tile"], _spb["evt"], _spb["ctx"], _spb["cand"], mask=_spb["mask"])
+_adv = v4_pt._advantages(_outp, _spb, _keep4)
+ok(abs(float(_adv[_keep4 > 0].mean())) < 1e-5
+   and abs(float(_adv[_keep4 > 0].std(unbiased=False)) - 1.0) < 1e-4,
+   "PPO：优势在学生行上归一化（均值 0 / 标准差 1）")
+ok(float(_adv[_keep4 == 0].abs().max()) == 0.0, "PPO：非学生行的优势被置 0（不参与策略梯度）")
+_lp_self = _torch.log_softmax(_outp["policy"], dim=-1).gather(1, _spb["label"][:, None]).squeeze(1)
+_loss0, _parts0 = v4_pt.compute_loss(_outp, _spb, _pw, row_keep=_keep4,
+                                     ppo=(_lp_self, 0.2, 0.0))
+ok(abs(float(_loss0)) < 1e-5, "PPO：ρ≡1 时替代项 ≈ 0（优势已中心化 ⇒ 判据有解析解）",
+   f"loss={float(_loss0):.2e}")
+ok(abs(_parts0["kl"]) < 1e-6 and 0.0 <= _parts0["clip_frac"] <= 1.0,
+   "PPO：KL / 截断比例诊断在合理范围", f"kl={_parts0['kl']:.2e} clip={_parts0['clip_frac']:.3f}")
+_loss1, _parts1 = v4_pt.compute_loss(_outp, _spb, _pw, row_keep=_keep4,
+                                     ppo=(_lp_self + 1.0, 0.2, 0.0))
+ok(abs(float(_loss1)) > 1e-4, "PPO：行为策略一偏移，替代项就变（判据不是空转）",
+   f"loss={float(_loss1):.3e}")
+# `--behaviour` 的载入：导出一份小 net.bin → 载回来 → state_dict 逐张量一致
+_beh_file = scratch("v4-beh") / "net.bin"
+v4_export.save_net(v4_model.build(seed=3, **v4_export.GOLDEN_DIMS).state_dict(),
+                   dict(v4_export.GOLDEN_DIMS), _beh_file)
+_mbeh = v4_pt._load_behaviour(str(_beh_file), "cpu")
+_ok_beh = all(bool((_mbeh.state_dict()[k] == v).all())
+              for k, v in v4_model.build(seed=3, **v4_export.GOLDEN_DIMS).state_dict().items())
+ok(_ok_beh, "PPO：`--behaviour` 能从 net.bin 载回同一份权重（log π_old 才可信）")
+try:
+    v4_pt.train(argparse.Namespace(**{**_ptbase, "data": str(_sp_src / "ds"),
+                                      "label": "v4-selfcheck-ppo-nb", "objective": "ppo"}))
+    ok(False, "PPO：缺 `--behaviour` 必须报错（否则重要性比无从谈起）")
+except SystemExit as _e:
+    ok("--behaviour" in str(_e), "PPO：缺 `--behaviour` 被硬拒 ✓", str(_e)[:60])
+
 # 场外均衡审计（设计 §7.5）—— 含负向对照
 _bdir = scratch("v4-balance")
 _pols = ["pa", "pb", "pc", "pd"]
