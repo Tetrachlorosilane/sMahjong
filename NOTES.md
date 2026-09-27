@@ -2142,7 +2142,8 @@ teacher（约 95% 决策听老师），而"这一代比上一代强多少"必须
 （点数账修复，tag `0581d17`，release #396820517）、**v1.10.3**（导出 JSON 紧凑化，
 tag `ba294cd`，release #396851557）与 **v1.10.4**（导出侧手牌账修复，tag `99842dc`，
 release #396873201）与 **v1.10.5**（加杠几何 + 音效竞态自愈，tag `v1.10.5` →
-  远端 `576f908b`，release #397273611）也已发布：本仓库的版本号
+  远端 `576f908b`，release #397273611）与 **v1.10.6**（特征 v3 + 新机器人包，release #397338153）与
+  **v1.11.0**（训练工作流 + 3 个新机器人包，release #397557867）也已发布：本仓库的版本号
 **只加不改**，发布记录（资产摘要、release id、走过哪条推送通道）写在 `release/RELEASE-v<版本>.md`。
 ⚠ **tag 要先建再建 release**：`POST /releases` 的 `target_commitish` 默认是 `main`，
 tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Training`）—— 先 `POST /git/refs` 建 tag
@@ -2232,6 +2233,25 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   本地草稿与摘要表：`release\RELEASE-v1.10.6.md`（`release\` 已 gitignore）。
   发布前实测：L1 **1370/1370**、L2 **852/852**、训练端 `--selftest` PASS、同种子自对弈逐字节
   （1,119,860 B）、sidecar 逐字节 ×3、`net --golden` maxΔ = 0。
+
+- **v1.11.0**（2026-09-27，**训练工作流**：时间预算 / 缓存档硬闸门 / 配额自动回收 / 跨代选人 + 3 个新机器人包）：
+  release id **397557867**，tag `v1.11.0` → 远端 `cff0defd`（`target_commitish = Training`）。
+  ⚠ **"远端缺哪些文件"的判据是比 tree sha，不是 diff 两条提交链**：远端 `Training` 头 `d5405504` 的
+  tree `cadcc703…` 与本地 `d0ed74e` 的 tree **完全相同** ⇒ 远端内容 = 那个本地提交，缺的就是它之后的改动；
+  据此算出 15 个文件，用 **`github_commit_files` 一个提交带过去**（基线 `d5405504`）。
+  通道：`POST /git/refs` 建 tag → `POST /releases` → 资产走 `uploads.github.com`。
+  **内容等价判据**：远端提交 tree `3c30141b…` == 本地 `HEAD`（`4f87805`）的 tree ⇒ 逐字节一致。
+  8 个资产（本地 sha256 与 GitHub digest 抽查一致）：`sMahjong-client-v1.11.0-win64.zip` 38,847,605 B
+  `3ce89eaa…`（asset 592435309）· `sMahjong-server-v1.11.0.zip` 351,998 B `15d58e1e…`（592434427）·
+  `sMahjong-bot-ai-v1.11.0.zip` 3,013,158 B `eb3dd01c…`（592434522）· `ppo-v3-g01-g05.zip` 1,004,623 B
+  `f86218ca…`（592434733）· `ppo-v3-g01-g06.zip` 1,004,806 B `63f58f25…`（592434843）· `ppo-v3-g02-g03.zip`
+  1,004,772 B `3d4ecb5c…`（592434961）· `first.zip` 241 B `0674205f…`（592435108）· `pass.zip` 238 B
+  `0194109a…`（592435156）。⚠ **本版 `client/` 与 `server/` 源码自 v1.10.6 起没变**（改动全在 `python/` 与
+  文档）⇒ 客户端/服务端行为与 v1.10.6 相同，玩家可见增量只有 3 个机器人包；三个包一律 α=0 纯网络，
+  且**彼此的强度差别在实测里都证不出来**（选谁 = 选打法风格，不是选强弱）。
+  发布前实测：L1 **1370/1370**、L2 **852/852**、`selfcheck.py` **315/315**、`doc-refs-check` PASS、
+  服务端 zip 内 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.11.0、exe 内 UTF-16 串实测 1.11.0。
+  本地草稿与摘要表：`release\RELEASE-v1.11.0.md`。
 
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
