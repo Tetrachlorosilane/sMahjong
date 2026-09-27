@@ -147,18 +147,33 @@ class BalanceReport:
     """一轮采集的**场外因素**计数 + 判据结论（设计 §7.5）。"""
 
     games: int = 0
+    #: 小局（`hand` 行）数。⚠ `games` 与它同值：轨迹里"一场 = 一个 `g<序号>.jsonl`"，
+    #: 而 `hand` 行记的是**小局** —— 两个口径在历史文档里混用过，这里两个都给出（`files` 才是场数）。
+    rounds: int = 0
     policy_seat: dict[str, dict[int, int]] = field(default_factory=dict)
+    #: 每个策略**占了多少"座位场"**（= 每局座位数 × 场数）—— 配席/对手配额的**正确单位**。
+    #: ⚠ 别拿"决策行数"当配席：一个策略打多少手取决于它的行为（pass 多、和了少都不一样），
+    #: 两个座位不等于两倍决策（实测 teacher 148,688 / net 76,206 ≈ 1.95 而非 2.00）。
+    policy_seat_games: dict[str, dict[int, int]] = field(default_factory=dict)
     dealer: dict[str, int] = field(default_factory=dict)
     kyoku: dict[str, int] = field(default_factory=dict)
     outcomes: dict[str, int] = field(default_factory=dict)
     decisions: int = 0
     files: int = 0
+    #: `--expect` 的配席清单（策略 → 该轮占的座位数）；空 = 不核这一条
+    expected: dict[str, int] = field(default_factory=dict)
+    #: 只有当四个座位**本就该等分**时才用 CV 判对手配额（`A,B,C,D` 或 2+2 那种）
+    equal_shares: bool = False
 
     # -- 判据 ------------------------------------------------------------
     def seat_deviation(self) -> float:
-        """每个策略在 4 个座位上的最大相对偏差（理想各 1/4）。"""
+        """每个策略在 4 个座位上的最大相对偏差（理想各 1/4）。
+
+        用**座位场**口径（不是决策行）：决策数受策略行为影响，会把"分配不均"与"打得多少"混在一起。
+        """
+        src = self.policy_seat_games or self.policy_seat
         worst = 0.0
-        for pol, seats in self.policy_seat.items():
+        for pol, seats in src.items():
             total = sum(seats.values())
             if total == 0:
                 continue
@@ -167,40 +182,76 @@ class BalanceReport:
         return worst
 
     def opponent_cv(self) -> float:
-        """各策略（当作彼此的对手）总场次的变异系数 —— 对手配额是否受控。"""
-        vals = np.array([sum(s.values()) for s in self.policy_seat.values()], dtype=float)
+        """各策略（当作彼此的对手）总座位场的变异系数 —— 对手配额是否受控。"""
+        if self.policy_seat_games:
+            vals = np.array([sum(s.values()) for s in self.policy_seat_games.values()], dtype=float)
+        else:
+            vals = np.array([sum(s.values()) for s in self.policy_seat.values()], dtype=float)
         if vals.size < 2 or vals.mean() == 0:
             return 0.0
         return float(vals.std(ddof=1) / vals.mean())
 
+    def seat_games(self) -> dict[str, int]:
+        """策略 → 座位场数（`--expect` 的同一单位）。"""
+        if self.policy_seat_games:
+            return {p: sum(s.values()) for p, s in self.policy_seat_games.items()}
+        return {p: sum(s.values()) for p, s in self.policy_seat.items()}
+
     def verdict(self) -> tuple[bool, list[str]]:
+        """判据（设计 §7.5）。⚠ **空数据必须判不均衡** —— 2026-09-27 首次跑真轨迹时，
+        决策行识别写的是"没有 `type` 字段"，而真轨迹写 `"type":"decision"` ⇒ 一条决策都没统计到，
+        `seat_deviation`/`opponent_cv` 全是 0 ⇒ 报了个**假绿**。现在把"有没有读到东西"也做成闸门。"""
         reasons: list[str] = []
+        if self.rounds == 0:
+            reasons.append("没有小局记录（跑的是评测采样轨迹？）")
+        if self.decisions == 0:
+            reasons.append("一条决策行都没有（轨迹形状不对：决策行读不出来）")
+        if not self.policy_seat:
+            reasons.append("没有任何 (策略, 座位) 记录 —— 座位/对手配额无从审计")
         sd = self.seat_deviation()
         if sd > SEAT_TOL:
             reasons.append(f"座位偏差 {sd:.3%} > {SEAT_TOL:.0%}")
-        cv = self.opponent_cv()
-        if cv > OPP_CV_TOL:
-            reasons.append(f"对手配额 CV {cv:.1%} > {OPP_CV_TOL:.0%}")
-        if self.games == 0:
-            reasons.append("没有赛事记录（跑的是评测采样轨迹？）")
+        if self.expected:
+            got = self.seat_games()
+            bad = [f"{p}: {got.get(p, 0)} != {n}" for p, n in self.expected.items()
+                   if got.get(p, 0) != n]
+            extra = [f"{p}: {got[p]}（清单里没写）" for p in got if p not in self.expected]
+            if bad or extra:
+                reasons.append("与 --expect 的配席不符（座位场）：" + "；".join(bad + extra))
+        if self.equal_shares:
+            cv = self.opponent_cv()
+            if cv > OPP_CV_TOL:
+                reasons.append(f"对手配额 CV {cv:.1%} > {OPP_CV_TOL:.0%}")
         return not reasons, reasons
 
     def to_json(self) -> dict[str, Any]:
         ok, why = self.verdict()
-        return {"games": self.games, "files": self.files, "decisions": self.decisions,
+        return {"games": self.games, "rounds": self.rounds, "files": self.files,
+                "decisions": self.decisions,
                 "seat_deviation": self.seat_deviation(), "opponent_cv": self.opponent_cv(),
-                "policy_seat": self.policy_seat, "dealer": self.dealer, "kyoku": self.kyoku,
+                "policy_seat": self.policy_seat, "policy_seat_games": self.policy_seat_games,
+                "seat_games": self.seat_games(),
+                "dealer": self.dealer, "kyoku": self.kyoku,
                 "outcomes": self.outcomes, "balanced": ok, "reasons": why,
+                "expect": self.expected, "equal_shares": self.equal_shares,
                 "thresholds": {"seat": SEAT_TOL, "opponent_cv": OPP_CV_TOL}}
 
 
-def balance_report(run_dir: str | Path, *, limit_files: int | None = None) -> BalanceReport:
+def balance_report(run_dir: str | Path, *, limit_files: int | None = None,
+                   expect: dict[str, int] | None = None,
+                   equal_shares: bool = False) -> BalanceReport:
     """扫一轮采集的轨迹，统计场外因素（设计 §7.5 的表）。
 
-    ⚠ 只认 `type == "hand"` 的账目行做赛事/结局统计；决策行的 `policy` + `seat` 用来建
-    "这一场哪个座位是谁"的映射（采集轨迹里策略是固定的 4 个 spec）。
+    ⚠ 决策行的判据是 `type == "decision"`（**或没有 `type` 的老形状**）—— 2026-09-27 只认了后者，
+    于是一整轮真轨迹被统计成"0 决策"，座位/对手配额全是 0、结论假绿。`verdict()` 现在把
+    "读到东西了没有"也当闸门。
+
+    @param expect 本轮**声明的配席**（策略 → 座位数，例如 `{"net:..": 1, "teacher": 2, "random": 1}`）；
+        给了就逐项核对实际场次，配错即判不均衡
+    @param equal_shares 四个座位本就该等分时才用 `opponent_cv` 判对手配额
+        （`A,B,C,D` 或 2+2 配对）；1+2+1 这种**刻意不对称**的阵容不该被 CV 判红
     """
-    rep = BalanceReport()
+    rep = BalanceReport(expected=dict(expect or {}), equal_shares=bool(equal_shares))
     files = sorted(Path(run_dir).glob("g*.jsonl"))
     if limit_files:
         files = files[:limit_files]
@@ -217,7 +268,7 @@ def balance_report(run_dir: str | Path, *, limit_files: int | None = None) -> Ba
                 except json.JSONDecodeError:
                     continue
                 typ = row.get("type")
-                if typ is None:                                  # 决策行
+                if typ in (None, "decision"):                    # 决策行（两种形状都认）
                     rep.decisions += 1
                     pol = row.get("policy")
                     seat = row.get("seat")
@@ -228,6 +279,7 @@ def balance_report(run_dir: str | Path, *, limit_files: int | None = None) -> Ba
                     rep.policy_seat[str(pol)][int(seat)] += 1
                 elif typ == "hand":
                     rep.games += 1
+                    rep.rounds += 1
                     rnd = row.get("round") or {}
                     kyoku = int(rnd.get("kyoku", 1))
                     rep.kyoku[f"{rnd.get('bakaze', '?')}{kyoku}"] = \
@@ -240,11 +292,15 @@ def balance_report(run_dir: str | Path, *, limit_files: int | None = None) -> Ba
                            "agari_ron" if row.get("agari") else
                            "abortive" if row.get("abortive") else "ryuukyoku")
                     rep.outcomes[key] = rep.outcomes.get(key, 0) + 1
+        # 一个文件 = 一场：把这一场四个座位上的策略记成"座位场"（配席的正确单位）
+        for _seat, _pol in seat_of.items():
+            rep.policy_seat_games.setdefault(_pol, {}).setdefault(_seat, 0)
+            rep.policy_seat_games[_pol][_seat] += 1
     return rep
 
 
-def write_balance(run_dir: str | Path, out: str | Path | None = None) -> Path:
-    rep = balance_report(run_dir)
+def write_balance(run_dir: str | Path, out: str | Path | None = None, **kw) -> Path:
+    rep = balance_report(run_dir, **kw)
     out = Path(out) if out else Path(run_dir) / "balance.json"
     out.write_text(json.dumps(rep.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
     return out

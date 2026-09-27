@@ -1790,7 +1790,7 @@ except v4_spec.ContractError:
 _run = scratch("v4-bc-run")
 _ptbase = dict(data=str(_v4src / "ds"), epochs=1, batch=2, eval_batch=2, lr=1e-3, max_steps=1,
                seed=7, threads=1, device="cpu", stage_a=0.25, stage_b=0.35, head_lr_mult=3.0,
-               mask_frac=0.0, ssl_weight=0.2)
+               mask_frac=0.0, ssl_weight=0.2, stage_c_lr_mult=1.0, rwr_beta=0.0)
 _a = v4_pt.train(argparse.Namespace(**{**_ptbase, "label": "v4-selfcheck-a"}))
 _b = v4_pt.train(argparse.Namespace(**{**_ptbase, "label": "v4-selfcheck-b"}))
 eq("v4 预训练：同种子两次的 history 逐字段相同",
@@ -1914,19 +1914,93 @@ ok(bool((_hg >= 0).all()), "v4：值头软标签非负（不会造出负概率�
 ok(_torch.equal(_v4m(**_x, mask=None)["policy"][:, 0], _v4m(**_x, mask=None)["policy"][:, 0]),
    "v4：前向是确定性的（无 dropout）—— 红证①与判据④都依赖这条")
 
+# ---- P3 开局：学生掩码（`--student`）+ 回报列（`delta`）+ RWR 权重（2026-09-27）------------
+_std = "net:tools/build/x/net.bin#1.0"
+_sp_src = scratch("v4-sp-src")
+for _g in range(2):
+    _jl = _sp_src / f"g{_g}.jsonl"
+    _sp_rows = []
+    for _i in range(4):
+        _legal = list(_v4obs["legal"])[:2]
+        _obs = dict(_v4obs, v=3, seat=_i % 4, legal=_legal)
+        # 一半座位是"学生"、一半是 teacher —— 掩码的判据就是这 1:1
+        _sp_rows.append({"type": "decision", "game": _g, "hand_no": 1, "step": _i, "seat": _i % 4,
+                         "policy": _std if _i % 2 == 0 else "teacher", "kind": "turn",
+                         "legal": _legal, "chosen": _legal[_i % 2], "chosen_index": _i % 2,
+                         "hand_delta": [1000 * (_i - 2), -1000 * (_i - 2), 0, 0],
+                         "placement": [1, 2, 3, 4],
+                         "final_scores": [26000, 25000, 24000, 25000], "obs": _obs})
+    with _jl.open("w", encoding="utf-8") as _fh:
+        for _r in _sp_rows:
+            _fh.write(json.dumps(_r, ensure_ascii=False) + "\n")
+        _fh.write(json.dumps({"type": "game", "game": _g, "seed": 1, "policies": ["teacher"] * 4,
+                              "start_score": 25000, "final_scores": [26000, 25000, 24000, 25000],
+                              "placement": [1, 2, 3, 4]}) + "\n")
+    write_sidecar(_jl, [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(4)])
+_v4sp = v4_ds.build(_sp_src, _sp_src / "ds", val_frac=0.5, split_seed=0, aux=False, quiet=True,
+                    student=_std)
+_sp = v4_ds.load_split(_sp_src / "ds", "train")
+ok(_sp["is_student"] is not None and _sp["delta"] is not None,
+   "P3 数据集：`--student` 写出 `is_student`，且 `delta`（回报）列在")
+_lab = _sp["meta"].get("student")
+eq("P3 数据集：meta 记下学生策略串", _lab, _std)
+_is = np.asarray(_sp["is_student"])
+ok(0 < int(_is.sum()) < _is.size, "P3 数据集：学生掩码不全是 1 也不全是 0（真遮罩）",
+   f"学生 {int(_is.sum())}/{_is.size}")
+_dl = np.asarray(_sp["delta"])
+ok(int(np.abs(_dl).max()) > 0, "P3 数据集：`delta` 读了轨迹的 `hand_delta`（非全 0）",
+   f"max|delta|={int(np.abs(_dl).max())}")
+# 不给 `--student` ⇒ 全部算学生（老行为不变）
+_v4all = v4_ds.build(_sp_src, _sp_src / "ds2", val_frac=0.5, split_seed=0, aux=False, quiet=True)
+eq("P3 数据集：不给 `--student` 时全部算学生（老行为）",
+   int(np.asarray(v4_ds.load_split(_sp_src / "ds2", "train")["is_student"]).sum()),
+   int(v4_ds.load_split(_sp_src / "ds2", "train")["is_student"].size))
+# RWR 权重：与 `delta` 单调、上下夹在 exp(±2)
+_k, _w = v4_pt._row_weights({"is_student": _is, "delta": _dl}, np.arange(_is.size), 8.0, "cpu")
+ok(_k is not None and _w is not None, "P3 训练：`_row_weights` 同时给出掩码与权重")
+_wv = _w.numpy()
+ok(bool((_wv >= np.exp(-2.0) - 1e-6).all() and (_wv <= np.exp(2.0) + 1e-6).all()),
+   "P3 训练：RWR 权重夹在 exp(±2) 内（β=8 千点）",
+   f"min={_wv.min():.3f} max={_wv.max():.3f}")
+_ord = np.argsort(_dl)
+ok(bool((np.diff(_wv[_ord]) >= -1e-6).all()), "P3 训练：RWR 权重随本小局收支单调不降")
+eq("P3 训练：β<=0 时不加权（权重为 None ⇒ 损失里就是 mean）", v4_pt._row_weights(
+    {"is_student": _is, "delta": _dl}, np.arange(_is.size), 0.0, "cpu")[1], None)
+# 负向：`--student` 与轨迹里的 `policy` 对不上 ⇒ 学生行全 0 ⇒ `train()` 必须**报错退出**
+_v4zero = v4_ds.build(_sp_src, _sp_src / "ds0", val_frac=0.5, split_seed=0, aux=False, quiet=True,
+                      student="net:这个串和轨迹里的对不上")
+eq("P3 数据集：对不上的 `--student` ⇒ `is_student` 全 0", int(np.asarray(
+    v4_ds.load_split(_sp_src / "ds0", "train")["is_student"]).sum()), 0)
+try:
+    v4_pt.train(argparse.Namespace(**{**_ptbase, "data": str(_sp_src / "ds0"),
+                                      "label": "v4-selfcheck-stu0"}))
+    ok(False, "P3 训练：学生行占比 0 必须报错（否则就是在训对手/老师的动作）")
+except SystemExit as _e:
+    ok("学生行占比 0" in str(_e), "P3 训练：学生行占比 0 被硬拒 ✓", str(_e)[:70])
+
 # 场外均衡审计（设计 §7.5）—— 含负向对照
 _bdir = scratch("v4-balance")
 _pols = ["pa", "pb", "pc", "pd"]
 
 
-def _write_run(d, *, skew: bool) -> None:
-    with (d / "g0.jsonl").open("w", encoding="utf-8") as fh:
-        for game in range(8):
+def _write_run(d, *, skew: bool, real_shape: bool = True) -> None:
+    """写一轮假的采集轨迹（**一场一个文件**，与真轨迹同构）。
+
+    ⚠ 两条教训（2026-09-27）：
+    ① 决策行要带 `"type":"decision"`（真轨迹的形状）—— 老形状会让审计在真数据上一条决策都读不到；
+    ② **一场 = 一个文件**：座位→策略的映射每场固定、跨场轮转。把 8 场塞进一个文件时，
+       审计只能看到"最后一场"的配席 ⇒ 座位偏差算出 75% 的假红（夹具形状不对，判据就不可信）。
+    """
+    for game in range(8):
+        with (d / f"g{game}.jsonl").open("w", encoding="utf-8") as fh:
             for seat in range(4):
                 pol = _pols[0] if (skew and seat >= 2) else _pols[(seat + game) % 4]
-                fh.write(json.dumps({"game": game, "seat": seat, "policy": pol,
-                                     "legal": ["discard:1m"]}) + "\n")
-            fh.write(json.dumps({"type": "hand", "game": game, "hand_no": 0, "round": {"bakaze": "E", "kyoku": 1},
+                row = {"game": game, "seat": seat, "policy": pol, "legal": ["discard:1m"]}
+                if real_shape:
+                    row["type"] = "decision"
+                fh.write(json.dumps(row) + "\n")
+            fh.write(json.dumps({"type": "hand", "game": game, "hand_no": 0,
+                                 "round": {"bakaze": "E", "kyoku": 1},
                                  "agari": True, "tsumo": True, "abortive": False}) + "\n")
 
 
@@ -1934,11 +2008,32 @@ _write_run(_bdir, skew=False)
 _rep = v4_harness.balance_report(_bdir)
 _ok_bal, _why = _rep.verdict()
 ok(_ok_bal, f"v4 均衡：逐座位轮转的一轮判为均衡（座位偏差 {_rep.seat_deviation():.2%}，CV {_rep.opponent_cv():.1%}）")
-eq("v4 均衡：赛事计数（8 场）", _rep.games, 8)
+eq("v4 均衡：小局计数（8 局）", _rep.rounds, 8)
+eq("v4 均衡：决策行按**真形状**（`type=decision`）读到了", _rep.decisions, 32)
+ok(bool(_rep.policy_seat), "v4 均衡：配席统计非空（读到 (策略, 座位) 了）")
 eq("v4 均衡：结局分类（自摸）", _rep.outcomes.get("agari_tsumo"), 8)
 _rep_json = _rep.to_json()
-ok({"seat_deviation", "opponent_cv", "balanced", "reasons"} <= set(_rep_json),
+ok({"seat_deviation", "opponent_cv", "balanced", "reasons", "rounds", "expect"} <= set(_rep_json),
    "v4 均衡：报告字段齐全（写 league/<label>/balance.json）")
+
+# 负向对照 ①：决策行形状不认识（老形状也认，但**空目录**必须判不均衡而不是假绿）
+_bempty = scratch("v4-balance-empty")
+(_bempty / "g0.jsonl").write_text(json.dumps({"type": "hand", "game": 0, "hand_no": 0,
+                                              "round": {"bakaze": "E", "kyoku": 1}}) + "\n",
+                                  encoding="utf-8")
+_rep_e = v4_harness.balance_report(_bempty)
+_ok_e, _why_e = _rep_e.verdict()
+ok(not _ok_e and any("决策行" in w for w in _why_e),
+   f"v4 均衡负向对照：只有小局行、没有决策行 ⇒ 判不均衡（{_why_e}）")
+
+# 负向对照 ②：`--expect` 声明了配席但实际不符 ⇒ 判不均衡
+_rep_x = v4_harness.balance_report(_bdir, expect={_pols[0]: 999})
+ok_x, _why_x = _rep_x.verdict()
+ok(not ok_x and any("expect" in w for w in _why_x),
+   f"v4 均衡负向对照：配席与 `--expect` 不符 ⇒ 判不均衡（{_why_x}）")
+_rep_ok = v4_harness.balance_report(_bdir, equal_shares=True)
+eq("v4 均衡：四策略等分时 CV 判据下的场次数", sorted(
+    {p: sum(v.values()) for p, v in _rep_ok.policy_seat.items()}.values()), [8, 8, 8, 8])
 
 _bskew = scratch("v4-balance-skew")
 _write_run(_bskew, skew=True)

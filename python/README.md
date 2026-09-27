@@ -180,6 +180,30 @@ java -cp "server\build\mahjong-server.jar;tools\build" tools.V4Probe --bench too
 > 远高于设计预算（≤2 + ≤1.5 ms）。**当 bot 可以，当自对弈采集主力太慢**；下一轮做增量事件缓存
 > （`docs/TRAINING-V4.md` §P5）。
 
+**P3 开局：自对弈 + 回报加权（RWR）一轮**（口径与实测见 `docs/TRAINING-V4.md`「第四轮」）：
+
+```powershell
+# ① 采集：学生 1 席（带温度探索）+ teacher 2 席 + random 1 席；**要标签侧就必须用 Java 生产者**
+java -jar server\build\mahjong-server.jar --selfplay 200 --workers 12 --rotate --aux `
+     --policy "net:tools/build/<上一代>\net.bin#1.0,teacher,teacher,random" --seed 20260929 --out S:\mahjong-training\raw\v4-sp-002
+java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-sp-002 --workers 12
+# ② 数据集：`--student` 的策略串要与轨迹里的 `policy` 逐字相同（写 `is_student` + `delta` 两列）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-sp-002 `
+     S:\mahjong-training\compact\v4-sp-002 --student "net:tools/build/<上一代>/net.bin#1.0" --aux --val-frac 0.10
+# ③ 训练：学生掩码 + RWR(β=8 千点) + 阶段 c 降 lr + 关掉饱和的掩码重建
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-002 `
+     --label v4-p3-001 --epochs 10 --stage-a 0.25 --stage-b 0.35 --stage-c-lr-mult 0.1 --rwr-beta 8 --mask-frac 0
+# ④ 场外均衡审计（判据⑩；`--expect` 的单位是**座位场** = 每局座位数 × 场数）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 balance --dir S:\mahjong-training\raw\v4-sp-002 `
+     --expect "net:tools/build/<上一代>/net.bin#1.0=200,teacher=400,random=200"
+# ⑤ 评估：2+2 同牌山配对 + 配对显著性（正 = 新网更好）
+trainer\build\trainer.exe selfplay 800 --workers 24 --rotate `
+     --policy "net:tools\build\<新代>\net.bin,net:tools\build\<新代>\net.bin,teacher,teacher" `
+     --seed 777001 --out S:\mahjong-training\raw\eval-p3-vs-teacher
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-p3-vs-teacher `
+     --metric rank_points --labels "net:tools\build\<新代>,teacher"
+```
+
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
 
 | 段 | 维度 | 由谁算 |

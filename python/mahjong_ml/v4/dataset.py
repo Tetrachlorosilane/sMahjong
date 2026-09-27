@@ -134,6 +134,11 @@ _COLUMNS: dict[str, tuple] = {
     "seat": (np.int8, ()),
     "game": (np.int32, ()),
     "hand_no": (np.int16, ()),
+    # ---- 自对弈改进（P3 开局）用的两列（2026-09-27 加；老数据集没有这两列，`load_split` 给 None）----
+    # `is_student`：这一行的动作是不是**本轮要训练的那一代**做的（`build --student <策略串>` 判定）
+    "is_student": (np.int8, ()),
+    # `delta`：本小局该家的收支（点）—— RWR/优势加权的回报来源（轨迹里 `hand_delta` 是四家数组）
+    "delta": (np.int32, ()),
     "aux_opp_hand": (np.uint8, (3, 34)),
     "aux_opp_tenpai": (np.uint8, (3,)),
     "aux_opp_dealin": (np.uint8, (3,)),
@@ -154,7 +159,8 @@ def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
     return out
 
 
-def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool) -> None:
+def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
+                student: str | None = None) -> None:
     """把一个文件的**前 `take` 条**决策写进 `mm` 的 `[i0, i0+take)` 行。
 
     ⚠ 串行与并行**共用这一份行逻辑**（并行只是把不同文件分给不同进程，各写各的连续行区间）
@@ -228,6 +234,14 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool) 
             mm["seat"][i] = seat
             mm["game"][i] = int(row.get("game", -1))
             mm["hand_no"][i] = int(row.get("hand_no", -1))
+            # ① `is_student`：这一行的动作是不是**本轮被训练的那一代**做的（v3 的 `--student` 口径）。
+            #    ⚠ 不遮的后果是**静默**的：把对手网/老师的动作也算进策略损失（v3 实测学生行占比
+            #    0.75 而非 0.25，指标照样好看）。
+            mm["is_student"][i] = 1 if (student is None or row.get("policy") == student) else 0
+            # ② `delta`：本小局该家的收支（点）—— RWR / 优势加权的**唯一回报来源**（事后回填）。
+            #    缺字段记 0（那这一行的权重就是 1，等于回到纯模仿）。
+            hd = row.get("hand_delta")
+            mm["delta"][i] = int(hd[seat]) if isinstance(hd, list) and 0 <= seat < len(hd) else 0
             if ax is not None:
                 mm["aux_opp_hand"][i] = axcols["opp_hand"][j]
                 mm["aux_opp_tenpai"][i] = axcols["opp_tenpai"][j]
@@ -276,10 +290,11 @@ def _spawn(jobs: list[list[str]], log_dir: Path) -> None:
 
 def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split_seed: int = 0,
           aux: bool = False, limit_files: int | None = None, workers: int = 0,
-          quiet: bool = False) -> dict:
+          quiet: bool = False, student: str | None = None) -> dict:
     """轨迹目录 → v4 数据集（`train.*.npy` / `val.*.npy` 各一组列 + `meta.json`）。
 
     @param aux 是否要求并读取标签侧 `g*.aux.npz`（信念/危险头的监督来源）
+    @param student 本轮要训练的那一代的**确切策略串**（写 `is_student` 列；None = 全部算学生）
     @param workers 并行进程数（0 = 自动，≤75% 的核、上限 12）；**产物与串行逐字节相同**是判据
         （各进程只写自己那段连续行区间，行逻辑只有 `_write_file` 一份）
     """
@@ -327,13 +342,14 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
             tmp.mkdir(parents=True, exist_ok=True)
             req.write_text(json.dumps({
                 "out_dir": str(out_dir), "tag": tag, "lmax": lmax, "aux": bool(aux),
+                "student": student,
                 "chunks": [[[str(f), int(i0), int(take)] for f, i0, take in ch] for ch in chunks],
             }, ensure_ascii=False), encoding="utf-8")
             _spawn([["_chunk", str(req), str(k)] for k in range(len(chunks))], tmp / "logs")
             shutil.rmtree(tmp, ignore_errors=True)
         else:
             for f, i0, take in tasks:
-                _write_file(mm, f, i0, take, lmax=lmax, aux=aux)
+                _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student)
             for m in mm.values():
                 m.flush()
         return {"files": [f.name for f in part], "decisions": n, "lmax": lmax}
@@ -356,6 +372,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "train_files": train["files"], "val_files": val["files"],
         "lmax": max(train["lmax"], val["lmax"]),
         "val_frac": val_frac, "split_seed": split_seed,
+        "student": student,
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -383,7 +400,8 @@ def load_split(out_dir: str | Path, split: str) -> dict:
                          f" —— 注册表变了，重建数据集")
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
-                 "placement", "seat", "game", "hand_no", "aux_opp_hand", "aux_opp_tenpai",
+                 "placement", "seat", "game", "hand_no", "is_student", "delta",
+                 "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"
         out[name] = np.load(p, mmap_mode="r") if p.is_file() else None
@@ -404,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--split-seed", type=int, default=0)
     ap.add_argument("--aux", action="store_true", help="读取标签侧 g*.aux.npz（信念/危险头监督）")
     ap.add_argument("--limit-files", type=int, default=None, help="只取前 N 个轨迹文件（冒烟）")
+    ap.add_argument("--student", default=None,
+                    help="本轮要训练的那一代的**确切策略串**（写 `is_student` 列；缺省 = 全部算学生）")
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数（0 = 自动，≤75%% 的核、上限 12）；产物与串行逐字节相同")
     args = ap.parse_args(argv)
@@ -417,12 +437,13 @@ def main(argv: list[str] | None = None) -> int:
         n = int(np.load(out_dir / f"{tag}.nlegal.npy", mmap_mode="r").shape[0])
         mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+")
         for f, i0, take in tasks:
-            _write_file(mm, f, i0, take, lmax=int(req["lmax"]), aux=bool(req["aux"]))
+            _write_file(mm, f, i0, take, lmax=int(req["lmax"]), aux=bool(req["aux"]),
+                        student=req.get("student"))
         for m in mm.values():
             m.flush()
         return 0
     build(args.src, args.out, val_frac=args.val_frac, split_seed=args.split_seed, aux=args.aux,
-          limit_files=args.limit_files, workers=args.workers)
+          limit_files=args.limit_files, workers=args.workers, student=args.student)
     return 0
 
 

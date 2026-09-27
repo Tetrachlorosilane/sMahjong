@@ -1269,6 +1269,36 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 - ⚠ **性能**（实测 1.36M 参数、单线程）：特征 ≈4.6 ms + 前向 ≈40 ms / 决策 —— 远高于设计里的
   "≤2 ms + ≤1.5 ms"预算，**增量缓存（事件塔复用）与稠密循环优化是下一轮的事**（`docs/TRAINING-V4.md` §P5）。
 
+**v4 数据集与 P3 训练（自对弈改进，2026-09）**：
+
+```bash
+# ① 采集（**要标签侧就必须用 Java 生产者**：C++ 的 --aux 显式报错）
+java -jar mahjong-server.jar --selfplay 200 --workers 12 --rotate --aux \
+     --policy "net:<上一代 net.bin>#1.0,teacher,teacher,random" --seed 20260929 --out <raw>
+java -jar mahjong-server.jar --features <raw> --workers 12
+# ② 数据集：`--student` 写 `is_student` 列（策略串必须与轨迹里的 `policy` **逐字相同**）
+python -m mahjong_ml.v4.dataset <raw> S:\mahjong-training\compact\<label> \
+     --student "net:<上一代 net.bin>#1.0" --aux --val-frac 0.10
+# ③ 训练：学生掩码 + RWR（β 千点）+ 阶段 c 降 lr；SSL 掩码重建可关（实测饱和）
+python -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\<label> --label <ckpt> \
+     --stage-a 0.25 --stage-b 0.35 --stage-c-lr-mult 0.1 --rwr-beta 8 --mask-frac 0
+# ④ 场外均衡审计（判据⑩；**超阈的那一轮不得当判据**）
+python -m mahjong_ml.v4 balance --dir <raw> --expect "net:...=200,teacher=400,random=200"
+# ⑤ 评估：2+2 同牌山配对（A 两席 / B 两席，逐场 rotate）+ 配对显著性
+trainer\build\trainer.exe selfplay 800 --workers 24 --rotate \
+     --policy "net:<新 net.bin>,net:<新 net.bin>,teacher,teacher" --seed 777001 --out <eval>
+python -m mahjong_ml.eval <eval> --metric rank_points --labels "net:<新>,teacher"
+```
+
+- **数据集两列（v4 起）**：`is_student`（这一行的动作是不是本轮要训练的那一代做的）与
+  `delta`（本小局该家收支，点）—— 前者遮住**对手/老师的动作**（不遮就是静默失真：实测学生行占比
+  26.1% 而非 100%），后者是 RWR 的回报来源。
+- **RWR 只作用于 `policy` / `effect`**：`danger` 是**标定**目标（放铳概率），按回报加权会把"赢的局"
+  （多半没放铳）放大 ⇒ 概率被系统性压低；`value/placement/belief_*` 是状态级头，不吃掩码与权重。
+- **均衡审计的口径**：`--expect` 的单位是**座位场**（每局座位数 × 场数），不是决策行数（一个策略打多少手
+  取决于它的行为，实测 teacher 两席只拿到 1.95 倍的决策）；`--equal-shares` 只在"四席本就该等分"时开
+  （1+2+1 这种刻意不对称的阵容不该被对手配额 CV 判红）。
+
 **P5b 混合（teacher 先验）**：策略串写成 `net:<权重文件>@<α>`（α 缺省 0 = 纯网络），
 语义是 `argmax(student(obs) + α · 1[该候选 == 老师在本信息集的动作])`。
 

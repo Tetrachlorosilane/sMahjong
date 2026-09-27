@@ -123,19 +123,63 @@ def _batch(data: dict, idx: np.ndarray, device: str) -> dict[str, torch.Tensor]:
     return b
 
 
+def _row_weights(data: dict, idx, beta: float, device: str):
+    """逐行权重 = `is_student` 掩码 × RWR 权重（`exp(clip(delta/1000/β, -2, 2))`）。
+
+    为什么这两样必须一起给（见 `docs/TRAINING-V4.md` §「P3 开局」）：
+    ① **掩码**：自对弈轨迹里四条座位的动作都在，不加掩码就会把**对手网/老师的动作算进策略损失**
+       （v3 实测学生行占比 0.75 而非 0.25，静默失真）；
+    ② **权重**：纯模仿只会复现当前水平的动作分布，`exp(回报/β)` 才是"往赢的打法偏"的那一步
+       （RWR / AWR-lite：没有 critic 基线，就用**本小局收支**当回报 —— 这是它与正式 PPO 的差距，
+       也是这一轮刻意选的最小可证版本）。
+
+    @param beta 温度（**千点**为单位，例如 8 = 8000 点）；`<= 0` = 不加权（全 1）
+    """
+    keep = None
+    if data.get("is_student") is not None:
+        v = np.asarray(data["is_student"][idx], dtype=np.float32)
+        if (v == 0).any():
+            keep = torch.from_numpy(v).to(device)
+    w = None
+    if beta and beta > 0 and data.get("delta") is not None:
+        d = np.asarray(data["delta"][idx], dtype=np.float32) / 1000.0        # 点 → 千点
+        adv = np.clip(d / float(beta), -2.0, 2.0)
+        w = torch.from_numpy(np.exp(adv).astype(np.float32)).to(device)
+    return keep, w
+
+
 def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  weights: dict[str, float] | None = None,
-                 ssl: tuple | None = None) -> tuple[torch.Tensor, dict[str, float]]:
+                 ssl: tuple | None = None,
+                 row_keep: torch.Tensor | None = None,
+                 row_w: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
     @param ssl     `(ssl_head, mask, target)` —— 掩码事件重建（P1 pretext）；不传就不算
+    @param row_keep 逐行掩码（学生行 = 1 / 对手行 = 0）—— **只作用于动作相关的头**
+        （`policy` / `effect` / `danger`：它们的标签是"谁动了手、动了之后怎样"）
+    @param row_w   逐行权重（RWR）—— 与 `row_keep` 同一适用范围；
+        ⚠ 状态级头（`value` / `placement` / `belief_*`）**不吃**掩码与权重：那些标签讲的是"这个局面"，
+        与四条座位里谁动的手无关（吃了反而会把"对手造成的局面"也往学生的回报上算）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
     total = torch.zeros((), device=b["label"].device)
+    eff = row_keep if row_w is None else (row_w if row_keep is None else row_keep * row_w)
 
-    l_policy = F.cross_entropy(out["policy"], b["label"])
+    def reduce_row(per_row: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:
+        """逐行损失 → 标量（有掩码/权重时按权重归一；没有时就是 mean，与原行为逐位相同）。
+
+        @param w 用哪份逐行因子：缺省 = `eff`（掩码 × RWR）；只传掩码 = 不吃 RWR。
+        """
+        use = eff if w is None else w
+        if use is None:
+            return per_row.mean()
+        denom = use.sum().clamp_min(1e-6)
+        return (per_row * use).sum() / denom
+
+    l_policy = reduce_row(F.cross_entropy(out["policy"], b["label"], reduction="none"))
     parts["policy"] = float(l_policy.detach())
     total = total + w["policy"] * l_policy
 
@@ -169,15 +213,22 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         rows = torch.arange(b["label"].shape[0], device=b["label"].device)
         d = out["danger"][rows, b["label"]]                    # [B,4]
         any_deal = (b["opp_dealin"].sum(-1) > 0).float()
-        l_d = (F.binary_cross_entropy_with_logits(d[:, :3], b["opp_dealin"])
-               + F.binary_cross_entropy_with_logits(d[:, 3], any_deal)) / 2.0
+        per_row = (F.binary_cross_entropy_with_logits(d[:, :3], b["opp_dealin"], reduction="none")
+                   .mean(-1)
+                   + F.binary_cross_entropy_with_logits(d[:, 3], any_deal, reduction="none")) / 2.0
+        # ⚠ 危险头**只吃掩码、不吃 RWR 权重**：它标定的是"打这张的放铳概率"，
+        #   按回报加权会把"赢的局"（多半没放铳）放大 ⇒ 概率被系统性压低（实测 danger 损失
+        #   0.48 → 0.68 一去不回）。策略/牌效才该往高回报的行偏。
+        l_d = reduce_row(per_row, row_keep)
         parts["danger"] = float(l_d.detach())
         total = total + w["danger"] * l_d
     if b.get("effect") is not None:
         scale = torch.tensor(EFFECT_SCALE, device=b["effect"].device).view(1, 1, 3)
         tgt = b["effect"] / scale
         m = b["mask"].unsqueeze(-1).expand_as(tgt)
-        l_e = F.mse_loss(out["effect"][m], tgt[m])
+        per_row = (((out["effect"] - tgt) ** 2 * m).sum(dim=(1, 2))
+                   / m.sum(dim=(1, 2)).clamp_min(1.0))
+        l_e = reduce_row(per_row)
         parts["effect"] = float(l_e.detach())
         total = total + w["effect"] * l_e
     if ssl is not None:
@@ -192,8 +243,13 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
 
 @torch.no_grad()
 def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
-             ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0) -> dict:
-    """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率。"""
+             ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0,
+             row_keep=None) -> dict:
+    """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率。
+
+    @param row_keep 只在**这些行**上统计一致率（自对弈数据里 = 学生那一代的行；
+        不给就统计全部行）。⚠ 损失仍在全部行上算（那是"这一局的局面"的损失，与谁动的手无关）。
+    """
     model.eval()
     n = int(data["nlegal"].shape[0])
     types = data["meta"].get("action_types", [])
@@ -222,13 +278,23 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
             ssl_hit += int((pred[mask_rows] == target[mask_rows]).sum())
             ssl_n += int(mask_rows.sum())
         pred = out["policy"].argmax(dim=-1)
-        hit += int((pred == b["label"]).sum())
-        first_legal += int((b["label"] == 0).sum())
-        tot += idx.size
+        sel = None
+        if row_keep is not None:
+            sel = torch.from_numpy(np.asarray(row_keep[idx], dtype=bool)).to(pred.device)
+            if not bool(sel.any()):
+                continue
+        def take(t: torch.Tensor) -> torch.Tensor:
+            return t if sel is None else t[sel]
+        hit += int((take(pred) == take(b["label"])).sum())
+        first_legal += int((take(b["label"]) == 0).sum())
+        tot += int(take(b["label"]).numel())
         # 按动作类型分解（教师偏爱哪些类型、模型学会了没有）—— 类型来自数据集里的 `label_type`
         if data.get("label_type") is not None:
             tids = np.asarray(data["label_type"][idx], dtype=np.int64)
-            for tid, p, y in zip(tids.tolist(), pred.tolist(), b["label"].tolist()):
+            keep_list = [True] * len(tids) if sel is None else sel.cpu().numpy().tolist()
+            for tid, p, y, kp in zip(tids.tolist(), pred.tolist(), b["label"].tolist(), keep_list):
+                if not kp:
+                    continue
                 name = types[tid] if 0 <= tid < len(types) else "?"
                 by_type.setdefault(name, [0, 0])
                 by_type[name][1] += 1
@@ -305,9 +371,29 @@ def train(args) -> dict:
     n = int(train_data["nlegal"].shape[0])
     steps = max(1, min(args.max_steps or 10 ** 9, n // args.batch))
     total_steps = steps * args.epochs
+    # 学生掩码 + RWR 权重（P3 开局；见 `_row_weights`）。⚠ 掩码/权重**只在动作相关的头上生效**。
+    # ⚠ `getattr` 取缺省：`rwr_beta` 是后加的可选开关，而 `train()` 也会被自检/脚本直接用
+    #   `Namespace(**{...})` 调用（那种调用不该因为少一个可选字段就炸）
+    rwr_beta = float(getattr(args, "rwr_beta", 0.0) or 0.0)
+    keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
+    if rwr_beta > 0 and w_tr is None:
+        raise SystemExit("--rwr-beta > 0 但数据集里没有 `delta` 列（老数据集）—— "
+                         "重新 `python -m mahjong_ml.v4.dataset build …`（它现在会写 `delta`/`is_student`）")
+    nv = int(val_data["nlegal"].shape[0])
+    keep_va, _ = _row_weights(val_data, np.arange(nv), 0.0, "cpu")
+    frac_tr = float(keep_tr.mean()) if keep_tr is not None else 1.0
+    frac_va = float(keep_va.mean()) if keep_va is not None else 1.0
+    if keep_tr is not None and frac_tr <= 0.0:
+        raise SystemExit("学生行占比 0 —— `dataset build --student` 的策略串与轨迹里的 "
+                         "`policy` 字段没对上（这是静默失真的源头，宁可报错）")
+    if w_tr is not None:
+        print(f"RWR：β={args.rwr_beta:g} 千点 → 权重 min={float(w_tr.min()):.3f} "
+              f"mean={float(w_tr.mean()):.3f} max={float(w_tr.max()):.3f}")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
-          f"{int(val_data['nlegal'].shape[0])} 条；lmax={meta['lmax']}；"
-          f"标签侧 {'有' if meta['has_aux'] else '无'}")
+          f"{nv} 条；lmax={meta['lmax']}；"
+          f"标签侧 {'有' if meta['has_aux'] else '无'}；"
+          f"学生行占比 训练 {frac_tr:.1%} / 验证 {frac_va:.1%}"
+          f"{'（`--student` 遮罩生效）' if keep_tr is not None else '（无掩码：全部行都算学生）'}")
     print(f"模型：{model.param_count():,} 参数（+SSL 头 {sum(p.numel() for p in ssl_head.parameters()):,}）；"
           f"device={device}；threads={threads}；seed={args.seed}")
     print(f"分阶段：a 策略+牌效（{int(args.stage_a * 100)}%）→ b 冻主干只训头"
@@ -352,7 +438,10 @@ def train(args) -> dict:
                 b["evt"] = evt_masked
                 ssl = (ssl_head, mask_rows, target)
             out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
-            loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl)
+            kb = None if keep_tr is None else keep_tr[idx].to(device)
+            wb = None if w_tr is None else w_tr[idx].to(device)
+            loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl,
+                                       row_keep=kb, row_w=wb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -365,8 +454,13 @@ def train(args) -> dict:
             gstep += 1
         ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
                       mask_frac=args.mask_frac)
+        ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va)
+                  if keep_va is not None else None)
         row = {"epoch": epoch, "stage_at_end": cur_stage, "train_loss": run / max(1, seen),
                "train_parts": {k: v / max(1, seen) for k, v in run_parts.items()},
+               "train_student_frac": frac_tr, "val_student_frac": frac_va,
+               "val_top1_student": (ev_stu["top1"] if ev_stu else None),
+               "val_top1_student_n": (ev_stu["n"] if ev_stu else None),
                **{f"val_{k}": v for k, v in ev.items() if k != "by_type"},
                "val_by_type": ev["by_type"]}
         history.append(row)
@@ -378,7 +472,8 @@ def train(args) -> dict:
               f"bt {ev.get('loss_belief_tenpai', float('nan')):.3f} "
               f"danger {ev.get('loss_danger', float('nan')):.3f} "
               f"effect {ev.get('loss_effect', float('nan')):.4f} "
-              f"ssl_acc {ev.get('ssl_acc', float('nan')):.3f}")
+              f"ssl_acc {ev.get('ssl_acc', float('nan')):.3f}"
+              + (f" | **学生行 top1 {ev_stu['top1']:.3f}**(n={ev_stu['n']})" if ev_stu else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
     if mon:
@@ -426,6 +521,10 @@ def main(argv: list[str] | None = None) -> int:
     #   所以 c 段的主干 lr 必须再降一档：这个倍率乘在 a/c 的基准 lr 上（缺省 1.0 = 老行为）。
     ap.add_argument("--stage-c-lr-mult", type=float, default=1.0,
                     help="阶段 c（联合微调）学习率相对 --lr 的倍率（塌了就调小，例如 0.1）")
+    # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
+    ap.add_argument("--rwr-beta", type=float, default=0.0,
+                    help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"
+                         "0 = 关闭（纯模仿）。⚠ 只作用于 policy/effect/danger")
     # P1 自监督：掩码事件重建
     ap.add_argument("--mask-frac", type=float, default=0.15, help="掩码多少比例的真实事件 token（0 = 关）")
     ap.add_argument("--ssl-weight", type=float, default=0.2, help="掩码重建损失权重")

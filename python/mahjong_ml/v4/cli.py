@@ -192,14 +192,33 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_balance(args: argparse.Namespace) -> int:
-    rep = harness.balance_report(args.dir, limit_files=args.limit)
+    expect = {}
+    for item in (args.expect or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            print(f"--expect 的项要写成 `<策略串>=<座位数>`：{item}")
+            return 2
+        name, n = item.rsplit("=", 1)
+        expect[name.strip()] = int(n)
+    rep = harness.balance_report(args.dir, limit_files=args.limit, expect=expect,
+                                 equal_shares=bool(args.equal_shares))
     out = Path(args.out) if args.out else None
     if out:
         out.write_text(json.dumps(rep.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
     j = rep.to_json()
-    print(f"场外均衡审计（{j['files']} 文件 / {j['games']} 局 / {j['decisions']} 决策）")
+    print(f"场外均衡审计（{j['files']} 文件 / {j['rounds']} 小局 / {j['decisions']} 决策）")
     print(f"  座位最大偏差 {j['seat_deviation']:.3%}（阈值 {harness.SEAT_TOL:.0%}）· "
-          f"对手配额 CV {j['opponent_cv']:.1%}（阈值 {harness.OPP_CV_TOL:.0%}）")
+          f"对手配额 CV {j['opponent_cv']:.1%}（阈值 {harness.OPP_CV_TOL:.0%}"
+          f"{'' if j['equal_shares'] else '，未按等分判'}）")
+    if j["seat_games"]:
+        print("  配席（座位场；`--expect` 用同一单位）：" + "；".join(
+            f"{p}={n}" for p, n in sorted(j["seat_games"].items())))
+    if j["policy_seat_games"]:
+        print("  逐座位：" + "；".join(
+            f"{p} " + "/".join(f"s{s}:{n}" for s, n in sorted(v.items()))
+            for p, v in sorted(j["policy_seat_games"].items())))
     print(f"  亲家分布 {j['dealer']}")
     print(f"  结局分布 {j['outcomes']}")
     print(f"⇒ {'均衡 ✓ 可用于判据' if j['balanced'] else '不均衡 ✗ 该轮不得用于判据：' + '；'.join(j['reasons'])}")
@@ -252,6 +271,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--dir", required=True)
     b.add_argument("--out", default=None)
     b.add_argument("--limit", type=int, default=None, help="只扫前 N 个轨迹文件（冒烟用）")
+    b.add_argument("--expect", default=None,
+                   help="本轮声明的配席（`策略串=座位数`，逗号分隔；例如 `teacher=2,random=1`）")
+    b.add_argument("--equal-shares", action="store_true",
+                   help="四个座位本就该等分时才用对手配额 CV 判红（1+2+1 这种别开）")
     b.set_defaults(fn=cmd_balance)
     args = ap.parse_args(argv)
     return args.fn(args)
