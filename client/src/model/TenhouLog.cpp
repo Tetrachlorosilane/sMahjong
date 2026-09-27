@@ -319,6 +319,8 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
         QStringList uraCodes;
         QVector<int> scores(4, 25000);
         QVector<int> settled(4, 25000);   // 本局「已结算到哪」：初值 = 本局起始点数板，每次结算后累加
+        QVector<int> riichiPaid(4, 0);    // 本局已扣的立直棒（判"持点不足 1000"要看扣完的余额）
+        int lastDrawTilesLeft = -1;       // 本巡摸完之后的活牌山（判"牌山不足 4 张"）
         QJsonArray result;
         bool hora = false;
         bool openingUsed = false;
@@ -340,6 +342,7 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                     }
                 }
                 settled = scores;   // 本局起始点数板 = 结算起点
+                riichiPaid = QVector<int>(4, 0);
                 sticks = e.body.value(QStringLiteral("round")).toObject()
                                  .value(QStringLiteral("riichi_sticks")).toInt(sticks);
                 if (doraCodes.isEmpty()) {
@@ -382,6 +385,8 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                 } else {
                     out.problems << QStringLiteral("bad_draw_tile");
                 }
+                // 本巡摸完之后还剩几张活牌 —— 复盘器用它判"这次立直合不合法"（见下面 riichi 分支）
+                lastDrawTilesLeft = e.body.value(QStringLiteral("tiles_left")).toInt(-1);
             } else if (ev == QLatin1String("discard") && seat >= 0 && seat < 4) {
                 const QString tile = e.body.value(QStringLiteral("tile")).toString();
                 const bool tsumogiri = e.body.value(QStringLiteral("tsumogiri")).toBool(false);
@@ -393,6 +398,27 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
                     continue;
                 }
                 if (riichi) {
+                    // ⚠ **M.League 与《天鳳》/《雀魂》在"能不能立直"上不同**（docs/日本麻将.md L382）：
+                    //   M.League 允许「剩余可摸的牌不到 4 张」或「持点不足 1000」时立直（服务端
+                    //   `rules.riichiMinTilesLeft/MinScore` 在 mleague 预设里都是 0），而天鳳/雀魂不允许。
+                    //   网页版复盘器（Mortal）按**天鳳规则**重放，遇到这种动作会**整份牌谱拒收**，
+                    //   而且**只有"被分析的那家"自己做了该动作时才报错**（症状：换一个座位分析就正常）
+                    //   —— 2026-09-27 的用户文件正是这一条（見 NOTES §9.6.6）。
+                    //   导出**不拦**（对 M.League 而言这是合法牌谱），只打一条 problem：回放窗口的状态栏
+                    //   会把 problems 原样显示出来（`ReplayWindow::exportTenhou`），用户当场就知道
+                    //   "这份牌谱喂天鳳规则的复盘器会被判规则违规、要换 tenhou 预设重打"。
+                    if (lastDrawTilesLeft >= 0 && lastDrawTilesLeft < 4) {
+                        out.problems << QStringLiteral("riichi_few_tiles_r%1s%2")
+                                            .arg(round + 1)
+                                            .arg(seat);
+                    }
+                    const int scoreNow = settled.value(seat, 25000) - 1000 * riichiPaid.value(seat, 0);
+                    if (scoreNow < 1000) {
+                        out.problems << QStringLiteral("riichi_low_score_r%1s%2")
+                                            .arg(round + 1)
+                                            .arg(seat);
+                    }
+                    ++riichiPaid[seat];
                     // 立直宣言占**一个**元素（参考实现据此发 Reach + Dahai 两个事件）
                     discards[seat].append(QStringLiteral("r")
                                           + (tsumogiri ? QStringLiteral("60") : digits(tile)));

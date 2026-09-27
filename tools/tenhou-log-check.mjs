@@ -714,6 +714,59 @@ function checkSemantics(root, errs) {
         } else if (isRyu && draws !== 70) {
             errs.push(`${tag}：荒牌流局的摸牌数应为 70，实际 ${draws}`);
         }
+        // ⑬ **天鳳/雀魂不允许、但 M.League 允许的立直** —— 网页版复盘器（Mortal）按天鳳规则重放，
+        //    遇到这类动作会**整份牌谱拒收**，而且**只有"被分析的那家"自己做了该动作时才报错**
+        //    （症状：换一个座位分析就正常！）。判据（docs/日本麻将.md L382）：
+        //    《雀魂》《天凤》要求「持点 ≥1000 **且** 剩余可摸的牌 ≥4 张」才能立直；
+        //    M.League 两者都不要（服务端 mleague 预设 `riichiMinScore=0 / riichiMinTilesLeft=0`）。
+        {
+            const startScores = Array.isArray(k[1]) ? k[1] : [25000, 25000, 25000, 25000];
+            let wall = 70;                  // 活牌山：136 − 配牌 52 − 王牌 14
+            let rinshanPending = false;     // 杠后的岭上摸牌**不占**活牌山
+            const idx = [0, 0, 0, 0];
+            const paid = [0, 0, 0, 0];      // 本局各家已扣的立直棒（判"持点不足 1000"）
+            let turn = ((k[0] && k[0][0]) || 0) % 4;   // 庄家先动
+            for (let guard = 0; guard < 400; ++guard) {
+                const seat = turn % 4;
+                const takes = k[5 + 3 * seat] || [];
+                const disc = k[6 + 3 * seat] || [];
+                const i = idx[seat];
+                const tk = takes[i];
+                if (tk === undefined) break;              // 本局结束
+                let kan = false;
+                if (typeof tk === 'number') {
+                    if (rinshanPending) rinshanPending = false;
+                    else wall -= 1;
+                } else {
+                    const p = parseNaki(tk, seat, `${tag} 座位${seat} 取表（⑬）`);
+                    if (!p.error && p.kind === 'daiminkan') kan = true;
+                }
+                const d = disc[i];
+                idx[seat] += 1;
+                if (typeof d === 'string' && d.startsWith('r')) {
+                    if (wall < 4) {
+                        errs.push(`${tag} 座位${seat}：立直时活牌山只剩 ${wall} 张 —— 天鳳/雀魂要求 ≥4`
+                            + `（M.League 允许 0）→ 按天鳳规则重放的复盘器会**整份拒收**，`
+                            + `且只在分析这一家时报错`);
+                    }
+                    const sc = (startScores[seat] ?? 25000) - 1000 * paid[seat];
+                    if (sc < 1000) {
+                        errs.push(`${tag} 座位${seat}：立直时持点 ${sc} < 1000 —— 天鳳/雀魂不允许`
+                            + `（M.League 允许）→ 同上，天鳳规则的复盘器会整份拒收`);
+                    }
+                    paid[seat] += 1;
+                } else if (typeof d === 'string') {
+                    const p = parseNaki(d, seat, `${tag} 座位${seat} 出表（⑬）`);
+                    if (!p.error && (p.kind === 'ankan' || p.kind === 'kakan')) kan = true;
+                }
+                if (kan) {
+                    wall -= 1;                 // 开杠：牌山末尾移进王牌
+                    rinshanPending = true;     // 同一家接着摸岭上
+                    continue;                  // 不换庄家
+                }
+                turn = (turn + 1) % 4;
+            }
+        }
         // ⑫ 赤五每局唯一
         for (const [n, c] of aka) {
             if (c > 1) errs.push(`${tag}：赤五 ${n} 在同一局出现 ${c} 次（每种只有 1 张）`);
