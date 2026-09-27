@@ -131,20 +131,20 @@ python\.venv\Scripts\python.exe -m mahjong_ml.dataset build `
 # ③ 行为克隆训练（checkpoint 落 S 盘 ckpt/，配额闸门在 paths.allocate 里）
 python\.venv\Scripts\python.exe -m mahjong_ml.bc `
     --data S:\mahjong-training\compact\bc-001 --label bc-002 --epochs 60
+
+# ④ 看指标 / 复现：metrics.json 里带 args、特征版本、数据 meta、每 epoch 的 train/val
 ```
 
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
 
 | 段 | 维度 | 由谁算 |
 | --- | --- | --- |
-| 状态（obs 原始字段） | 539 | Python `features.py` |
-| 状态（派生危险度 `danger_worst` + `danger_riichi`） | **68** | **Java** `ObsFeatures.perDecision`（sidecar） |
+| 状态（obs 原始字段） | 544 | Python `features.py` |
+| 状态（派生：危险度 + 71 维派生块） | **71** | **Java** `ObsFeatures.perDecision`（sidecar） |
 | 候选（类型 / 牌码 / 取法 / 摸切 / 杠种…） | 88 | Python |
 | 候选（向听 / 进张 / 听牌形 / 宝牌） | **8** | **Java** `ObsFeatures.perCandidate`（sidecar） |
-| **合计** | **607 / 96** | 特征版本 **v2** |
+| **合计** | **615 / 96** | 特征版本 **v3**（老 607 维权重/紧凑集**构造期拒绝**） |
 
-# ③ 看指标 / 复现：metrics.json 里带 args、特征版本、数据 meta、每 epoch 的 train/val
-```
 
 **评一个已有 checkpoint**（DAgger 对比、换数据集复评都靠它 —— 不用重训即可同尺子比较）：
 
@@ -179,7 +179,8 @@ python\.venv\Scripts\python.exe -m mahjong_ml.dagger `
 
 三件事值得留意：
 
-- **特征规格只有一份**：`mahjong_ml/features.py`（v2：`state_dim()=607`、`cand_dim()=96`）。
+- **特征规格只有一份**：`mahjong_ml/features.py`（**v3：`state_dim()=615` = 544 + 71 派生、`cand_dim()=96`**；
+  老 607 维权重/紧凑集在构造期被拒）。
   打印分段偏移用 `python -m mahjong_ml.features`。**派生量由 Java 算**（`ObsFeatures`），
   两侧由 `SelfTest.obsFeaturesTests`（obs 通路 == Round 通路，带红证）与 `python/selfcheck.py`
   （sidecar 格式契约、缺 sidecar 必须报错）钉住。
@@ -265,7 +266,7 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\awr-v
 
 ## 四·九、P4 在线自对弈（PPO + 联赛）
 
-**三个模块**：`ppo.py`（PPO 训练）/ `online.py`（世代循环 + 联赛阶梯）/ `league.py`（Plackett-Luce Elo + 对手池加权采样）。
+**三个模块**：`ppo.py`（PPO 训练）/ `online.py`（世代循环 + 联赛阶梯 + **跨代筛选 `screen`** + 候选人续训）/ `league.py`（Plackett-Luce Elo + 对手池加权采样）；一轮的**时间预算与资源闸门**在 `budget.py`。
 
 ```powershell
 # 0) P4 的前置是 Java 侧的**探索口**：`net:<权重>[@<α>][#<T>]` = 从 softmax(logits/T) 采样。
@@ -273,10 +274,21 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\awr-v
 #    PPO 是同策略算法，没有它数据就全落在"贪心那一条"上（重要性权重没有支撑集）。
 
 # 1) 世代循环：每代 [采集(2 席自己 + 2 席联赛对手) → --features → 紧凑集 → PPO → 导出 net.bin]
+#    缺省**按时间预算**排轮次（`--target-minutes 20`：场次由台账实测反推 + 资源闸门夹逼，
+#    且**只跑缓存档**；`--gen-games` 只在 `--target-minutes 0` 时才是口径）。
 python\.venv\Scripts\python.exe -m mahjong_ml.online run `
     --init S:\mahjong-training\ckpt\awr-002\model.pt `
     --init-value S:\mahjong-training\ckpt\iql-004\model.pt `
-    --label ppo --generations 4 --gen-games 1500 --temp 1.0 --epochs 4 --workers 20
+    --label ppo --generations 4 --temp 1.0 --epochs 4 --workers 20
+
+# 1b) 跨代选人 → 候选人续训：4 席满桌（1 席候选人 + 其余三代/teacher）、**座位严格平均**、
+#     按**平均得点**排序；得分最高且**有可训权重**的那个拿去续训，`--opponents` 显式点名对手。
+python\.venv\Scripts\python.exe -m mahjong_ml.online screen `
+    --policies ppo-v3-g01-g05,ppo-v3-g01-g06,ppo-v3-g01-g07,teacher --games 400 --batches 3 --workers 24
+python\.venv\Scripts\python.exe -m mahjong_ml.online run --init S:\mahjong-training\ckpt\ppo-v3-g01-g06\model.pt `
+    --label ppo-v3-g02 --generations 1 --workers 24 `
+    --opponents "teacher,net:S:\mahjong-training\ckpt\ppo-v3-g01-g05\net.bin,net:S:\mahjong-training\ckpt\ppo-v3-g01-g07\net.bin" `
+    --student-seats 1
 
 # 2) 阶梯（判据在这里，不在训练日志里）：每代一跑 net:gNN,teacher,first,random 出 Elo + 脚本基线，
 #    另跑一批 **2+2**（net×2 vs teacher×2）给顺位点的逐场配对 CI
@@ -298,7 +310,9 @@ python\.venv\Scripts\python.exe -m mahjong_ml.online displace `
 **λ=1**（奖励只在末决策记一次，λ<1 是系统性偏差）· 优势**只在学生行**归一化 ·
 价值头冷启动自 P3 的 IQL critic（只取 `trunk.* + v_head.*`）· 策略损失只算学生行、价值损失用全部行 ·
 **价值头不导出到 Java**（线上仍只认 `CandidateScorer`，`NeuralPolicy.java` 一行没动）·
-阶梯 run 是一席对一席（实测 `sd(Δ)≈80`），**配对判据只在 2+2 那批读**（`sd(Δ)≈53`）。
+阶梯 run 是一席对一席（实测 `sd(Δ)≈80`），**配对判据只在 2+2 那批读**（`sd(Δ)≈53`）·
+⚠ **跨代对局必须让紧凑集只把"这一轮被训练的策略"算作学生**（`dataset build --student <确切策略串>`，
+`online run` 自动传）—— 缺省口径"任何 `net:`"会把**对手网的决策算进策略损失**（学生行占比 0.75 而非 0.25，静默）。
 
 **一轮实测（2026-09，4 代 × 1500 场采集，每代 ~26 分钟）**：
 

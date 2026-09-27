@@ -22,8 +22,14 @@
 - **对脚本基线不掉**：`first`/`pass`/`random` 的 θ 不许"我涨它也涨到超过我"（同一次 fit 里读）；
 - 出现"对 `teacher` 变强、对 `random` 变弱"= 过拟合到自己的策略 → **回退**（见 §4 P4 的判据原文）。
 
-⚠ 采到的每一代原始轨迹都留在 `raw/`（配额 30 GB，滚动淘汰最旧的）：**判据要能复算**，
+⚠ 采到的每一代原始轨迹都留在 `raw/`（配额 80 GB，滚动淘汰最旧的）：**判据要能复算**，
 所以别删；真要清盘就删 `compact/`（它能从 `raw/` 重建）。
+
+## "一轮"有多长：时间预算，不是固定场次（2026-09-27）
+
+`--target-minutes 30` = **这一轮的场次由时间预算反推**（成本模型见 `budget.py`，从台账实测回填），
+再被资源闸门夹逼（raw/compact/总配额余量、盘余量、`--max-games`）。报告里会写清"是谁限制了这一轮"。
+`--gen-games` 只在 `--target-minutes 0`（默认）时起作用 —— 老命令行行为逐字不变。
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from . import league, paths
+from . import budget, features, league, paths
 from . import producer as producers
 
 #: 仓库根（`python/mahjong_ml/online.py` → 上三级）
@@ -131,12 +137,16 @@ def short_of(label: str, g: int) -> str:
 
 
 def pick_opponents(args, g: int, nets: dict[str, Path], fit: league.Fit | None) -> list[str]:
-    """选这一代的**两个对手**（见模块 docstring 的"联赛对手"）。
+    """选这一代的**对手**（见模块 docstring 的"联赛对手"）。
 
+    - **显式给了 `--opponents`**：直接用那一串（`online screen` 选出的**跨代联合联赛**就是这么来的：
+      "候选人 vs 其余三代 + teacher"），不再看联赛权重 —— 口径要可复现、可指名；
     - 第一代：`teacher` ×2（先跟老师学，避免"两只没学好的自己互啄"）；
     - 之后：按 `league.select_weights`（"谁克我就多跟它打"）抽，**老师常驻一席**；
       没有 fit（还没跑过 `ladder`）就退化成"脚本基线里确定性轮转" —— 保证**可复现**。
     """
+    if getattr(args, "opponents", None):
+        return [s.strip() for s in args.opponents.split(",") if s.strip()]
     me = short_of(args.label, g - 1)
     pool = ["teacher"] + list(league.SCRIPT_BASELINES) + list(nets)
     if g <= 1:
@@ -193,6 +203,16 @@ def cmd_run(args) -> int:
             log = []
     fit = _load_fit(league_dir / "ladder.json")
     start = max(1, args.start_gen)
+    if args.target_minutes > 0:
+        print(f"按时间预算跑：目标 {args.target_minutes:g} 分钟/轮"
+              f"（场次由成本模型 + 资源闸门定；`--gen-games {args.gen_games}` 本轮不生效）")
+    elif args.dry_run:
+        raise SystemExit("--dry-run 只在 `--target-minutes > 0` 时有内容可出（场次是常数，没有计划可算）")
+    if args.dry_run:
+        # 只出计划：**什么都不做**（连续跑要用的权重都不导 —— dry-run 不该有副作用）
+        _plan_games(args, budget.fit_cost(log), budget.fit_disk(log), start)
+        print("（--dry-run：只出计划，不采不训）", flush=True)
+        return 0
     if start > 1:
         # 断点续跑（`--start-gen 4 --init ckpt/ppo-g03/model.pt`）：把上一代的 net.bin 登记回池子，
         # 否则 g-1 的对手就是"不存在"（`pick_opponents` 会去 `nets` 里找它）
@@ -205,25 +225,41 @@ def cmd_run(args) -> int:
         print(f"续跑：从第 {start} 代开始，上一代 {prev} → {nb}")
     for g in range(start, args.generations + 1):
         tag = short_of(args.label, g)
+        # ⓪ **这一轮采多少场**：成本/磁盘模型**每轮重新标定**（上一轮刚写进台账；第一轮只能用默认值）
+        cost, disk = budget.fit_cost(log), budget.fit_disk(log)
+        games, plan = _plan_games(args, cost, disk, g)
+        phases: dict[str, float] = {}
+        t_round = time.perf_counter()
         # ① 采集要用的权重：第一代从 `--init` 现导（导到 `*-src`，**不动**原始 checkpoint 目录），
         #    之后直接用上一代结束时导出的 `net.bin`（它就是采集时的行为策略，π_old 靠它）
         if g == 1:
             net_bin = paths.allocate("ckpt", f"{tag}-src") / "net.bin"
-            runpy(["mahjong_ml.export", "weights", "--ckpt", str(ckpt),
-                   "--out", str(net_bin)], "导出采集权重（--init）")
+            phases["export"] = runpy(["mahjong_ml.export", "weights", "--ckpt", str(ckpt),
+                                      "--out", str(net_bin)], "导出采集权重（--init）")
         else:
             net_bin = nets[short_of(args.label, g - 1)]
         # ② 联赛选对手 → 采集（**两席自己 + 两席对手**，`--rotate` 会轮座位）
         opps = pick_opponents(args, g, nets, fit)
         spec = f"net:{net_bin}#{args.temp}"
-        raw = paths.allocate("raw", tag)
-        t_collect = selfplay(raw, args.gen_games, ",".join([spec, spec] + opps),
-                            seed=args.seed + g * 1000, workers=args.workers,
-                            hands=args.hands, sample=args.sample)
+        seats = [spec] * int(getattr(args, "student_seats", 2) or 2) + opps
+        if len(seats) != 4:
+            raise SystemExit(f"这一桌是 {len(seats)} 席（学生 {args.student_seats} 席 + 对手 "
+                             f"{len(opps)} 席）—— 必须正好 4 席：`--student-seats` 与 `--opponents` 对不上")
+        # ⚠ **预扣空间**：把这一轮的预计字节数交给配额闸门 ⇒ 回收发生在**写之前**
+        #   （不传就是"写完超了、下次分配才发现"，2026-09-27 把 compact 顶到 92/116 GB 就是这么来的）
+        raw = paths.allocate("raw", tag, need_bytes=int(disk.raw_bytes_per_game * games))
+        phases["collect"] = selfplay(raw, games, ",".join(seats),
+                                     seed=args.seed + g * 1000, workers=args.workers,
+                                     hands=args.hands, sample=args.sample)
         # ③ 派生特征（服务端算）+ 紧凑集（Python 打包）；生产者与采集同源（MAHJONG_PRODUCER）
-        run(producers.features_cmd(raw, args.workers), "派生特征")
-        comp = paths.allocate("compact", tag)
-        runpy(["mahjong_ml.dataset", "build", str(raw), str(comp)], "建紧凑集")
+        phases["features"] = run(producers.features_cmd(raw, args.workers), "派生特征")
+        comp = paths.allocate("compact", tag, need_bytes=int(disk.compact_bytes_per_game * games))
+        # ⚠ `--student` 必须给**这一轮学生的确切策略串**：`is_student` 的旧口径是"任何 `net:`"，
+        #   跨代对局里对手也是网络 ⇒ 它们的决策会被算进**策略损失**（off-policy 污染、且静默）。
+        #   实测：候选人 1 席 + 对手 g05/g07 两席 ⇒ 学生行占比 0.75 而不是 0.25（2026-09-27）。
+        phases["compact"] = runpy(["mahjong_ml.dataset", "build", str(raw), str(comp),
+                                   "--workers", str(args.compact_workers or args.workers),
+                                   "--student", spec], "建紧凑集")
         # ④ PPO 一代
         new_ckpt_dir = paths.allocate("ckpt", tag)
         ppo_cmd = ["mahjong_ml.ppo", "--data", str(comp), "--init", str(ckpt),
@@ -237,21 +273,57 @@ def cmd_run(args) -> int:
             # ⚠ 原来写的是 `g == 1`：`--start-gen 2` 续跑时 g 从 2 起 ⇒ 冷启动**被静默忽略**
             #   （2026-09-26 实测踩到：`--start-gen 2 --init-value <iql>` 跑完价值头还是上一代的）
             ppo_cmd += ["--init-value", str(args.init_value)]
-        runpy(ppo_cmd, f"PPO 第 {g} 代")
+        phases["ppo"] = runpy(ppo_cmd, f"PPO 第 {g} 代")
         ckpt = new_ckpt_dir / "model.pt"
         # ⑤ 把这一代导出成 Java 能读的权重（下一代的采集、以及 ladder 都要用它）
-        runpy(["mahjong_ml.export", "weights", "--ckpt", str(ckpt),
-               "--out", str(new_ckpt_dir / "net.bin")], f"导出 {tag} 的权重")
+        phases["export"] = phases.get("export", 0.0) + runpy(
+            ["mahjong_ml.export", "weights", "--ckpt", str(ckpt),
+             "--out", str(new_ckpt_dir / "net.bin")], f"导出 {tag} 的权重")
         nets[tag] = new_ckpt_dir / "net.bin"
+        total = time.perf_counter() - t_round
+        if plan is not None:
+            # 目标 vs 实测**必须打出来**：时间预算的价值全在这条偏差上（下一轮的 per_game 靠它收敛）
+            d = total - args.target_minutes * 60.0
+            print(f"\n⏱ 第 {g} 轮实测 {total/60:.1f} 分钟（目标 {args.target_minutes:g} 分钟，"
+                  f"偏差 {d/60:+.1f}）："
+                  + " · ".join(f"{k} {phases[k]/60:.1f}" for k in budget.PHASES if k in phases)
+                  + " 分钟", flush=True)
         log.append({"generation": g, "tag": tag, "opponents": opps, "raw": str(raw),
-                    "compact": str(comp), "ckpt": str(ckpt), "collect_seconds": t_collect,
-                    "games": args.gen_games, "temp": args.temp})
+                    "compact": str(comp), "ckpt": str(ckpt),
+                    "collect_seconds": phases["collect"], "games": games, "temp": args.temp,
+                    # ⏱ 时间预算的**标定素材**：分相时长 + 总时长 + 落盘字节（下一轮拿它们回填成本模型）
+                    "phases": {k: phases[k] for k in budget.PHASES if k in phases},
+                    "total_seconds": total,
+                    "raw_bytes": paths.dir_size_bytes(raw),
+                    "compact_bytes": paths.dir_size_bytes(comp),
+                    "target_seconds": (args.target_minutes * 60.0) if plan is not None else None,
+                    "planned_games": (plan.games if plan is not None else None),
+                    "clamped_by": (plan.clamped_by if plan is not None else None)})
         (league_dir / "generations.json").write_text(
             json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n{args.generations} 代跑完；台账：{league_dir / 'generations.json'}")
     print("下一步：`python -m mahjong_ml.online ladder --label " + args.label
           + " --generations " + str(args.generations) + "` 拿 Elo 与配对 CI（判据在这里，不在训练日志里）")
     return 0
+
+
+def _plan_games(args, cost: budget.Cost, disk: budget.Disk, g: int) -> tuple[int, budget.Plan | None]:
+    """这一轮采多少场：`--target-minutes > 0` 按时间预算反推 + 资源闸门夹逼；否则就是 `--gen-games`。
+
+    ⚠ 报告里必须写清"**是谁限制了这一轮**"：否则"目标 30 分钟却只跑了 12 分钟"看起来像 bug，
+    而真正的原因是配额余量（这一条是**可操作的结论** —— 清理/抬配额 vs 改目标）。
+    """
+    if args.target_minutes <= 0:
+        return args.gen_games, None
+    target = args.target_minutes * 60.0
+    try:
+        plan = budget.plan_round(target, cost,
+                                budget.gates_now(disk, cache_gb=args.cache_gb),
+                                min_games=args.min_games, max_games=args.max_games)
+    except budget.ResourceError as e:
+        raise SystemExit(f"{e}\n（先清理数据根或抬配额；只想要个小轮就显式用 `--gen-games`）") from None
+    print(budget.format_plan(plan, cost, target, generation=g), flush=True)
+    return plan.games, plan
 
 
 def _load_fit(path: Path) -> league.Fit | None:
@@ -516,7 +588,8 @@ def cmd_displace(args) -> int:
             raise SystemExit(f"缺 checkpoint：{p}（{name}）")
 
     split = ds.load_split(args.data, args.split)
-    n = int(np.asarray(split["state"]).shape[0])
+    # ⚠ `np.shape` 而不是 `np.asarray(...).shape`：后者会把内存映射的 `state` 整块读进 RAM（见 `rewards.py`）
+    n = int(np.shape(split["state"])[0])
     if n == 0:
         raise SystemExit(f"{args.data} 的 {args.split} 切分为空")
     rng = np.random.default_rng(args.seed)
@@ -557,6 +630,150 @@ def cmd_displace(args) -> int:
     return 0
 
 
+def screen_table(runs: list, label_of: dict[str, str]) -> list[dict]:
+    """多批 selfplay 的 `eval.Run` → **每策略一行**，按**平均得点**降序。
+
+    · `avg_delta` = 引擎的账（`by_policy[*]`，**每一小局**的收支）；`score` = 由 `final_scores − 25000`
+      逐场算的**整场得点**（两者差一个"每场小局数"，实测 11.1–11.7）—— 交叉核对按 `avg_delta × 每场小局数`
+      比，容差 5%（不限死 0：小局数在批之间会飘）。
+    · 排序用**整场得点 `score`**（用户口径"平均得点"）；顺位点/和率/放铳率/打点同表给出，用来交叉核对。
+    """
+    import mahjong_ml.eval as _ev
+    rows: dict[str, dict] = {}
+    for run in runs:
+        hpg = (run.hands / run.games) if run.games else 0.0
+        for spec, st in (run.by_policy or {}).items():
+            g = int(st.get("games", 0))
+            r = rows.setdefault(spec, {"spec": spec, "name": label_of.get(spec, spec),
+                                       "seat_games": 0, "avg_delta": 0.0, "rank_points": 0.0,
+                                       "win_rate": 0.0, "deal_in_rate": 0.0, "avg_win_score": 0.0,
+                                       "hands_per_game": 0.0, "score": 0.0, "n_score": 0})
+            r["seat_games"] += g
+            # ⚠ 键名是 `by_policy` 的**原名**（`avg_rank_points` / `avg_delta` / `avg_win_score`）——
+            #   写错不会报错，只会静默变成 0（2026-09-27 真踩过：顺位点整列都是 +0.00）
+            for key, src in (("avg_delta", "avg_delta"), ("rank_points", "avg_rank_points"),
+                             ("win_rate", "win_rate"), ("deal_in_rate", "deal_in_rate"),
+                             ("avg_win_score", "avg_win_score")):
+                r[key] += float(st.get(src, 0.0)) * g
+            r["hands_per_game"] += hpg * g
+            vals = list(_ev.per_game_series(run, spec, "score").values())
+            r["score"] += sum(vals)
+            r["n_score"] += len(vals)
+    out = []
+    for r in rows.values():
+        g = max(1, r["seat_games"])
+        row = {k: (r[k] / g) for k in
+               ("avg_delta", "rank_points", "win_rate", "deal_in_rate", "avg_win_score",
+                "hands_per_game")}
+        row.update(spec=r["spec"], name=r["name"], seat_games=r["seat_games"],
+                   score=(r["score"] / r["n_score"] if r["n_score"] else 0.0))
+        expect = row["avg_delta"] * row["hands_per_game"]
+        # 容差：绝对下限 60 点 + 相对 5%。⚠ **必须有绝对下限**：引擎的"逐小局账"（`avg_delta`）
+        # 与局末 `final_scores` 的差是一个**恒定小量**（实测 24 行：+12…+35 点/场，≈1.5 点/小局 ——
+        # 流局/供託那种局末记账），它在**均值接近 0** 时会把相对误差放大到 >30%（实测 66 vs 88），
+        # 于是"两本账"看起来像坏了。这个下限仍然能抓住真正的口径事故（把"每小局"当"整场"用会差 11 倍）。
+        if abs(expect - row["score"]) > max(60.0, 0.05 * abs(row["score"])):
+            raise SystemExit(f"{row['name']}：引擎账 avg_delta={row['avg_delta']:.1f}/小局 × "
+                             f"{row['hands_per_game']:.2f} 小局 = {expect:.0f}，与逐场 final_scores 算出的 "
+                             f"{row['score']:.0f} 相差 {abs(expect - row['score']):.0f}（>60 点且 >5%）"
+                             f"—— 报文口径变了？")
+        out.append(row)
+    return sorted(out, key=lambda r: -r["score"])
+
+
+def cmd_screen(args) -> int:
+    """**跨代际小批量筛选**：让若干代网络 + teacher 同坐一张桌子，按**平均得点**选下一步的候选人。
+
+    口径（2026-09-27 用户指定）：
+
+    · **座位平均**：`--rotate`（自对弈脚本强制）让每个策略在 4 个座位上**各坐 1/4 的场次** ——
+      这是**严格的座位平均**，比"每局随机坐"更强：随机只在期望上平衡，还会多一层座位噪声；
+      多批换 seed 拿到的是**独立样本**，不是靠座位随机化去抵消偏差。
+    · **小批量**：每批 `--games`（缺省 400）+ `--sample 64`（评测不训练，省盘）；`--batches` 批汇总。
+    · **排序指标 = 平均得点**（`score` = `final_scores − 25000`）；同时打印顺位点/和率/放铳率/打点。
+    · **判据不留情面**：用 `eval.pool_diffs` 做**逐场配对**（同一副牌山）的"第一名 − 其他人"CI；
+      CI 含 0 就说"**小批量证不出差别**"，只把它当"候选人"而不是"已证明更强"。
+    · 可选 `--value-data <紧凑集>`：对每个**网络**权重在**同一份** val 切分上做**价值头校准**
+      （MAE / 逐点 ρ / 小局 ρ）—— "跨代际价值检验"的第二个口径（同一把尺子）。
+    """
+    from . import dataset as ds
+    from . import eval as ev
+    from . import nets as netmod
+    from . import ppo as ppomod
+    from . import rewards as rw
+
+    specs = [resolve_spec(p.strip()) for p in args.policies.split(",") if p.strip()]
+    if len(specs) != 4:
+        raise SystemExit(f"跨代际筛选要**正好 4 个策略**（一张桌子坐满），现在是 {len(specs)}：{specs}")
+    label_of = {spec: short for spec, short in zip(specs, [p.strip() for p in args.policies.split(",")])}
+    league_dir = paths.allocate("league", args.label)
+    runs = []
+    for k in range(1, args.batches + 1):
+        d = paths.allocate("probe", f"screen-{k}")
+        selfplay(d, args.games, ",".join(specs), seed=args.seed + 1000 * k,
+                 workers=args.workers, sample=args.sample)
+        run = ev.load_run(d)
+        # 留档**完整** summary（`eval.load_run` 既能吃目录也能吃这个文件 ⇒ 以后不用重跑就能重算表），
+        # 再清掉轨迹（probe 本来就是"用完即删"）
+        (league_dir / f"screen-b{k}.json").write_text(
+            (d / "summary.json").read_text(encoding="utf-8"), encoding="utf-8")
+        runs.append(run)
+        _rmtree(d)
+    table = screen_table(runs, label_of)
+    print(f"\n== 跨代际筛选（{args.batches} 批 × {args.games} 场 = {args.batches * args.games} 场 · "
+          f"4 席满桌 · `--rotate` ⇒ 每策略每座位各 {args.batches * args.games // 4} 场）==")
+    print(f"{'策略':<10}{'平均得点':>10}{'每小局':>9}{'顺位点':>9}{'和了率':>8}{'放铳率':>8}{'平均打点':>10}")
+    for r in table:
+        print(f"{r['name']:<10}{r['score']:>+10.1f}{r['avg_delta']:>+9.1f}{r['rank_points']:>+9.2f}"
+              f"{r['win_rate']:>8.1%}{r['deal_in_rate']:>8.1%}"
+              f"{r['avg_win_score']:>10.0f}")
+    top = table[0]
+    print(f"\n⇒ **平均得点最高：{top['name']}**（{top['score']:+.1f} 千点/场·席）—— 作为进一步训练的候选人")
+    for other in table[1:]:
+        pooled, per_run = ev.pool_diffs(runs, top["spec"], other["spec"], "score")
+        n = int(pooled.size)
+        mean = float(pooled.mean())
+        sd = float(pooled.std(ddof=1)) if n > 1 else 0.0
+        lo, hi = ev.bootstrap_ci(pooled) if n > 1 else (mean, mean)
+        p = ev.sign_test_p(pooled)
+        need = ev.required_n(sd, max(1.0, abs(mean))) if sd > 0 else 0
+        verdict = "CI 排除 0（显著）" if (lo > 0 or hi < 0) else "**小批量证不出差别**"
+        print(f"   {top['name']} − {other['name']}：逐场配对 Δ={mean:+.1f} 千点 "
+              f"95%CI=[{lo:+.1f},{hi:+.1f}] p={p:.3f} n={n} sd={sd:.1f}（检出同量级 Δ 需 ≈{need} 场）"
+              f" ⇒ {verdict}")
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else paths.DATA_ROOT / "ckpt"
+    if args.value_data:
+        # **价值头校准**（第二个口径）：所有网络在**同一份** val 切分、同一把尺子上比
+        split = ds.load_split(args.value_data, "val")
+        tr = rw.transitions(split, rank_weight=args.rank_weight)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"\n== 价值头校准（同一份 val 切分：{args.value_data}，{len(tr['idx'])} 条）==")
+        print(f"{'策略':<10}{'MAE(千点)':>12}{'常数基线':>10}{'逐点 ρ':>9}{'小局 ρ':>9}")
+        for spec, short in label_of.items():
+            ck = ckpt_dir / short / "model.pt"
+            if not ck.is_file():
+                print(f"{short:<10}{'（没有 ckpt，跳过：teacher/非本仓权重）':>40}")
+                continue
+            c = torch.load(ck, map_location="cpu", weights_only=False)
+            cfg = c["config"]
+            # ⚠ 必须 `.to(device)`：`value_report` 把 state 送到 device，权重留在 CPU 会报
+            #   "Expected all tensors to be on the same device"（2026-09-27 真踩过）
+            v = netmod.build_value(features.state_dim(), hidden=cfg["hidden"], head=cfg["head"]).to(device)
+            v.load_state_dict(c["value"])
+            rep = ppomod.value_report(v, split, tr, device, batch=args.batch)
+            print(f"{short:<10}{rep['mae']:>12.4f}{rep['const_mae']:>10.4f}"
+                  f"{rep['pearson']:>+9.3f}{rep['ep_pearson']:>+9.3f}")
+        print("读法：MAE 低于常数基线、ρ 越高 = 价值头越可用（与 P3 的 critic 同一把尺子）。")
+    print(f"\n落档：{league_dir}/screen-b*.json")
+    return 0
+
+
+def _rmtree(d: Path) -> None:
+    """删掉一次评测的轨迹目录（probe 是"用完即删"的：它没有配额，但也不该长住）。"""
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="P4：世代循环 + 联赛阶梯")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -572,7 +789,33 @@ def main(argv: list[str] | None = None) -> int:
                         "例：只跑第 2 代 = `--start-gen 2 --generations 2`")
     r.add_argument("--start-gen", type=int, default=1,
                    help="从第几代开始（断点续跑：`--start-gen 4 --init <第 3 代的 model.pt>`）")
-    r.add_argument("--gen-games", type=int, default=2000, help="每代采集场次（写 raw/，约 1.1 MB/场）")
+    r.add_argument("--gen-games", type=int, default=2000,
+                   help="每代采集场次（写 raw/，约 1.1 MB/场）—— ⚠ **只在 `--target-minutes 0` 时生效**")
+    r.add_argument("--target-minutes", type=float, default=20.0,
+                   help="**一轮的目标时长（分钟；缺省 20 = 用户 2026-09-27 指定的口径，0 = 关）**："
+                        "场次由成本和磁盘模型从台账实测回填后反推（实测点上的分段线性），"
+                        "再被资源闸门夹逼（raw/compact/总配额余量、盘余量、--max-games），"
+                        "报告里写清是谁限制的。见 `python/mahjong_ml/budget.py`")
+    r.add_argument("--min-games", type=int, default=400,
+                   help="时间预算下**允许的最小轮次场次**（资源供不起就报错，不静默缩小轮次）")
+    r.add_argument("--max-games", type=int, default=16000,
+                   help="时间预算下的场次硬上限（**RAM 兜底**：本机 32 GB 实测 14700 场的一轮走通，"
+                        "`compact` 并行时物理内存一度只剩 ~1 GB ⇒ 想再大先加固内存或调小 --compact-workers）")
+    r.add_argument("--compact-workers", type=int, default=0,
+                   help="建紧凑集的并行度（0 = 跟 --workers 一样）。⚠ **这是内存旋钮**：`dataset build` 的"
+                        "子进程各持一份 chunk，worker 越多峰值越高（实测 24 worker × 14700 场把可用内存打到 ~1 GB）")
+    r.add_argument("--cache-gb", type=float, default=0.0,
+                   help="一轮允许占用的**页缓存**（GB）—— **只跑缓存档**的硬闸门（缺省 0 = 自动取 "
+                        "0.8 × 物理内存；`-1` = 关掉它，故意跑磁盘档时才用）。"
+                        "⚠ 越过它一轮会从 ≈12 分钟掉到 ≈45+ 分钟（PPO 要把紧凑集读 5 遍，S 盘 ~120 MB/s）")
+    r.add_argument("--dry-run", action="store_true",
+                   help="只按当前余量算出这一轮的场次并打印计划，不采不训（配 `--target-minutes`）")
+    r.add_argument("--opponents", default=None,
+                   help="**显式指定对手**（逗号分隔的策略串），不再走联赛采样 —— 跨代联合对局用它，"
+                        "例：`--opponents teacher,net:<g06>/net.bin,net:<g07>/net.bin`")
+    r.add_argument("--student-seats", type=int, default=2,
+                   help="学生占几席（缺省 2；与 `--opponents` 的席数相加必须正好 4）。"
+                        "对手正好 3 个时用 `--student-seats 1`（候选人 1 席 vs 其余三代 + teacher 3 席）")
     r.add_argument("--temp", type=float, default=1.0, help="行为策略温度（`#<T>`，必须与 ppo --temp 一致）")
     r.add_argument("--epochs", type=int, default=4)
     r.add_argument("--lr", type=float, default=1e-4)
@@ -609,6 +852,23 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--json", default=None)
     d.add_argument("--seed", type=int, default=20260401)
 
+    d = sub.add_parser("screen", help="**跨代际小批量筛选**：4 席满桌 + 座位平均，按平均得点选候选人")
+    d.add_argument("--policies", required=True,
+                   help="正好 4 个策略（内置名 / ckpt 短名 / net 路径），逗号分隔，如 "
+                        "`ppo-v3-g01-g05,ppo-v3-g01-g06,ppo-v3-g01-g07,teacher`")
+    d.add_argument("--games", type=int, default=400, help="每批场次（小批量）")
+    d.add_argument("--batches", type=int, default=3, help="批数（每批换 seed ⇒ 独立样本）")
+    d.add_argument("--sample", type=int, default=64, help="评测采样（省盘；**不训练**，不影响时间）")
+    d.add_argument("--workers", type=int, default=24)
+    d.add_argument("--seed", type=int, default=910001)
+    d.add_argument("--label", default="ppo-v3-g01", help="报告落到 league/<label>/")
+    d.add_argument("--value-data", default=None,
+                   help="可选：在这份紧凑集的 val 切分上对每个网络做**价值头校准**（同一把尺子）")
+    d.add_argument("--ckpt-dir", default=None, help="价值检验找 `model.pt` 的根（缺省 = 数据根/ckpt）")
+    d.add_argument("--rank-weight", type=float, default=1.0)
+    d.add_argument("--batch", type=int, default=8192)
+    d.add_argument("--json", default=None, help="汇总表写到这个文件（可选）")
+
     p = sub.add_parser("pair", help="两个策略的 2+2 同牌山配对（判据协议）")
     p.add_argument("--a", required=True, help="策略：内置名 / ckpt 短名（ppo-g04）/ net.bin 路径")
     p.add_argument("--b", required=True)
@@ -627,6 +887,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_displace(args)
     if args.cmd == "pair":
         return cmd_pair(args)
+    if args.cmd == "screen":
+        return cmd_screen(args)
     return cmd_ladder(args)
 
 

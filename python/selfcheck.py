@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -54,6 +55,7 @@ from mahjong_ml import offline_rl, rewards                # noqa: E402
 from mahjong_ml import awr                                # noqa: E402
 from mahjong_ml import league as ml_league                  # noqa: E402
 from mahjong_ml import ppo                                # noqa: E402
+from mahjong_ml import budget as ml_budget                 # noqa: E402
 import torch                                              # noqa: E402
 
 fails: list[str] = []
@@ -230,6 +232,84 @@ try:
 finally:
     paths.DATA_ROOT = saved
 
+# ---- 配额**自动回收**的三条新判据（2026-09-27，用户："完善配额自动回收机制"）-----------------
+# ① 保护的永不删（`bc-v3-001` 是 v3 BC 基座，raw 早被淘汰 ⇒ 删了不可重建）；
+# ② 回收**先挑超出 KEEP_LAST 的旧代**（滚动回收），而不是"顺手删掉最旧的那个小目录"；
+# ③ `need_bytes` **预扣**：空间在写之前腾好，而不是写完超了、等下次分配才发现。
+ok("bc-v3-001" in paths.KEEP_NAMES,
+   "回收：v3 的 BC 基座在保护名单里（它的 raw 已被淘汰 ⇒ 不可重建）", str(sorted(paths.KEEP_NAMES)))
+ok(set(paths.KEEP_LAST) == {"raw", "compact"},
+   "回收：只给「每代一份」的两类设保留名额", str(paths.KEEP_LAST))
+_qroot = scratch("quota")
+_saved2 = (paths.DATA_ROOT, dict(paths.QUOTA_GB), paths.TOTAL_QUOTA_GB, dict(paths.KEEP_LAST))
+try:
+    paths.DATA_ROOT = _qroot
+    paths.ensure_root()
+    paths.TOTAL_QUOTA_GB = 1000.0                     # 先只看分项配额，别让总配额插嘴
+
+    def _mk(kind: str, name: str, mb: int) -> Path:
+        d = _qroot / kind / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "x.bin").write_bytes(b"x" * (mb * 1024 * 1024))
+        return d
+
+    # 保护：名字在 KEEP_NAMES + `.keep` 标记
+    base = _mk("raw", "bc-v3-001", 90)
+    marked = _mk("raw", "keepme", 90)
+    (marked / paths.KEEP_MARKER).write_text("keep\n", encoding="utf-8")
+    junk = _mk("raw", "junk", 90)
+    paths.QUOTA_GB["raw"] = 0.00015                   # ≈157 KB：删掉 junk 也还是超（只剩保护条目）
+    try:
+        paths.allocate("raw", "new")                  # 分配即触发回收
+        eq("回收：只剩保护条目且空间不够时必须报 QuotaError", "没报错", "应报 QuotaError")
+    except paths.QuotaError as _e:
+        ok(base.exists() and marked.exists() and not junk.exists(),
+           "回收：`KEEP_NAMES` / `.keep` 的条目**永不删**，非保护条目先被淘汰；腾不出来就**报错**（不静默）",
+           str(_e)[:56])
+        ok("受保护" in str(_e), "回收：报错里说明「受保护」与「抬配额/手工清理」", str(_e)[:60])
+        ok(True, "（同一条断言覆盖「必须报错」）")
+
+    # 旧代优先：5 代 + 一个评测小目录，KEEP_LAST=2 ⇒ 第一个该删的是最旧的**代**（不是评测目录）
+    for d in list((_qroot / "raw").iterdir()):
+        shutil.rmtree(d, ignore_errors=True)
+    paths.KEEP_LAST["raw"] = 2
+    gens = [_mk("raw", f"ppo-g{i:02d}", 20) for i in range(1, 6)]
+    tiny = _mk("raw", "ppo-ladder-ppo-g05", 1)        # 评测小目录：不匹配 `-gNN$`
+    ev = [p.name for p in paths.evictable("raw")]
+    eq("回收：淘汰顺序 = **超出保留名额的旧代**（最旧在前）", ev[:3], ["ppo-g01", "ppo-g02", "ppo-g03"])
+    ok(ev[-1] == "ppo-ladder-ppo-g05",
+       "回收：评测小目录排在最后（KEEP_LAST 只数「每代一份」的条目）", str(ev))
+    paths.QUOTA_GB["raw"] = 0.06                      # ≈61 MB：5×20 MB 已用，再加一个 20 MB 就超
+    paths.allocate("raw", "ppo-g06", need_bytes=20 * 1024 * 1024)
+    ok(not gens[0].exists() and not gens[1].exists(),
+       "回收：`need_bytes`**预扣** ⇒ 写之前就把不够的空间腾出来（旧代先走）",
+       f"g01={gens[0].exists()} g02={gens[1].exists()}")
+    ok(tiny.exists(), "回收：预扣淘汰也只挑旧代，评测小目录仍留着")
+    # 保留名额**按 label 分组**：给 a 造 3 代、b 造 1 代 ⇒ 只有 a 的最旧那代超名额
+    for nm in ("a-g01", "a-g02", "a-g03", "b-g01"):
+        _mk("raw", nm, 1)
+    _ovr = sorted(p.name for p in paths._over_retention("raw"))
+    ok("a-g01" in _ovr and "a-g02" not in _ovr and "b-g01" not in _ovr,
+       "回收：每代保留名额**按 label 分组**（a 有 3 代 ⇒ 只淘汰最旧的 a-g01；b 只有 1 代 ⇒ 不动）",
+       str(_ovr))
+    ok("下一个回收" in paths.report(), "回收：`report()` 会预告「下一个回收谁」", paths.report()[-60:])
+    # 可回收字节：只算"超名额的旧代 + 非每代一份的杂项"，**不算**保护条目、也不算还在名额内的那几代
+    _rec = paths.reclaimable_bytes("raw")
+    _keep_gen = [p for p in ("a-g02", "a-g03", "ppo-g05") if (_qroot / "raw" / p).exists()]
+    ok(_rec > 0 and "bc-v3-001" not in str(_rec),
+       "回收：`reclaimable_bytes` 只统计能腾出的（保护条目不计入可用空间）",
+       f"reclaimable={_rec/1024:.0f} KB, 保留名额内的代保留 {len(_keep_gen)} 个")
+    _g_gate = {g.name: g.games for g in ml_budget.gates_now(ml_budget.fit_disk([]))}
+    _no_rec = int(((paths.QUOTA_GB["raw"] * 1024**3 - paths.dir_size_bytes(_qroot / "raw"))
+                   / ml_budget.DEFAULT_RAW_BYTES_PER_GAME))
+    ok(_g_gate["raw 配额余量"] >= ml_budget._floor100(max(0, _no_rec)),
+       "回收：规划端的配额闸门**把可回收空间算进去**（否则永远卡在「余量只剩一点」）",
+       f"闸门={_g_gate['raw 配额余量']} 场 vs 只看余量={_no_rec} 场")
+finally:
+    (paths.DATA_ROOT, paths.QUOTA_GB, paths.TOTAL_QUOTA_GB, paths.KEEP_LAST) = (
+        _saved2[0], _saved2[1], _saved2[2], _saved2[3])
+    shutil.rmtree(_qroot, ignore_errors=True)
+
 # ---------------------------------------------------------------- ⑤ 特征 / 数据集 / 网络
 
 print("== 特征（唯一规格）==")
@@ -338,6 +418,30 @@ eq("特征版本写进 meta", build_meta["feature_version"], feat.FEATURE_VERSIO
 eq("派生特征版本写进 meta", build_meta["derived_version"], feat.DERIVED_VERSION)
 ok(build_meta.get("has_derived") is True, "meta 标记「已带派生特征」")
 eq("按场切分：2 场 → 1 训 1 验", (len(build_meta["train_files"]), len(build_meta["val_files"])), (1, 1))
+# ⚠ 跨代对局：对手也是网络 ⇒ `is_student` 必须只认**这一轮学生的确切策略串**（`build(student_prefix=…)`）。
+#   旧口径"任何 `net:`"会把对手网的决策算进**策略损失**（实测 1 席学生得到 0.75 的学生行占比）。
+_student_spec = "net:T:\\x\\net.bin"                     # 与上面 g1 那行的 policy 完全相同
+_other_net = fs = None
+for _g in range(2):
+    _p = src / f"g{_g}.jsonl"
+    _rows = [json.loads(l) for l in _p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if _g == 0:
+        for _r in _rows:
+            _r["policy"] = "net:T:\\y\\other.bin"        # 对手也是网络（旧口径下会被算成学生）
+    _p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in _rows) + "\n", encoding="utf-8")
+ds.build(src, droot / "compact2", val_frac=0.5, split_seed=0, quiet=True,
+         student_prefix=_student_spec)
+
+
+def _n_student(d):
+    return sum(int(np.asarray(ds.load_split(d, sp)["is_student"]).sum()) for sp in ("train", "val"))
+
+
+eq("P3 列 is_student：显式 `--student <spec>` 时**对手网不算学生**（跨代对局的关键判据）",
+   _n_student(droot / "compact2"), 1)                        # 只有 g1 那一行是"这一轮的学生"
+ds.build(src, droot / "compact3", val_frac=0.5, split_seed=0, quiet=True)   # 缺省 `net:`
+eq("P3 列 is_student：缺省 `net:` 时**对手网也算学生**（老口径；跨代对局会污染策略损失）",
+   _n_student(droot / "compact3"), 3)                        # g0 两行 + g1 一行
 eq("训练条数", build_meta["train_decisions"], 2)
 tr = ds.load_split(droot / "compact", "train")
 eq("读回的 state 形状", tr["state"].shape, (2, feat.state_dim()))
@@ -1108,6 +1212,243 @@ try:
     eq("解析：找不到的策略必须报错（不许当成内置名跑）", "没报错", "应报错")
 except SystemExit as _e:
     ok("找不到策略" in str(_e), "解析：找不到的策略报错并指出路径", str(_e)[:60])
+
+# ⑬ **一轮有多长：时间预算**（`budget.py`）—— 2026-09-27 用户口径"记 30 分钟左右的训练为一轮"。
+#    三条要害：① 成本模型**必须实测回填**（默认值只配给第一次）；② 资源闸门要能**夹住**时间预算，
+#    且报告要说出**是谁**在夹（否则"30 分钟只跑了 12 分钟"看起来像 bug）；③ 资源供不起 `--min-games`
+#    时必须**报错**，不许静默把轮次缩小到没意义。
+print("== 时间预算（每轮多少场由目标时长反推）==")
+eq("预算：默认秒/场 = (288 s − 50 s 固定) / 2000 场（2026-09-27 冒烟实测）",
+   ml_budget.DEFAULT_PER_GAME, 0.1184)
+eq("预算：默认固定开销 = 50 s/轮（两处独立实测都是 ~50 s；**别并进 per_game**）",
+   ml_budget.DEFAULT_FIXED_SECONDS, 50.0)
+eq("预算：分相占比之和 == 1（它只用来把预测时长拆开显示）",
+   round(sum(ml_budget.DEFAULT_PHASE_SHARE.values()), 9), 1.0)
+ok(set(ml_budget.DEFAULT_PHASE_SHARE) == set(ml_budget.PHASES),
+   "预算：分相名单与 `online.cmd_run` 的落账字段一一对应", str(ml_budget.PHASES))
+ok(0.0 < ml_budget.FREE_SPACE_SAFETY < 1.0,
+   "预算：整盘余量只按 90% 排计划（配额类闸门**不打折** —— 它们是策略上限）",
+   str(ml_budget.FREE_SPACE_SAFETY))
+eq("预算：取整只对 ≥100 场生效（冒烟/自检要用小数字）",
+   [ml_budget._floor100(x) for x in (20270, 99, 100, 0)], [20200, 99, 100, 0])
+# 成本回填（≥2 个不同场次）→ **实测点上的分段线性（弦）**：
+# ⚠ 为什么不是"一个全局 per_game"：成本曲线不线性（紧凑集装得进内存时便宜、装不进时每遍真读盘）。
+# 实测两点 (1000, 100 s) / (3000, 280 s) 之间用弦；点外按端点规则外推（下方按比例、上方按末段斜率）。
+_led = [
+    {"generation": 1, "games": 1000, "total_seconds": 100.0,
+     "phases": {"collect": 25.0, "features": 5.0, "compact": 25.0, "ppo": 42.0, "export": 3.0}},
+    {"generation": 2, "games": 3000, "total_seconds": 280.0,
+     "phases": {"collect": 75.0, "features": 15.0, "compact": 75.0, "ppo": 108.0, "export": 7.0}},
+]
+_c = ml_budget.fit_cost(_led)
+eq("预算：边际秒/场 = 相邻实测点的弦斜率（(280−100)/(3000−1000) = 0.09）",
+   round(_c.rate, 9), 0.09)
+eq("预算：标定轮数如实报出（`source()` 要能说出这是实测还是默认值）", _c.rounds, 2)
+eq("预算：分相占比也从台账来（collect = 100/380）", round(_c.share["collect"], 6), round(100.0 / 380, 6))
+eq("预算：实测点上**逐点复现**",
+   (round(_c.predict(1000), 6), round(_c.predict(3000), 6)), (100.0, 280.0))
+eq("预算：两实测点之间走弦（t(2000) = 190 s）", round(_c.predict(2000), 6), 190.0)
+eq("预算：比最大实测点还大 → 按**末段斜率**外推（保守：宁可排短）",
+   round(_c.predict(5000), 6), round(280.0 + 0.09 * 2000, 6))
+eq("预算：比最小实测点还小 → 按**比例缩**（`fixed + (t_min−fixed)·g/g_min`），绝不为负",
+   (round(_c.predict(500), 6), round(_c.predict(0), 6)), (round(50 + 50 * 0.5, 6), 50.0))
+ok(all(_c.predict(g) >= 0 for g in range(0, 20000, 500)),
+   "预算：预测**处处非负**（⚠ 别用第一段斜率往下推：数据超内存那侧的斜率很陡，往下推会算出负时长 ⇒ "
+   "小目标被排成大轮）")
+ok(all(_c.predict(g) <= _c.predict(g + 500) for g in range(0, 19000, 500)),
+   "预算：预测**单调不减**（场次多不能更省时间）")
+eq("预算：`games_for` 与 `predict` 互逆（往返误差 ≤ 100 场，取整粒度）",
+   abs(_c.games_for(_c.predict(2000)) - 2000) <= 100, True)
+ok("分段线性" in _c.source(), "预算：`source()` 写明「实测点分段线性」与边际秒/场", _c.source())
+# ⚠ 只有**一个**实测点：不能画弦 → 固定项取实测常数，`rate` 扣掉它（模型逐字复现那一轮）
+_one = ml_budget.fit_cost([{"generation": 1, "games": 2000, "total_seconds": 288.0}])
+eq("预算：单点台账 → rate = (288 − 50) / 2000", round(_one.rate, 6),
+   round((288.0 - ml_budget.DEFAULT_FIXED_SECONDS) / 2000, 6))
+eq("预算：单点台账**逐字复现**那一轮的实测总时长",
+   round(_one.predict(2000), 6), 288.0)
+eq("预算：单点也能看出「这是实测」（不是默认值）", _one.rounds, 1)
+ok(_one.predict(2000) == 288.0 and _one.predict(4000) == 50 + (288.0 - 50) * 2,
+   "预算：单点台账按 `fixed + rate·场次` 外推", f"t(4000)={_one.predict(4000):.0f}s")
+# ⚠ 老台账只有 `collect_seconds`（单相）—— 拿它当整轮时长会低估到 1/4，必须**拒绝**、退回默认值
+_old = [{"generation": 1, "games": 2000, "collect_seconds": 44.0}]
+_c0 = ml_budget.fit_cost(_old)
+eq("预算：只有 collect_seconds 的老台账**不参与标定**（单相时长会低估整轮）", _c0.rounds, 0)
+eq("预算：没有可标定轮次就用默认值",
+   (_c0.rate, _c0.fixed_seconds),
+   (ml_budget.DEFAULT_PER_GAME, ml_budget.DEFAULT_FIXED_SECONDS))
+eq("预算：坏值（负/NaN/非数）一律忽略，不许把模型带偏",
+   ml_budget.fit_cost([{"games": 1000, "total_seconds": -5.0},
+                       {"games": -1, "total_seconds": 10.0},
+                       {"games": 1000, "total_seconds": float("nan")},
+                       {"games": 1000, "total_seconds": "12"}]).rounds, 0)
+_d = ml_budget.fit_disk([{"games": 2000, "raw_bytes": 2.6e9, "compact_bytes": 5.6e9}])
+eq("预算：磁盘模型也实测回填（1.3 MB/场 raw）", round(_d.raw_bytes_per_game, 1), 1.3e6)
+eq("预算：磁盘模型（2.8 MB/场 compact）", round(_d.compact_bytes_per_game, 1), 2.8e6)
+eq("预算：磁盘模型没有台账 → 默认值", ml_budget.fit_disk([]).rounds, 0)
+eq("预算：磁盘默认值与 v3 谱系最近四代实测一致（raw 1.52 / compact 3.06 MB/场）",
+   (round(ml_budget.DEFAULT_RAW_BYTES_PER_GAME / 1e6, 2),
+    round(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6, 2)), (1.52, 3.06))
+# 计划：时间预算 30 分钟、无闸门 → 用弦反解（1800 s 落在 1000/3000 两点之间）
+_p = ml_budget.plan_round(1800.0, _c, ())
+eq("预算：30 分钟 → 场次由**分段线性**反解并取整到百", _p.by_time,
+   ml_budget._floor100(_c.games_for(1800.0)))
+eq("预算：取自弦的场次，预计时长 ≈ 目标（差 ≤ 取整粒度 100 场 × 斜率）",
+   abs(_p.seconds - 1800.0) <= 60.0, True)
+eq("预算：没有闸门时 `clamped_by` 为空（说明是时间预算自己在定）", _p.clamped_by, None)
+ok("预计" in ml_budget.format_plan(_p, _c, 1800.0, generation=7)
+   and "第 7 轮" in ml_budget.format_plan(_p, _c, 1800.0, generation=7),
+   "预算：计划报告带轮次与预计时长")
+# 计划：闸门夹住时必须**指名道姓**，并且实际场次 = 最紧那条
+_g = (ml_budget.Gate("compact 配额余量", 1100), ml_budget.Gate("盘余量", 9000))
+_p2 = ml_budget.plan_round(1800.0, _c, _g, min_games=400, max_games=24000)
+eq("预算：闸门更紧时取闸门值", _p2.games, 1100)
+eq("预算：报告写明**是谁**限制了这一轮", _p2.clamped_by, "compact 配额余量")
+ok("compact 配额余量" in ml_budget.format_plan(_p2, _c, 1800.0), "预算：计划文本里能读到限制原因")
+eq("预算：预计时长 = 模型在**实际场次**上的取值（被夹住时就不是目标时长）", round(_p2.seconds, 3),
+   round(_c.predict(_p2.games), 3))
+_p3 = ml_budget.plan_round(1800.0, _c, (), min_games=400, max_games=1000)
+eq("预算：`--max-games` 也是一条会露脸的闸门", _p3.clamped_by, "--max-games")
+eq("预算：`--max-games` 生效时场次 = 它", _p3.games, 1000)
+try:
+    ml_budget.plan_round(1800.0, _c, (ml_budget.Gate("compact 配额余量", 10),), min_games=400)
+    eq("预算：闸门供不起 --min-games 时必须**报错**，不许静默缩小轮次", "没报错", "应报 ResourceError")
+except ml_budget.ResourceError as _e:
+    ok("compact 配额余量" in str(_e) and "10 场" in str(_e),
+       "预算：资源不够的报错里带闸门明细", str(_e)[:70])
+# 真·闸门（走 `paths`）：拿 scratch 当数据根，配额故意压小 → 该条闸门必须真的变 0
+_broot = scratch("budget")
+_saved = (paths.DATA_ROOT, dict(paths.QUOTA_GB), paths.TOTAL_QUOTA_GB)
+try:
+    paths.DATA_ROOT = _broot
+    paths.ensure_root()
+    _gates = ml_budget.gates_now(ml_budget.fit_disk([]))
+    eq("预算：五道闸门齐全（**缓存档** + raw/compact 配额 + 总配额 + 盘余量）",
+       [g.name for g in _gates],
+       ["缓存档上限", "raw 配额余量", "compact 配额余量", "总配额余量", "盘余量"])
+    ok(all(g.games >= 0 for g in _gates), "预算：闸门场次非负",
+       str([(g.name, g.games) for g in _gates]))
+    paths.QUOTA_GB["raw"] = 0.001                       # ≈1 MB 配额
+    (_broot / "raw" / "x").mkdir(parents=True, exist_ok=True)
+    (_broot / "raw" / "x" / "g0.jsonl").write_bytes(b"x" * 4_000_000)   # 已经**超**配额
+    _g2 = {g.name: g.games for g in ml_budget.gates_now(ml_budget.fit_disk([]))}
+    eq("预算：配额已超 → 该闸门给 0 场（不是负数）", _g2["raw 配额余量"], 0)
+    try:
+        ml_budget.plan_round(1800.0, ml_budget.fit_cost([]),
+                             ml_budget.gates_now(ml_budget.fit_disk([])), min_games=400)
+        eq("预算：配额满时 `plan_round` 报错", "没报错", "应报 ResourceError")
+    except ml_budget.ResourceError:
+        ok(True, "预算：配额满时 `plan_round` 报 ResourceError（要人先清理，不静默降级）")
+finally:
+    paths.DATA_ROOT, paths.QUOTA_GB, paths.TOTAL_QUOTA_GB = _saved[0], _saved[1], _saved[2]
+    shutil.rmtree(_broot, ignore_errors=True)
+# 编排侧的接线：`--target-minutes 0` 时**逐字**保持老行为（场次 = `--gen-games`），>0 时才走预算
+_ns = argparse.Namespace(target_minutes=0.0, gen_games=2000, min_games=400, max_games=24000, dry_run=False)
+eq("预算：`--target-minutes 0` → 场次就是 `--gen-games`（老命令行行为不变）",
+   ml_online._plan_games(_ns, ml_budget.fit_cost([]), ml_budget.fit_disk([]), 3), (2000, None))
+
+
+# ---- 大轮次的**内存**前提：`state`/`cand` 是内存映射，任何"顺手物化一下"都会把整块读进 RAM --------
+# 2026-09-27 实测：11M 行 × 615 × 2B = **13.6 GB** 被 `np.asarray(split["state"]).shape[0]` 悄悄读进来
+# （可用内存从 18 GB 掉到 1 GB）。判据不是"内存够大"，而是**代码里不许有物化**：
+# 用一个"有 `.shape` 但没有 `__array__`"的探针列，物化尝试会立刻炸。
+class _NoMaterialize:
+    """探针列：`np.shape` 走 `.shape`（不物化），`np.asarray` 会调 `__array__`（炸）。"""
+
+    shape = (1234, 615)
+
+    def __array__(self, *a, **k):                        # noqa: D105
+        raise AssertionError("这一列是内存映射，不许物化")
+
+
+_probe = _NoMaterialize()
+eq("大轮次：`np.shape(列)[0]` 走 `.shape`（不物化 13.6 GB 的 state）", int(np.shape(_probe)[0]), 1234)
+try:
+    np.asarray(_probe)
+    eq("大轮次：`np.asarray(列)` 会物化 —— 探针必须能抓到它", "没炸", "应炸")
+except AssertionError:
+    ok(True, "大轮次：探针能抓到「物化内存映射」的写法（`np.asarray(col).shape[0]`）")
+_rsplit = {"state": _probe, "file": np.zeros(4, np.int64), "hand_no": np.zeros(4, np.int64),
+           "seat": np.zeros(4, np.int64), "placement": np.ones(4, np.int64),
+           "is_student": np.ones(4, np.uint8), "delta": np.zeros((4, 4), np.float64)}
+try:
+    _rt = rewards.transitions(_rsplit, rank_weight=0.0)   # rank_weight=0 → 不需要 meta 里的 split 名
+    ok(int(_rt["idx"].shape[0]) == int(np.shape(_probe)[0]),
+       "大轮次：`rewards.transitions` 只读 `state` 的行数、不把它读进 RAM（探针没炸）",
+       f"idx={int(_rt['idx'].shape[0])}")
+except AssertionError as _e:
+    ok(False, "大轮次：`rewards.transitions` 会物化内存映射的 `state` —— 这是 13.6 GB 级别的坑", str(_e))
+
+# ---- **缓存档**闸门（用户口径：控制训练只跑缓存档）-----------------------------------------------
+# 为什么是硬闸门：一轮的紧凑集装得进内存 → PPO 命中页缓存（实测 ≈12 分钟/轮）；装不进 → 每遍真读盘
+# （41.78 GB × 5 遍 @ ~120 MB/s = 46 分钟）。中间**没有过渡**，所以不能靠"少排一点场次"来微调。
+eq("缓存档：比例 = 0.8 × 物理内存（实测 27.2 GB 走通、41.8 GB 落磁盘档 ⇒ 压在已验证那一档）",
+   ml_budget.CACHE_FRACTION, 0.8)
+_ram = ml_budget.total_ram_gb()
+ok(_ram is None or _ram > 1.0, "缓存档：物理内存探测（ctypes GlobalMemoryStatusEx）",
+   f"{_ram:.1f} GB" if _ram else "取不到（用兜底 32 GB）")
+_saved_ram = ml_budget.total_ram_gb
+try:
+    ml_budget.total_ram_gb = lambda: 32.0
+    eq("缓存档：缺省 = 0.8 × 32 GB = 25.6 GB", round(ml_budget.cache_budget_gb(), 6), 25.6)
+    eq("缓存档：显式值优先", ml_budget.cache_budget_gb(24.0), 24.0)
+    eq("缓存档：`-1` = 关掉这道闸门（故意跑磁盘档时才用）", ml_budget.cache_budget_gb(-1), -1.0)
+    _d2 = ml_budget.fit_disk([{"games": 1000, "raw_bytes": 1e9, "compact_bytes": 2.56e9}])
+    _g = {g.name: g.games for g in ml_budget.gates_now(_d2)}       # compact 2.56 MB/场
+    eq("缓存档：闸门 = 缓存预算 / 实测 compact 字节每场（25.6 GiB ÷ 2.56 MB = 10700 场）",
+       _g["缓存档上限"], 10700)
+    _c2 = ml_budget.fit_cost([{"games": 1000, "total_seconds": 100.0}])
+    _p4 = ml_budget.plan_round(3600.0, _c2, ml_budget.gates_now(_d2, cache_gb=6.4),
+                               min_games=400, max_games=24000)     # 6.4 GiB ÷ 2.56 MB = 2600 场
+    eq("缓存档：比时间预算更紧时，场次 = 缓存档上限（**夹住**，不是「少排一点」）", _p4.games, 2600)
+    eq("缓存档：报告**点名**是它在限制", _p4.clamped_by, "缓存档上限")
+    ok("缓存档上限" in ml_budget.format_plan(_p4, _c2, 3600.0),
+       "缓存档：计划文本里能读到这道闸门", ml_budget.format_plan(_p4, _c2, 3600.0).splitlines()[3][:60])
+    _g_off = {g.name for g in ml_budget.gates_now(_d2, cache_gb=-1)}
+    ok("缓存档上限" not in _g_off, "缓存档：`--cache-gb -1` 时这道闸门**不在**闸门表里", str(sorted(_g_off)))
+finally:
+    ml_budget.total_ram_gb = _saved_ram
+
+# ---- 跨代际筛选（`online screen`）：按**平均得点**排序 + 口径交叉核对 -------------------------------
+# 用户口径（2026-09-27）："联合 teacher 与 g05 g06 g07 做小批量跨代际价值检验，坐位平均随机化，
+# 取平均得点最高者作为进一步训练的候选人"。`--rotate` 给的是**严格座位平均**（每策略每座位各 1/4 场次）。
+ok("score" in ml_eval.METRICS, "筛选：`eval` 支持 `score` 指标（`final_scores − 起点`）", str(ml_eval.METRICS))
+_row = {"policies": ["a", "b", "a", "b"], "final_scores": [30000, 20000, 27000, 23000],
+        "placement": [1, 4, 2, 3], "rank_points": [50.0, -40.0, 20.0, -30.0]}
+eq("筛选：`score` = `final_scores − 25000`（同标签多座位取平均）",
+   ml_eval.seat_values(_row, "a", "score"), [5000.0, 2000.0])
+eq("筛选：`rank_points` 口径不变", ml_eval.seat_values(_row, "b", "rank_points"), [-40.0, -30.0])
+_sruns = []
+for _k, _hpg in ((0, 11.0), (1, 12.0)):
+    _sruns.append(type("R", (), {
+        "games": 2, "hands": 2 * _hpg,
+        "by_policy": {
+            "a": {"games": 2, "avg_delta": 100.0, "avg_rank_points": 3.0, "win_rate": 0.25,
+                  "deal_in_rate": 0.1, "avg_win_score": 7000.0},
+            "b": {"games": 2, "avg_delta": -100.0, "avg_rank_points": -3.0, "win_rate": 0.2,
+                  "deal_in_rate": 0.2, "avg_win_score": 6000.0},
+        },
+        "per_game": [
+            {"seed": 1000 * _k + 1, "policies": ["a", "b"],
+             "final_scores": [25000 + 100 * _hpg, 25000 - 100 * _hpg]},
+            {"seed": 1000 * _k + 2, "policies": ["b", "a"],
+             "final_scores": [25000 - 100 * _hpg, 25000 + 100 * _hpg]},
+        ],
+    })())
+_st = ml_online.screen_table(_sruns, {"a": "A代", "b": "B代"})
+eq("筛选：按**平均得点**降序（A 代 +1150 千点 > B 代 −1150）",
+   [r["name"] for r in _st], ["A代", "B代"])
+eq("筛选：引擎账（每小局）× 每场小局数 == 逐场得点（交叉核对）",
+   round(_st[0]["score"], 1), round(100.0 * 11.5, 1))
+eq("筛选：顺位点列读的是 `avg_rank_points`（**不是** `rank_points` —— 写错会静默变 0）",
+   (_st[0]["rank_points"], _st[1]["rank_points"]), (3.0, -3.0))
+_bad = [type("R", (), {"games": 1, "hands": 11.0,
+                       "by_policy": {"a": {"games": 1, "avg_delta": 100.0}},
+                       "per_game": [{"seed": 7, "policies": ["a"], "final_scores": [99999]}]})()]
+try:
+    ml_online.screen_table(_bad, {"a": "A"})
+    eq("筛选：两份账差 >5% 必须报错（不悄悄挑一个用）", "没报错", "应 SystemExit")
+except SystemExit:
+    ok(True, "筛选：引擎账与逐场得点差 >5% 时报错（口径变了要被抓住）")
 
 # ---------------------------------------------------------------- 汇总
 

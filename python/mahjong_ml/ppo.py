@@ -126,7 +126,7 @@ def value_report(value: nets.ValueNet, split: dict, tr: dict, device: str,
     · `mae`：逐决策 `|V − 回报|`（千点），与 `const`（恒等于训练集均值）同粒度；
     · `pearson`：逐决策相关；`ep_pearson`：**按 episode 先平均再相关**（判据① 用的那个口径）。
     """
-    n = int(np.asarray(split["state"]).shape[0])
+    n = int(np.shape(split["state"])[0])
     v = np.zeros(n, dtype=np.float64)
     value.eval()
     with torch.no_grad():
@@ -172,7 +172,7 @@ def explore(args) -> int:
     model = nets.build(cfg["state_dim"], cfg["cand_dim"], hidden=cfg["hidden"], head=cfg["head"])
     model.load_state_dict(ck["model"])
     model.eval()
-    n = min(int(np.asarray(split["state"]).shape[0]), args.rows)
+    n = min(int(np.shape(split["state"])[0]), args.rows)
     if n == 0:
         raise SystemExit("切分为空")
     idx = np.arange(n)
@@ -202,7 +202,7 @@ def train(args) -> dict:
     paths.ensure_root()
     split = ds.load_split(args.data, "train")
     tr = rewards.transitions(split, rank_weight=args.rank_weight)
-    n = int(np.asarray(split["state"]).shape[0])
+    n = int(np.shape(split["state"])[0])
     if n == 0:
         raise SystemExit("数据集是空的 —— 先跑一轮采集（online.py / --selfplay）")
     student = np.asarray(split["is_student"], dtype=bool)
@@ -336,7 +336,7 @@ def train(args) -> dict:
 
     val_split = ds.load_split(args.data, "val")
     vr = {"n": 0}
-    if int(np.asarray(val_split["state"]).shape[0]) > 0:
+    if int(np.shape(val_split["state"])[0]) > 0:
         vtr = rewards.transitions(val_split, rank_weight=args.rank_weight)
         vr = value_report(value, val_split, vtr, device, batch=args.batch)
         print(f"价值诊断（val {vr['n']} 条）：MAE {vr['mae']:.4f}（常数基线 {vr['const_mae']:.4f}）"

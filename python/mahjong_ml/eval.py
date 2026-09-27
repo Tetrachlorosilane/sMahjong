@@ -26,11 +26,12 @@ from pathlib import Path
 
 import numpy as np
 
-METRICS = ("rank_points", "place")
+METRICS = ("rank_points", "place", "score")
 ALPHA = 0.05
 POWER_DEFAULT = 0.8            # `required_n` 的默认功效（通行口径；50% 功效会低估约一半场次）
 BOOT_DEFAULT = 10_000
 BOOT_SEED = 20260101          # 固定：同输入 → 同置信区间（可复现是硬要求）
+START_SCORE = 25000           # 起点（半庄）；`score` 指标 = `final_scores[i] − 25000`
 
 
 # ------------------------------------------------------------------ 载入
@@ -82,6 +83,12 @@ def seat_values(row: dict, label: str, metric: str) -> list[float]:
             out.append(float(row["rank_points"][i]))
         elif metric == "place":
             out.append(-float(row["placement"][i]))     # 取负：正数=更好
+        elif metric == "score":
+            # **平均得点**（相对起点的收支，千点口径与 `by_policy[*].avg_delta` 同源）——
+            # 2026-09-27 加：跨代际筛选要按"得点最高者"排序（用户口径），顺位点只是它的一个代理。
+            if "final_scores" not in row:
+                raise ValueError("per_game 缺 final_scores（按得点排序需要它）—— 重新跑自对弈")
+            out.append(float(row["final_scores"][i]) - START_SCORE)
         else:
             raise ValueError(f"未知指标 {metric}（可用：{', '.join(METRICS)}）")
     return out

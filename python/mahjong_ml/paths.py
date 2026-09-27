@@ -17,6 +17,7 @@ robocopy 迁移后逐文件校验一致（数量/字节/SHA256）。详见 `docs
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -53,6 +54,21 @@ TOTAL_QUOTA_GB = 200.0
 #: 磁盘余量下限（GB）：任何时刻都要留这么多（写满盘会让采集静默失败）。
 MIN_FREE_GB = 10.0
 
+#: **永不淘汰**的条目（名字精确匹配）∪ 任何带 `.keep` 标记文件的条目。
+#: ⚠ 为什么需要它：`bc-v3-001` 是 v3 的 BC 基座（整条 P4 谱系的 `--init`），而它的 `raw`
+#: 早已被配额淘汰 ⇒ **删了就再也造不出来**。同理，凡是想长期留档的集合，在里面放一个 `.keep` 即可。
+KEEP_NAMES = frozenset({"bc-v3-001"})
+KEEP_MARKER = ".keep"
+
+#: **保留最近 N 代**（只对"每代一份"的条目生效：名字形如 `<label>-g<数字>`，按 label 前缀分别计数）。
+#: 超出的旧代会被排到淘汰队列**最前面**（真正删不删仍由配额/余量决定）⇒ 稳态占用可预测，
+#: 而不是"一路写到爆、爆了才删最旧的"。⚠ 它**不会**碰 protected 条目，也不会碰评测小目录
+#: （`*-ladder-*` / `*-pair-*` 那些不匹配 `-g<数字>$`，体积也小）。
+KEEP_LAST: dict[str, int] = {"raw": 2, "compact": 4}
+
+#: "每代一份"的命名（与 `online.short_of()` 一致：`<label>-g01`）
+_GEN_RE = re.compile(r"^(?P<label>.+)-g(?P<gen>\d+)$")
+
 
 class DataRootError(RuntimeError):
     """数据根不可用（不存在/不可写）—— **不要**降级去写别处（那会违反约束 ①）。"""
@@ -64,18 +80,63 @@ class QuotaError(RuntimeError):
 
 # ------------------------------------------------------------------ 基本量
 
+def _tree_bytes(root: str) -> int:
+    """目录总字节（`os.scandir` 版）。
+
+    ⚠ **为什么不用 `Path.rglob("*")` + `p.stat()`**：`raw` 长到 20 万文件时那一路要 **20 秒**，
+    而每轮要分配 5 次目录、还要算"可回收多少" ⇒ 光数文件就要几分钟（实测 2026-09-27）。
+    `os.scandir` 的 `DirEntry.stat()` 在 Windows 上直接用目录枚举时缓存的元数据，
+    不额外开文件、也不建 `Path` 对象。
+    """
+    total = 0
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return total
+
+
+def entry_sizes(kind: str) -> dict[str, int]:
+    """**一次扫描**拿到某子目录下每个一级条目的字节数（`{名字: 字节}`）。
+
+    给"可回收多少"用：逐个条目分别遍历会把同一棵树走 N 遍（实测 `raw` 54 个条目 = 26 秒）。
+    """
+    d = DATA_ROOT / kind
+    out: dict[str, int] = {}
+    if not d.is_dir():
+        return out
+    try:
+        with os.scandir(d) as it:
+            entries = list(it)
+    except OSError:
+        return out
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                out[e.name] = _tree_bytes(e.path)
+            elif e.is_file(follow_symlinks=False):
+                out[e.name] = e.stat(follow_symlinks=False).st_size
+        except OSError:
+            out[e.name] = 0
+    return out
+
+
 def dir_size_bytes(path: Path) -> int:
     """目录占用（字节）。目录不存在返回 0。"""
     if not path.exists():
         return 0
-    total = 0
-    for p in path.rglob("*"):
-        if p.is_file():
-            try:
-                total += p.stat().st_size
-            except OSError:
-                pass
-    return total
+    return _tree_bytes(str(path))
 
 
 def free_gb() -> float:
@@ -132,29 +193,96 @@ def _rm(path: Path) -> int:
     return before
 
 
+def _protected(p: Path) -> bool:
+    """永不淘汰：名字在 `KEEP_NAMES` 里，或目录里有 `.keep` 标记（见 `KEEP_NAMES` 的说明）。"""
+    try:
+        return p.name in KEEP_NAMES or (p / KEEP_MARKER).is_file()
+    except OSError:
+        return True                                   # 读不动就当它受保护（宁可少删）
+
+
+def _over_retention(kind: str) -> set[Path]:
+    """**超出 `KEEP_LAST` 名额的旧代**（按 label 分组、每组只留最新 N 个）。
+
+    这些条目会被排到淘汰队列最前面 —— 于是"回收"表现为**滚动回收旧代**，而不是
+    "一路写到配额上限、然后从最旧的（可能是 BC 基座那种不可重建的）开始删"。
+    """
+    n = KEEP_LAST.get(kind, 0)
+    if not n:
+        return set()
+    groups: dict[str, list[tuple[float, Path]]] = {}
+    for t, p in _entries(kind):                        # 已按 mtime 升序（最旧在前）
+        m = _GEN_RE.match(p.name)
+        if m:
+            groups.setdefault(m.group("label"), []).append((t, p))
+    over: set[Path] = set()
+    for items in groups.values():
+        for _, p in items[:-n] if n < len(items) else []:
+            over.add(p)                               # 旧的那几代
+    return over
+
+
+def evictable(kind: str) -> list[Path]:
+    """**可淘汰条目**（最该删的在前）：① 超出 `KEEP_LAST` 的旧代（最旧在前）；
+    ② 其余非保护条目（最旧在前）。⚠ 与 `enforce_quota` 用的是同一份判据。"""
+    ents = [p for _, p in _entries(kind) if not _protected(p)]
+    over = _over_retention(kind)
+    return [p for p in ents if p in over] + [p for p in ents if p not in over]
+
+
+def reclaimable_bytes(kind: str) -> int:
+    """**不破坏「最近 `KEEP_LAST` 代」的前提下**能腾出多少字节。
+
+    = 超出保留名额的旧代 + 非"每代一份"的杂项（旧的评测轨迹等），**不含**受保护条目、
+    也**不含**还在保留名额内的那几代 —— 后者是"实在没别的可删才动"的最后手段，不该被规划当成可用空间。
+
+    ⚠ 规划端（`budget.gates_now`）要用它：`allocate(need_bytes=…)` 现在会**预扣**回收，
+    所以"配额余量 + 可回收"才是这一轮真正能用多少 —— 否则规划会永远卡在"余量只剩 8 GB"，
+    而实际上前面躺着 16 GB 的旧代等着被回收。
+    """
+    over = _over_retention(kind)
+    sizes = entry_sizes(kind)                         # **一次扫描**（别逐条目各走一遍）
+    total = 0
+    for _, p in _entries(kind):
+        if _protected(p):
+            continue
+        m = _GEN_RE.match(p.name)
+        if p in over or not m:                        # 超名额的旧代 / 不是"每代一份"的杂项
+            total += sizes.get(p.name, 0)
+    return total
+
+
 def total_gb() -> float:
     """数据根下**全部**子目录的占用（GB）—— 总配额的判据。"""
     return sum(dir_size_bytes(DATA_ROOT / k) for k in SUBDIRS) / 1024**3
 
 
-def _oldest_among(kinds: tuple[str, ...]) -> Path | None:
-    """这些子目录里**全局最旧**的那一条（`None` = 都没东西可删）。"""
-    best: tuple[float, Path] | None = None
+def _next_among(kinds: tuple[str, ...]) -> Path | None:
+    """这些子目录里**下一个该淘汰**的条目（跨两类比较：先比"是否超保留名额"，再比 mtime）。"""
+    best: tuple[int, float, Path] | None = None
     for k in kinds:
+        over = _over_retention(k)
         for t, p in _entries(k):
-            if best is None or t < best[0]:
-                best = (t, p)
-            break                                    # `_entries` 已按 mtime 升序
-    return None if best is None else best[1]
+            if _protected(p):
+                continue
+            cand = (0 if p in over else 1, t, p)      # 超名额的旧代优先删
+            if best is None or cand[:2] < best[:2]:
+                best = cand
+            break                                     # `_entries` 已按 mtime 升序
+    return None if best is None else best[2]
 
 
 def enforce_quota(kind: str, *, need_bytes: int = 0) -> list[str]:
-    """把数据根压回配额内：**从最旧的开始删**，直到"够用 + 留足余量"。
+    """把数据根压回配额内：**从最该删的开始删**，直到"够用 + 留足余量"。
 
     三道闸门（依次）：
       ① `kind` 自己的分项配额；② **数据根总配额**（`TOTAL_QUOTA_GB`，只淘汰 raw/compact）；
       ③ 整盘余量（留 `MIN_FREE_GB`）。
     ⚠ `probe` 没有分项配额（用完即删），但**仍受总配额约束**。
+    ⚠ **保护**：`KEEP_NAMES` / `.keep` 标记的条目永不删（删了不可重建）；若只剩保护条目，
+    抛 `QuotaError`（宁可报错，也不悄悄删掉基座）。
+    ⚠ **预扣**：`need_bytes` = 这一次**预计要写**的字节数 —— 调用方（`online.py`）按磁盘模型
+    投影后传进来，于是空间在**写之前**就腾好了，而不是"写完超了、等下一次分配才发现"。
 
     @return 被删掉的条目名（便于日志/审计）
     """
@@ -162,60 +290,73 @@ def enforce_quota(kind: str, *, need_bytes: int = 0) -> list[str]:
     # ① 先按自身配额
     if kind in QUOTA_GB:
         quota = int(QUOTA_GB[kind] * 1024**3)
-        while dir_size_bytes(DATA_ROOT / kind) + need_bytes > quota:
-            entries = _entries(kind)
-            if not entries:
-                break
-            _, victim = entries[0]
-            _rm(victim)
-            removed.append(victim.name)
+        # ⚠ 尺寸**只数一次**，之后按"删掉多少"递减：`raw` 有 20 万文件，每次循环重走一遍要 20 秒
+        cur = dir_size_bytes(DATA_ROOT / kind)
+        while cur + need_bytes > quota:
+            cands = evictable(kind)
+            if not cands:
+                raise QuotaError(
+                    f"{kind} 占用 {cur/1024**3:.2f} GB + 本次预计 "
+                    f"{need_bytes/1024**3:.2f} GB 超过配额 {QUOTA_GB[kind]:.0f} GB，"
+                    f"且非保护条目已删完（受保护：{', '.join(sorted(KEEP_NAMES)) or '无'} + 带 "
+                    f"{KEEP_MARKER} 的目录）—— 要么抬配额，要么先手工清理")
+            cur -= _rm(cands[0])
+            removed.append(cands[0].name)
     # ② 再看**总配额**（2026-09-26 加的 200 GB 上限）：只在可复算的两类里淘汰
-    while total_gb() + need_bytes / 1024**3 > TOTAL_QUOTA_GB:
-        victim = _oldest_among(("raw", "compact"))
+    #    ⚠ 同①：总数只数一次，之后按"删掉多少"递减（别忘了减，否则循环不收敛 ⇒ 删空后报错）
+    tot = int(total_gb() * 1024**3)
+    while tot + need_bytes > TOTAL_QUOTA_GB * 1024**3:
+        victim = _next_among(("raw", "compact"))
         if victim is None:
             raise QuotaError(
-                f"数据根占用 {total_gb():.2f} GB 超过总配额 {TOTAL_QUOTA_GB:.0f} GB，"
+                f"数据根占用 {tot/1024**3:.2f} GB 超过总配额 {TOTAL_QUOTA_GB:.0f} GB，"
                 f"且 raw/compact 已无可删条目")
-        _rm(victim)
+        tot -= _rm(victim)
         removed.append(f"{victim.parent.name}/{victim.name}")
-    # ③ 最后看整盘余量（留 MIN_FREE_GB）—— 不够就继续删（仍从最旧的删）
+    # ③ 最后看整盘余量（留 MIN_FREE_GB）—— 不够就继续删（仍从最该删的开始）
     while free_gb() < MIN_FREE_GB + need_bytes / 1024**3:
-        victim = _oldest_among(("raw", "compact")) or (
-            _entries(kind)[0][1] if _entries(kind) else None)
+        victim = _next_among(("raw", "compact")) or (evictable(kind) or [None])[0]
         if victim is None:
-            total = sum(t for t, _ in _entries("raw") + _entries("compact"))
             raise QuotaError(
                 f"磁盘余量不足（{free_gb():.2f} GB < {MIN_FREE_GB} GB）且已无可删条目"
-                f"（raw+compact 共 {total/1024**3:.2f} GB）")
+                f"（raw+compact 共 {tot/1024**3:.2f} GB —— 受保护的不算）")
         _rm(victim)
         removed.append(f"{victim.parent.name}/{victim.name}")
     return removed
 
 
 def allocate(kind: str, label: str, *, need_bytes: int = 0, root: Path | None = None) -> Path:
-    """为一次采集/产物分配目录：**先过闸门，再给路径**。
+    """为一次采集/产物分配目录：**先过闸门（含回收），再给路径**。
+
+    ⚠ `need_bytes` 是**这一次预计要写多少**（调用方按磁盘模型投影）—— 传了它，回收就发生在
+    **写之前**；不传（=0）就只能"写完超了、下次分配才发现"，那正是 2026-09-27 把 `compact`
+    顶到 92/116 GB 才有人管的原因。回收了谁会被打出来（`[paths] 回收 …`），别让它静默发生。
 
     @param kind  `raw` / `compact` / `ckpt` / `league` / `logs` / `probe`
-    @param label 子目录名（如 `run-001` / `gen-07`）
+    @param label 子目录名（如 `ppo-v3-g01-g07`）
     """
     ensure_root(root)
     if kind not in SUBDIRS:
         raise ValueError(f"未知类别 {kind}（可用：{', '.join(SUBDIRS)}）")
-    enforce_quota(kind, need_bytes=need_bytes)
+    removed = enforce_quota(kind, need_bytes=need_bytes)
+    if removed:
+        print(f"[paths] {kind} 回收 {len(removed)} 项：{', '.join(removed)}", flush=True)
     d = DATA_ROOT / kind / label
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def report() -> str:
-    """一行式状态：各子目录占用 / 配额 + **总量/总配额** + 盘余量（写进日志用）。"""
+    """一行式状态：各子目录占用 / 配额 + **总量/总配额** + 盘余量 + **下一个会被回收的是谁**。"""
     parts = []
     for k in SUBDIRS:
         size = dir_size_bytes(DATA_ROOT / k) / 1024**3
         q = QUOTA_GB.get(k)
         parts.append(f"{k}={size:.2f}GB" + (f"/{q:.0f}GB" if q else ""))
+    nxt = [f"{k}:{_next_among((k,)).name}" for k in ("raw", "compact") if _next_among((k,))]
     return (f"{DATA_ROOT} | " + " ".join(parts)
-            + f" | total={total_gb():.2f}GB/{TOTAL_QUOTA_GB:.0f}GB | free={free_gb():.2f}GB")
+            + f" | total={total_gb():.2f}GB/{TOTAL_QUOTA_GB:.0f}GB | free={free_gb():.2f}GB"
+            + (f" | 下一个回收 {' '.join(nxt)}" if nxt else ""))
 
 
 if __name__ == "__main__":                       # python -m mahjong_ml.paths

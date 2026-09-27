@@ -118,7 +118,10 @@ def transitions(split: dict, *, unit: float = POINTS_PER_UNIT, rank_weight: floa
         所以 λ=1 时**整场名次是主导项**（这也正是这类比赛的目标函数）。
     """
     _check_columns(split, "file", "hand_no", "seat", "placement", "is_student")
-    n = int(np.asarray(split["state"]).shape[0])
+    # ⚠ **别写 `np.asarray(split["state"]).shape[0]`**：`state` 是内存映射（`load_split` 用 `mmap_mode="r"`），
+    # `asarray` 会把它**整块读进 RAM**（11M 行 × 615 × 2B = **13.6 GB**，2026-09-27 实测把可用内存打到 1 GB）。
+    # `np.shape` 走的是 `.shape` 属性，不物化。
+    n = int(np.shape(split["state"])[0])
     nxt = next_index(split)
     done = nxt < 0
     raw = hand_delta_of_seat(split)
