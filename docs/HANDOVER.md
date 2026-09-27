@@ -10,12 +10,13 @@
 
 | 项 | 值 |
 | --- | --- |
-| 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `ed5c30f`，再往前 `7b45342` |
-| 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = `034dde58`（2026-09-27 核对）；**本地领先 3 个提交**（`7b45342` v4 框架 · `ed5c30f` obs v3 清单 · 本文件所在提交），**未推** —— 是否推见 §6.1 |
-| 数据盘 | `S:\mahjong-training` total **1.86 GB / 200 GB**，可用 **227.8 GB**（本轮做过全清，见 §2.3） |
+| 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `8b069fa`（obs v3 + v4 两轮预训练），再往前 `06d9ebd`（本文件首次落地）|
+| 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`8446ea5b`（= v1.12.0 的 tag）**，其 tree `6c746e4c…` **== 本地 `8b069fa` 的 tree** ⇒ **已同步**（§2.11）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree |
+| 发布 | **v1.12.0 已上线**（release **#397670321**，2 个资产：client + server；**不带机器人包** —— v4 权重还不能导出）；`bot-ai/` 沿用 v1.11.0 三个（已开包核对 `sd=615/cd=96` 与服务端同规格）|
+| 数据盘 | `S:\mahjong-training` = **11.37 GB**（`raw` 1.64 · `compact` 9.66 · `ckpt` 0.08 · `league` 0.001）；S 盘可用 **218.3 GB / 231.5 GB**（本轮做过全清，见 §2.3）。v4 两轮：`raw\v4-bc-001` 0.45 / `v4-bc-002` 1.19、`compact\v4-bc-001` 2.13 / `v4-bc-002` 5.71 GB |
 | 训练进度 | **v3 谱系已到平台**；**v4 已完成两轮 teacher 预训练**：教师一致率 **0.608 → 0.619**（首合法基线 0.165），**所有辅助头都收敛**（`value` 6.63→3.59、`belief_tenpai` 0.173→0.140、`danger` 0.328→0.297），见 §2.9/§2.10 |
-| v4 状态 | **P0 全部收口**（`v4 check` PASS、`v4 plan` **12/13 绿**、selfcheck **398/0**）：obs v3 三端 + sidecar v3 + 数据集层硬闸门 + **标签侧 `aux.npz`**；下一步是 **P1 自监督预训练**（§3） |
-| 并行工作 | ⚠ **有另一个会话在同一仓库工作**（见 §5 第 1 条：推送要串行 + 比 tree sha） |
+| v4 状态 | **P0 全部收口**（`v4 check` PASS、`v4 plan` **12/13 绿**、selfcheck **419/0**）：obs v3 三端 + sidecar v3 + 数据集层硬闸门 + **标签侧 `aux.npz`**；下一步是 **P1 收尾**（§7.5 均衡审计 + 更难的自监督 + 放量，见 §3） |
+| 并行工作 | ⚠ **有另一个会话在同一仓库工作**（见 §5 第 1 条：推送要串行 + 比 tree sha）；本次推送前其改动已在基线里（§2.11） |
 
 ---
 
@@ -202,6 +203,30 @@
 - checkpoint：`S:\mahjong-training\ckpt\v4-bc-002\model.pt`；数据 `compact\v4-bc-002`。
 - 完整表与读数：`docs/TRAINING-V4.md`「第二轮：分阶段训练 + 掩码事件重建」。
 
+### 2.11 提交与发布 v1.12.0（2026-09-27）
+
+- **提交**：`8b069fa`（本地）—— obs v3 三端 + sidecar v3 + 标签侧 `--aux` + v4 训练回路两轮预训练；
+  工作树 **0 改动**；改动清单 = **4 个提交 / 50 个文件**（37 改 + 13 增 + 0 删）。
+- **推送（REST）**：远端头 `034dde58` 的 tree `4d3f50ed…` **== 本地 `d8ac9ae` 的 tree**
+  ⇒ 远端内容就是那个本地提交，缺的是它之后的 4 个提交；`git diff --name-status d8ac9ae HEAD`
+  一把算出 50 个文件，用 **`github_commit_files` 一次带过去** ⇒ 远端 `8446ea5b`，
+  其 tree `6c746e4c…` **== 本地 `HEAD` 的 tree**（判据达成）。
+  ⚠ `github_git_push` 本次**走不通**：git 通道（broker）对 github.com 返回 **502**，REST 正常 —— 两条通道互不相干。
+- **发布**：tag `v1.12.0` → `8446ea5b` → release **#397670321**（2 个资产，digest 与本地 sha256 逐一核对一致）：
+  `sMahjong-client-v1.12.0-win64.zip` 38,848,421 B `5b260841…`（asset 593034214）·
+  `sMahjong-server-v1.12.0.zip` 368,820 B `3c6095e0…`（593034070）。
+- **本版性质**：改动全在训练侧（服务端训练接口 + C++ 镜像 + Python v4 回路）与文档；
+  客户端只有版本号 `1.11.0 → 1.12.0`（`-Deploy` 重建，exe 内 UTF-16 串实测 1.12.0），**玩家可见增量 = 无**。
+- **不带机器人包**：v4 权重还不能导出（要等 P5 的 Java/C++ v4 前向）⇒ `bot-ai/` 继续用 v1.11.0 的三个；
+  已**开包读权重头**确认同规格（`magic=MJNN ver=1 sd=615 cd=96`，服务端 `Features.STATE = 544 + 71 = 615`）。
+- 发布前实测：L1 **1403/0** · L2 **854/0** · `selfcheck.py` **419/0** · `v4 check` PASS ·
+  trainer 三套 parity PASS（200 场逐字节）· `doc-refs-check` PASS · 服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、
+  `VERSION` = 1.12.0。
+- 顺手修 **`Features.java` / `NeuralPolicy.java` 注释里 3 处陈旧数字**（`617 = 544 + 73` / `// 607`
+  → `615 = 544 + 71`）：`docs/` 前一轮已改对，**代码注释里的漏了**。发布资产**不重出**
+  （tag 指向的提交就是打包时那份源码，注释与行号变了、类文件语义不变）。
+- 本地草稿与摘要表：`release\RELEASE-v1.12.0.md`（`release\` 已 gitignore）。
+
 ---
 
 ## 3. 下一步：**P1 收尾（均衡审计 + 更难的自监督）+ 放量**
@@ -247,6 +272,10 @@
 - **第 4 轮 ✅**：标签侧 `aux.npz`（§2.8，P0 收口）。
 - **第 5 轮 ✅**：第一轮 teacher 预训练（§2.9，`v4/dataset.py` + `v4/pretrain.py`）。
 - **第 6 轮 ✅**：分阶段训练（辅助头收敛）+ 掩码事件重建 + 数据集并行化（§2.10）。
+- **第 7 轮 ✅**：提交 + 发布 **v1.12.0**（§2.11：远端 tree == 本地 tree 为判据，2 个资产 digest 逐一核对）。
+
+**下一轮的起点**：从 §3 的四件里挑 **① §7.5 均衡审计**（判据⑩，至今没跑过）——
+它是唯一"判据要求但从未执行"的一项；harness 骨架在 `v4/harness.py`，数据用 `v4-bc-002` 的采集轨迹。
 
 ---
 
@@ -276,7 +305,8 @@ cd python
 .venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-bc-001 S:\mahjong-training\compact\v4-bc-001 --aux
 .venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-bc-001 --label v4-bc-001 --epochs 6
 
-# 训练端 C++（改了 trainer/ 之后必跑；判据见 §2.6/§2.7 与 docs\TRAINER-CPP.md §6.20/§6.21）pwsh -File trainer\build.ps1                                                          # 增量编译 + 编后自检
+# 训练端 C++（改了 trainer/ 之后必跑；判据见 §2.6/§2.7 与 docs\TRAINER-CPP.md §6.20/§6.21）
+pwsh -File trainer\build.ps1                                                          # 增量编译 + 编后自检
 node tools\trainer-selfplay-parity.mjs 1 1 pass 20260101                               # 轨迹逐字节（秒级）
 node tools\trainer-opts-parity.mjs 4 first,pass,random 2                               # 询问内容逐字符
 node tools\trainer-features-parity.mjs <轨迹目录> 4                                    # sidecar 逐字节（sidecar v3 七段）
@@ -297,9 +327,15 @@ $env:MAHJONG_PRODUCER='java'                       # 本会话实测：cpp 用�
 
 ## 5. 操作纪律（本会话踩过/确认过的）
 
-1. **推送（与并行会话共存）**：原生 `git fetch/push` 在本机不通（schannel 取不到凭据）⇒ 走
-   `github_commit_files`（REST）。**判据是"远端提交的 tree == 本地 HEAD 的 tree"**，不是"推送成功"；
-   推之前先 `GET /git/ref/heads/Training` 拿**真实**远端头（本会话就撞到远端被另一会话推过）。
+1. **推送（与并行会话共存）**：原生 `git fetch/push` 在本机不通（schannel 取不到凭据），
+   `github_git_push` 也不一定行 —— 它走的是 broker 的 `git/…` 通道，**本次对 github.com 返回 502**
+   （REST 通道同时正常；两条通道互不相干）。可靠的只有 **`github_commit_files`（REST）**。
+   **判据是"远端提交的 tree == 本地 HEAD 的 tree"**，不是"推送成功"（REST 建的提交 sha 与本地**天然不同**，
+   永远别指望 sha 相等）。**算法**（本次实测最省事）：
+   ① `GET /git/ref/heads/Training` 拿真实远端头；② `GET /git/commits/<头>` 读它的 **tree sha**；
+   ③ 与本地 `git log --format='%h %T %s'` 逐行比 —— 命中哪个本地提交，就知道远端内容等于哪一代；
+   ④ `git diff --name-status <那个提交> HEAD` 得出**要推的文件**（含删除项）。
+   ⛔ 别用 `GET /git/trees/<sha>?recursive=1` 列全仓：本仓 352 个文件，**响应会被工具截断**。
    一次带上**全部**改动文件，避免交错时覆盖对方改过的同名文件。
 2. **多行提交信息不要塞进 PowerShell 引号**（`"` 会提前结束字符串）⇒ 用 `write` 落一个文件 + `git commit -F`。
 3. **改文件一律用 `edit`/`write` 工具**，别用 PowerShell 做多行替换（CRLF 与 `` `n `` 不匹配会静默不生效）。
@@ -311,7 +347,7 @@ $env:MAHJONG_PRODUCER='java'                       # 本会话实测：cpp 用�
 
 ## 6. 待决问题（留给下一轮定）
 
-1. **要不要推那 3 个本地提交**（`7b45342` v4 框架 · `ed5c30f` obs v3 清单 · 交接文档）？—— 推法见 §5 第 1 条。
+1. ~~要不要推那几个本地提交~~ ✅ **已推 + 已发布 v1.12.0**（§2.11）—— 下一轮的推送照 §5 第 1 条走。
 2. **v3 谱系是否彻底封存**：数据集已删，若想再要"更强的 v3 基准对手"，只能重采重训（同种子可复现）。
 3. **步长/epoch 实验**（`--epochs 4→2` 把 PPO 读盘 5 遍压到 3 遍）—— 本会话实测"KL 撞墙但无增益"，
    留作 v4 落地后的对照项，不是当务之急。
@@ -320,7 +356,7 @@ $env:MAHJONG_PRODUCER='java'                       # 本会话实测：cpp 用�
 5. **`events[]` 的累积口径要不要改成"只发增量"**（obs v3 第 1 轮新出）：累积让轨迹 ×2.4~2.8
    （1,608 → 3,798 B/决策），增量能把体积压回 ~1.1×，但 `blocks.tile_matrix` /
    `RiverState.full_recompute` 都得改成"消费侧按小局攒"。**现在 Java 与 C++ 两侧都已按累积实现**
-   （C++ 已过 200 场逐字节），所以改的代价是**两侧一起改 + 重跑 parity**；趁 v4 数据集还是零，改的代价最低。
-6. **`aux.npz`（标签侧）何时落盘**（`FEATURES-V4.md` §5.2）：P1 的掩码重建不依赖它，
-   但 P2 的信念/危险头监督要用 —— 它是 `v4 plan` 里唯一的 ⚠️（11/13 绿）。
-5. **v4 的 `belief` 头是否进推理**（设计里标 ✅：与危险头一起驱动押し引き）—— P1 校准达标后再定权重。
+   （C++ 已过 200 场逐字节），所以改的代价是**两侧一起改 + 重跑 parity**；
+   ⚠ 前提变了：v4 数据集**已经不是零**（`v4-bc-001/002` 已建）⇒ 改口径还要**重采 + 重建数据集**。
+6. ~~`aux.npz`（标签侧）何时落盘~~ ✅ 已落地（§2.8，`v4 plan` 12/13）。
+7. **v4 的 `belief` 头是否进推理**（设计里标 ✅：与危险头一起驱动押し引き）—— P1 校准达标后再定权重。

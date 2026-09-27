@@ -21,7 +21,7 @@ import mahjong.util.Log;
  *
  * <p>前向结构（与 `nets.CandidateScorer` 一一对应）：
  * <pre>
- *   h = ReLU(W₂·ReLU(W₁·x + b₁) + b₂)          # trunk，x = Features.state(...)（607 维）
+ *   h = ReLU(W₂·ReLU(W₁·x + b₁) + b₂)          # trunk，x = Features.state(...)（615 维）
  *   logit_i = o·ReLU(H·[h ‖ cand_i] + b_h) + b_o   # 逐候选打分，cand_i 见 Features.candidate
  * </pre>
  *

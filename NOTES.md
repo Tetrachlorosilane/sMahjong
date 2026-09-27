@@ -2491,6 +2491,31 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   服务端 zip 内 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.11.0、exe 内 UTF-16 串实测 1.11.0。
   本地草稿与摘要表：`release\RELEASE-v1.11.0.md`。
 
+- **v1.12.0**（2026-09-27，**训练侧**：obs v3 + sidecar v3 + 标签侧 `--aux` + v4 训练回路两轮 teacher 预训练）：
+  release id **397670321**，tag `v1.12.0` → 远端 `8446ea5b0f741840d9be1f4c6c5347c5f28fca1b`。
+  通道：`github_commit_files`（REST，**一个提交带 50 个文件**）→ `POST /git/refs` 建 tag →
+  `POST /releases` → 资产走 `uploads.github.com`。
+  **内容等价判据**：远端提交 tree `6c746e4ca9c66cc1007efa51b53f30d21b37a1a8` == 本地 `HEAD`（`8b069fa`）的 tree。
+  ⚠ **"要推哪些文件"怎么算**：`GET /git/commits/<远端头>` 读它的 **tree sha**，与本地
+  `git log --format='%h %T %s'` 逐行比 —— 远端头 `034dde58` 的 tree `4d3f50ed…` 恰好等于本地 `d8ac9ae`
+  的 tree ⇒ 远端内容 = 那个本地提交，缺的就是它之后的 4 个提交；`git diff --name-status d8ac9ae HEAD`
+  一把出 50 项（**0 删除**）。⛔ 别用 `GET /git/trees/<sha>?recursive=1` 列全仓：352 个文件**会被工具截断**。
+  ⚠ 本次 `github_git_push` **走不通**：broker 模式下 git 走 `<broker>/git/…` 返回 **HTTP 502**
+  （"代理那台机器到 github.com 不通"），同时 REST 通道正常 —— **两条通道可以一边通一边不通**，
+  502 不是 token / scope / 白名单问题（插件的报错文案里已经写了这一点，照它换通道即可）。
+  2 个资产（本地 sha256 与 GitHub digest **逐一**核对一致）：`sMahjong-client-v1.12.0-win64.zip`
+  38,848,421 B `5b260841…`（asset 593034214）· `sMahjong-server-v1.12.0.zip` 368,820 B `3c6095e0…`（593034070）。
+  ⚠ **本版不带机器人 AI 包**（v4 权重还不能导出，要等 P5 的 v4 前向）：`bot-ai/` 沿用 v1.11.0 的三个；
+  已开包核对它们与本版服务端同规格（权重头 `sd=615 / cd=96`，服务端 `Features.STATE = 544 + 71`）——
+  "老包还能不能用"要**开包读权重头**，不能靠"版本号看着像"。
+  发布前实测：L1 **1403/1403**、L2 **854/854**、`selfcheck.py` **419/419**、`v4 check` PASS、
+  trainer 三套 parity PASS（200 场逐字节）、`doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、
+  `VERSION` = 1.12.0、exe 内 UTF-16 串实测 1.12.0。
+  ⚠ 发布后顺手修了 `server/.../ai/Features.java` **注释**里 3 处陈旧数字（`617 = 544 + 73` / `// 607`
+  → `615 = 544 + 71`）：`docs/` 里同样的数字前一轮已改对，**代码注释里的漏了** ——
+  改这类"规格数字"必须 `grep` 全仓（含注释），且**发布资产不重出**（tag 指向的提交就是打包时那份源码，
+  注释/行号变了、类文件语义不变）。本地草稿与摘要表：`release\RELEASE-v1.12.0.md`。
+
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
 **需求**：把本项目的对局导出成能被 AI 复盘工具直接吃的牌谱

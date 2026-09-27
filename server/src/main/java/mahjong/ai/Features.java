@@ -15,7 +15,7 @@ import mahjong.util.Json;
  * one-hot 槽位映射全集中在这里；Python 侧由 `features.describe()` 打印同一张表。
  * 一致性由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具**逐元素**钉住（容差 1e-4）。
  *
- * <h2>布局（state 617 = 544 基础 + 73 派生；cand 96 = 88 基础 + 8 派生）</h2>
+ * <h2>布局（state 615 = 544 基础 + 71 派生；cand 96 = 88 基础 + 8 派生）</h2>
  * <pre>
  *   state: hand/34(×0.25) · hand_red/34 · meld_kind/4×5 · meld_tiles/4×34(×0.25)
  *          · river/4×34(×0.25) · dora/34(×0.25) · riichi/4 · ippatsu/4
@@ -23,7 +23,7 @@ import mahjong.util.Json;
  *          · points/5（自己点数 · 与三家均值差 · 顺位 · 与上一名差 · 与下一名差；后四项 /1000、顺位 /3）
  *          · round/5 · state/5 · self/4 · ctx/4
  *          · visible/34(×0.25) · drawn/37 · called_tile/37 · from/4 · win_note/3
- *          · derived 73（{@link ObsFeatures#perDecision}；**逐维分母不同**，见
+ *          · derived 71（{@link ObsFeatures#perDecision}；**逐维分母不同**，见
  *            {@link ObsFeatures#DERIVED_DECISION_SCALE}）
  *   cand:  type/9 · tile/37 · tiles/37 · tsumogiri/1 · kan_kind/3 · noarg/1
  *          · derived 8（{@link ObsFeatures#perCandidate}，除以 {@link #DERIVED_CAND_SCALE}）
@@ -43,7 +43,7 @@ public final class Features {
 
     public static final int BASE_STATE = 544;
     public static final int BASE_CAND = 88;
-    public static final int STATE = BASE_STATE + ObsFeatures.PER_DECISION;      // 607
+    public static final int STATE = BASE_STATE + ObsFeatures.PER_DECISION;      // 615
     public static final int CAND = BASE_CAND + ObsFeatures.PER_CANDIDATE;       // 96
 
     public static final float DERIVED_DANGER_SCALE = 100f;
@@ -63,9 +63,9 @@ public final class Features {
     private Features() {
     }
 
-    // ------------------------------------------------------------------ 状态（607）
+    // ------------------------------------------------------------------ 状态（615）
 
-    /** `obs`（JSON 形态）→ 607 维状态向量；`v` 是同一 obs 的派生特征视图。 */
+    /** `obs`（JSON 形态）→ 615 维状态向量；`v` 是同一 obs 的派生特征视图。 */
     public static float[] state(Map<String, Object> obs, ObsFeatures.View v) {
         float[] f = new float[STATE];
         int i = 0;

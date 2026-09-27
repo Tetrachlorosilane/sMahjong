@@ -247,6 +247,9 @@ python -m mahjong_ml.packbot --out bot-ai `
 > 内置的 `teacher / first / pass / random` 不受影响。
 > ⚠ **这 3 个包彼此之间的强度差别在实测里都证不出来**（见各行），选谁主要是选**打法风格**，不是选强弱；
 > 要"更强"目前只有内置 `teacher`（四强互啄里得点最高）。
+> ⚠ **v1.12.0 未随包发布新的机器人 AI 包**（v4 权重还不能导出：服务端/C++ 侧尚无 v4 前向，阶段 P5）
+> —— 上面这 3 个包**仍是当前可用的包**：已开包核对权重头为 `magic=MJNN ver=1 sd=615 cd=96`
+> （服务端 `Features.STATE = 544 + 71 = 615`），与本版同规格，可直接放进 `bot-ai/`。
 
 
 > ⚠ **发布口径**：深度模型包**不带 teacher 先验**（`bot.json` 不写 `alpha`）。先验（`--alpha auto`）
