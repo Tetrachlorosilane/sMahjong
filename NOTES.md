@@ -2620,16 +2620,18 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   注释/行号变了、类文件语义不变）。本地草稿与摘要表：`release\RELEASE-v1.12.0.md`。
 
 - **v1.13.0**（2026-09-28，**v4 机器人 AI 包随发布 + 逐决策 reward-to-go 契约**）：
-  release id **RELEASE_ID_PLACEHOLDER**，tag `v1.13.0` → 远端 **TAG_SHA_PLACEHOLDER**。
-  通道：`github_commit_files`（REST）→ `POST /git/refs` 建 tag → `POST /releases` →
-  资产走 `uploads.github.com`（`github_upload_release_asset`）。
-  **内容等价判据**：远端提交 tree == 本地 `HEAD` 的 tree（两边逐字节一致，不是"看着像"）。
-  资产 **6 个**（本地 sha256 与 GitHub digest 逐一核对）：
-  `sMahjong-client-v1.13.0-win64.zip` 38,848,425 B `0a9a1696…` ·
-  `sMahjong-server-v1.13.0.zip` 402,181 B `e7fbb521…` ·
-  `sMahjong-bot-ai-v1.13.0.zip` 18,084,284 B `7d507fd5…` ·
-  `v4-bc-004.zip` 5,030,913 B `352cd603…` · `v4-p3-001.zip` 5,023,840 B `5b81cf59…` ·
-  `v4-ppo-001.zip` 5,030,883 B `b4995708…`（**asset id 待回填**）。
+  release id **397762262**，tag `v1.13.0` → 远端 **`4d7cb9ecda2bab0f27fbddf6397ed7b13e0001ba`**。
+  通道：`github_commit_files`（REST，**一个提交带 16 个文件**）→ `POST /git/refs` 建 tag →
+  `POST /releases` → 资产走 `uploads.github.com`（`github_upload_release_asset`）。
+  **内容等价判据**：远端提交 tree `9c2f881dea4f348b0a2e365687c1ff6118a0c51c` == 本地 `HEAD`（`103fd73`）的 tree。
+  **基线怎么定**：`GET /git/ref/heads/Training` → `ced637c5`（上一轮推的 `fa9c971` 的 tree）⇒
+  只需 `git diff HEAD` 里那 16 个文件（**全是文本**；有二进制就得走 blob API，见 §9.5 末尾）。
+  6 个资产（本地 sha256 与 GitHub digest 逐一核对一致）：
+  `sMahjong-client-v1.13.0-win64.zip` 38,848,425 B `0a9a1696…`（**593510762**）·
+  `sMahjong-server-v1.13.0.zip` 402,181 B `e7fbb521…`（**593511045**）·
+  `sMahjong-bot-ai-v1.13.0.zip` 18,084,284 B `7d507fd5…`（**593511150**）·
+  `v4-bc-004.zip` 5,030,913 B `352cd603…`（**593511388**）· `v4-p3-001.zip` 5,023,840 B `5b81cf59…`
+  （**593511525**）· `v4-ppo-001.zip` 5,030,883 B `b4995708…`（**593511669**）。
   ⚠ **本版终于能带 v4 包**（P5 的 v4 前向在 v1.12.0 之后落地）：`net.bin` **格式 2**，
   服务端 `NetWeights` 按 `format` 分派到 `V4Policy`；包目录里 `net.json` 是
   `v4/export.py` 自己写的**张量清单**（74 个张量 / 16 个块 / 指纹 `e1f5dd0fc1e9aba8`），服务端不读它。

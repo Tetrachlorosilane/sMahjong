@@ -12,7 +12,7 @@
 | --- | --- |
 | 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `8b069fa`（obs v3 + v4 两轮预训练），再往前 `06d9ebd`（本文件首次落地）|
 | 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`daacdc68`**（P5 的第二个提交；其 tree `5b56699a…` **== 本地 HEAD 的 tree**）⇒ **已同步**（§2.12）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree；⚠⚠ **二进制文件（`forward-v4.bin`）进不了 `github_commit_files`**（它只收文本），要走 `POST /git/blobs`（base64）→ `POST /git/trees`（inline `sha`）→ `POST /git/commits` → `PATCH /git/refs`，见 §2.12 |
-| 发布 | **v1.13.0 已上线**（release id / 资产摘要见 `NOTES.md` §9.5）：**第一次随包发布 v4 的 3 代网络**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，格式 2 权重）+ 逐决策 reward-to-go 契约。上一版 v1.12.0（#397670321）只带 client + server（那时 v4 还不能导出） |
+| 发布 | **v1.13.0 已上线**（release **#397762262** → <https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.13.0>，tag `v1.13.0` → 远端 `4d7cb9ec`，6 个资产）：**第一次随包发布 v4 的 3 代网络**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，格式 2 权重）+ 逐决策 reward-to-go 契约。上一版 v1.12.0（#397670321）只带 client + server（那时 v4 还不能导出）。逐资产 sha256 / asset id 见 `NOTES.md` §9.5 |
 | 数据盘 | `S:\mahjong-training` ≈ **17 GB**（`compact` 又多了 `v4-bc-003` 5.7 GB）；S 盘可用 ≈ **212 GB**。数据集：`raw\v4-bc-002` 1.19 GB → `compact\v4-bc-003`（**修好 `cand` 派生段后重建**，262,095 训练 / 14,965 验证）；checkpoint `ckpt\v4-bc-004`（教师一致率 **0.903**）与 `v4-bc-003`（0.165，阶段 c 塌掉的那份，留作对照） |
 | 训练进度 | **v3 谱系已到平台**；v4：teacher 预训练 0.608 → 0.619 → **0.903**（§2.12）；P3 开局 RWR（§2.14，−1.96 / −3.08 证不出）；**PPO 一轮**（§2.15：2,000 场 2+2 主判据 **−3.54 [−5.84,−1.24]** ⇒ **略低于 teacher**，探索数据 + 整场级优势是主因）；**第六轮**（§2.16）把这两条主因各修一处（`#0.5` + 逐决策 reward-to-go） |
 | v4 状态 | **P0 收口** + **P5 前向三端落地** + **§7.5 审计已做** + **PPO 回路已落地**（§2.15）+ **逐决策 reward-to-go 三端落地**（§2.16）。**下一件要紧事**：① 用 `#0.5` + `rtg` 优势重跑一轮 PPO 并按预先注册判据判决（§3 ①）；② 前向性能（40 ms → 1.5 ms，增量缓存） |
@@ -371,7 +371,7 @@
 
 ### 2.16 发布 v1.13.0 + 第六轮：逐决策 reward-to-go 三端落地（2026-09-28）
 
-- **发布 v1.13.0**（6 个资产；release id 与逐资产 sha256 见 `NOTES.md` §9.5）：
+- **发布 v1.13.0**（release **#397762262**，6 个资产；逐资产 sha256 / asset id 见 `NOTES.md` §9.5）：
   **第一次带 v4 的机器人包**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，`net.bin` 格式 2）+ v3 的三个
   （v4 谱系目前还没有一代打出"比 teacher 强"的结论，所以老包继续随附）+ client/server。
   ⚠ **"包能挂上"与"包能打"分开验**：启动日志的清单、`bot-ai-test.mjs`（20/0）、
