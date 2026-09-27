@@ -20,6 +20,7 @@ v3 的紧凑集存的是 **state 615 / cand 96**（特征 v3 的拼装结果）�
 | `label` | int16 | **教师动作**：有 `teacher_index` 用它（DAgger），否则用 `chosen_index` |
 | `effect` | `[lmax,3]` float16 | sidecar 逐候选派生量的前 3 维（向听/进张种数/进张枚数）⇒ 牌效头的回归目标 |
 | `value` | float32 | `final_scores[seat] − 起点`（**千点**；值头的 HL-Gauss 目标） |
+| `rtg` | float32 | **逐决策** reward-to-go（千点）：`Σ_{本局及其后} 收支 + 终局余棒`（轨迹 `reward_to_go`）—— λ=1 的 GAE 目标；老轨迹写 NaN |
 | `placement` | int8 | 该座位终局顺位 − 1（0..3；缺字段填 −1） |
 | `seat` / `game` / `hand_no` | int8 / int32 / int16 | 溯源与按座位诊断 |
 | `aux_opp_hand` | `[3,34]` uint8 | `g*.aux.npz`（**隐藏真值**；信念头） |
@@ -139,6 +140,11 @@ _COLUMNS: dict[str, tuple] = {
     "is_student": (np.int8, ()),
     # `delta`：本小局该家的收支（点）—— RWR/优势加权的回报来源（轨迹里 `hand_delta` 是四家数组）
     "delta": (np.int32, ()),
+    # `rtg`：**逐决策** reward-to-go（千点）—— λ=1 的 GAE 目标（`A = R_tg − V(s)`）。
+    #   2026-09-27 加（第六轮）：此前只有整场结果（`value`），优势里没有"这一手之后发生了什么"。
+    #   ⚠ 老轨迹没有 `reward_to_go` ⇒ 这里写 **NaN**（显式缺席）：`--value-target rtg` 会当场报错，
+    #   而 `final` 口径照常能跑老数据集 —— 不静默填 0（那会把优势变成 `0 − V(s)`）。
+    "rtg": (np.float32, ()),
     "aux_opp_hand": (np.uint8, (3, 34)),
     "aux_opp_tenpai": (np.uint8, (3,)),
     "aux_opp_dealin": (np.uint8, (3,)),
@@ -242,6 +248,10 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
             #    缺字段记 0（那这一行的权重就是 1，等于回到纯模仿）。
             hd = row.get("hand_delta")
             mm["delta"][i] = int(hd[seat]) if isinstance(hd, list) and 0 <= seat < len(hd) else 0
+            # ③ `rtg`：逐决策 reward-to-go（点 → 千点）—— 离线 PPO 的 λ=1 目标（第六轮）。
+            #    ⚠ 缺席写 NaN 而不是 0：0 会让优势变成 `0 − V(s)`（看着能跑，其实回报没了）。
+            rtg = row.get("reward_to_go")
+            mm["rtg"][i] = float(rtg) / 1000.0 if isinstance(rtg, (int, float)) else np.nan
             if ax is not None:
                 mm["aux_opp_hand"][i] = axcols["opp_hand"][j]
                 mm["aux_opp_tenpai"][i] = axcols["opp_tenpai"][j]
@@ -352,7 +362,14 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                 _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student)
             for m in mm.values():
                 m.flush()
-        return {"files": [f.name for f in part], "decisions": n, "lmax": lmax}
+        # 逐决策 reward-to-go 的**覆盖率**（NaN = 老轨迹没有这个字段 ⇒ `--value-target rtg`
+        # 会在入口处硬拒，不留"静默用 0 当回报"的口子）。
+        # ⚠ 并行分支里父进程的 memmap 已经显式 close 过（Windows 句柄），所以**重新开一份**读。
+        rtg_frac = float(np.isfinite(
+            np.asarray(np.load(out_dir / f"{tag}.rtg.npy", mmap_mode="r")[:n],
+                       dtype=np.float32)).mean())
+        return {"files": [f.name for f in part], "decisions": n, "lmax": lmax,
+                "rtg_frac": rtg_frac}
 
     train = one_split(train_files, "train")
     val = one_split(val_files, "val")
@@ -373,6 +390,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "lmax": max(train["lmax"], val["lmax"]),
         "val_frac": val_frac, "split_seed": split_seed,
         "student": student,
+        "rtg_frac": {"train": train["rtg_frac"], "val": val["rtg_frac"]},
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -385,6 +403,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         print(f"  标签侧：{'有（' + str(aux) + '）' if aux else '无'}；"
               f"块指纹 {meta['blocks_fingerprint']}；obs v{meta['obs_version']} / "
               f"derived v{meta['derived_version']}")
+        print(f"  逐决策 reward-to-go 覆盖：train {train['rtg_frac']:.1%} / val {val['rtg_frac']:.1%}"
+              f"（0% = 老采集器；`--value-target rtg` 会在入口报错）")
     return meta
 
 
@@ -400,7 +420,7 @@ def load_split(out_dir: str | Path, split: str) -> dict:
                          f" —— 注册表变了，重建数据集")
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
-                 "placement", "seat", "game", "hand_no", "is_student", "delta",
+                 "placement", "seat", "game", "hand_no", "is_student", "delta", "rtg",
                  "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"

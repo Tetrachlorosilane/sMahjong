@@ -1,8 +1,10 @@
 #include "trace.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "jsonw.hpp"
 #include "seed.hpp"
@@ -113,6 +115,31 @@ void TraceRecorder::finish(const std::array<int, 4> &finalScores) {
     if (dir_.empty()) {
         return;                            // 只统计不落盘（`--out` 缺省）
     }
+    // 逐决策 reward-to-go（点）：`R(h,s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]`。
+    // 口径必须与 Java `TraceRecorder.rewardToGo` **逐字一致**（同种子两份轨迹逐字节相同）：
+    //   ① 含本小局（打出去就结算了）；② 加终局余棒（末局结算后供託那批立直棒归末局 1 位）；
+    //   ③ 于是第 0 小局 == `final_scores − 起点`（= 值头旧口径的 value），末局 == 本局收支 + 余棒。
+    int maxNo = -1;
+    for (const HandRow &h : hands_) {
+        maxNo = std::max(maxNo, h.handNo);
+    }
+    std::vector<std::array<int, 4>> rtg(static_cast<size_t>(maxNo + 1), std::array<int, 4>{});
+    std::array<int, 4> bonus{};
+    if (!hands_.empty()) {
+        for (int s = 0; s < 4; s++) {
+            bonus[static_cast<size_t>(s)] = finalScores[static_cast<size_t>(s)]
+                    - hands_.back().scoresAfter[static_cast<size_t>(s)];
+        }
+    }
+    std::array<int, 4> acc{};
+    for (int h = static_cast<int>(hands_.size()) - 1; h >= 0; h--) {
+        const HandRow &hr = hands_[static_cast<size_t>(h)];
+        for (int s = 0; s < 4; s++) {
+            acc[static_cast<size_t>(s)] += hr.delta[static_cast<size_t>(s)];
+            rtg[static_cast<size_t>(hr.handNo)][static_cast<size_t>(s)] =
+                    acc[static_cast<size_t>(s)] + bonus[static_cast<size_t>(s)];
+        }
+    }
     std::string out;
     // ---- 第一段：全部 decision 行（按发生顺序、跨小局连续）----
     for (const DecisionRow &r : decisions_) {
@@ -149,6 +176,13 @@ void TraceRecorder::finish(const std::array<int, 4> &finalScores) {
             o += std::to_string(h.loser);
             o += ",\"hand_agari\":";
             jsonBool(o, h.agari);
+        }
+        // ---- 事后回填：逐决策回报（整场结束才知道；键序与 Java 一致：在 hand_agari 之后）----
+        o += ",\"reward_to_go\":";
+        if (r.handNo >= 0 && r.handNo <= maxNo && r.seat >= 0 && r.seat < 4) {
+            o += std::to_string(rtg[static_cast<size_t>(r.handNo)][static_cast<size_t>(r.seat)]);
+        } else {
+            o += "0";
         }
         // ---- 事后回填：整场的顺位（整场结束时才知道）----
         o += ",\"final_scores\":";

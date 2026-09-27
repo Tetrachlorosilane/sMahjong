@@ -199,7 +199,7 @@ Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1423 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1429 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、

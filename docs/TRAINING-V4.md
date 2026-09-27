@@ -691,6 +691,44 @@ obs v2 轨迹被硬拒绝、**同种子两次训练的 `history` 逐字段相同
 **下一轮**（按预期收益排序）：**降温度**（`#0.5` 或贪心 + 噪声，先在采集期就把行为策略拉回 teacher 水平）→
 **逐决策信用**（在 Java/C++ 侧按小局记 reward-to-go，才能算 GAE）→ 再谈放大场次。
 
+### 第六轮：逐决策 reward-to-go —— 让 λ=1 的 GAE 目标可算（2026-09-28）
+
+**动因**：第五轮判负的两条主因里，第二条是**优势的信用分配只到整场**（`A = R_整场 − E[V(s)]`）。
+在线 PPO 的 GAE(λ=1) 要的是"**从这个局面起**的回报 − V(s)"，而离线数据当时只有整场结果 ⇒
+同一场里所有决策共用一个 `R`，优势里没有"这一手之后发生了什么"。
+
+**改动（契约 + 三端，一处口径）**：轨迹的每条 `decision` 行新增 **`reward_to_go`**（点）：
+
+```
+R(h, s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]
+```
+
+- **含本小局**（打出去就结算了），**不含之前的小局**（那是已经实现的收益，不该再算进"从这里起"）；
+- **加终局余棒**：末局结算后供託里那批立直棒按规则归末局第 1 位（`AGENTS.md` §6.4 ②）。
+  不加它的话第 0 小局的回报会比 `final_scores − 起点` 少一个 0~3000 点的常数，值头目标与旧口径就对不上；
+- ⇒ **不变式**：第 0 小局的 `reward_to_go == final_scores[seat] − start_score`（点）、
+  末局 `== 末局 delta[seat] + 余棒`、且**真的逐决策**（多局时至少有一行 ≠ 整场结果）。
+
+| 端 | 落点 | 判据（实测） |
+| --- | --- | --- |
+| 契约 | `docs/PROTOCOL.md` §8.4（决策行字段表 + 三条不变式） | 三处一起改（`TraceRecorder` / PROTOCOL / `selfplay-check`） |
+| Java | `TraceRecorder.rewardToGo`（后缀和，按 `hand_no` 对齐）+ `finish()` 在 `final_scores` **之前**写键 | `SelfTest.rewardToGoTests` 6 项；L1 **1429/0** |
+| C++ | `trainer/src/trace.cpp`（同算法，键序同 Java） | `trainer-selfplay-parity.mjs 2 6 teacher 20260927` **逐字节一致**（1.30 MB / 1.42 MB）；C++ 轨迹过 `selfplay-check.mjs` |
+| 检查器 | `tools/selfplay-check.mjs` 独立重算（不照抄 Java 的实现） | 红证：改一行 `reward_to_go` → 2 条报错、退出码 1 |
+| Python | 数据集新列 `rtg`（千点 = `reward_to_go/1000`）；`--value-target final|rtg` | `selfcheck` **479/0**（+11）；`meta.rtg_frac` 记覆盖率 |
+| 训练 | `--value-target rtg` 让**值头目标与优势的 `R` 同源**（一处开关，不可能不同步） | `_advantages(..., key=)` + `compute_loss(..., value_key=)` |
+
+⚠ **三条不许省的判断**（都是这一轮特意钉的）：
+① **老轨迹写 NaN，不写 0**：`rtg` 缺席时填 0 会让优势变成 `0 − V(s)`（训练照跑、回报没了）——
+所以数据集写 NaN + `--value-target rtg` 在 NaN 数据上**硬拒**；② **整体平移看不见**：优势在学生行上
+归一化（减均值）⇒ 把 `R` 整体加一个常数不改变优势，判"换源有没有生效"的夹具必须让**逐行差不是常数**
+（自检里同时钉了这两条）；③ **C++/Java 必须逐字同口径**：同一颗种子两份轨迹**逐字节相同**是唯一判据
+（"两边都记了 reward_to_go"不算 —— 差一个 `>=` 就是偏差）。
+
+**下一轮（执行中）**：`#0.5` 采集 → `dataset build --student "<同一串>"` → `pretrain --objective ppo
+--value-target rtg --behaviour-temp 0.5` → **预先注册的 2,000 场 2+2 配对** vs teacher 与 vs 上一代
+（两个数一起报：均值自助法 CI + 符号检验 p）。
+
 ### P5 已落地：三端 v4 前向（2026-09-27）
 
 **目标**（本文件 §9 的 P5 行）：Java/C++ 侧的 v4 前向 + `net.bin` 格式 2 + bot-ai 包可加载；

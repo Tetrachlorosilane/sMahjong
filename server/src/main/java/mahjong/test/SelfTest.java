@@ -99,6 +99,7 @@ public final class SelfTest {
         trainingInterfaceTests();
         obsEventStreamTests();
         auxLabelTests();
+        rewardToGoTests();
         obsFeaturesTests();
         neuralForwardTests();
         v4ForwardTests();
@@ -3344,6 +3345,129 @@ public final class SelfTest {
                 winOnes > 0 || dealinOnes > 0);
         check("aux：顺位回填都在 1..4", placeOk);
         check("aux：三家暗牌计数都在 1..14 张（合计 " + handTiles + "）", handRange);
+    }
+
+    /**
+     * **逐决策 reward-to-go**（`reward_to_go`，点）的不变式 —— 离线 PPO 的 λ=1 目标就靠它。
+     *
+     * <p>为什么必须有这一组（`docs/TRAINING-V4.md` §「第六轮」）：第五轮只有**整场**回报，
+     * 优势里没有"这一手之后发生了什么"，于是 2,000 场 2+2 配对量到 Δ=−3.54 顺位点。
+     * 这一组钉四件事，缺一条这个字段就不能当 GAE 目标用：
+     * <ol>
+     *   <li><b>守恒</b>：第 0 小局的 {@code reward_to_go} == {@code final_scores[seat] − 起点}
+     *       （= 值头旧口径的 `value`，含终局余棒）—— 断了说明后缀和或余棒加错了；</li>
+     *   <li><b>后缀和</b>：独立按 `hand` 行的 `delta` 重算一遍，逐行比对（不是"能跑就算对"）；</li>
+     *   <li><b>真的逐决策</b>：至少有一行的值**不等于**整场结果 —— 否则这个字段只是把
+     *       `value` 抄了一遍，等于没加（这条就是它的红证）；</li>
+     *   <li><b>末局口径</b>：末局决策 == 末局收支 + 终局余棒。</li>
+     * </ol>
+     */
+    private static void rewardToGoTests() {
+        java.nio.file.Path dir = null;
+        try {
+            dir = java.nio.file.Files.createTempDirectory("mj-rtg");
+            mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+            cfg.games = 1;
+            cfg.workers = 1;
+            cfg.seedBase = 20260927L;
+            cfg.maxHands = 6;
+            cfg.outDir = dir.toString();
+            mahjong.train.SelfPlay.run(cfg);
+        } catch (java.io.IOException e) {
+            failures.add("reward-to-go 自测建临时目录失败: " + e);
+            fail++;
+            return;
+        }
+        final java.nio.file.Path trace = dir.resolve("g0.jsonl");
+        if (!java.nio.file.Files.isRegularFile(trace)) {
+            check("reward-to-go：轨迹文件产出", false);
+            return;
+        }
+        // ① 先按 hand 行建"逐局收支"与终局余棒，独立算一份后缀和（不复用被测代码）
+        final java.util.Map<Integer, int[]> deltas = new java.util.LinkedHashMap<>();
+        int[] lastAfter = null;
+        int startScore = 25000;
+        int[] finalScores = null;
+        final java.util.List<Object[]> decs = new java.util.ArrayList<>();
+        for (String line : readLines(trace)) {
+            if (!line.trim().startsWith("{")) {
+                continue;
+            }
+            java.util.Map<String, Object> row = Json.asObj(Json.tryParse(line));
+            final String type = Json.str(row, "type", "");
+            if ("hand".equals(type)) {
+                final int hn = Json.i(row, "hand_no", -1);
+                java.util.List<Object> d = Json.list(row, "delta");
+                int[] arr = new int[4];
+                for (int s = 0; s < 4 && d != null && s < d.size(); s++) {
+                    arr[s] = ((Number) d.get(s)).intValue();
+                }
+                deltas.put(hn, arr);
+                java.util.List<Object> after = Json.list(row, "scores_after");
+                lastAfter = new int[4];
+                for (int s = 0; s < 4 && after != null && s < after.size(); s++) {
+                    lastAfter[s] = ((Number) after.get(s)).intValue();
+                }
+            } else if ("game".equals(type)) {
+                startScore = Json.i(row, "start_score", 25000);
+                java.util.List<Object> fs = Json.list(row, "final_scores");
+                finalScores = new int[4];
+                for (int s = 0; s < 4 && fs != null && s < fs.size(); s++) {
+                    finalScores[s] = ((Number) fs.get(s)).intValue();
+                }
+            } else if ("decision".equals(type)) {
+                decs.add(new Object[]{Json.i(row, "hand_no", -1), Json.i(row, "seat", -1),
+                        row.get("reward_to_go")});
+            }
+        }
+        check("reward-to-go：轨迹里有决策行（" + decs.size() + " 条）", !decs.isEmpty());
+        check("reward-to-go：每条决策行都带 reward_to_go",
+                !decs.isEmpty() && decs.stream().allMatch(o -> o[2] instanceof Number));
+        if (decs.isEmpty() || finalScores == null || lastAfter == null
+                || !(decs.get(0)[2] instanceof Number)) {
+            return;
+        }
+        final int[] bonus = new int[4];
+        for (int s = 0; s < 4; s++) {
+            bonus[s] = finalScores[s] - lastAfter[s];
+        }
+        final int maxHand = deltas.keySet().stream().mapToInt(Integer::intValue).max().orElse(-1);
+        final int[][] want = new int[maxHand + 1][4];
+        int[] acc = new int[4];
+        for (int h = maxHand; h >= 0; h--) {
+            int[] d = deltas.get(h);
+            for (int s = 0; s < 4; s++) {
+                acc[s] += d == null ? 0 : d[s];
+                want[h][s] = acc[s] + bonus[s];
+            }
+        }
+        boolean suffixOk = true;
+        boolean firstHandOk = true;
+        boolean lastHandOk = true;
+        boolean differs = false;                       // 至少一行 != 整场结果（否则等于没加）
+        for (Object[] o : decs) {
+            final int hn = (Integer) o[0];
+            final int seat = (Integer) o[1];
+            final int got = ((Number) o[2]).intValue();
+            if (hn < 0 || hn > maxHand || seat < 0 || seat > 3 || got != want[hn][seat]) {
+                suffixOk = false;
+                continue;
+            }
+            if (hn == 0 && got != finalScores[seat] - startScore) {
+                firstHandOk = false;
+            }
+            if (hn == maxHand && got != (deltas.get(maxHand) == null ? 0 : deltas.get(maxHand)[seat])
+                    + bonus[seat]) {
+                lastHandOk = false;
+            }
+            if (hn > 0 && got != finalScores[seat] - startScore) {
+                differs = true;
+            }
+        }
+        check("reward-to-go：逐行等于「本局及其后收支之和 + 终局余棒」（独立重算）", suffixOk);
+        check("reward-to-go：第 0 小局 == final_scores − 起点（与值头旧口径同量纲）", firstHandOk);
+        check("reward-to-go：末局 == 末局收支 + 终局余棒", lastHandOk);
+        check("reward-to-go：真的逐决策（存在行 ≠ 整场结果；否则该字段只是抄了 value）", differs);
     }
 
     /** golden 夹具的魔数（"MJGF"，与 `export.py` 的 `GOLDEN_MAGIC` 同值）。 */

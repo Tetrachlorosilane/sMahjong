@@ -12,10 +12,10 @@
 | --- | --- |
 | 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `8b069fa`（obs v3 + v4 两轮预训练），再往前 `06d9ebd`（本文件首次落地）|
 | 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`daacdc68`**（P5 的第二个提交；其 tree `5b56699a…` **== 本地 HEAD 的 tree**）⇒ **已同步**（§2.12）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree；⚠⚠ **二进制文件（`forward-v4.bin`）进不了 `github_commit_files`**（它只收文本），要走 `POST /git/blobs`（base64）→ `POST /git/trees`（inline `sha`）→ `POST /git/commits` → `PATCH /git/refs`，见 §2.12 |
-| 发布 | **v1.12.0 已上线**（release **#397670321**，2 个资产：client + server；那版**不带机器人包** —— 当时 v4 还不能导出）。**现在 v4 已能打包**（`packbot --from-ckpt <v4 ckpt 目录>`，见 §2.12）：下一个 release 可以带 v4 包（先看 §3 ① 的性能结论） |
+| 发布 | **v1.13.0 已上线**（release id / 资产摘要见 `NOTES.md` §9.5）：**第一次随包发布 v4 的 3 代网络**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，格式 2 权重）+ 逐决策 reward-to-go 契约。上一版 v1.12.0（#397670321）只带 client + server（那时 v4 还不能导出） |
 | 数据盘 | `S:\mahjong-training` ≈ **17 GB**（`compact` 又多了 `v4-bc-003` 5.7 GB）；S 盘可用 ≈ **212 GB**。数据集：`raw\v4-bc-002` 1.19 GB → `compact\v4-bc-003`（**修好 `cand` 派生段后重建**，262,095 训练 / 14,965 验证）；checkpoint `ckpt\v4-bc-004`（教师一致率 **0.903**）与 `v4-bc-003`（0.165，阶段 c 塌掉的那份，留作对照） |
-| 训练进度 | **v3 谱系已到平台**；v4：teacher 预训练 0.608 → 0.619 → **0.903**（§2.12）；P3 开局 RWR（§2.14，−1.96 / −3.08 证不出）；**PPO 一轮**（§2.15：2,000 场 2+2 主判据 **−3.54 [−5.84,−1.24]** ⇒ **略低于 teacher**，探索数据 + 整场级优势是主因） |
-| v4 状态 | **P0 收口** + **P5 前向三端落地** + **§7.5 审计已做** + **PPO 回路已落地**（§2.15）。**下一件要紧事**：① 降温度 + **逐决策 reward-to-go**（GAE）再判 PPO；② 前向性能（40 ms → 1.5 ms，增量缓存） |
+| 训练进度 | **v3 谱系已到平台**；v4：teacher 预训练 0.608 → 0.619 → **0.903**（§2.12）；P3 开局 RWR（§2.14，−1.96 / −3.08 证不出）；**PPO 一轮**（§2.15：2,000 场 2+2 主判据 **−3.54 [−5.84,−1.24]** ⇒ **略低于 teacher**，探索数据 + 整场级优势是主因）；**第六轮**（§2.16）把这两条主因各修一处（`#0.5` + 逐决策 reward-to-go） |
+| v4 状态 | **P0 收口** + **P5 前向三端落地** + **§7.5 审计已做** + **PPO 回路已落地**（§2.15）+ **逐决策 reward-to-go 三端落地**（§2.16）。**下一件要紧事**：① 用 `#0.5` + `rtg` 优势重跑一轮 PPO 并按预先注册判据判决（§3 ①）；② 前向性能（40 ms → 1.5 ms，增量缓存） |
 | 并行工作 | ⚠ **有另一个会话在同一仓库工作**（见 §5 第 1 条：推送要串行 + 比 tree sha）；本次推送前其改动已在基线里（§2.11） |
 
 ---
@@ -293,10 +293,13 @@
 
 **这一轮要做的事**（按优先级）：
 
-① **把 P3 判到底**（§2.15 的结论：PPO 这一轮**略低于 teacher**，两条主因是探索污染与整场级优势）——
-   **降探索温度**（`#0.5`；采集期 `#1.0` 比 teacher 低 7.6 顺位点）→ **逐决策 credit**
-   （在 Java/C++ 的轨迹里记 reward-to-go，才能算 GAE/λ=1；现在是 `A = R_整场 − E[V]`，`sd(Δ)=52.8`）→
-   再放大场次（2+2 设计下检出 Δ=2.0 要 ~5,500 场）；
+① **用"降温度 + 逐决策优势"重跑一轮 PPO 判决**（§2.15 的结论：PPO 这一轮**略低于 teacher**，
+   两条主因是探索污染与整场级优势）——**两处都已在 §2.16 落地**，这一轮只剩执行 + 判决：
+   采集用 `#0.5`（学生串 `net:<上一代 net.bin>@0#0.5`）→ `--features` → `dataset build --student <同一串>`
+   → `pretrain --objective ppo --value-target rtg --behaviour <同一份权重> --behaviour-temp 0.5`；
+   **预先注册判据**：2,000 场 **2+2** 同牌山配对 vs teacher（`sd(Δ)≈53`：检出 Δ=2.0 要 ~5,500 场，
+   所以 2,000 场只能判"有没有掉下去"）+ 一次 vs 上一代的配对；报告均值自助法 CI **与**符号检验两个数。
+   ⚠ 别再用四路各一席的设计（`sd≈73`，同样的钱只买到一半精度）；
 ② **性能：把 v4 前向压回预算**（P5 验收里唯一没达标的项，实测 4.6 + 40 ms/决策）——
    按性价比：**增量事件缓存**（把 `v4/cache.py` 的 `EventStream` 语义搬到 Java：GRU 隐状态跨决策复用，
    `recompute()` 仍是基准路径，判据仍是"增量 == 全量"）→ 稠密循环优化（扁平 `float[]` + 行偏移、
@@ -326,10 +329,11 @@
   两条 2+2 配对**都证不出差别**（这本身是结论：上一代已在 teacher 水平，200 场 RWR 推不动）。
 - **第 10 轮 ✅**：P3 加强版 —— 1,000 场自对弈（689,693 决策）+ **PPO 落地**（§2.15）；
   学生行 CE 0.861 → 0.601、KL 0.069 → 0.021（全程在信任域内）；判决 +0.66 / +1.47（**方向翻正、仍证不出**）。
+- **第 11 轮 ✅**：发布 **v1.13.0**（v4 的 3 代网络随包 + 逐决策 reward-to-go 三端落地，§2.16）；
+  下一轮（§3 ①）用 `#0.5` + `rtg` 优势重跑 PPO 并按预先注册判据判决。
 
-**下一轮的起点**：§3 的 ① **性能**（把前向压回 1.5 ms 预算，先做增量事件缓存）——
-它是 P5 唯一没达标的验收项；之后回到 ② **§7.5 均衡审计**（判据⑩，**已在 §2.14 做完**）
-与 P3 的加强版（量级 + PPO）。
+**下一轮的起点**：§3 的 ① **把 P3 判到底**（`#0.5` 采集 + `rtg` 优势 = λ=1 GAE，已就位）——
+之后是 ② **性能**（把前向压回 1.5 ms 预算，先做增量事件缓存），它是 P5 唯一没达标的验收项。
 
 ### 2.14 P3 开局一轮（自对弈 + RWR）+ §7.5 均衡审计（2026-09-27）
 
@@ -365,6 +369,24 @@
   引擎侧记 reward-to-go）；③ **离线指标向好 ≠ 变强**（学生行 CE 0.861→0.601、top1 0.845→0.886，强度 −3.54）；
   ④ 采样设计：四路各一席 `sd(Δ)=73–74` 是 2+2（≈53）的 ~2 倍 ⇒ 同样预算优先 2+2。
 
+### 2.16 发布 v1.13.0 + 第六轮：逐决策 reward-to-go 三端落地（2026-09-28）
+
+- **发布 v1.13.0**（6 个资产；release id 与逐资产 sha256 见 `NOTES.md` §9.5）：
+  **第一次带 v4 的机器人包**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，`net.bin` 格式 2）+ v3 的三个
+  （v4 谱系目前还没有一代打出"比 teacher 强"的结论，所以老包继续随附）+ client/server。
+  ⚠ **"包能挂上"与"包能打"分开验**：启动日志的清单、`bot-ai-test.mjs`（20/0）、
+  以及**真打一场**（`--selfplay 1 --policy net:<包里的 net.bin>`，8 小局 / 483 决策 / 23.1 s）。
+- **第六轮（契约 + 三端）**：轨迹决策行新增 **`reward_to_go`**（点）= `Σ_{本局及其后} delta + 终局余棒`
+  ⇒ 离线 PPO 的 **λ=1 GAE 目标**（`A = R_tg − E[V(s)]`）现成可算，不再只有整场结果。
+  - **Java** `TraceRecorder.rewardToGo`（后缀和 + 余棒，按 `hand_no` 显式对齐）+
+    `SelfTest.rewardToGoTests`（6 项：守恒 / 独立重算的后缀和 / 真逐决策 / 末局口径）；
+  - **C++** `trainer/src/trace.cpp` 同口径 ⇒ `trainer-selfplay-parity.mjs` 2 场 × 6 小局**逐字节一致**，
+    且 C++ 轨迹过 `selfplay-check.mjs` 独立检查器 PASS；
+  - **检查器** `tools/selfplay-check.mjs` 独立重算（红证实测：改一行 `reward_to_go` → 2 条报错、退出码 1）；
+  - **Python**：数据集新增 `rtg` 列（千点；老轨迹写 **NaN**，不填 0）+ `--value-target final|rtg`
+    （同时决定值头目标与优势的 `R`，两处必须同源）；`pretrain` 在 NaN 数据上硬拒。
+  - 判据：L1 **1429/0**、`selfcheck` **479/0**（+11）、trainer `--selftest` PASS、`v4 check` PASS。
+
 ---
 
 ## 4. 环境与命令备忘（本机实测）
@@ -378,7 +400,7 @@ cd C:\Users\HP\source\games\mahjong\python
 .venv\Scripts\python.exe -m mahjong_ml.features    # 权威特征规格（v3: state 615 / cand 96）
 
 # 服务端 / 客户端
-pwsh -File server\build.ps1 ; java -jar server\build\mahjong-server.jar --selftest   # L1（当前 1403 项）
+pwsh -File server\build.ps1 ; java -jar server\build\mahjong-server.jar --selftest   # L1（当前 1429 项）
 pwsh -File client\build.ps1 -Deploy                                                  # 发布前必做
 node tools\doc-refs-check.mjs                                                        # 文档自检（含索引完整性）
 
@@ -400,6 +422,13 @@ node tools\trainer-v4-parity.mjs --golden                              # Java �
 node tools\trainer-v4-parity.mjs --selfcheck                           # 比较器负向对照（扰动必须 FAIL）
 node tools\trainer-v4-parity.mjs tools\build\v4-bc-004\net.bin .tmp-v4fix   # Java↔C++ 逐行（实测 1,885 条 maxΔ=0）
 java -cp "server/build/mahjong-server.jar;tools/build" tools.V4Probe --bench tools\build\v4-bc-004\net.bin .tmp-v4fix\g0.jsonl 200
+
+# 第六轮：逐决策 reward-to-go（λ=1 的 GAE 目标；§2.16）—— 一轮 PPO 的完整回路
+java -jar server\build\mahjong-server.jar --selfplay 1000 --workers 24 --aux --seed 20260928 --out S:\mahjong-training\raw\v4-sp-004 --policy "teacher,net:tools\build\v4-p3-001\net.bin@0#0.5,teacher,net:tools\build\v4-p3-001\net.bin@0#0.5"
+node tools\selfplay-check.mjs S:\mahjong-training\raw\v4-sp-004       # 含 reward_to_go 的独立重算
+.venv\Scripts\python.exe -m mahjong_ml.v4 balance --dir S:\mahjong-training\raw\v4-sp-004 --expect "teacher=2,net:...=2" --equal-shares
+java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-sp-004 --workers 24.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-sp-004 S:\mahjong-training\compact\v4-sp-004 --aux --student "net:tools\build\v4-p3-001\net.bin@0#0.5"
+.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 --label v4-ppo-002 --objective ppo --value-target rtg --behaviour ..\tools\build\v4-p3-001\net.bin --behaviour-temp 0.5 --init S:\mahjong-training\ckpt\v4-p3-001\model.pt --epochs 4
 
 # 训练端 C++（改了 trainer/ 之后必跑；判据见 §2.6/§2.7 与 docs\TRAINER-CPP.md §6.20/§6.21）
 pwsh -File trainer\build.ps1                                                          # 增量编译 + 编后自检

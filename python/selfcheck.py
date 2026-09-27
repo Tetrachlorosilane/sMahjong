@@ -2019,6 +2019,74 @@ try:
 except SystemExit as _e:
     ok("--behaviour" in str(_e), "PPO：缺 `--behaviour` 被硬拒 ✓", str(_e)[:60])
 
+# ---- 第六轮：逐决策 reward-to-go（轨迹 `reward_to_go` → 数据集 `rtg` 列；λ=1 的 GAE 目标）-------
+# 为什么必须有这一组：第五轮的优势是 `A = R_整场 − E[V(s)]`，没有"这一手之后发生了什么"，
+# 于是 2,000 场 2+2 配对量到 Δ=−3.54 顺位点。这一组钉四件事：① 列真的从轨迹读进来；
+# ② 老轨迹是 **NaN**（不是 0 —— 0 会让优势变成 `0 − V(s)`，静默失真）；③ 换源确实改变优势与值头目标；
+# ④ 拿 NaN 数据跑 `--value-target rtg` **当场报错**。
+_rt_src = scratch("v4-rt-src")
+for _g in range(2):
+    _jl = _rt_src / f"g{_g}.jsonl"
+    _rows = []
+    for _i in range(4):
+        _legal = list(_v4obs["legal"])[:2]
+        _obs = dict(_v4obs, v=3, seat=_i % 4, legal=_legal)
+        _rows.append({"type": "decision", "game": _g, "hand_no": _g, "step": _i, "seat": _i % 4,
+                      "policy": _std, "kind": "turn", "legal": _legal,
+                      "chosen": _legal[_i % 2], "chosen_index": _i % 2,
+                      "hand_delta": [1000 * (_i - 2), 0, 0, 0],
+                      "reward_to_go": [1000, 4000, 2000, 3000][_i],
+                      "placement": [1, 2, 3, 4],
+                      "final_scores": [26000, 25000, 24000, 25000], "obs": _obs})
+    with _jl.open("w", encoding="utf-8") as _fh:
+        for _r in _rows:
+            _fh.write(json.dumps(_r, ensure_ascii=False) + "\n")
+        _fh.write(json.dumps({"type": "game", "game": _g, "seed": 1, "policies": [_std] * 4,
+                              "start_score": 25000, "final_scores": [26000, 25000, 24000, 25000],
+                              "placement": [1, 2, 3, 4]}) + "\n")
+    write_sidecar(_jl, [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(4)])
+v4_ds.build(_rt_src, _rt_src / "ds", val_frac=0.5, split_seed=0, aux=False, quiet=True,
+            student=_std)
+_rtd = v4_ds.load_split(_rt_src / "ds", "train")
+_rtcol = np.asarray(_rtd["rtg"], dtype=np.float32)
+ok(bool(np.isfinite(_rtcol).all()), "第六轮：`rtg` 列从轨迹的 `reward_to_go` 读进来（点 → 千点）",
+   f"n={_rtcol.size}")
+eq("第六轮：`rtg` = reward_to_go/1000（夹具 4 个值）",
+   sorted(set(np.round(_rtcol.astype(float), 3).tolist())), [1.0, 2.0, 3.0, 4.0])
+ok(float(_rtd["meta"]["rtg_frac"]["train"]) == 1.0, "第六轮：meta 记 reward-to-go 覆盖率（100%）")
+ok(bool(np.isnan(np.asarray(_sp["rtg"], dtype=np.float32)).all()),
+   "第六轮：**老轨迹**的 `rtg` 是 NaN（显式缺席；填 0 会把优势变成 `0 − V(s)`，静默失真）")
+_rtb = v4_pt._batch(_rtd, np.arange(4), "cpu")
+ok(_rtb.get("rtg") is not None, "第六轮：`_batch` 带出 `rtg`（缺列时为 None，不炸老数据集）")
+_vrt = v4_model.build(seed=13)
+with _torch.no_grad():
+    _outrt = _vrt(_rtb["tile"], _rtb["evt"], _rtb["ctx"], _rtb["cand"], mask=_rtb["mask"])
+_keep4b = _torch.tensor([1.0, 1.0, 0.0, 0.0])
+_a_val = v4_pt._advantages(_outrt, _rtb, _keep4b, key="value")
+_a_rtg = v4_pt._advantages(_outrt, _rtb, _keep4b, key="rtg")
+ok(float((_a_val - _a_rtg).abs().max()) > 1e-4,
+   "第六轮：优势回报换源（value → rtg）确实改变 A（判据不是空转）")
+# 反过来也要知道边界：**整体平移**（所有行 +常数）在归一化后是看不见的 —— 所以上面那组夹具
+# 刻意让两列在学生行上的差**不是常数**（`[1000,4000,...]` vs `final_scores`），否则这条判据会假绿。
+_rtb_shift = dict(_rtb)
+_rtb_shift["value"] = _rtb["value"] + 5.0
+ok(float((v4_pt._advantages(_outrt, _rtb_shift, _keep4b, key="value") - _a_val).abs().max()) < 1e-5,
+   "第六轮：优势对回报的整体平移不变（学生行归一化的后果；夹具必须避开这一点）")
+ok(abs(float(_a_rtg[_keep4b > 0].mean())) < 1e-5
+   and abs(float(_a_rtg[_keep4b > 0].std(unbiased=False)) - 1.0) < 1e-4,
+   "第六轮：rtg 口径的优势同样只在学生行上归一化（均值 0 / 标准差 1）")
+ok(float(_a_rtg[_keep4b == 0].abs().max()) == 0.0, "第六轮：rtg 口径下非学生行优势仍为 0")
+_pv = v4_pt.compute_loss(_outrt, _rtb, _pw, row_keep=_keep4b, value_key="value")[1]["value"]
+_pr = v4_pt.compute_loss(_outrt, _rtb, _pw, row_keep=_keep4b, value_key="rtg")[1]["value"]
+ok(abs(_pv - _pr) > 1e-4, "第六轮：`value_key=rtg` 真的换了值头目标（critic 与优势同源）",
+   f"value {_pv:.4f} vs rtg {_pr:.4f}")
+try:
+    v4_pt.train(argparse.Namespace(**{**_ptbase, "data": str(_sp_src / "ds"),
+                                      "label": "v4-selfcheck-rtg0", "value_target": "rtg"}))
+    ok(False, "第六轮：老数据集 + `--value-target rtg` 必须报错（NaN 不是回报）")
+except SystemExit as _e:
+    ok("reward_to_go" in str(_e), "第六轮：`--value-target rtg` 在 NaN 数据上被硬拒 ✓", str(_e)[:70])
+
 # 场外均衡审计（设计 §7.5）—— 含负向对照
 _bdir = scratch("v4-balance")
 _pols = ["pa", "pb", "pc", "pd"]

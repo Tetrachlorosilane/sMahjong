@@ -1186,7 +1186,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 
 | 行 | 内容 |
 | --- | --- |
-| `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, final_scores, placement}`，`--teacher-label` 时**另带** `teacher` / `teacher_index` |
+| `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, reward_to_go, final_scores, placement}`，`--teacher-label` 时**另带** `teacher` / `teacher_index` |
 | `hand` | `{hand_no, hand, round, scores_after, delta, agari, abortive, reason, renchan, winner, loser, tsumo, nagashi, tenpai}` |
 | `game` | `{game, seed, policies, start_score, hands, decisions, sampled_every, final_scores, placement}` |
 
@@ -1196,6 +1196,16 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
   `∈ legal`、`chosen_index` 一定对得上，且**不会**出现"记了裸键、执行了另一条"的错位。
 - **奖励是事后回填的**：决策发生时还不知道这一手 / 这一场的结果，所以 `hand_delta`（本小局四家收支）、
   `hand_winner`/`hand_loser`、`placement`（整场顺位）是在小局 / 整场结束时补进去的。
+- **`reward_to_go`（点）= 逐决策回报**：`R(h, s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]` ——
+  「本小局及其后」该家的收支之和，外加末局结算后供託里那批立直棒（按规则归末局第 1 位，
+  `AGENTS.md` §6.4 ②）。它是**离线 PPO 的 λ=1 GAE 目标**的 `R`（`A = R − E[V(s)]`），
+  也是值头的监督目标（数据集列 `rtg`，千点）。
+  三条不变式（`SelfTest.rewardToGoTests` 与 `tools/selfplay-check.mjs` 各自独立钉一遍）：
+  ① **第 0 小局 == `final_scores[seat] − start_score`**（与值头旧口径同量纲，余棒必须算进去）；
+  ② 末局 == 末局 `delta[seat]` + 余棒；③ 它**真的逐决策**（多局时至少有一行 ≠ 整场结果 ——
+  否则这个字段只是把 `value` 抄了一遍）。Java 与 C++ 两侧**逐字同口径**（同种子轨迹逐字节相同）。
+  ⚠ 没有这个字段的**老轨迹**：数据集里 `rtg` 写 **NaN**（显式缺席），`--value-target rtg` 会硬拒 ——
+  ⛔ 不许填 0（那会把优势变成 `0 − V(s)`：训练照跑、回报没了）。
 - `placement` 恒为 `1..4` 的一个排列：**同点按座次先后**（M.League 起家优先）拆开 ——
   否则「平均顺位」会被同点挤掉一个名次。
 - `summary.json` 含 `by_policy`（`avg_place` / **`avg_rank_points`** / `win_rate` / `deal_in_rate` /

@@ -109,6 +109,10 @@ def _batch(data: dict, idx: np.ndarray, device: str) -> dict[str, torch.Tensor]:
         "mask": torch.from_numpy(mask).to(device),
         "label": torch.from_numpy(np.asarray(data["label"][idx], dtype=np.int64)).to(device),
         "value": torch.from_numpy(np.asarray(data["value"][idx], dtype=np.float32)).to(device),
+        # `rtg`（逐决策 reward-to-go，千点）：第六轮加的 λ=1 GAE 目标。老数据集里是 NaN ⇒
+        # `--value-target rtg` 会在入口处硬拒（见 `train()`），不会静默拿 NaN 去训。
+        "rtg": torch.from_numpy(np.asarray(data["rtg"][idx], dtype=np.float32)).to(device)
+        if data.get("rtg") is not None else None,
         "placement": torch.from_numpy(
             np.asarray(data["placement"][idx], dtype=np.int64)).to(device),
         "effect": torch.from_numpy(
@@ -149,11 +153,13 @@ def _row_weights(data: dict, idx, beta: float, device: str):
 
 
 def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
-                row_keep: torch.Tensor | None) -> torch.Tensor:
+                row_keep: torch.Tensor | None, key: str = "value") -> torch.Tensor:
     """`A = R − E[V(s)]`，**只在学生行上归一化**（设计 §7.4 / v3 P4 的硬口径）。
 
-    - `R` = 数据集里的 `value`（`final_scores − 起点`，千点）—— 与值头的监督目标**同一个量**，
-      所以 critic 与优势是自洽的（值头学的就是这个 R 的分布）；
+    - `R` = 数据集里的 `value`（`final_scores − 起点`，千点）或 **`rtg`（逐决策 reward-to-go）**；
+      ⚠ 两者**必须是值头正在学的那个量**（`--value-target` 同时决定这里与值头目标），否则
+      critic 与优势不同量纲，优势会被系统性偏移（第五轮的 `A = R_整场 − E[V(s)]` 就是这个毛病：
+      它没有"这一手之后发生了什么"，信用分配粗到整场，实测 Δ=−3.54 顺位点）；
     - `E[V(s)]` = 值头 51 个分箱的期望（分箱中心 `linspace(-30, +30)`，与 `VALUE_RANGE` 同量纲）；
     - ⚠ **归一化只用学生行**：把对手/老师那 3/4 的行算进均值方差，会把优势的尺度带偏
       （v3 实测过学生行占比 0.75 而非 0.25 那种静默失真）。
@@ -161,7 +167,7 @@ def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS,
                             device=out["value"].device)
     v_hat = (torch.softmax(out["value"], dim=-1) * center).sum(-1)
-    adv = b["value"] - v_hat
+    adv = b[key] - v_hat
     if row_keep is not None:
         k = row_keep > 0
         if bool(k.any()):
@@ -216,7 +222,8 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  ssl: tuple | None = None,
                  row_keep: torch.Tensor | None = None,
                  row_w: torch.Tensor | None = None,
-                 ppo: tuple | None = None) -> tuple[torch.Tensor, dict[str, float]]:
+                 ppo: tuple | None = None,
+                 value_key: str = "value") -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -229,6 +236,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     @param ppo     `(logp_old, clip, entropy_coef)` —— 用 **PPO 截断替代项**取代策略头的交叉熵：
         `ρ = exp(logπ_new − logπ_old)`、`−min(ρA, clip(ρ,1±ε)A) + c·H(π)`。
         `A` 由 `_advantages()` 给（学生行归一化）；`logp_old` 由 `_behaviour_logprobs()` 重算。
+    @param value_key 值头的监督目标取自哪一列：`value`（整场结果，缺省）/ `rtg`（逐决策
+        reward-to-go）。⚠ 它**同时**决定优势里的 `R` —— 两处必须同源，否则 critic 与优势
+        不同量纲（见 `_advantages()` 的注释）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -250,7 +260,7 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         logp_old, clip_eps, ent_coef = ppo
         logp_new = torch.log_softmax(out["policy"], dim=-1).gather(
             1, b["label"][:, None]).squeeze(1)
-        adv = _advantages(out, b, row_keep)
+        adv = _advantages(out, b, row_keep, key=value_key)
         ratio = torch.exp(logp_new - logp_old)
         surr = -torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv)
         l_policy = reduce_row(surr, row_keep)
@@ -272,7 +282,7 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         total = total + w["policy"] * l_policy
 
     # 值头：HL-Gauss **软标签**的交叉熵（与自检里"每行和为 1"同一套目标）
-    target = M.hl_gauss_targets(b["value"])
+    target = M.hl_gauss_targets(b[value_key])
     l_value = -(F.log_softmax(out["value"], dim=-1) * target).sum(-1).mean()
     parts["value"] = float(l_value.detach())
     total = total + w["value"] * l_value
@@ -332,7 +342,7 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
 @torch.no_grad()
 def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
              ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0,
-             row_keep=None) -> dict:
+             row_keep=None, value_key: str = "value") -> dict:
     """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率。
 
     @param row_keep 只在**这些行**上统计一致率（自对弈数据里 = 学生那一代的行；
@@ -362,7 +372,7 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
         #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
         kb_e = None if row_keep is None else torch.from_numpy(
             np.asarray(row_keep[idx], dtype=np.float32)).to(device)
-        loss, parts = compute_loss(out, b, ssl=ssl, row_keep=kb_e)
+        loss, parts = compute_loss(out, b, ssl=ssl, row_keep=kb_e, value_key=value_key)
         loss_sum += float(loss) * idx.size
         for k, v in parts.items():
             parts_sum[k] = parts_sum.get(k, 0.0) + v * idx.size
@@ -476,6 +486,20 @@ def train(args) -> dict:
     #   `Namespace(**{...})` 调用（那种调用不该因为少一个可选字段就炸）
     rwr_beta = float(getattr(args, "rwr_beta", 0.0) or 0.0)
     objective = str(getattr(args, "objective", "bc") or "bc")
+    # 值头目标 / 优势回报的来源（第六轮）：`rtg` = 逐决策 reward-to-go（λ=1 的 GAE 目标）。
+    # ⚠ 两处**必须同源**，所以只有一个开关；老数据集里 `rtg` 是 NaN ⇒ 选了就当场报错（不静默）。
+    value_key = "rtg" if str(getattr(args, "value_target", "final") or "final") == "rtg" else "value"
+    if value_key == "rtg":
+        ok = all(d.get("rtg") is not None
+                 and bool(np.isfinite(np.asarray(d["rtg"], dtype=np.float32)).all())
+                 for d in (train_data, val_data))
+        if not ok:
+            raise SystemExit("--value-target rtg 但数据集里没有可用的 `reward_to_go`（rtg 列是 NaN）"
+                             "—— 那是**老轨迹**（采集器还没有逐决策回报）。请用新版采集器重采，"
+                             "或改用 `--value-target final`。")
+        print("值头/优势口径：**逐决策 reward-to-go**（rtg，千点；λ=1 的 GAE 目标）")
+    else:
+        print("值头/优势口径：整场结果（value = final_scores − 起点；旧口径）")
     keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
     if rwr_beta > 0 and w_tr is None:
         raise SystemExit("--rwr-beta > 0 但数据集里没有 `delta` 列（老数据集）—— "
@@ -568,7 +592,7 @@ def train(args) -> dict:
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
             loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl,
-                                       row_keep=kb, row_w=wb, ppo=ppo)
+                                       row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -580,8 +604,9 @@ def train(args) -> dict:
                 run_parts[k] = run_parts.get(k, 0.0) + v * idx.size
             gstep += 1
         ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
-                      mask_frac=args.mask_frac)
-        ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va)
+                      mask_frac=args.mask_frac, value_key=value_key)
+        ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
+                           value_key=value_key)
                   if keep_va is not None else None)
         row = {"epoch": epoch, "stage_at_end": cur_stage, "train_loss": run / max(1, seen),
                "train_parts": {k: v / max(1, seen) for k, v in run_parts.items()},
@@ -666,6 +691,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="行为策略的采样温度（缺省从数据集 meta 的 `student` 串里解析 `#T`，再缺省 1.0）")
     ap.add_argument("--ppo-clip", type=float, default=0.2, help="PPO 截断 ε")
     ap.add_argument("--ppo-entropy", type=float, default=0.01, help="熵奖励系数（学生行上）")
+    ap.add_argument("--value-target", choices=["final", "rtg"], default="final",
+                    help="值头目标 / 优势回报的来源：final = 整场结果（旧口径）/ "
+                         "rtg = **逐决策 reward-to-go**（λ=1 的 GAE 目标；需要新版采集器的轨迹）")
     ap.add_argument("--init", default=None,
                     help="从这份权重起步（ckpt 或 net.bin）—— 缺省随机初始化（纯模仿那几轮的口径）")
     # P1 自监督：掩码事件重建

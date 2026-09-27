@@ -228,6 +228,40 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-
 python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-ppo3way --labels "<新代>,teacher"
 ```
 
+**第六轮：降探索温度 + 逐决策 reward-to-go（λ=1 的 GAE 目标）** —— 第五轮的两条主因各修一处
+（`#1.0` 的探索把行为分布拉低 7.6 顺位点；`A = R_整场 − E[V]` 没有逐决策信用分配）：
+
+```powershell
+# 采集：学生 2 席**降到 `#0.5`**（行为策略回到 teacher 水平）+ teacher 2 席；
+# ⚠ 学生串里 `@0` = 不加 teacher 先验、`#0.5` = 采样温度（它同时是 PPO 的 `log π_old` 温度）
+java -jar server\build\mahjong-server.jar --selfplay 1000 --workers 24 --rotate --aux `
+     --policy "net:tools\build\<上一代>\net.bin@0#0.5,net:tools\build\<上一代>\net.bin@0#0.5,teacher,teacher" `
+     --seed 20261002 --out S:\mahjong-training\raw\v4-sp-004
+java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-sp-004 --workers 24
+# 轨迹里现在带 `reward_to_go`（本局及其后收支之和 + 终局余棒）——先过独立校验器
+node tools\selfplay-check.mjs S:\mahjong-training\raw\v4-sp-004
+# 数据集：`--student` 与上面的串**逐字相同**（否则 `is_student` 全 0，训练入口硬拒）；
+# 新列 `rtg`（千点）= reward_to_go/1000；老轨迹里它是 NaN
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-sp-004 `
+     S:\mahjong-training\compact\v4-sp-004 --aux --student "net:tools\build\<上一代>\net.bin@0#0.5"
+# PPO + `--value-target rtg`：值头目标与优势的 R **同源**（都是逐决策回报）；
+# `--behaviour-temp 0.5` 必须与采集时的 `#0.5` 一致，否则 log π_old 是错的分布
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 `
+     --label v4-ppo-002 --epochs 4 --batch 256 --objective ppo --value-target rtg `
+     --behaviour "tools\build\<上一代>\net.bin" --behaviour-temp 0.5 --init "tools\build\<上一代>\net.bin" `
+     --stage-a 0 --stage-b 0 --lr 1e-4 --head-lr-mult 1 --mask-frac 0 --ssl-weight 0
+# 预先注册的判据：2,000 场 **2+2** 同牌山配对 vs teacher（⚠ 四路各一席的 sd(Δ)≈73 是 2+2 ≈53 的 2 倍）
+trainer\build\trainer.exe selfplay 2000 --workers 24 --rotate `
+     --policy "net:tools\build\<新代>\net.bin,net:tools\build\<新代>\net.bin,teacher,teacher" `
+     --seed 777005 --out S:\mahjong-training\raw\eval-ppo2-vs-teacher
+python\.venv\Scripts\python.exe -m mahjong_ml.eval S:\mahjong-training\raw\eval-ppo2-vs-teacher `
+     --metric rank_points --labels "net:tools\build\<新代>,teacher"
+```
+
+> ⚠ `--value-target rtg` 在**老数据集**（没有 `reward_to_go` 的轨迹）上会**当场报错**，
+> 这是刻意的：`rtg` 缺席写 NaN 而不是 0 —— 填 0 会让优势变成 `0 − V(s)`（训练照跑、回报没了）。
+> ⚠ 优势对学生行的**整体平移不敏感**（归一化会减掉均值）——判断"换源有没有生效"要看**逐行差非常数**的那种夹具。
+
 > ⚠ 混合阵容（含 `random`）的数据集上，**策略 CE 只看学生行**：`random` 的动作在训练过的网看来
 > 几乎是零概率（逐行 CE 中位 0.05 / 90 分位 24 / 最大 672；纯 teacher 数据上中位 0.004）
 > —— 不遮罩的"策略 CE"会被它带跑。

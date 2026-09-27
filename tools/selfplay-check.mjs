@@ -47,7 +47,7 @@ const EVT_MELD_KEYS = ['actor', 'tile', 'called_tile', 'tiles', 'meld_kind', 'fr
 
 const DECISION_KEYS = new Set(['type', 'game', 'hand_no', 'hand', 'step', 'seat', 'policy',
   'kind', 'legal', 'chosen', 'chosen_index', 'obs', 'hand_delta', 'hand_winner', 'hand_loser',
-  'hand_agari', 'final_scores', 'placement', 'teacher', 'teacher_index']);
+  'hand_agari', 'reward_to_go', 'final_scores', 'placement', 'teacher', 'teacher_index']);
 
 const problems = [];
 const warnings = [];
@@ -265,7 +265,7 @@ for (const f of files) {
     if (row.step <= lastStep) add(file, ln, `step 未严格递增：${row.step} <= ${lastStep}`);
     lastStep = row.step;
     // backfill
-    for (const k of ['hand_delta', 'final_scores', 'placement']) {
+    for (const k of ['hand_delta', 'reward_to_go', 'final_scores', 'placement']) {
       if (!(k in row)) add(file, ln, `缺少回填字段 ${k}`);
     }
     stats.decisions++;
@@ -339,6 +339,45 @@ for (const f of files) {
     }
     if (new Set(game.row.placement).size !== 4) add(file, game.ln, 'placement 不是 1..4 的排列');
   } else add(file, lines.length, '没有 game 结算行');
+
+  // ---- 逐决策 reward-to-go（离线 PPO 的 λ=1 目标；契约见 PROTOCOL §8.4 与 AGENTS §6.5）
+  // 独立重算一遍：`R(h,s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]`，逐行比对 —— ⛔ 不照抄 Java 的实现。
+  // 余棒 = 末局结算后供託里那批立直棒按规则归末局 1 位（见上面 game 段），所以它必须加进来，
+  // 否则第 0 小局的 reward_to_go 会比值头的旧口径（final_scores − 起点）少一个 0~3000 点的常数。
+  if (hands.length > 0 && game) {
+    const maxNo = Math.max(...hands.map((h) => h.row.hand_no));
+    const byNo = new Map(hands.map((h) => [h.row.hand_no, h.row.delta]));
+    const lastRow = hands[hands.length - 1].row;
+    const bonus = game.row.final_scores.map((v, i) => v - lastRow.scores_after[i]);
+    const want = new Array(maxNo + 1);
+    const acc = [0, 0, 0, 0];
+    for (let h = maxNo; h >= 0; h--) {
+      const d = byNo.get(h) || [0, 0, 0, 0];
+      for (let s = 0; s < 4; s++) acc[s] += d[s];
+      want[h] = acc.map((v, s) => v + bonus[s]);
+    }
+    let midGameDiffers = 0;
+    for (const { row, ln } of decisions) {
+      const w = want[row.hand_no];
+      if (!w || row.seat < 0 || row.seat > 3) {
+        add(file, ln, `reward_to_go：hand_no=${row.hand_no} / seat=${row.seat} 越界`);
+        continue;
+      }
+      if (row.reward_to_go !== w[row.seat]) {
+        add(file, ln, `reward_to_go=${row.reward_to_go} 与独立重算的 ${w[row.seat]} 不一致`
+          + `（本局及其后收支之和 + 余棒 ${bonus[row.seat]}）`);
+      }
+      const whole = game.row.final_scores[row.seat] - game.row.start_score;
+      if (row.hand_no === 0 && row.reward_to_go !== whole) {
+        add(file, ln, `第 0 小局 reward_to_go=${row.reward_to_go} != final_scores[${row.seat}] − 起点 ${whole}`);
+      }
+      if (row.hand_no > 0 && row.reward_to_go !== whole) midGameDiffers++;
+    }
+    // 红证：它必须**真的逐决策**。整场只有 1 小局时"每行都等于整场结果"是对的，所以只在多局时查。
+    if (maxNo > 0 && midGameDiffers === 0) {
+      add(file, 1, 'reward_to_go 在所有非首局行上都等于整场结果 —— 这个字段没有逐决策（等于把 value 抄了一遍）');
+    }
+  }
 
   // ---- 决策数与小局数对得上
   // ⚠ **采样过的轨迹不能查"每小局至少 4 条"**：`--sample k` 只记每 k 次决策里的 1 条，

@@ -309,14 +309,21 @@ final class TraceRecorder {
 
     // ------------------------------------------------------------------ 收尾
 
-    /** 整场结束：回填顺位。必须在 {@code Table.playGame()} 返回之后调用。 */
+    /** 整场结束：回填顺位与逐决策 reward-to-go。必须在 {@code Table.playGame()} 返回之后调用。 */
     void finish(Table t) {
         int[] finalScores = new int[4];
         for (int i = 0; i < 4; i++) {
             finalScores[i] = t.seat(i).score;
         }
         List<Object> placement = placementOf(finalScores);
+        final int[][] rtg = rewardToGo(finalScores);
         for (Map<String, Object> row : decisions) {
+            // 逐决策回报（点）：λ=1 的 GAE 目标 = 从这个局面起的还行收入之和。
+            // 顺序必须与 C++ 侧一致（`trainer/src/trace.cpp`）—— 同种子两份轨迹要逐字节相同。
+            final int hn = ((Number) row.get("hand_no")).intValue();
+            final int seat = ((Number) row.get("seat")).intValue();
+            row.put("reward_to_go",
+                    hn >= 0 && hn < rtg.length && seat >= 0 && seat < 4 ? rtg[hn][seat] : 0);
             row.put("final_scores", Json.intList(finalScores));
             row.put("placement", placement);
         }
@@ -356,6 +363,54 @@ final class TraceRecorder {
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /**
+     * 逐决策 **reward-to-go**（点）：`R(h, s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]`。
+     *
+     * <p>为什么要它（`docs/TRAINING-V4.md` §「第六轮」）：离线 PPO 原来只能拿**整场**结果
+     * （{@code final_scores − 起点}）当回报，那个量对所有局面都一样 ⇒ 优势
+     * {@code A = R − E[V(s)]} 里没有"这一手之后发生了什么"的信息，信用分配粗到整场
+     * （实测 2,000 场 2+2 配对 Δ=−3.54 顺位点，见 §「第五轮」）。有了逐决策回报，
+     * **λ=1 的 GAE 目标就现成可算**（{@code A = R_tg − V(s)}），不需要在线交互。
+     *
+     * <p>口径（三条，与 {@code trainer/src/trace.cpp} 逐字一致）：
+     * <ul>
+     *   <li>回报 = **本小局及其后**该家的收支之和 —— 决策的后果包含本小局（打出去就结算了）；</li>
+     *   <li>外加**终局余棒**（末局结算后供託里那批立直棒按规则归末局第 1 位，`AGENTS.md` §6.4）：
+     *       不加它的话第 0 小局的回报会比 {@code value} 少一个 0~3000 点的常数，
+     *       于是值头（若也用 rtg 当目标）与旧口径对不上；</li>
+     *   <li>所以有不变式：**第 0 小局的决策的 {@code reward_to_go} == {@code final_scores[seat] − 起点}**
+     *       （点）—— 自检与 {@code tools/selfplay-check.mjs} 都钉着它。</li>
+     * </ul>
+     *
+     * @return {@code rtg[hand_no][seat]}；没有小局结算行时返回空数组（那种轨迹本来就不该用）
+     */
+    private int[][] rewardToGo(int[] finalScores) {
+        final int n = hands.size();
+        int maxNo = -1;
+        for (Map<String, Object> h : hands) {
+            maxNo = Math.max(maxNo, ((Number) h.get("hand_no")).intValue());
+        }
+        final int[][] rtg = new int[maxNo + 1][4];
+        int[] bonus = new int[4];
+        if (n > 0) {
+            List<Object> lastAfter = Json.list(hands.get(n - 1), "scores_after");
+            for (int s = 0; s < 4 && lastAfter != null && s < lastAfter.size(); s++) {
+                bonus[s] = finalScores[s] - ((Number) lastAfter.get(s)).intValue();
+            }
+        }
+        int[] acc = new int[4];
+        for (int h = n - 1; h >= 0; h--) {
+            List<Object> d = Json.list(hands.get(h), "delta");
+            final int hn = ((Number) hands.get(h).get("hand_no")).intValue();
+            for (int s = 0; s < 4; s++) {
+                final int add = d != null && s < d.size() ? ((Number) d.get(s)).intValue() : 0;
+                acc[s] += add;
+                rtg[hn][s] = acc[s] + bonus[s];
+            }
+        }
+        return rtg;
+    }
 
     /**
      * 写标签侧文件 `g<n>.aux.npz`（`FEATURES-V4.md` §5.2；**训练专用，推理路径永不读它**）。

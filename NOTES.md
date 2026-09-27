@@ -2619,6 +2619,30 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   改这类"规格数字"必须 `grep` 全仓（含注释），且**发布资产不重出**（tag 指向的提交就是打包时那份源码，
   注释/行号变了、类文件语义不变）。本地草稿与摘要表：`release\RELEASE-v1.12.0.md`。
 
+- **v1.13.0**（2026-09-28，**v4 机器人 AI 包随发布 + 逐决策 reward-to-go 契约**）：
+  release id **RELEASE_ID_PLACEHOLDER**，tag `v1.13.0` → 远端 **TAG_SHA_PLACEHOLDER**。
+  通道：`github_commit_files`（REST）→ `POST /git/refs` 建 tag → `POST /releases` →
+  资产走 `uploads.github.com`（`github_upload_release_asset`）。
+  **内容等价判据**：远端提交 tree == 本地 `HEAD` 的 tree（两边逐字节一致，不是"看着像"）。
+  资产 **6 个**（本地 sha256 与 GitHub digest 逐一核对）：
+  `sMahjong-client-v1.13.0-win64.zip` 38,848,425 B `0a9a1696…` ·
+  `sMahjong-server-v1.13.0.zip` 402,181 B `e7fbb521…` ·
+  `sMahjong-bot-ai-v1.13.0.zip` 18,084,284 B `7d507fd5…` ·
+  `v4-bc-004.zip` 5,030,913 B `352cd603…` · `v4-p3-001.zip` 5,023,840 B `5b81cf59…` ·
+  `v4-ppo-001.zip` 5,030,883 B `b4995708…`（**asset id 待回填**）。
+  ⚠ **本版终于能带 v4 包**（P5 的 v4 前向在 v1.12.0 之后落地）：`net.bin` **格式 2**，
+  服务端 `NetWeights` 按 `format` 分派到 `V4Policy`；包目录里 `net.json` 是
+  `v4/export.py` 自己写的**张量清单**（74 个张量 / 16 个块 / 指纹 `e1f5dd0fc1e9aba8`），服务端不读它。
+  ⚠ **"包能挂上"与"包能打"要分开验**：① 挂载清单（启动日志的「机器人 AI：…」含 v4 三个）；
+  ② `node tools\bot-ai-test.mjs`（清单/建房/换一代/路径串被拒，20/0 PASS）；
+  ③ **真打一场**：`--selfplay 1 --policy net:<包里的 net.bin>` → 跑满 8 小局（4.6 s/局 × ... 实测 23.1 s、
+  483 次决策）—— 只验①不看③的话，"权重能载入但前向和打包版对不上"会漏过去。
+  ⚠ v4 前向 ≈48 ms/决策（含特征），所以 v4 包**当 bot 可以、当自对弈主力不行**（采集仍用 teacher/v3）。
+  发布前实测：L1 **1429/1429**、L2 **854/854**、`selfcheck.py` **479/479**、`v4 check` PASS、
+  trainer `--selftest` PASS、**Java↔C++ 轨迹逐字节**（2 场 × 6 小局，`trainer-selfplay-parity.mjs`）、
+  `doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.13.0、exe 内 UTF-16 串实测 1.13.0。
+  本地草稿与摘要表：`release\RELEASE-v1.13.0.md`。
+
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
 **需求**：把本项目的对局导出成能被 AI 复盘工具直接吃的牌谱
