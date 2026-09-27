@@ -472,7 +472,37 @@ std::string featureLayout() {
             + "（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points）"
             + " perCandidate=" + std::to_string(kPerCandidate)
             + "（shanten, advance_types, advance_tiles, wait_types, wait_tiles,"
-              " good_wait_types, good_wait_tiles, dora_count）";
+              " good_wait_types, good_wait_tiles, dora_count）"
+            + " perSeat=" + std::to_string(kPerSeatDanger)
+            + "（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]）"
+            + " perSeatBitmap=" + std::to_string(kPerSeatBitmap)
+            + "（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）";
+}
+
+PerSeatDerived perSeat(const FeatureView &v) {
+    PerSeatDerived ps;
+    for (int j = 0; j < kSeatCount; j++) {
+        const int s = (v.seat + 1 + j) % 4;
+        const Counts *river = &v.rivers[static_cast<size_t>(s)];
+        const bool riichi = v.riichi[static_cast<size_t>(s)];
+        for (int k = 0; k < kKindCount; k++) {
+            const DangerReport rep = dangerOf(k, v.visible, river, riichi, v.turn);
+            ps.danger[static_cast<size_t>(j)][static_cast<size_t>(k)] =
+                    static_cast<uint8_t>(rep.score);
+            if (rep.genbutsu) {
+                ps.genbutsu[static_cast<size_t>(j)][static_cast<size_t>(k >> 3)] |=
+                        static_cast<uint8_t>(1u << (k & 7));
+            }
+            if (rep.suji || rep.wall) {
+                ps.suji[static_cast<size_t>(j)][static_cast<size_t>(k >> 3)] |=
+                        static_cast<uint8_t>(1u << (k & 7));
+            }
+            // "假设该家已立直"：已立直的家与原口径逐字相同，省一次调用（也免了两条路漂）
+            ps.dangerRiichi[static_cast<size_t>(j)][static_cast<size_t>(k)] = static_cast<uint8_t>(
+                    riichi ? rep.score : dangerOf(k, v.visible, river, true, v.turn).score);
+        }
+    }
+    return ps;
 }
 
 }  // namespace trainer

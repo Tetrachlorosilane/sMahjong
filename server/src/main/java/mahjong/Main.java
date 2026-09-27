@@ -40,6 +40,8 @@ public final class Main {
         boolean selfplayClaims = true;
         int selfplayHands = 0;
         boolean selfplayTeacherLabel = false;
+        // 标签侧文件（`g*.aux.npz`；训练专用，推理路径永不读它）
+        boolean selfplayAux = false;
         String preset = null;
         // ---- 训练接口（派生特征富化）：见 mahjong.train.TraceFeatures
         String featuresDir = null;
@@ -151,6 +153,11 @@ public final class Main {
                     // DAgger：对学生座位额外记一次老师的动作（`teacher` / `teacher_index`）
                     selfplayTeacherLabel = true;
                     break;
+                case "--aux":
+                    // 训练专用标签侧文件 `g<n>.aux.npz`（FEATURES-V4.md §5.2）：
+                    // 对手手牌/听牌、放铳、和了、收支、顺位 —— ⚠ 不改轨迹本身
+                    selfplayAux = true;
+                    break;
                 case "--hands":
                     if (i + 1 < args.length) {
                         selfplayHands = Integer.parseInt(args[++i]);
@@ -238,6 +245,7 @@ public final class Main {
             cfg.recordClaims = selfplayClaims;
             cfg.maxHands = selfplayHands;
             cfg.teacherLabel = selfplayTeacherLabel;
+            cfg.aux = selfplayAux;
             cfg.preset = preset;
             Log.quiet = !Log.verbose;
             mahjong.train.SelfPlay.Summary sum;
@@ -353,6 +361,7 @@ public final class Main {
         System.out.println("  --hands <n>        每场最多打 n 个小局（0 = 完整半庄；冒烟测试用）");
         System.out.println("  --preset <name>    规则预设：mleague|tenhou|majsoul|custom");
         System.out.println("  --teacher-label    DAgger：对学生座位额外记一次老师的动作（teacher/teacher_index）");
+        System.out.println("  --aux              额外落**标签侧**文件（g*.aux.npz：对手手牌/听牌、放铳、和了、顺位；轨迹不动）");
         System.out.println("  --features <dir>   给轨迹目录补**派生特征** sidecar（g*.feat.bin；轨迹本身不动）");
     }
 }

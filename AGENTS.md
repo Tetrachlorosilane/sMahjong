@@ -8,7 +8,8 @@
 
 **三份文件，一套章节号**：**本文件 = 手册**（判据 / 命令 / 不变量 / 速查表，**动代码前必读**）·
 **`NOTES.md` = 细节分册**（案例 / 红证 / 推导 / 全量症状 / 已知限制，**需要时查**；章节号与本文件一一对应）·
-**`docs/INDEX.md` = 文档总索引**（六个板块 · 按任务 / 按角色查 · 目录树 · 文档清单；玩家看 `README.md`）。
+**`docs/INDEX.md` = 文档总索引**（六个板块 · 按任务 / 按角色查 · 目录树 · 文档清单；玩家看 `README.md`）·
+⚠ **接手/续接会话先读 `docs/HANDOVER.md`**（当前进度 · 已完成判据 · 下一步 · 环境命令 · 待决问题）。
 
 > ⚠ **本文件必须"每次会话都读得完"**：它是自动加载的工作区指令，而**指令预算只有 64 KB** ——
 > 超了会被**静默截断**（后面的章节等于不存在，而且不报错）。所以**判据留下、细节进 `NOTES.md`**（见 §8）。
@@ -300,7 +301,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | ① 规则与引擎（唯一权威方） | `server/src/main/java/mahjong/{core,rules,game}/` · `docs/日本麻将.md` · `docs/DESIGN.md` · `docs/AUDIT.md` |
 | ② 协议与两端契约 | `docs/PROTOCOL.md` ★（改协议先改它）· `docs/input-json.md` |
 | ③ 客户端（Qt6 Widgets） | `client/src/{ui,model,net}/` · `client/README.md` · `docs/THEME.md` |
-| ④ 训练（v3 现状 → v4 目标） | `python/mahjong_ml/` · `trainer/` · `docs/TRAINING.md` · `docs/FEATURES-V4.md` · `docs/TRAINING-V4.md` · `docs/TRAINER-CPP.md` · `docs/BOT-AI.md` |
+| ④ 训练（v3 现状 → v4 目标） | `python/mahjong_ml/`（v4 框架在 `v4/`） · `trainer/` · `docs/TRAINING.md` · `docs/FEATURES-V4.md` · `docs/TRAINING-V4.md` · `docs/TRAINER-CPP.md` · `docs/BOT-AI.md` |
 | ⑤ 运维与发布 | `docs/DEPLOY.md` · `docs/THIRD-PARTY.md` · `tools/package-release.ps1` + `make-zip.mjs` |
 | ⑥ 验证与文档纪律 | `tools/*-test.mjs` · `tools/*-parity*.mjs` · `python/selfcheck.py` · `AGENTS.md` · `NOTES.md` · `docs/INDEX.md` |
 

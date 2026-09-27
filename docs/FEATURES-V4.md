@@ -172,8 +172,14 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | `rip_phase` | 1 | 该事件是否发生在"该 actor 立直之后" |
 | `seq_delta` | 1 | 距上一条事件隔了几条 `/8`（噪声/丢包容错） |
 
-- **窗口 K = 60**：一个半庄单局的事件 ≤ ~100 条，取最近 60 条进注意力；更早的信息由
-  循环状态 `h`（设计文档 §5.3）承担 —— 这是"**状态与增量双向管理**"的接口。
+- **编码落点（2026-09，obs v3 已落地）**：JSON 侧是 `Observation.events[]`（字段表见 `PROTOCOL.md` §8.2，
+  Java 是权威实现）。三条**实现口径**（三端镜像时必须一致）：
+  ① `type` 里 `kan` = **三种杠**（`meld_kind` 再分 ankan/kakan/daiminkan）、`meld` **只**用于吃/碰；
+  ② `draw` / `agari` / `ryuukyoku` 三个槽位**服务端不发**（理由见 `PROTOCOL.md` §8.2 的语义判据 3）
+  ⇒ 训练侧永远读到 0，**不要**据此反推"没有摸牌"；
+  ③ `seq_delta` 本实现**恒缺省（=1）**：日志完整、不抽样，白占一个常量通道 —— 留作将来"只发尾部/丢包"的容错位。
+- **窗口 K = 60**：一个半庄单局的事件 ≤ ~100 条（实测服务端发的五类事件 ~80 条/小局），取最近 60 条进注意力；
+  更早的信息由循环状态 `h`（设计文档 §5.3）承担 —— 这是"**状态与增量双向管理**"的接口。
 - **编码器**：`MLP(96 → 192)` + 可学习 `type`/`meld_kind` 嵌入 + **相对巡目位置编码**（sin/cos，16 维）
   + 相对方位偏置。事件 token **不做** absolute seat 编码（一律相对自己）。
 
@@ -182,8 +188,14 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | 段 | 宽 | 内容 |
 | --- | --- | --- |
 | 基础（沿用 v3，逐字不变） | 88 | `type/9` + `tile/37`（含赤槽位）+ `tiles/37`（取法）+ `tsumogiri/1` + `kan_kind/3` + `noarg/1` |
-| 派生（引擎算） | 24 | `after_shanten/8` · `ukeire_kinds/34` · `ukeire_tiles/136` · `ukeire_good/34` · `wait_kinds/34` · `wait_tiles/136` · `score_han/13` · `score_points/32000` · `score_expected/32000`（打点粗估 × 和了率） · `danger_after_all/100`（打这**张之后**对四家的最坏危险度） · `danger_after_riichi/100` |
-| 预留 | 16 | 0 |
+| 派生（引擎算） | 11 | ① `after_shanten/8` ② `ukeire_kinds/34` ③ `ukeire_tiles/136` ④ `ukeire_good/34` ⑤ `wait_kinds/34` ⑥ `wait_tiles/136` ⑦ `score_han/13` ⑧ `score_points/32000` ⑨ `score_expected/32000`（打点粗估 × 和了率） ⑩ `danger_after_all/100`（打这**张之后**对四家的最坏危险度） ⑪ `danger_after_riichi/100`（①②④⑤⑥ 就是 v3 的逐候选 8 维里的 7 项） |
+| 预留 | 29 | 0 |
+| **合计** | **128** | = 88 + 11 + 29（⚠ 早期草案写的"24 + 16"是**拍的分法**，落地时按"只留有名有姓的维"改成 11 + 29） |
+
+> **权威清单现场打印**：`python -m mahjong_ml.v4 spec`（块 id / 宽度 / 依赖的 obs 字段 / 版本），
+> `python -m mahjong_ml.v4 fingerprint` 给块清单指纹（写进 `net.bin` 格式 2）。
+> 代码在 `python/mahjong_ml/v4/`：`spec` 注册表 · `blocks` 拼装 · `cache` 两级缓存 · `model` 多头 ·
+> `harness` 封闭红证与均衡审计。**这张表与代码不一致时，以 `v4 spec` 为准并回来改这里。**
 
 ⚠ **"打完这张之后"的派生量**（`after_shanten`/`ukeire_*`）与 v3 同源（`HandEval.afterDiscard`），
 但 v4 **额外**要求它按"**可摸张数**"口径扣掉自家手牌（`Visible.drawable`）—— v3 用的是"可见"口径。
@@ -211,17 +223,30 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 
 | 派生块 | 宽 | 谁算 | 侧存 dtype | 归一化 |
 | --- | --- | --- | --- | --- |
-| `danger_all[34]` | 34 | `rules.Danger.worst` | int8 | `/100` |
-| `danger_riichi[34]` | 34 | `rules.Danger.worstAgainstRiichi` | int8 | `/100` |
-| `danger_per_seat[3][34]` | 102 | `rules.Danger.of`（逐家） | int8 | `/100` |
-| `safety_genbutsu[3][34]` | 102 | `Danger.of` 的 `genbutsu` | **位图**（packed，13 B） | 0/1 |
-| `safety_suji[3][34]` | 102 | `Danger.of` 的 `suji`/`suji_wall`/`wall` | **位图**（packed，13 B） | 0/1 |
-| `after_shanten` / `value_han` / `value_points` | 3 | `HandEval.afterDiscard` / `estimatedHan` | int16 | `/8` `/13` `/32000` |
-| 逐候选 24 维（§4.3） | 24 | `HandEval.afterDiscard` + `Danger` + `scoreIfWin` | int16 | 见 §4.3 |
+| `danger_all[34]` | 34 | `rules.Danger.worst` | int16（A 段） | `/100` |
+| `danger_riichi[34]` | 34 | `rules.Danger.worstAgainstRiichi` | int16（A 段） | `/100` |
+| `danger_per_seat[3][34]` | 102 | `rules.Danger.of`（逐家，**实际立直状态**） | int8（D 段） | `/100` |
+| `danger_riichi_per_seat[3][34]` | 102 | `Danger.of(..., theirRiichi=true)`（**假设该家已立直**，弃和口径） | int8（E 段） | `/100` |
+| `genbutsu_per_seat[3][34]` | 102 | `Danger.of` 的 `genbutsu` | **位图**（F 段，5 B/家） | 0/1 |
+| `suji_per_seat[3][34]` | 102 | `Danger.of` 的 `suji`/`suji_wall`/`wall`（= `suji \|\| wall`） | **位图**（G 段，5 B/家） | 0/1 |
+| `after_shanten` / `value_han` / `value_points` | 3 | `HandEval.afterDiscard` / `estimatedHan` | int16（A 段） | `/8` `/13` `/32000` |
+| 逐候选 24 维（§4.3） | 24 | `HandEval.afterDiscard` + `Danger` + `scoreIfWin` | int16（C 段） | 见 §4.3 |
 
-- 落盘：`<trace>.feat.bin`（**sidecar v3**，头部带 `derived_version = 3` 与逐段长度，**构造期校验**）。
-- 大小估算：约 **340 B/决策**（v3 是 ~185 B）；一轮 6M 决策 ≈ 2.0 GB。可接受（`compact` 配额 116 GB）。
-- ⚠ **位图段**是刻意的：`genbutsu`/`suji` 若按 int8 存要 204 B/决策（翻倍），而它们本质是布尔。
+- **逐家段的方位**：下标 **0 = 下家 / 1 = 対面 / 2 = 上家**（**相对**自己）——
+  与 §4.1 的 `danger_all` / `danger_riichi` / `safety_*` 三通道组同一套方位（那里也是"旋转到自己为下标 0"）。
+  权威实现在 `ObsFeatures.perSeat`（Java）与 `obffeatures.cpp:perSeat`（C++），两侧由
+  `tools/trainer-features-parity.mjs` **逐字节**钉住。
+- ⚠ `danger_riichi_per_seat` 对**已立直**的家就等于 `danger_per_seat`；对没立直的家是"他若听牌有多危险"
+  —— 用它才能在不立直的对手之间也分出"中档 vs 现物"。
+- ⚠ 两张位图**互斥**（`Danger.of` 对现物提前 return ⇒ `suji`/`wall` 都是假），自检里钉着这条。
+- 落盘：`<trace>.feat.bin`（**sidecar v3 = 七段式**：`A` 逐决策 71·int16 · `B` nLegal·int16 ·
+  `C` 逐候选·int16 · `D`/`E` 逐家危险度 102·**int8**/**决策** · `F`/`G` 逐家位图 15 B/决策）。
+  头部仍是 20 B（magic / `featureVersion`(=derived 3) / nDec / perDec / perCand），
+  D~G 的长度由 `nDec` 与固定常量推出，读侧校验**总长度**（`dataset.load_sidecar`）。
+- 大小实测：**518.5 B/决策**（1,951 条决策的实采轨迹；`A 142 + B 2 + C ~141 + D/E 204 + F/G 30`）
+  ⇒ 一轮 6M 决策 ≈ **3.1 GB**（`compact` 配额 116 GB 仍宽裕；⚠ 旧文写的"约 340 B"是**没算 D/E 两段 int8** 的估计）。
+- ⚠ **位图段**是刻意的：`genbutsu`/`suji` 若按 int8 存要 204 B/决策（翻倍），而它们本质是布尔
+  （34 位 → 5 字节，**字节内 LSB 在前**：Java/C++ 写、Python `np.unpackbits(bitorder="little")` 读）。
 
 ### 5.2 标签侧（**只在训练时存在，绝不进输入**）
 
@@ -237,9 +262,28 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | `win_flag` / `hand_delta` | 1 / 1 | 引擎 | 价值头 |
 | `placement` | 1 | 引擎 | 顺位头 |
 
+**落地形态（2026-09-27，P0 第 4 步）**：
+
+- 生产者 = `java -jar mahjong-server.jar --selfplay … --aux`（`TraceRecorder.writeAux`）；
+  写出器是 **`mahjong.train.NpzWriter`**（JDK 自带 `ZipOutputStream`，STORED + 固定时间戳
+  ⇒ 同数据两次写出**逐字节相同**；`.npy` v1.0 头 64 字节对齐）。
+- 文件 = 一个 npz，成员：上表那 8 列（`own_shanten_after` int8 / `hand_delta` int32 / 其余 uint8）
+  + `meta`（UTF-8 JSON 的 uint8 数组：`aux_version` / `obs_version` / `game` / `seed` / `n` / `policies`）。
+  **行序与 `g*.jsonl` 的决策行一一对应**。
+- 读侧 = `mahjong_ml.auxlabels`（`load_aux` / `check_dir` / `python -m mahjong_ml.auxlabels check <dir>`）：
+  版本、成员齐、行数与轨迹对齐、`obs_version` 与轨迹一致 —— **四条都是硬拒**。
+- 进数据集 = `python -m mahjong_ml.dataset build … --aux`：并成**一组独立列**
+  （`aux_own_shanten_after` / `aux_own_tenpai` / `aux_opp_tenpai` / `aux_opp_hand` / `aux_opp_dealin`
+  / `aux_win_flag`；`hand_delta` / `placement` 已能从轨迹派生，不重复落）。
+  缺文件**报错**（不填 0 —— 全 0 的"对手手牌"会让信念头学出一个永远空的答案，而训练照跑）。
+- ⚠ **只差 C++ 生产者**：训练端 `--aux` **显式报错**（`producer.py` 的 `CPP_MISSING` 同步登记），
+  要标签就用 `MAHJONG_PRODUCER=java` 采这一批 —— 与 `--teacher-label` 同一条纪律（能力缺失要报错，不静默降级）。
+
 ⚠ **防作弊硬闸门**（要写成自检）：`aux.npz` **不得**出现在推理路径上 ——
 `NeuralPolicy` 只吃 `feat.bin`；`dataset build` 要校验"推理输入列"与"标签列"的**物理分离**
-（两套文件 + 两套列名，不给"顺手带进去"的机会）。
+（两套文件 + 两套列名，不给"顺手带进去"的机会）。判据（都已自动化）：
+① 开/不开 `--aux`，`g*.jsonl` **逐字节相同**（`SelfTest.auxLabelTests`）；
+② 开/不开 `--aux`，紧凑集的 `state/cand/nlegal/label/delta/game` **逐字节相同**（`selfcheck.py`）。
 
 ---
 

@@ -1017,9 +1017,14 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 `Policies.fromAction(ActionPolicy)` 提供三道保护：动作不在本次 `legal` 里 / 返回 `null` / 抛异常，
 一律退回内置机器人。**只实现 `ActionPolicy` 就不可能让牌桌线程死掉。**
 
-### 8.2 观测（`Observation`，格式版本 `v: 2`）
+### 8.2 观测（`Observation`，格式版本 `v: 3`）
 
 只含该座位**合法可见**的信息。字段表（`toJson()` 的输出，权威）：
+
+> **obs 版本**：`v: 2` = v3 特征（`state 615 / cand 96`）；**`v: 3`（当前）= v4 特征**
+> —— 新增 `events[]`（有序事件流）与 `riichi_turn[]`（立直巡数）。两者都是 v4 的
+> `evt[K,96]` 与 `ctx.seats` 的唯一来源；**老轨迹（v2）没有这两个字段，不得混进 v4 训练**
+> （`events` 缺失 ⇒ 事件流全 0 ＝换了个任务，而且不报错）。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -1040,6 +1045,8 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `tiles_left` / `dead_wall_left` | int | 可摸余牌 / 岭上余牌 |
 | `total_discards` / `kan_count` / `any_call` | int / bool | 公开的巡目与局面量 |
 | `visible` | int[34] | **派生量** = 四家牌河 + 四家副露 + 宝牌指示牌（省得训练侧重算）；实现见 `rules.Visible` |
+| `events` | obj[] | **obs v3**：本局**从开局到现在**的公开事件流（有序、只追加；元素字段见下）。v4 的 `evt[K,96]` 的唯一来源 |
+| `riichi_turn` | int[4] | **obs v3**：四家**立直巡数** = 立直宣言发生在**该家自己的第几次摸牌**（未立直 = 0）。与 `events[].turn` **同一把尺子**（都按 `playerDraws` 计），所以 `/18` 的归一化对两者都成立 |
 | `haitei` / `houtei` / `rinshan` | bool | 海底 / 河底 / 岭上 |
 | `from` / `called_tile` / `win_note` | int / str? / str? | 鸣牌询问专用：谁打的、哪张、自己能听不能和的原因（`furiten`/`no_yaku`） |
 | `legal` | str[] | **本次全部合法动作**（动作空间的掩码来源，见 §8.3） |
@@ -1052,6 +1059,42 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 
 > ⚠ 自家回合**不能**调 `Round.isFuriten()`：它内部会跑 34 次向听 DFS，而 14 张手牌的听牌集合
 > **恒为空**，所以那一刻它完全等价于 `furitenTemp || furitenPerm` —— 白花一次 DFS。
+
+**`events[]` 的元素**（obs v3；字段按类型**省着发**，不出现的字段 = 假/无）：
+
+| 字段 | 类型 | 什么时候有 | 含义 |
+| --- | --- | --- | --- |
+| `type` | str | 恒有 | `discard` / `meld`（吃·碰）/ `kan`（三种杠）/ `riichi` / `dora_flip`（杠宝牌翻开） |
+| `tile` | str | 除 `riichi` 外恒有 | 主牌**牌码**：舍牌 = 打出的那张；`meld`/`kan` = **被鸣那张**；`dora_flip` = 新翻的指示牌（**牌种**写法） |
+| `called_tile` | str | `meld` / `kan` | 被鸣那张（与 `tile` 相同；**加杠**时是加上的第 4 张 —— 与 `meld.called_tile` 同源） |
+| `tiles` | str[] | `meld` / `kan` | 整副副露的牌码（增量缓存靠它累加 `meld_count`） |
+| `meld_kind` | str | `meld` / `kan` | `chi` / `pon` / `ankan` / `kakan` / `daiminkan` |
+| `actor` | int | 恒有 | 谁做的（**绝对**座位 0–3；`dora_flip` 是翻牌的那家） |
+| `from` | int | `meld` / `kan` | 被鸣那张来自谁（绝对座位；暗杠 = 自己，加杠 = 当初那副碰的来源） |
+| `turn` | int | 恒有 | 该事件发生在**该 actor 的第几次摸牌**（= `player_draws` 那把尺子，0 = 还没摸过） |
+| `tsumogiri` | bool | 只在 `discard` | 是否摸切（与报文 `discard.tsumogiri` **同源**） |
+| `sideways` | bool | 只在 `discard` | 是否立直宣言那张（与报文 `discard.sideways` **同源**；顺延牌不算） |
+| `rip_phase` | bool | 只在为真时 | 该事件是否发生在"**该 actor 立直之后**" |
+| `seq_delta` | int | 本实现不发 | 距上一条事件隔了几条（`/8`，容错位）：**缺省 = 1**。服务端日志完整、不抽样，所以恒为缺省 |
+
+三条语义判据（实现与特征侧共用同一份，改之前先看这段）：
+
+1. **`turn` 与 `riichi_turn` 同一把尺子**（都按"第几次摸牌"），所以 `riichi_turn[s]` 就等于
+   座位 `s` 那条 `riichi` 事件的 `turn`；`0` = 未立直
+   （真正的立直必然发生在某次摸牌之后 ⇒ `turn ≥ 1`，与"未立直"不会撞车）。
+2. **立直宣言那张舍牌算"立直之前"**（`rip_phase = false`）：它才是分界，`tile.river_after_riichi` 里不该有它。
+   横置顺延的那张（宣言牌被鸣走后的下一张）算立直**之后**。
+3. **`type` 只覆盖"对局过程中会发生的公开事件"**，`EVT_TYPES` 里的其余三个槽位**刻意不发**：
+   - `draw`：`draw` 报文是**逐座位**发的（别人只看到"谁摸了一张"、看不到牌面），而"谁在第几巡摸牌"
+     已经由每条 `discard` 的 `actor`+`turn` 完整表达 —— 记它只会把庄家第 14 张（随配牌发出、
+     本就没有 `draw` 报文）变成一个不对称的空洞。
+   - `agari` / `ryuukyoku`：观测只在**询问那一刻**构造，终局事件之后不再有询问 ⇒ 它们永远不会出现在任何 obs 里。
+
+> **只追加**：`events` 是**本小局累积**的（同一小局的后一次询问以前一次为前缀，小局之间清零）。
+> 特征侧只取最近 `K = 60` 条进注意力（更早的由循环状态 `h` 承担，见 `docs/FEATURES-V4.md` §4.2）。
+> ⚠ "按小局累积"意味着 obs 会随小局推进变大：实测轨迹里平均每决策 **1.6 KB → 3.8 KB**
+> （整份 `g*.jsonl` ×2.4，见 `NOTES.md` §6.5）—— 换来的是**观测自洽**（单条 obs 就能重建
+> `river_before/after_riichi` 与 `tedashi/tsumogiri` 分组，不必依赖"按顺序喂"）。
 
 **特征侧的现成判据**（都在 `server/.../rules/`，纯函数，不必经过 `Round`）：
 
@@ -1133,6 +1176,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--out <dir>` | 轨迹输出（每场 `g<序号>.jsonl` + `summary.json`） |
 | `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
 | `--hands <n>` | 每场最多 n 个小局（0 = 完整半庄；冒烟测试用） |
+| `--aux` | **额外**落标签侧文件 `g<序号>.aux.npz`（`FEATURES-V4.md` §5.2：对手手牌/听牌、放铳、和了、顺位）。⚠ **不改轨迹**：同一颗种子开不开它，`g*.jsonl` 逐字节相同（自检钉着）。C++ 生产者**未实现** → 显式报错 |
 | `--preset <name>` | 规则预设：`mleague` / `tenhou` / `majsoul` / `custom` |
 
 **三条硬性质**（结果可信的前提）：① 同种子逐事件可复现（`debugDeterministicSeed` + 每局一份策略实例）；
@@ -1172,13 +1216,16 @@ java -jar mahjong-server.jar --features <轨迹目录> [--workers 24]
 ```
 
 给目录里每个 `g<序号>.jsonl` 生成同名 `g<序号>.feat.bin`（**轨迹格式完全不变**）。
-派生量（逐决策 71 维：逐张危险度 68 + 向听/打点粗估 3；逐候选 8 个量）由服务端的权威实现
+派生量（逐决策 71 维：逐张危险度 68 + 向听/打点粗估 3；逐候选 8 个量；**sidecar v3 起另加逐家四段**：
+`danger_per_seat` / `danger_riichi_per_seat`（int8）与 `genbutsu_per_seat` / `suji_per_seat`（位图））由服务端的权威实现
 （`mahjong/ai/ObsFeatures.java` → `HandEval` / `Danger`）算，**刻意不在 Python 里再写一份** ——
 两套实现必然漂移（`docs/TRAINING.md` §3.4）。二进制格式见 `mahjong.train.TraceFeatures` 的 javadoc
-（header + A/B/C 三段，**v3 起全部是 int16** —— 逐决策段带了点数，uint8 会截成 mod 256）；
-Python 侧读它的是 `python/mahjong_ml/dataset.py`，
+（header + **A~G 七段**；A/B/C 是 int16 —— 逐决策段带了点数，uint8 会截成 mod 256；
+D~G 是 `derived_version 3` 新增的**逐家**段，字段表见 `docs/FEATURES-V4.md` §5.1，
+实测 **518.5 B/决策**）；Python 侧读它的是 `python/mahjong_ml/dataset.py`，
 契约由 `python/selfcheck.py` 与 `SelfTest.obsFeaturesTests` 两侧钉住
-（后者是「obs 通路 == Round 通路」的逐元素 golden 对拍，带红证）。
+（后者是「obs 通路 == Round 通路」的逐元素 golden 对拍，带红证），
+C++ 侧由 `tools/trainer-features-parity.mjs` **逐字节**钉住。
 
 **进程内神经网络策略（B 形态）**：
 
@@ -1192,7 +1239,7 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 
 - 前向是**纯 Java 手写**（`mahjong/ai/NeuralPolicy.java`：trunk 两层 ReLU + 逐候选打分头），
   **零第三方依赖**、无 socket 往返；特征拼装在 `mahjong/ai/Features.java`（与
-  `python/mahjong_ml/features.py` 同规格：**v3 起 state 617 = 544 基础 + 73 派生**，cand 96 = 88 + 8；
+  `python/mahjong_ml/features.py` 同规格：**v3 起 state 615 = 544 基础 + 71 派生**，cand 96 = 88 + 8；
   四家块一律**旋转到自己为下标 0**，另加 `points/5` 位置点数段与 5 维牌力/打点派生量 —— 规格表见
   `docs/TRAINING.md` §5）。
 - **加载失败/魔数不对/特征维度不符** → **构造期**就抛错（不会打到一半才发现），

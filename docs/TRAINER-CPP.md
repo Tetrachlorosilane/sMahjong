@@ -115,7 +115,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | --- | --- | --- |
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | ✅ **已完成**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ 四种策略 24 局 × 40 场 = 9.77 万次（§6.11）；⑪ 鸣牌询问 `claimOptions`（ron/pon/kan/chi + 赤五取法 + 振听）✅ 1.85 万次（§6.12）—— ⑩+⑪ 合计 **116,166 次逐字符一致**；⑫ `Round` 摸打/鸣牌/立直/杠/流局循环 ✅ **完整半庄与 Java 逐字节相同**（官方闸门 300 场 × 2 小局 `--cpp-workers 8`、100 场 × 8 小局、150 场完整半庄；独立复算 **200 场完整半庄 200/200** = 155,464 决策 / 1,761 小局两侧相等；**soak 500 场 × {`first`,`random`} 各 500/500**；§6.13 / §6.14 / §6.15）。⚠ 判据里原来写的"先 100 场"**不够**：食替退化局面**跟策略走**（**实测** `first` **3/500 场 ≈ 1/167**、`random` **0/500**，且短局碰不到），完整半庄验收**至少 200 场** —— 见 §6.15 |
-| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state`/`candidate` 拼装，**v3 起 state 615**）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 615 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
+| **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state`/`candidate` 拼装，**v3 起 state 615**）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 615 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）；⑥ **obs v3（事件流 + 立直巡数）✅ 已镜像**（§6.20）：200 场完整半庄（四策略混桌 + `--rotate`）逐字节 200/200、五种副露与五类事件全覆盖、C++ 产出直接过 `selfplay-check`；⑦ **sidecar v3（逐家危险度/安全度四段）✅ 已镜像**（§6.21）：`trainer-features-parity` 3/3 逐字节、`takeover-check` 整链 PASS。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
 | **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ✅ **已完成（并行 + 对接）**：① `--workers` 真并行落地（`selfplay` + `features`），**产出逐字节不变**（300 场 × 2 小局 1 vs 8 逐字节、**200 场完整半庄 1 vs 24 逐字节 200/200**）；② **同等核数下决策/秒 = Java 的 16.7×（100 场）/ 18.7×（200 场）**（基线：24 核 1172 决策/秒、单核 88；目标 3× 超出 5 倍以上，§6.14）；③ 产出数据直接喂通 P3/P4 管线不改一行 Python（`MAHJONG_PRODUCER=cpp` + `trainer-takeover-check.mjs` PASS）；④ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 供工作流省掉编后自检。⏳ AVX2 向听表、批量前向未做（§6.14 也说明了为什么 `-flto`/`-fno-rtti` 不留） |
 
 **非目标**（明确不做，避免范围失控）：网络对战（TCP/NDJSON）、房间/等待室/身份/投票、
@@ -919,6 +919,84 @@ v3/71 **12.0 s ≈ 84.1 µs/决策 ≈ 11,900 决策/秒/核**；同构建里把
 产物与串行**逐字节相同**）+ PPO 4 epoch 68.8 s + 导出 3.6 s。
 ⇒ **瓶颈从"紧凑集（单核 Python）"移到 PPO/采集**；v3 谱系 g01–g05 的成本表、价值头诊断与判据侧
 （Elo 阶梯 + 同牌山 2+2 配对）见 `NOTES.md` §6.5「特征 v3 谱系第一轮」。
+
+### 6.20 obs v3：训练端镜像（2026-09-27，已完成）
+
+**动机**：v4 特征张量 `evt[K,96]` 的输入是 obs 的**事件流**（`docs/FEATURES-V4.md` §4.2）。
+Java 权威实现 2026-09-27 落地（`docs/PROTOCOL.md` §8.2 · `NOTES.md` §6.5），训练端必须**同种子逐字节**
+跟上 —— 否则 `MAHJONG_PRODUCER=cpp` 会产出"没有事件流"的轨迹（`events` 缺失 ⇒ 事件流全 0，
+等于换了个任务，而且**不报错**）。
+
+**做了什么**（四处，每处都与 Java 一一对应）：
+
+| # | 文件 | 内容 |
+| --- | --- | --- |
+| 1 | **新增 `event.hpp`** | `Event`（Java `Round.Event` 的镜像：牌码字符串 + 绝对座位 + `turn` + `tsumogiri`/`sideways`/`ripPhase`）与 `eventsJson()`（键序与"没有的字段整个键都不出现"**逐条照抄** Java `Observation.eventJson`）。⚠ 单独一个头：`Observation` 也要持有事件流，而 `round.hpp` 已经 include 了 `observation.hpp` —— 嵌在 `Round` 里会**成环** |
+| 2 | `round.hpp/.cpp` | `events` + `riichiTurn`；四类事件各一个**漏斗** —— `recordDiscard()`（+ `tsumogiri`）、**新增 `placeMeld()`**（吃/碰/大明杠/暗杠四条落位路径 + 加杠的**替换**路径共用一个出口，加杠走 `replaceIndex`）、`doRiichi()`、`revealKanDora(seat)`（+ 一条 `dora_flip`）。`meldKindWire` 从 round.cpp 的匿名命名空间**挪到 `meld.hpp`**（事件与观测共用一份，免得两处各写一遍） |
+| 3 | `observation.hpp` | `kObservationVersion 2 → 3`；`events` / `riichiTurn`（内部 `-1` → 公开 `0`）；JSON 里插在 `visible` 与 `haitei` **之间**（与 Java 键序一致） |
+| 4 | `makeObservation()` | **构造期快照**事件流（与 Java 同一条语义：观测是"决策那一刻"的，之后别人打牌不该改它） |
+
+**门禁（本机重跑，2026-09-27）**：
+
+| 命令 | 结果 |
+| --- | --- |
+| `trainer --selftest` | **TRAINER SELFTEST PASS** |
+| `trainer-selfplay-parity.mjs 1 1 pass 20260101` | **PASS**：`g0.jsonl` **372,480 B 逐字节一致** |
+| 分层对拍 8 例：`2 3 first 8888` · `2 2 random 4242` · `1 0 first 8888` · `1 0 teacher 20260101` · `2 0 teacher 20260101 --rotate` · `1 0 first --preset tenhou` · `2 0 first --sample 5` · `1 0 first --no-claims` | **8/8 PASS** |
+| **200 场完整半庄**（`teacher,first,random,pass --rotate --cpp-workers 8`，seed 20260101） | **PASS**：200/200 个 `g*.jsonl` 逐字节一致；两侧 **2,613 小局 / 206,830 决策**（抽样 10 场：`chi 12,565` · `pon 9,033` · `ankan 186` · `kakan 41` · `daiminkan 20`；事件 `discard 327,278` · `meld 21,598` · `kan 247` · `riichi 768` · `dora_flip 247`） |
+| 覆盖闸门（**五种副露 + 五类事件都真的出现过**，否则镜像里那些分支等于没测） | ✅ 另跑了 teacher 12 场（`daiminkan 50`）与 random 12 场（`daiminkan 282`）——专门为了把**大明杠**这条落位路径覆盖上（`first`/`pass` 从不杠，teacher 也很少杠） |
+| `trainer-opts-parity.mjs 4 first,pass,random 2` | **PASS**：**2,075 行**询问内容逐字符一致 |
+| `trainer-features-parity.mjs <teacher 轨迹> 4` | **PASS**：2 个 sidecar **逐字节一致**（**sidecar 版本仍是 2** —— obs 版本与派生版本是两件事，见下） |
+| **C++ 产出直接过独立校验器**：`node tools\selfplay-check.mjs <cpp 轨迹目录>` | **DATASET PASS** —— 含 obs v3 的事件结构校验、**用事件流独立重建牌河**、`riichi_turn` ↔ `riichi` 事件对账（这一条比"与 Java 逐字节"更强：它证明 C++ 的产物**语义**也成立，不只是"跟 Java 一样"） |
+| **整条链**：`node tools\trainer-takeover-check.mjs 4 1 teacher 20260101` | **PASS** —— `MAHJONG_PRODUCER=cpp` 的采集/派生（均与 Java 逐字节）+ `selfplay-check` + **`dataset build` 出紧凑集**（1880/686 条，`state 615 / cand 96`，特征版本 3）⇒ obs v3 的轨迹**不改一行 Python 就能喂进现有 v3 管线**（多出来的字段被忽略） |
+| `tools\trainer-workers-check.mjs 60 1 teacher 20260101 1 8` | **PASS**：C++ `--workers 1` 与 `8` 的 60/60 个轨迹逐字节相同（obs v3 下并行仍不改内容） |
+
+**代价（与 Java 同一条口径）**：`events` 按小局累积 ⇒ 轨迹 **×2.4 ~ ×2.8**。可直接对照的一对：
+`trainer-selfplay-parity.mjs 1 0 pass 20260101` 的 `g0.jsonl` 由 §6.19 记录的 **1,119,860 B**
+涨到 **3,134,525 B**（×2.80）。要压回去就得把 `events` 改成"只发增量"（**两侧一起改**），
+这条决策挂在 `docs/HANDOVER.md` §6 待决问题 5。
+
+**边界（别混）**：obs 版本（`v: 3`）与 sidecar 的 `derived_version`（**下一段 §6.21 已提到 3**）
+是**两件事** —— 本轮只动前者；sidecar v3（逐家危险度 / 现物 / 筋壁）与 Python 数据集层硬拒绝见 §6.21。
+`draw` / `agari` / `ryuukyoku` 两侧同样**不发**（`docs/PROTOCOL.md` §8.2 的语义判据 3）。
+
+### 6.21 sidecar v3：逐家危险度 / 安全度四段（2026-09-27，已完成）
+
+**动机**：v4 的 `tile` 张量按**逐家**给危险度与安全度通道（`FEATURES-V4.md` §4.1 的
+`danger_all` / `danger_riichi` / `safety_genbutsu` / `safety_suji` 四组各 3 通道），
+而逐决策段那 68 维是"对四家取最坏"之后的**聚合量** —— 聚合了拆不回"对哪一家"。
+所以 sidecar 从**三段**扩成**七段**（`derived_version 2 → 3`）。
+
+**做了什么**（Java 权威 → C++ 镜像 → Python 读侧，同一轮）：
+
+| 端 | 文件 | 内容 |
+| --- | --- | --- |
+| Java | `ai/ObsFeatures.java` | `FEATURE_VERSION 2 → 3`；`PerSeat` 容器 + `perSeat(View)`：`danger_per_seat[3][34]`（实际立直状态）、`danger_riichi_per_seat[3][34]`（**假设该家已立直**）、`genbutsu_per_seat[3][5]` / `suji_per_seat[3][5]`（位图，**字节内 LSB 在前**）。方位是**相对**自己：0=下家 / 1=対面 / 2=上家 |
+| Java | `train/TraceFeatures.java` | 写 D~G 四段（`int8` 危险度 ×2 + 位图 ×2）；头部仍是 20 B（长度由 `nDec` 推出，读侧校验总长） |
+| C++ | `danger.hpp` | `DangerReport` 补上 `genbutsu`/`suji`/`wall`（原来"训练端没人读"所以没搬 —— 现在位图要读；**同一份 `dangerOf` 出三个判据**，而不是在特征里重算一遍） |
+| C++ | `obffeatures.*` | `kFeatureVersion 3` + `PerSeatDerived` + `perSeat()`（与 Java 逐字同式） |
+| C++ | `features.cpp` | 写 D~G（int8 危险度 + 原样 5 字节位图） |
+| Python | `mahjong_ml/features.py` · `dataset.py` | `DERIVED_VERSION 3` + `DERIVED_PER_SEAT=BITMAP_BYTES=5` 等常量；`load_sidecar` 按七段算偏移并校验**总长度** |
+| Python | `mahjong_ml/v4/traces.py`（新增） | **数据集层唯一入口**：obs/派生版本的**硬拒绝**（#6）+ `sidecar_dict()`（把打包位图展开成 34 宽喂 `blocks.assemble`） |
+
+**门禁（本机重跑）**：
+
+| 命令 | 结果 |
+| --- | --- |
+| `java -jar … --selftest` | **1392 项 / 0 失败**（+4：逐家段两通路一致 / 非全 0 / 位图互斥 / **相对方位**换视角就挪格） |
+| `trainer --selftest` | **PASS** |
+| `node tools\trainer-features-parity.mjs <teacher 轨迹> 4` | **PASS**：3 个 sidecar **逐字节一致**（289,726 / 369,700 / 352,176 B） |
+| `node tools\trainer-selfplay-parity.mjs 2 0 teacher 20260101`（`DangerReport` 改动后再验） | **PASS** 逐字节 |
+| `node tools\trainer-takeover-check.mjs 4 1 teacher 20260101` | **PASS**：`MAHJONG_PRODUCER=cpp` 整条链（采集/派生逐字节 + `selfplay-check` + **`dataset build` 出紧凑集**） |
+| `python selfcheck.py` | **381 项 / 0 失败**（+16：sidecar 七段形状/位序 + v4 数据集层正反两条） |
+| `python -m mahjong_ml.v4 check` | **PASS**（新增「数据集层」一组：obs v2 硬拒绝 ✓ / 有 sidecar v3 时 `tile.danger`·`tile.safety` **不降级** ✓ / 缺则逐块记名降级 ✓） |
+
+**体积（实测 1,951 条决策）**：**518.5 B/决策** = `A 142 + B 2 + C ~141 + D/E 204 + F/G 30`
+⇒ 一轮 6M 决策 ≈ **3.1 GB**（`FEATURES-V4.md` §5.1 原来估的 ~340 B/2.0 GB 少算了 D/E 两段 int8，已按实测改）。
+
+**兼容**：`derived_version != 3` 的 sidecar（含之前所有 v2 文件）在 `dataset.load_sidecar` 就被拒
+（`v4/traces.load_sidecar` 再对一次 `DERIVED_VERSION_V4`），**重跑 `--features` 即可**；
+`compact/*` 里的旧 `derived_version` 由 `load_split` 拒绝（原有闸门）。
 
 ---
 

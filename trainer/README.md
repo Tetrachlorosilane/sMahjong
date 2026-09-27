@@ -226,7 +226,8 @@ trainer/
 │  ├─ table.hpp       一整场的推进器 + **唯一的决策漏斗** `decideBot`（= Java `Table.playGame/decideBot`）
 │  ├─ trace.hpp/.cpp  轨迹记录器（`g*.jsonl` 三段式：decision → hand → game = Java `TraceRecorder`）
 │  ├─ selfplay.hpp/.cpp 自对弈编排（每场种子/策略实例/每场一文件/`summary.json` = Java `SelfPlay`）
-│  ├─ observation.hpp 观测（只含合法信息；字段白名单见 PROTOCOL §8.2）
+│  ├─ observation.hpp 观测（只含合法信息；**obs v3 起含事件流 + 立直巡数**；字段白名单见 PROTOCOL §8.2）
+│  ├─ event.hpp       一条公开事件（`Round.Event` 的镜像）+ `eventsJson()`（键序逐条照抄 Java）
 │  ├─ options.hpp     询问内容 → 动作空间的展开（`Action.enumerate`）
 │  ├─ policies.hpp    `pass` / `first` / `random`（teacher / net 未实现 → 显式报错）
 │  ├─ jsonw.hpp       手写 JSON 写出器（键序 = 插入序、无浮点噪声、CRLF 由 `trace.cpp` 定）

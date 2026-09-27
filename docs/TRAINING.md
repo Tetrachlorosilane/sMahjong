@@ -319,7 +319,7 @@ score(h, candidate_emb)    →  每个合法动作一个标量   →  softmax ov
 | 公开状态 | `riichi`/`ippatsu`、`dora_indicators`、`scores`、`round{bakaze,kyoku,honba,dealer,riichi_sticks}`、`tiles_left`/`dead_wall_left`、`total_discards`、`kan_count`、`any_call`、`haitei`/`houtei`/`rinshan` |
 | **位置与点数**（v3 落地） | 自己点数、与三家均值之差、**顺位**、与上一名/下一名的分差（`points/5`）。⚠ 四家块（副露/牌河/立直/一发/点数）一律**旋转到自己为下标 0** —— 不旋转时输入里没有"哪一格是我"的锚，实测只有 15.5% 的决策能靠账目恒等式反推出来（开局 90.7% 完全不可分，见 `NOTES.md` §6.5） |
 | 询问上下文 | `kind`（turn / claim）、`from` / `called_tile`、`win_note`（`furiten`/`no_yaku`）、`legal` 掩码 |
-| **派生特征**（**已落地** = 特征 v2 / v3） | `mahjong/ai/ObsFeatures.java`：逐张危险度 `danger_worst[34]` + `danger_riichi[34]`（68 维）+ v3 的 `[shanten_now, value_han, value_points]`（3 维，**打点粗估与 teacher 的押し引き同一把尺子** `HandEval.estimatedHan`）→ 共 71 维进**状态**；逐候选 `[shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count]`（8 维 → 进**候选**）。**由 Java 算、Python 只读**（`--features` 写 sidecar，逐决策段 int16），两侧靠 `SelfTest.obsFeaturesTests` 的 golden 对拍钉住（obs 通路 == Round 通路，带红证） |
+| **派生特征**（**已落地** = 特征 v2 / v3） | `mahjong/ai/ObsFeatures.java`：逐张危险度 `danger_worst[34]` + `danger_riichi[34]`（68 维）+ v3 的 `[shanten_now, value_han, value_points]`（3 维，**打点粗估与 teacher 的押し引き同一把尺子** `HandEval.estimatedHan`）→ 共 71 维进**状态**；逐候选 `[shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count]`（8 维 → 进**候选**）。**由 Java 算、Python 只读**（`--features` 写 sidecar，逐决策段 int16），两侧靠 `SelfTest.obsFeaturesTests` 的 golden 对拍钉住（obs 通路 == Round 通路，带红证）。<br>⚠ **sidecar v3（2026-09-27）另加逐家四段**（`danger_per_seat` / `danger_riichi_per_seat` / `genbutsu_per_seat` / `suji_per_seat`）—— **不进**上面这 615/96 张量，是给 **v4** 的 `tile` 通道用的；实测 518.5 B/决策，字段表见 `docs/FEATURES-V4.md` §5.1 |
 | （可选，未做） | teacher 在同一 obs 上的**动作 one-hot**、四家逐张危险度的**理由码**（`genbutsu`/`suji`/…）、鸣后"有没有役计划" |
 
 **为什么必须带派生特征**：这些正是 teacher 自己吃的东西。把它们显式喂进去，
@@ -1365,7 +1365,7 @@ python/                        # 训练侧（本仓库内；torch 走本地 .ven
 └─ tests/golden/               # ✅ forward.bin：Python↔Java 的**前向 golden 夹具**（SelfTest 读它）
 
 server/.../ai/                 # B 形态（✅ 已落地）
-├─ ObsFeatures.java            # ✅ 派生特征（obs → 71 维 + 8 维逐候选）—— 权威实现，golden 对拍
+├─ ObsFeatures.java            # ✅ 派生特征（obs → 71 维 + 8 维逐候选 + **sidecar v3 逐家四段**）—— 权威实现，golden 对拍
 ├─ Features.java               # ✅ 基础段拼装（544/88，与 features.py 同规格；v3 起四家块旋转到自己为 0）
 ├─ NeuralPolicy.java           # ✅ 纯 Java 前向（加载权重 + trunk + 打分头 + 掩码 argmax）
 └─ Policies.java               # ✅ byName 接 net:<权重文件>

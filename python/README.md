@@ -130,11 +130,31 @@ java -Dstdout.encoding=UTF-8 -jar server\build\mahjong-server.jar `
 python\.venv\Scripts\python.exe -m mahjong_ml.dataset build `
     S:\mahjong-training\raw\bc-001 S:\mahjong-training\compact\bc-001
 
+# ②b **标签侧**（P1/P2 的信念/危险头监督用；采集时要加 `--aux`）：
+#     先核版本/行数/obs 版本对齐，再并成一组**独立列**（`aux_*`；缺文件报错，不填 0）
+python\.venv\Scripts\python.exe -m mahjong_ml.auxlabels check S:\mahjong-training\raw\bc-001
+python\.venv\Scripts\python.exe -m mahjong_ml.dataset build `
+    S:\mahjong-training\raw\bc-001 S:\mahjong-training\compact\bc-001 --aux
+
 # ③ 行为克隆训练（checkpoint 落 S 盘 ckpt/，配额闸门在 paths.allocate 里）
 python\.venv\Scripts\python.exe -m mahjong_ml.bc `
     --data S:\mahjong-training\compact\bc-001 --label bc-002 --epochs 60
 
 # ④ 看指标 / 复现：metrics.json 里带 args、特征版本、数据 meta、每 epoch 的 train/val
+```
+
+**v4 训练回路**（四张量 + 多头；第一轮 teacher 预训练已能跑，见 `docs/TRAINING-V4.md`「第一步已跑」）：
+
+```powershell
+# ① 轨迹 → v4 四张量 + 监督标签（tile[34,48] / evt[60,96] / ctx[64] / cand[n,128] + aux 真值列）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset `
+    S:\mahjong-training\raw\v4-bc-001 S:\mahjong-training\compact\v4-bc-001 --aux
+# ② teacher 预训练（教师模仿 + aux 辅助头；ckpt 落 S 盘 ckpt/）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain `
+    --data S:\mahjong-training\compact\v4-bc-001 --label v4-bc-001 --epochs 6
+# ③ 体检 / 状态表
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 check
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 plan
 ```
 
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
@@ -146,6 +166,11 @@ python\.venv\Scripts\python.exe -m mahjong_ml.bc `
 | 候选（类型 / 牌码 / 取法 / 摸切 / 杠种…） | 88 | Python |
 | 候选（向听 / 进张 / 听牌形 / 宝牌） | **8** | **Java** `ObsFeatures.perCandidate`（sidecar） |
 | **合计** | **615 / 96** | 特征版本 **v3**（老 607 维权重/紧凑集**构造期拒绝**） |
+
+> **sidecar 现在是七段**（`derived_version 3`，2026-09-27）：上表那 71 + 8 维仍是 **A/C** 两段，
+> 另加**逐家四段** `danger_per_seat` / `danger_riichi_per_seat`（int8，各 `3×34`/决策）与
+> `genbutsu_per_seat` / `suji_per_seat`（位图，各 5 B/家）—— 它们**不进 v3 的 615/96 张量**
+> （那是给 **v4** 的 `tile` 通道用的）。实测 **518.5 B/决策**；字段表见 `docs/FEATURES-V4.md` §5.1。
 
 
 **评一个已有 checkpoint**（DAgger 对比、换数据集复评都靠它 —— 不用重训即可同尺子比较）：

@@ -43,6 +43,16 @@ import mahjong.util.Json;
  *   逐候选（{@link #PER_CANDIDATE} = 8，顺序固定）：
  *     shanten, advance_types, advance_tiles, wait_types, wait_tiles,
  *     good_wait_types, good_wait_tiles, dora_count
+ *
+ *   逐家（sidecar v3 起；{@link #perSeat}，**相对方位** 0=下家 / 1=対面 / 2=上家）：
+ *     danger_per_seat[3][34]        —— 该家实际状态下的危险度（0..100，int8）
+ *     danger_riichi_per_seat[3][34] —— **假设该家已立直**（弃和口径，int8）
+ *     genbutsu_per_seat[3][5]       —— 现物位图（34 位/家，LSB 在前）
+ *     suji_per_seat[3][5]           —— 筋**或**壁位图（相对安全，位序同上）
+ *
+ *   ⚠ 逐家段与逐决策段的前 68 维**不是**同一件事：那 68 维是"对四家取最坏"之后的**聚合量**
+ *   （`Danger.worst` / `worstAgainstRiichi`），聚合了就没法拆回"对哪一家"—— 而 v4 的
+ *   `tile` 张量要的正是**逐家**通道（`FEATURES-V4.md` §4.1）。
  * </pre>
  *
  * <p>⚠ **逐候选的快照统一是"这一手做完、该打的那张也打完"之后的形态**（目标张数
@@ -57,11 +67,20 @@ import mahjong.util.Json;
 public final class ObsFeatures {
 
     /** 派生特征的版本（变了就要 +1：数据集靠它判兼容）。 */
-    public static final int FEATURE_VERSION = 2;
+    public static final int FEATURE_VERSION = 3;
     /** 逐决策段长度（68 危险度 + 3 自家牌力/打点）。 */
     public static final int PER_DECISION = 2 * Tiles.KIND_COUNT + 3;
     /** 逐候选段长度。 */
     public static final int PER_CANDIDATE = 8;
+
+    /** 逐家段的**对手数**（下标 0 = 下家 / 1 = 対面 / 2 = 上家，**相对方位**）。 */
+    public static final int SEATS = 3;
+    /** 逐家危险度段长度（D/E 两段各 `3 × 34`，int8 存盘）。 */
+    public static final int PER_SEAT_DANGER = SEATS * Tiles.KIND_COUNT;
+    /** 位图段**每家**的字节数（34 位 → 5 字节，高位空着）。 */
+    public static final int BITMAP_BYTES = 5;
+    /** 位图段总长度（F/G 两段各 `3 × 5` 字节）。 */
+    public static final int PER_SEAT_BITMAP = SEATS * BITMAP_BYTES;
 
     /**
      * 逐决策段**每一维的归一化分母**（与 {@code Features.DERIVED_CAND_SCALE} 同一个套路）。
@@ -325,6 +344,67 @@ public final class ObsFeatures {
         return new Meld(kind, ids, Json.i(m, "from", -1), calledId);
     }
 
+    // ================================================================= 逐家（sidecar v3）
+
+    /**
+     * 逐家派生段（sidecar v3 的 D/E/F/G 四段）—— **相对方位**：下标 0 = 下家、1 = 対面、2 = 上家。
+     *
+     * <p>为什么要有它：v4 的 `tile` 张量按**逐家**给危险度/安全度通道（`FEATURES-V4.md` §4.1 的
+     * `danger_all` / `danger_riichi` / `safety_genbutsu` / `safety_suji` 四组各 3 通道），
+     * 而逐决策段的 68 维是**对四家取最坏**之后的聚合量 —— 聚合了就没法再拆开，
+     * 而"这一张对**哪一家**危险"正是押し引き要的信息。
+     */
+    public static final class PerSeat {
+        /** `danger_per_seat[j][k]`：该家**实际状态**下的放铳危险度（0..100）。 */
+        public final int[][] danger = new int[SEATS][Tiles.KIND_COUNT];
+        /**
+         * `danger_riichi_per_seat[j][k]`：**假设该家已立直**的危险度（弃和口径）。
+         *
+         * <p>对真的立直了的家，它与 {@link #danger} 相同；对没立直的家，这是"他若听牌有多危险"
+         * —— 用它才能在不立直的对手之间也分出"中张 vs 现物"。
+         */
+        public final int[][] dangerRiichi = new int[SEATS][Tiles.KIND_COUNT];
+        /** `genbutsu_per_seat[j]` 位图（5 字节；第 k 位 = 牌种 k 是该家的现物）。 */
+        public final byte[][] genbutsu = new byte[SEATS][BITMAP_BYTES];
+        /** `suji_per_seat[j]` 位图（**筋或壁** ⇒ 相对安全；位序与 `genbutsu` 同）。 */
+        public final byte[][] suji = new byte[SEATS][BITMAP_BYTES];
+    }
+
+    /**
+     * 逐家段（D/E/F/G 的内容）。
+     *
+     * <p>位图**字节内 LSB 在前**（第 k 位 = 第 `k/8` 字节的第 `k%8` 位）—— Java / C++ / Python
+     * 三侧同一约定（Python 侧用 `np.unpackbits(bitorder="little")`）。
+     */
+    public static PerSeat perSeat(View v) {
+        PerSeat ps = new PerSeat();
+        for (int j = 0; j < SEATS; j++) {
+            final int s = (v.seat + 1 + j) % 4;
+            final int[] river = v.rivers == null ? null : v.rivers[s];
+            final boolean riichi = v.riichi != null && v.riichi[s];
+            for (int k = 0; k < Tiles.KIND_COUNT; k++) {
+                Danger.Report rep = Danger.of(k, v.visible, river, riichi, v.turn);
+                ps.danger[j][k] = rep.score;
+                if (rep.genbutsu) {
+                    setBit(ps.genbutsu[j], k);
+                }
+                if (rep.suji || rep.wall) {
+                    setBit(ps.suji[j], k);
+                }
+                // "假设该家已立直"：已立直的家与原口径逐字相同，省一次调用（也免了两条路漂）
+                ps.dangerRiichi[j][k] = riichi
+                        ? rep.score
+                        : Danger.of(k, v.visible, river, true, v.turn).score;
+            }
+        }
+        return ps;
+    }
+
+    /** 位图置位（LSB 在前；见 {@link #perSeat}）。 */
+    private static void setBit(byte[] bitmap, int k) {
+        bitmap[k >> 3] |= (byte) (1 << (k & 7));
+    }
+
     // ================================================================= 逐决策
 
     /** 71 维：两套逐张危险度（68）+ 自家牌力与打点（3，见类注释的布局表）。 */
@@ -540,6 +620,10 @@ public final class ObsFeatures {
                 + "（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points）"
                 + " perCandidate=" + PER_CANDIDATE
                 + "（shanten, advance_types, advance_tiles, wait_types, wait_tiles,"
-                + " good_wait_types, good_wait_tiles, dora_count）";
+                + " good_wait_types, good_wait_tiles, dora_count）"
+                + " perSeat=" + PER_SEAT_DANGER
+                + "（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]）"
+                + " perSeatBitmap=" + PER_SEAT_BITMAP
+                + "（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）";
     }
 }

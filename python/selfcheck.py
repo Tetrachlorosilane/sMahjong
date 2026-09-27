@@ -376,8 +376,12 @@ ok(abs(float(cd_d[-1]) - 1.0) < 1e-6 and abs(float(cd_d[-8]) - 1.0) < 1e-6,
 print("== 数据集（按整场切分 + 紧凑落盘 + 派生特征 sidecar）==")
 
 
-def write_sidecar(jsonl, rows):
-    """按 `TraceFeatures` 的三段式写一个 sidecar（合成用；同时也是格式契约的守卫）。"""
+def write_sidecar(jsonl, rows, *, drop_seat_segments=False):
+    """按 `TraceFeatures` 的**七段式**写一个 sidecar（合成用；同时也是格式契约的守卫）。
+
+    `drop_seat_segments=True` 时**故意不写** v3 的逐家四段（D~G）—— 用来验"老版/截断的
+    sidecar 必须报错"，而不是被当成 0 悄悄吃下去。
+    """
     import struct
     ndec = len(rows)
     a = np.concatenate([np.asarray(r["danger"], dtype="<i2") for r in rows])
@@ -386,7 +390,16 @@ def write_sidecar(jsonl, rows):
     head = struct.pack("<5i", ds.SIDECAR_MAGIC, feat.DERIVED_VERSION, ndec,
                        feat.DERIVED_DECISION, feat.DERIVED_CANDIDATE)
     out = jsonl.parent / (jsonl.name.split(".")[0] + ".feat.bin")
-    out.write_bytes(head + a.tobytes() + b.tobytes() + c.tobytes())
+    tail = b""
+    if not drop_seat_segments:
+        seats = np.asarray([r["per_seat"] for r in rows], dtype="<i1")       # (n,3,34)
+        riichi = np.asarray([r["per_seat_riichi"] for r in rows], dtype="<i1")
+        genbutsu = np.asarray([r["genbutsu"] for r in rows], dtype="u1")     # (n,3,5)
+        suji = np.asarray([r["suji"] for r in rows], dtype="u1")
+        assert seats.shape == (ndec, feat.DERIVED_SEATS, feat.KIND_COUNT)
+        assert genbutsu.shape == (ndec, feat.DERIVED_SEATS, feat.DERIVED_BITMAP_BYTES)
+        tail = seats.tobytes() + riichi.tobytes() + genbutsu.tobytes() + suji.tobytes()
+    out.write_bytes(head + a.tobytes() + b.tobytes() + c.tobytes() + tail)
     return out
 
 
@@ -395,6 +408,12 @@ src = droot / "src"
 src.mkdir(parents=True, exist_ok=True)
 DANGER = [7] * feat.DERIVED_DECISION                      # 合成的逐决策派生量（71 维）
 CAND0 = [[1, 2, 3, 4, 5, 6, 7, 8], [0] * 8]               # 两条候选的派生量（原始整数）
+# 合成的逐家段：第 0 家（下家）的 3 号牌种是现物、4 号牌种是筋 → 位图低 3 字节有值
+_SEAT_DANGER = [[5] * feat.KIND_COUNT, [30] * feat.KIND_COUNT, [65] * feat.KIND_COUNT]
+_GENBUTSU = [[0b00001000, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]]
+_SUJI = [[0b00010000, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]]
+PER_SEAT_ROW = {"per_seat": _SEAT_DANGER, "per_seat_riichi": _SEAT_DANGER,
+                "genbutsu": _GENBUTSU, "suji": _SUJI}
 for g in range(2):                                        # 两场，每场 2 条决策
     jsonl = src / f"g{g}.jsonl"
     with jsonl.open("w", encoding="utf-8") as fh:
@@ -411,7 +430,7 @@ for g in range(2):                                        # 两场，每场 2 �
                 row["teacher"] = "pass"
                 row["teacher_index"] = 1
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    write_sidecar(jsonl, [{"danger": DANGER, "cand": CAND0} for _ in range(2)])
+    write_sidecar(jsonl, [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(2)])
 
 build_meta = ds.build(src, droot / "compact", val_frac=0.5, split_seed=0, quiet=True)
 eq("特征版本写进 meta", build_meta["feature_version"], feat.FEATURE_VERSION)
@@ -447,11 +466,11 @@ tr = ds.load_split(droot / "compact", "train")
 eq("读回的 state 形状", tr["state"].shape, (2, feat.state_dim()))
 eq("读回的 cand 形状", tr["cand"].shape, (2, 2, feat.cand_dim()))
 ok(np.array_equal(np.asarray(tr["n_legal"]), [2, 2]), "n_legal 记对了")
-# 派生量落盘的口径：state 末尾 73 维是**归一化后**的派生量；cand 末尾 8 维是**原始整数**
+# 派生量落盘的口径：state 末尾 71 维是**归一化后**的派生量；cand 末尾 8 维是**原始整数**
 ok(np.allclose(np.asarray(tr["state"][0, -feat.DERIVED_DECISION:], dtype=np.float32),
                np.asarray(DANGER, dtype=np.float32) / np.asarray(feat.DERIVED_DECISION_SCALE,
                                                                  dtype=np.float32), atol=1e-3),
-   "state 末尾 73 维 = 派生量 / 逐维分母")
+   "state 末尾 71 维 = 派生量 / 逐维分母")
 ok(np.array_equal(np.asarray(tr["cand"][0, 0, -feat.DERIVED_CANDIDATE:]),
                   np.asarray(CAND0[0], dtype=np.uint8)),
    "cand 末尾 8 维 = 派生量的原始整数（归一化留给 _batch）")
@@ -459,6 +478,44 @@ sc = ds.load_sidecar(ds.sidecar_path(src / "g0.jsonl"))
 eq("sidecar：条数", sc["n"], 2)
 eq("sidecar：逐决策派生块形状", sc["danger"].shape, (2, feat.DERIVED_DECISION))
 eq("sidecar：候选块形状", sc["cand"].shape, (4, feat.DERIVED_CANDIDATE))
+# sidecar v3 的逐家四段（D~G）—— v4 的 `tile` 通道就靠它们
+eq("sidecar v3：逐家危险度段形状", sc["danger_per_seat"].shape,
+   (2, feat.DERIVED_SEATS, feat.KIND_COUNT))
+eq("sidecar v3：逐家立直口径段形状", sc["danger_riichi_per_seat"].shape,
+   (2, feat.DERIVED_SEATS, feat.KIND_COUNT))
+eq("sidecar v3：现物位图段形状", sc["genbutsu_per_seat"].shape,
+   (2, feat.DERIVED_SEATS, feat.DERIVED_BITMAP_BYTES))
+eq("sidecar v3：筋壁位图段形状", sc["suji_per_seat"].shape,
+   (2, feat.DERIVED_SEATS, feat.DERIVED_BITMAP_BYTES))
+eq("sidecar v3：逐家危险度原样读回（int8）", int(sc["danger_per_seat"][0][1][7]), 30)
+ok(int(sc["genbutsu_per_seat"][0][0][0]) == 0b00001000
+   and int(sc["suji_per_seat"][0][0][0]) == 0b00010000,
+   "sidecar v3：位图按**字节内 LSB 在前**读回（现物=3 号牌种、筋壁=4 号牌种）")
+ok(all(int(b) & 0b11111100 == 0 for b in sc["genbutsu_per_seat"][:, :, 4].ravel()),
+   "sidecar v3：位图末字节高位为 0（34 位占 5 字节）")
+# ⚠ 老版/截断的 sidecar（缺 v3 的 D~G 段）**必须报错** —— 当成 0 填就等于悄悄换任务
+_oldsc = scratch("dataset-oldsidecar")
+shutil.copy(src / "g0.jsonl", _oldsc / "g0.jsonl")
+shutil.copy(src / "g1.jsonl", _oldsc / "g1.jsonl")
+write_sidecar(_oldsc / "g0.jsonl",
+              [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(2)],
+              drop_seat_segments=True)
+try:
+    ds.load_sidecar(ds.sidecar_path(_oldsc / "g0.jsonl"))
+    ok(False, "缺 v3 逐家段的 sidecar 必须报错")
+except ValueError as e:
+    ok("长度不自洽" in str(e), "缺 v3 逐家段时按长度自洽性报错", str(e)[:60])
+# 版本号不符（老 sidecar）也必须报错 —— `FEATURES-V4.md` §6 判据 2（不许当 0 填）
+_badver = scratch("dataset-badver")
+shutil.copy(src / "g0.jsonl", _badver / "g0.jsonl")
+_raw = bytearray((src / "g0.feat.bin").read_bytes())
+_raw[4:8] = (2).to_bytes(4, "little")                    # 头部第 2 个 int32 = derived_version
+(_badver / "g0.feat.bin").write_bytes(bytes(_raw))
+try:
+    ds.load_sidecar(_badver / "g0.feat.bin")
+    ok(False, "sidecar 版本不符（v2）必须报错")
+except ValueError as e:
+    ok("派生特征版本" in str(e), "sidecar 版本不符时报错（提示重新 --features）", str(e)[:60])
 # 缺 sidecar 必须**报错**（悄悄用 0 会让训练/推理口径不一致，而且查不出来）
 noside = scratch("dataset-noside")
 shutil.copy(src / "g0.jsonl", noside / "g0.jsonl")
@@ -472,13 +529,107 @@ except FileNotFoundError as e:
 bad = scratch("dataset-bad")
 shutil.copy(src / "g0.jsonl", bad / "g0.jsonl")
 shutil.copy(src / "g1.jsonl", bad / "g1.jsonl")
-write_sidecar(bad / "g0.jsonl", [{"danger": DANGER, "cand": [[0] * 8] * 3} for _ in range(2)])
-write_sidecar(bad / "g1.jsonl", [{"danger": DANGER, "cand": CAND0} for _ in range(2)])
+write_sidecar(bad / "g0.jsonl",
+              [dict(PER_SEAT_ROW, danger=DANGER, cand=[[0] * 8] * 3) for _ in range(2)])
+write_sidecar(bad / "g1.jsonl", [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(2)])
 try:
     ds.build(bad, bad / "compact", val_frac=0.5, quiet=True)
     ok(False, "sidecar 与 jsonl 对不上时必须报错")
 except ValueError as e:
     ok("nLegal" in str(e), "sidecar 行数/N 与 jsonl 不符时报错", str(e)[:60])
+
+# ---- 标签侧（`--aux`）：读侧硬闸门 + 与输入列**物理分离**（2026-09-27）------------------
+from mahjong_ml import auxlabels as aux_mod, producer as ml_producer      # noqa: E402
+
+
+def write_aux(jsonl, n, *, version=aux_mod.AUX_VERSION, obs_version=1):
+    """合成一份 `g*.aux.npz`（与 Java `TraceRecorder.writeAux` 同构：成员名/形状/元数据）。
+
+    ⚠ `obs_version` 缺省 **1**：这一节的合成 obs 就是 `_fake_obs` 的 `v: 1`
+    （`check_dir` 会拿它与轨迹里的 obs 版本对账 —— 这正是"新轨迹配旧标签"要抓的那种错）。
+    """
+    out = aux_mod.aux_path(jsonl)
+    np.savez(out,
+             own_shanten_after=np.full((n,), 2, np.int8),
+             own_tenpai=np.full((n,), 1, np.uint8),
+             opp_tenpai=np.tile(np.asarray([1, 0, 1], np.uint8), (n, 1)),
+             opp_hand=(np.arange(n * 3 * 34).reshape(n, 3, 34) % 4).astype(np.uint8),
+             opp_dealin=np.zeros((n, 3), np.uint8),
+             win_flag=np.zeros((n,), np.uint8),
+             hand_delta=np.full((n,), 100, np.int32),
+             placement=np.full((n,), 2, np.uint8),
+             meta=np.frombuffer(json.dumps({
+                 "aux_version": version, "obs_version": obs_version, "game": 0, "seed": 1,
+                 "n": n, "policies": ["teacher"] * 4}).encode("utf-8"), dtype=np.uint8))
+    return out
+
+
+auxdir = scratch("aux")
+shutil.copy(src / "g0.jsonl", auxdir / "g0.jsonl")
+write_aux(auxdir / "g0.jsonl", 2)
+aux1 = aux_mod.load_aux(aux_mod.aux_path(auxdir / "g0.jsonl"))
+eq("aux：读回条数", aux1["n"], 2)
+eq("aux：opp_hand 形状（n,3,34）", tuple(aux1["opp_hand"].shape), (2, 3, 34))
+eq("aux：元数据里的 obs 版本", aux1["meta"]["obs_version"], 1)
+ok_files, probs = aux_mod.check_dir(auxdir)
+eq("aux：check_dir 通过的文件数", ok_files, 1)
+eq("aux：check_dir 无问题", probs, [])
+# ① 行数错位（标签 1 行 / 轨迹 2 条决策）必须报错
+auxbad = scratch("aux-badn")
+shutil.copy(src / "g0.jsonl", auxbad / "g0.jsonl")
+write_aux(auxbad / "g0.jsonl", 1)
+_okn, _pn = aux_mod.check_dir(auxbad)
+ok(_okn == 0 and any("错位" in p for p in _pn), "aux：行数与决策数不符时报错", str(_pn)[:70])
+# ② 缺标签文件必须报错（不静默跳过）
+auxmiss = scratch("aux-miss")
+shutil.copy(src / "g0.jsonl", auxmiss / "g0.jsonl")
+_okm, _pm = aux_mod.check_dir(auxmiss)
+ok(_okm == 0 and any("缺" in p for p in _pm), "aux：缺 g*.aux.npz 时报错", str(_pm)[:70])
+# ③ obs 版本不符（新轨迹配旧标签）必须报错
+auxver = scratch("aux-ver")
+shutil.copy(src / "g0.jsonl", auxver / "g0.jsonl")
+write_aux(auxver / "g0.jsonl", 2, obs_version=2)
+_okv, _pv = aux_mod.check_dir(auxver)
+ok(_okv == 0 and any("新旧混用" in p for p in _pv), "aux：标签 obs 版本与轨迹不符时报错",
+   str(_pv)[:70])
+# ④ 格式版本不符必须报错（字段增删没同步 Python 侧）
+try:
+    aux_mod.load_aux(write_aux(auxver / "g1.jsonl", 2, version=99))
+    ok(False, "aux 格式版本不符必须报错")
+except ValueError as e:
+    ok("标签格式版本" in str(e), "aux：格式版本不符时报错", str(e)[:60])
+# ⑤ `--aux` 并进紧凑集：列齐 + **输入列逐字节不变**（物理分离的机器判据）
+for g in (0, 1):
+    write_aux(src / f"g{g}.jsonl", 2)
+m_plain = ds.build(src, droot / "aux-plain", val_frac=0.5, split_seed=0, quiet=True)
+m_aux = ds.build(src, droot / "aux-on", val_frac=0.5, split_seed=0, quiet=True, aux=True)
+ok(m_aux["has_aux"] is True and m_aux["aux_version"] == aux_mod.AUX_VERSION,
+   "aux：meta 标记 has_aux 与版本")
+sp_aux = ds.load_split(droot / "aux-on", "train")
+ok(all(sp_aux["aux"][k] is not None for k in aux_mod.AUX_COMPACT_COLUMNS),
+   f"aux：紧凑集里 {len(aux_mod.AUX_COMPACT_COLUMNS)} 个标签列都在")
+eq("aux：opp_hand 列形状", tuple(sp_aux["aux"]["aux_opp_hand"].shape), (len(sp_aux["label"]), 3, 34))
+_insame = all((droot / "aux-plain" / f"train.{tag}.npy").read_bytes()
+              == (droot / "aux-on" / f"train.{tag}.npy").read_bytes()
+              for tag in ("state", "cand", "nlegal", "label", "delta", "game"))
+ok(_insame, "aux：开不开 --aux 的**输入列逐字节相同**（标签绝不进输入）")
+ok(sp_aux["meta"]["has_aux"] is True and bool(sp_aux["meta"]["aux_columns"]),
+   "aux：紧凑集 meta 记下 has_aux 与标签列清单")
+# ⑥ `--aux` 但缺标签文件 ⇒ 构建必须报错（不填 0）
+_auxnon = scratch("aux-none")
+shutil.copy(src / "g0.jsonl", _auxnon / "g0.jsonl")
+shutil.copy(ds.sidecar_path(src / "g0.jsonl"), ds.sidecar_path(_auxnon / "g0.jsonl"))
+try:
+    ds.build(_auxnon, _auxnon / "compact", val_frac=0.5, quiet=True, aux=True)
+    ok(False, "aux=True 但缺标签文件时必须报错")
+except FileNotFoundError as e:
+    ok("--aux" in str(e), "aux：缺标签文件时报错并提示怎么生成", str(e)[:60])
+# ⑦ C++ 生产者不支持 `--aux` ⇒ 显式报错（不静默产出一份没有标签的数据集）
+try:
+    ml_producer.selfplay_cmd(2, 1, "teacher", 1, Path("x"), aux=True, name="cpp")
+    ok(False, "cpp 生产者 + --aux 必须报错")
+except SystemExit as e:
+    ok("--aux" in str(e), "aux：cpp 生产者不支持时报错（提示用 java 采这一批）", str(e)[:70])
 same = ds.split_files(ds.trace_files(src), 0.5, 0)
 same2 = ds.split_files(ds.trace_files(src), 0.5, 0)
 eq("切分可复现（同种子同结果）", [f.name for f in same[0]], [f.name for f in same2[0]])
@@ -849,7 +1000,8 @@ for g in (0, 1):
                    "legal": ["discard:1m", "pass"], "chosen": "discard:1m", "chosen_index": 0,
                    "hand_delta": [100, -100, 0, 0], "obs": _fake_obs(["discard:1m", "pass"])}
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    write_sidecar(run / f"g{g}.jsonl", [{"danger": DANGER, "cand": CAND0} for _ in range(2)])
+    write_sidecar(run / f"g{g}.jsonl",
+                  [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(2)])
 (run / "summary.json").write_text(json.dumps({
     "games": 2, "hands": 2, "per_game": [
         {"game": 0, "rank_points": [61.6, 15.8, -10.0, -30.0]},
@@ -1449,6 +1601,331 @@ try:
     eq("筛选：两份账差 >5% 必须报错（不悄悄挑一个用）", "没报错", "应 SystemExit")
 except SystemExit:
     ok(True, "筛选：引擎账与逐场得点差 >5% 时报错（口径变了要被抓住）")
+
+# ---------------------------------------------------------------- 特征 v4（训练框架）
+# 规范 `docs/FEATURES-V4.md` · 设计 `docs/TRAINING-V4.md`。
+# 这一组盯的是"框架自己有没有说谎"：注册表与张量铺满、缺字段必须报错、消融必须真归零、
+# 增量必须等于全量、封闭红证、多头形状、场外均衡审计（含负向对照）。
+from mahjong_ml import v4 as ml_v4                              # noqa: E402
+from mahjong_ml.v4 import blocks as v4_blocks, cache as v4_cache  # noqa: E402
+from mahjong_ml.v4 import harness as v4_harness, model as v4_model, spec as v4_spec  # noqa: E402
+
+_v4obs = dict(ml_v4.cli.SAMPLE_OBS)                             # v3 样例（带事件流）
+
+ok(all(sum(b.width for b in v4_spec.BLOCKS if b.tensor == t) == w
+       for t, w in (("tile", v4_spec.C_TILE), ("evt", v4_spec.C_EVT),
+                    ("ctx", v4_spec.C_CTX), ("cand", v4_spec.C_CAND))),
+   "v4：块宽度**铺满**四个张量（少一块=有通道没人负责）")
+eq("v4：块清单指纹稳定（写进 net.bin 格式 2，加载时逐块核对）",
+   v4_spec.fingerprint(), v4_spec.fingerprint())
+eq("v4：指纹对块清单敏感（改宽度必须换指纹）",
+   len(v4_spec.fingerprint([v4_spec.block("tile.own")])), 16)
+eq("v4：obs 版本契约（v4 要求 v3）", v4_spec.OBS_VERSION_V4, 3)
+eq("v4：张量布局版本（与 v3 不同）", v4_spec.FEATURE_VERSION_V4, 4)
+
+_t = v4_blocks.assemble(_v4obs, None, allow_degraded=False)
+eq("v4：tile 形状", tuple(_t.tile.shape), (34, v4_spec.C_TILE))
+eq("v4：evt 形状（K=60 窗口）", tuple(_t.evt.shape), (v4_spec.K_EVT, v4_spec.C_EVT))
+eq("v4：ctx 形状", tuple(_t.ctx.shape), (v4_spec.C_CTX,))
+eq("v4：cand 形状（与 legal 同序）", tuple(_t.cand.shape),
+   (len(_v4obs["legal"]), v4_spec.C_CAND))
+ok(all(np.isfinite(x).all() for x in _t.as_dict().values()), "v4：四个张量全为有限数")
+ok(not ({"evt.stream", "ctx.seats", "tile.per_opp"} & _t.degraded),
+   "v4：obs v3 下 **obs 侧**的块都不降级（事件流/立直巡数/逐张属性齐全）")
+ok({"tile.danger", "tile.safety", "cand.derived"} <= _t.degraded,
+   "v4：缺 sidecar v3 时 **sidecar 侧**的块逐块记名降级（不猜、不填假值）")
+
+# 缺字段 / 版本不符 / 未知块 id —— **必须报错，不许填 0**
+for _name, _mut, _kw in (("缺 events", {k: v for k, v in _v4obs.items() if k != "events"}, {}),
+                         ("obs v2 未降级", dict(_v4obs, v=2), {}),
+                         ("未知块 id", _v4obs, {"ablate": ["nope.block"]})):
+    try:
+        v4_blocks.assemble(_mut, None, **_kw)
+        ok(False, f"v4：{_name} 应当报错（填 0 = 悄悄少给信息）")
+    except v4_spec.ContractError:
+        ok(True, f"v4：{_name} 报错 ✓")
+
+_td = v4_blocks.assemble(dict(_v4obs, v=2), None, allow_degraded=True)
+ok({"evt.stream", "ctx.seats", "tile.per_opp"} <= _td.degraded,
+   f"v4：obs v2 降级路径**逐块记名**（{sorted(_td.degraded)}）")
+ok("evt.stream" not in _t.degraded, "v4：v3 数据不会被误标降级")
+
+# ---- 数据集层（设计 §「P0 剩余工作」#6）：obs/sidecar 版本**硬拒绝** + sidecar v3 真的落位
+from mahjong_ml.v4 import traces as v4_traces                  # noqa: E402
+try:
+    v4_traces.gate_obs(dict(_v4obs, v=2), where="<自检>")
+    ok(False, "v4 数据集层：obs v2 必须报错（降级跑 = 悄悄换任务）")
+except v4_spec.ContractError:
+    ok(True, "v4 数据集层：obs v2 被硬拒绝 ✓")
+eq("v4 数据集层：obs v3 放行", v4_traces.gate_obs(_v4obs, where="<自检>"), v4_spec.OBS_VERSION_V4)
+_bm = np.zeros((1, 5), dtype=np.uint8)
+_bm[0, 0] = 0b00001000
+_bm[0, 4] = 0b00000010
+_bits = v4_traces.unpack_bitmap(_bm)[0]
+ok(int(_bits[3]) == 1 and int(_bits[33]) == 1 and int(_bits.sum()) == 2,
+   "v4 数据集层：位图展开按**字节内 LSB 在前**（第 3 位 / 第 33 位）")
+# sidecar v3 的逐家段真的喂进 tile.danger / tile.safety（含"数组不是列表"这条真 bug 的回归：
+# `sc.get(key) or []` 在 numpy 数组上会抛 ambiguous —— 见 NOTES §6.5）
+_scd = {"n": 1, "ver": v4_spec.DERIVED_VERSION_V4,
+        "danger_per_seat": np.arange(1, 103, dtype=np.int8).reshape(1, 3, 34),
+        "danger_riichi_per_seat": np.arange(1, 103, dtype=np.int8).reshape(1, 3, 34),
+        "genbutsu_per_seat": np.zeros((1, 3, 5), dtype=np.uint8),
+        "suji_per_seat": np.zeros((1, 3, 5), dtype=np.uint8)}
+_scd["genbutsu_per_seat"][0, :, 0] = 0b00000001                # 0 号牌种是三家现物
+_side = v4_traces.sidecar_dict(_scd, 0)
+eq("v4 数据集层：sidecar_dict 带上 derived_version", _side["derived_version"],
+   v4_spec.DERIVED_VERSION_V4)
+eq("v4 数据集层：位图展开成 34 宽", tuple(np.asarray(_side["genbutsu_per_seat"]).shape), (3, 34))
+_td2 = v4_blocks.assemble(_v4obs, _side, allow_degraded=False)
+ok(not ({"tile.danger", "tile.safety"} & _td2.degraded),
+   "v4 数据集层：有 sidecar v3 时 tile.danger / tile.safety 不降级（正向对照）")
+_s0, _w0 = v4_blocks.TILE_OFF["safety_genbutsu"]
+ok(bool((_td2.tile[0, _s0:_s0 + _w0] == 1.0).all()) and bool((_td2.tile[7, _s0:_s0 + _w0] == 0).all()),
+   "v4 数据集层：现物位图按牌种落到 safety_genbutsu 三个对手通道")
+
+# 文件级：`iter_decisions` 逐行过闸门（一条 v3 + 一条 v2 ⇒ 读到第二条必须抛）
+_trdir = scratch("v4-traces")
+with (_trdir / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"type": "decision", "obs": _v4obs}) + "\n")
+    _fh.write(json.dumps({"type": "decision", "obs": dict(_v4obs, v=2)}) + "\n")
+try:
+    list(v4_traces.iter_decisions(_trdir))
+    ok(False, "v4 数据集层：轨迹里混进 obs v2 必须报错")
+except v4_spec.ContractError as _e:
+    ok("obs v2" in str(_e), "v4 数据集层：iter_decisions 在 v2 那一行报错（并指出是哪一行）",
+       str(_e)[:70])
+
+# ---- v4 数据集 + 教师预训练（2026-09-27）：形状/标签/可复现 --------------------------------
+# 合成一条最小轨迹（复用伪造 obs + 上面的标签侧 writer），走**真实**的 Java 产物格式
+from mahjong_ml.v4 import dataset as v4_ds, pretrain as v4_pt, model as v4_model  # noqa: E402
+
+_v4src = scratch("v4-bc-src")
+_v4obs_rows = []
+for _g in range(2):
+    _jl = _v4src / f"g{_g}.jsonl"
+    _rows = []
+    for _i in range(3):
+        # ⚠ legal 取 **2 条**：与下面 `write_sidecar` 的逐候选段（`CAND0` 两条）逐条对齐 ——
+        #   `v4.dataset` 会校验 `sidecar.nLegal == len(legal)`（错位等于把别人的牌效目标训到这一行），
+        #   也会校验 `obs.legal == 行上的 legal`（blocks 按 obs.legal 展开候选）
+        _legal = list(_v4obs["legal"])[:2]
+        _obs = dict(_v4obs, v=3, seat=_i % 4, total_discards=20 + _i, legal=_legal)
+        _row = {"type": "decision", "game": _g, "hand_no": 1, "step": _i, "seat": _i % 4,
+                "policy": "teacher", "kind": "turn", "legal": _legal,
+                "chosen": _legal[_i % 2], "chosen_index": _i % 2,
+                "hand_delta": [100, -100, 0, 0], "placement": [1, 2, 3, 4],
+                "final_scores": [26000, 25000, 24000, 25000], "obs": _obs}
+        _rows.append(_row)
+        _jl_rows = _row
+    with _jl.open("w", encoding="utf-8") as _fh:
+        for _r in _rows:
+            _fh.write(json.dumps(_r, ensure_ascii=False) + "\n")
+        # `game` 行（起点分）—— `v4.dataset` 要从它读 start_score
+        _fh.write(json.dumps({"type": "game", "game": _g, "seed": 1, "policies": ["teacher"] * 4,
+                              "start_score": 25000, "final_scores": [26000, 25000, 24000, 25000],
+                              "placement": [1, 2, 3, 4]}) + "\n")
+    # sidecar（逐决策派生量）：`blocks.assemble` 要它的 4 个逐家段 + 逐候选段
+    write_sidecar(_jl, [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0) for _ in range(3)])
+    write_aux(_jl, 3)
+_v4meta = v4_ds.build(_v4src, _v4src / "ds", val_frac=0.5, split_seed=0, aux=True, quiet=True)
+eq("v4 数据集：训练条数", _v4meta["train_decisions"], 3)
+eq("v4 数据集：张量形状写进 meta", _v4meta["shapes"]["tile"], [34, v4_spec.C_TILE])
+eq("v4 数据集：obs/derived 版本", (_v4meta["obs_version"], _v4meta["derived_version"]),
+   (v4_spec.OBS_VERSION_V4, v4_spec.DERIVED_VERSION_V4))
+_v4tr = v4_ds.load_split(_v4src / "ds", "train")
+eq("v4 数据集：tile 列形状", tuple(_v4tr["tile"].shape),
+   (3, 34, v4_spec.C_TILE))
+eq("v4 数据集：evt 列形状", tuple(_v4tr["evt"].shape), (3, v4_spec.K_EVT, v4_spec.C_EVT))
+ok(_v4tr["cand"].shape[1] == _v4meta["lmax"], "v4 数据集：cand 宽度 = lmax")
+ok(all(_v4tr[k] is not None for k in ("label", "label_type", "effect", "value", "placement",
+                                      "aux_opp_hand", "aux_opp_tenpai")),
+   "v4 数据集：标签列齐（教师动作 + 值 + 顺位 + aux 真值）")
+# ① 缺 aux 却要 --aux ⇒ 报错（不填 0）
+try:
+    _noaux = scratch("v4-bc-noaux")
+    shutil.copy(_v4src / "g0.jsonl", _noaux / "g0.jsonl")
+    shutil.copy(ds.sidecar_path(_v4src / "g0.jsonl"), ds.sidecar_path(_noaux / "g0.jsonl"))
+    v4_ds.build(_noaux, _noaux / "ds", val_frac=0.5, aux=True, quiet=True)
+    ok(False, "v4 数据集：aux=True 但缺标签必须报错")
+except FileNotFoundError as _e:
+    ok("--aux" in str(_e), "v4 数据集：缺标签侧时报错", str(_e)[:60])
+# ② obs v2 的轨迹 ⇒ 报错（数据集层的硬闸门，不是只在校验器里）
+_badobs = scratch("v4-bc-badobs")
+with (_badobs / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"type": "decision", "obs": dict(_v4obs, v=2)}) + "\n")
+# sidecar 要给（否则先炸在"缺 sidecar"上，测不到 obs 版本这条闸门）
+write_sidecar(_badobs / "g0.jsonl", [dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0)])
+try:
+    v4_ds.build(_badobs, _badobs / "ds", val_frac=0.5, aux=False, quiet=True)
+    ok(False, "v4 数据集：obs v2 轨迹必须报错")
+except v4_spec.ContractError:
+    ok(True, "v4 数据集：obs v2 轨迹被硬拒绝 ✓")
+# ③ 教师预训练：**同种子两次跑出同一份 metrics**（可复现是硬要求）
+_run = scratch("v4-bc-run")
+_ptbase = dict(data=str(_v4src / "ds"), epochs=1, batch=2, eval_batch=2, lr=1e-3, max_steps=1,
+               seed=7, threads=1, device="cpu", stage_a=0.25, stage_b=0.35, head_lr_mult=3.0,
+               mask_frac=0.0, ssl_weight=0.2)
+_a = v4_pt.train(argparse.Namespace(**{**_ptbase, "label": "v4-selfcheck-a"}))
+_b = v4_pt.train(argparse.Namespace(**{**_ptbase, "label": "v4-selfcheck-b"}))
+eq("v4 预训练：同种子两次的 history 逐字段相同",
+   json.dumps(_a["history"], sort_keys=True), json.dumps(_b["history"], sort_keys=True))
+ok(_a["history"][0]["val_top1"] >= 0.0 and "val_loss_policy" in _a["history"][0]
+   and "val_loss_danger" in _a["history"][0],
+   "v4 预训练：指标含教师一致率与逐头损失")
+ok(_a["params"] <= 3_000_000, f"v4 预训练：参数量 {_a['params']:,} ≤ 3M")
+# ④ 分阶段 + 掩码自监督（P1）：阶段划分、冻主干、SSL 头、同种子可复现
+_ptargs = dict(data=str(_v4src / "ds"), epochs=2, batch=2, eval_batch=2,
+               lr=1e-3, max_steps=2, seed=11, threads=1, device="cpu", stage_a=0.25, stage_b=0.5,
+               head_lr_mult=3.0, mask_frac=0.5, ssl_weight=0.2)
+_s1 = v4_pt.train(argparse.Namespace(**{**_ptargs, "label": "v4-selfcheck-s"}))
+_s2 = v4_pt.train(argparse.Namespace(**{**_ptargs, "label": "v4-selfcheck-t"}))
+eq("v4 预训练（分阶段+SSL）：同种子两次 history 逐字段相同",
+   json.dumps(_s1["history"], sort_keys=True), json.dumps(_s2["history"], sort_keys=True))
+eq("v4 预训练（分阶段）：三个阶段的步数都 > 0",
+   sorted(_s1["stage_steps"]), ["a", "b", "c"])
+ok("val_ssl_acc" in _s1["history"][0] and 0.0 <= _s1["history"][0]["val_ssl_acc"] <= 1.0,
+   "v4 预训练（P1）：val 里带掩码事件重建的准确率")
+_bm_evt = torch.zeros(1, v4_spec.K_EVT, v4_spec.C_EVT)
+_bm_evt[0, 3, 0] = 1.0
+_bm_evt[0, 4, 1] = 1.0
+_masked, _mrow, _mtgt = v4_pt.mask_events(_bm_evt, 1.0, torch.Generator().manual_seed(0))
+ok(bool(_mrow[0, 3]) and bool(_mrow[0, 4]) and not bool(_mrow[0, 0]),
+   "v4 预训练（P1）：掩码只落在**真实事件**上（padding 不动）")
+ok(float(_masked[0, 3].abs().sum()) == 0.0 and float(_bm_evt[0, 3].abs().sum()) > 0.0,
+   "v4 预训练（P1）：被掩码的 token 真的置 0，且不改原张量")
+eq("v4 预训练（P1）：掩码目标 = 原事件的类型下标", int(_mtgt[0, 4]), 1)
+# ⑤ 模型多返回 `e_tokens`（pretext 用）—— 推理头清单里**不许**出现它
+ok("e_tokens" not in v4_model.inference_heads(), "v4：e_tokens 不进推理头清单")
+_ssl = v4_pt.MaskedEventHead()
+ok(sum(p.numel() for p in _ssl.parameters()) == 192 * len(v4_spec.EVT_TYPES) + len(v4_spec.EVT_TYPES),
+   "v4 预训练：SSL 头只做事件类型分类（D_MODEL → 类型数）")
+# ⑥ v4 数据集并行构建 == 串行（逐字节）
+_par_src = scratch("v4-bc-par")
+for _g in range(4):
+    shutil.copy(_v4src / f"g{_g % 2}.jsonl", _par_src / f"g{_g}.jsonl")
+    shutil.copy(ds.sidecar_path(_v4src / f"g{_g % 2}.jsonl"),
+                ds.sidecar_path(_par_src / f"g{_g}.jsonl"))
+    shutil.copy(aux_mod.aux_path(_v4src / f"g{_g % 2}.jsonl"),
+                aux_mod.aux_path(_par_src / f"g{_g}.jsonl"))
+v4_ds.build(_par_src, _par_src / "ser", val_frac=0.5, split_seed=0, aux=True, workers=1, quiet=True)
+v4_ds.build(_par_src, _par_src / "par", val_frac=0.5, split_seed=0, aux=True, workers=3, quiet=True)
+_same_cols = []
+for _p in sorted((_par_src / "ser").glob("*.npy")):
+    _q = _par_src / "par" / _p.name
+    _same_cols.append(_q.is_file() and _p.read_bytes() == _q.read_bytes())
+ok(all(_same_cols) and len(_same_cols) >= 19,
+   f"v4 数据集：并行（3 进程）与串行**逐字节相同**（{len(_same_cols)} 列）")
+
+# 消融：关掉的块必须整块归零，且其它块不受影响
+_ts = v4_blocks.assemble(_v4obs, None, ablate=["tile.safety"], allow_degraded=False)
+_s, _w = v4_blocks.TILE_OFF["safety_genbutsu"]
+ok(bool((_ts.tile[:, _s:_s + _w] == 0).all()), "v4：消融 tile.safety → 该块归零")
+ok(bool((_ts.tile[:, :_s] != 0).any()), "v4：消融只动那一块（其它通道还在）")
+_ta = v4_blocks.assemble(_v4obs, None, ablate=["evt.stream"], allow_degraded=False)
+ok(bool((_ta.evt == 0).all()), "v4：消融 evt.stream → 事件流整块归零")
+
+# 判据④：增量 == 全量（张量级 + 表示级）
+_inc = v4_harness.incremental_proof(_v4obs)
+ok(_inc["tensor_ok"], f"v4：牌河增量 == 全量（Δ={_inc['tensor_delta']:.1e}）")
+ok(_inc["repr_ok"], f"v4：GRU 增量 == 从头重放（Δ={_inc['repr_delta']:.1e}）")
+_rs = v4_cache.RiverState.full_recompute(_v4obs)
+_eq_ok, _eq_d = v4_cache.incremental_equals_full(_v4obs)
+ok(_eq_ok and _eq_d == 0.0, "v4：同一条事件流逐条喂 == 一次性重算（逐元素相等）")
+_rs2 = v4_cache.RiverState(seat=1)
+for _e in _v4obs["events"]:
+    _rs2.apply(_e)
+ok(float(np.abs(_rs2.channels() - _rs.channels()).max()) == 0.0,
+   "v4：RiverState 增量与基准路径**逐元素相同**")
+_eq_ok2, _ = v4_cache.incremental_equals_full(dict(_v4obs, v=2))
+ok(_eq_ok2, "v4：obs v2（无事件流）下增量路径也不炸")
+
+# ⚠ 杠是**自己的** `type`（不是 `meld` 的写法）：增量路径必须像全量路径那样把它的 4 张
+#   算进 `meld_count`，否则"有杠的局面"上判据④会静默失效（红证：只认 `meld` 时这里是 0）。
+_kan_ev = {"type": "kan", "actor": 1, "meld_kind": "ankan", "tile": "7z",
+           "tiles": ["7z", "7z", "7z", "7z"]}
+_st_kan = v4_cache.RiverState(seat=0)
+_st_kan.apply(_kan_ev)
+eq("v4：`kan` 事件也要累加 meld_count（增量路径不许漏杠）",
+   float(_st_kan.channels()[:, 15].sum()), 4.0)
+_st_pon = v4_cache.RiverState(seat=0)
+_st_pon.apply({"type": "meld", "actor": 1, "meld_kind": "pon", "tile": "2z",
+               "tiles": ["2z", "2z", "2z"]})
+eq("v4：`meld`（碰）事件累加 meld_count", float(_st_pon.channels()[:, 15].sum()), 3.0)
+_st_irr = v4_cache.RiverState(seat=0)
+ok(not _st_irr.apply({"type": "dora_flip", "tile": "1z"})
+   and float(np.abs(_st_irr.channels()).max()) == 0.0,
+   "v4：无关事件（dora_flip）不改张量且返回 False（增量缓存可以整条跳过）")
+
+# 封闭红证（规范 §1.4）
+_pr = v4_harness.closure_proofs(_v4obs)
+ok(_pr["aux_logits_identical"], "v4 红证①：挂上隐藏真值标签后 logits 逐位不变（标签不进输入）")
+ok(_pr["reward_purity"], f"v4 红证③：奖励路径不含过程隐藏量 {_pr['reward_violations'] or ''}")
+_neg_ok, _neg_bad = v4_harness.reward_purity_scan(text="adv += 0.5 * opp_tenpai[s]\n", name="<对照>")
+ok(not _neg_ok and _neg_bad, "v4 红证③负向对照：注入 opp_tenpai 必须被抓出来")
+ok(v4_harness.reward_purity_scan(text="wall = time.perf_counter()\n", name="<对照>")[0],
+   "v4 红证③不误伤：墙钟计时 `wall` 不算隐藏量")
+ok(_pr["aux_separation"], f"v4 判据⑥：推理路径不碰 aux 标签 {_pr['aux_violations'] or ''}")
+
+# 模型与多头（设计 §5/§6）
+_v4m = v4_model.build(seed=5)
+ok(_v4m.param_count() <= 3_000_000, f"v4：参数量 {_v4m.param_count():,} ≤ 3M（上限来自 §0.1.3）")
+eq("v4：上线必需头（策略 + 分布价值 + 对手听牌 + 危险）",
+   v4_model.inference_heads(), ("policy", "value", "belief_tenpai", "danger"))
+eq("v4：头清单权重（策略头 = 1.0，teacher 模仿头**不在**这里）",
+   v4_model.loss_weights()["policy"], 1.0)
+ok("teacher" not in "".join(v4_model.loss_weights()), "v4：多头里没有 teacher 通道（teacher 只是起点/对手/基准）")
+import torch as _torch                                          # noqa: E402
+_x = {k: _torch.tensor(v, dtype=_torch.float32).unsqueeze(0) for k, v in _t.as_dict().items()}
+with _torch.no_grad():
+    _out = _v4m(**_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))
+eq("v4：策略 logits 形状", tuple(_out["policy"].shape), (1, _t.cand.shape[0]))
+eq("v4：分布价值分箱数", tuple(_out["value"].shape), (1, v4_model.VALUE_BINS))
+eq("v4：对手手牌信念形状", tuple(_out["belief_hand"].shape), (1, 3, 34))
+eq("v4：危险头形状（候选 × 4 家）", tuple(_out["danger"].shape), (1, _t.cand.shape[0], 4))
+_hg = v4_model.hl_gauss_targets(_torch.tensor([0.0, 5.0, -30.0, 100.0]))
+ok(bool((_hg.sum(dim=1) - 1.0).abs().max() < 1e-5), "v4：值头的软标签每行和为 1（HL-Gauss 正确）")
+ok(bool((_hg >= 0).all()), "v4：值头软标签非负（不会造出负概率）")
+ok(_torch.equal(_v4m(**_x, mask=None)["policy"][:, 0], _v4m(**_x, mask=None)["policy"][:, 0]),
+   "v4：前向是确定性的（无 dropout）—— 红证①与判据④都依赖这条")
+
+# 场外均衡审计（设计 §7.5）—— 含负向对照
+_bdir = scratch("v4-balance")
+_pols = ["pa", "pb", "pc", "pd"]
+
+
+def _write_run(d, *, skew: bool) -> None:
+    with (d / "g0.jsonl").open("w", encoding="utf-8") as fh:
+        for game in range(8):
+            for seat in range(4):
+                pol = _pols[0] if (skew and seat >= 2) else _pols[(seat + game) % 4]
+                fh.write(json.dumps({"game": game, "seat": seat, "policy": pol,
+                                     "legal": ["discard:1m"]}) + "\n")
+            fh.write(json.dumps({"type": "hand", "game": game, "hand_no": 0, "round": {"bakaze": "E", "kyoku": 1},
+                                 "agari": True, "tsumo": True, "abortive": False}) + "\n")
+
+
+_write_run(_bdir, skew=False)
+_rep = v4_harness.balance_report(_bdir)
+_ok_bal, _why = _rep.verdict()
+ok(_ok_bal, f"v4 均衡：逐座位轮转的一轮判为均衡（座位偏差 {_rep.seat_deviation():.2%}，CV {_rep.opponent_cv():.1%}）")
+eq("v4 均衡：赛事计数（8 场）", _rep.games, 8)
+eq("v4 均衡：结局分类（自摸）", _rep.outcomes.get("agari_tsumo"), 8)
+_rep_json = _rep.to_json()
+ok({"seat_deviation", "opponent_cv", "balanced", "reasons"} <= set(_rep_json),
+   "v4 均衡：报告字段齐全（写 league/<label>/balance.json）")
+
+_bskew = scratch("v4-balance-skew")
+_write_run(_bskew, skew=True)
+_rep2 = v4_harness.balance_report(_bskew)
+_ok2, _why2 = _rep2.verdict()
+ok(not _ok2, f"v4 均衡负向对照：座位偏斜必须判不均衡（{_why2}）")
+ok(_rep2.seat_deviation() > v4_harness.SEAT_TOL,
+   f"v4 均衡：偏斜偏差 {_rep2.seat_deviation():.2%} > 阈值 {v4_harness.SEAT_TOL:.0%}")
+eq("v4 均衡：阈值口径（离散 1% / 对手 CV 5%）",
+   (v4_harness.SEAT_TOL, v4_harness.OPP_CV_TOL), (0.01, 0.05))
+_bout = v4_harness.write_balance(_bdir)
+ok(_bout.is_file() and json.loads(_bout.read_text(encoding="utf-8"))["balanced"] is True,
+   "v4 均衡：write_balance 落盘且结论一致")
 
 # ---------------------------------------------------------------- 汇总
 

@@ -27,10 +27,16 @@ TILE_SLOTS = 37          # 34 种 + 赤 5m/5p/5s（与 Java 的 `Action.tileInde
 N_PLAYERS = 4
 
 #: 派生特征的段长（**与 Java `mahjong.ai.ObsFeatures` 必须一致**；改了两边一起改 + 版本 +1）
-DERIVED_VERSION = 2      # = Java `ObsFeatures.FEATURE_VERSION`（sidecar 头部也带它）
+DERIVED_VERSION = 3      # = Java `ObsFeatures.FEATURE_VERSION`（sidecar 头部也带它）
 DERIVED_DECISION = 71    # danger_worst[34] + danger_riichi[34] + shanten_now, value_han, value_points
 DERIVED_CANDIDATE = 8    # shanten, advance_types, advance_tiles, wait_types, wait_tiles,
                          # good_wait_types, good_wait_tiles, dora_count
+#: sidecar v3 的**逐家**段（D~G）：相对方位 **0 = 下家 / 1 = 対面 / 2 = 上家**
+#: （`danger_per_seat` / `danger_riichi_per_seat` int8；`genbutsu_per_seat` / `suji_per_seat` 位图，字节内 LSB 在前）
+DERIVED_SEATS = 3
+DERIVED_PER_SEAT = DERIVED_SEATS * KIND_COUNT                  # 102 = 3 家 × 34 种（int8）
+DERIVED_BITMAP_BYTES = 5                                       # 34 位 → 5 字节（末字节只用低 2 位）
+DERIVED_PER_SEAT_BITMAP = DERIVED_SEATS * DERIVED_BITMAP_BYTES  # 15
 
 #: 派生量的**归一化**（Java 侧推理时也必须用同一组系数；单点定义，别散在各处）
 DERIVED_SCALE_DANGER = 100.0
@@ -102,7 +108,7 @@ def is_red(code: str) -> bool:
 # ------------------------------------------------------------------ 状态特征
 
 def state_dim() -> int:
-    """状态向量维度（固定；改了要同步 Java 与自检）。末尾 73 维是**派生量**（危险度 68 + 牌力/打点 5）。"""
+    """状态向量维度（固定；改了要同步 Java 与自检）。末尾 71 维是**派生量**（危险度 68 + 向听/打点 3）。"""
     return _base_state_dim() + DERIVED_DECISION
 
 

@@ -164,6 +164,18 @@ public:
     int lastDiscardSeat = -1;
     int lastDiscardTile = -1;
     bool lastDiscardTsumogiri = false;
+
+    // ---------------------------------------------------------------- 公开事件日志（obs v3）
+    /**
+     * 本局的**有序公开事件日志**（Java `Round.events` 的镜像；只追加、整局累积，小局之间清零）。
+     *
+     * <p>四类各一个**漏斗**：`recordDiscard()` / `placeMeld()` / `doRiichi()` / `revealKanDora(seat)` ——
+     * 与 Java 的 `recordDiscard` / `sendMeld` / `doRiichi` / `sendDora` 一一对应。
+     * ⚠ `draw` / `agari` / `ryuukyoku` **刻意不发**（理由见 `docs/PROTOCOL.md` §8.2）。
+     */
+    std::vector<Event> events;
+    /** 四家立直巡数（立直宣言发生在该家自己的第几次摸牌；未立直 = -1，与 Java 同）。 */
+    std::array<int, 4> riichiTurn{-1, -1, -1, -1};
     /** 牌河里需要**横置**的那张的下标（-1 = 无；只有立直宣言牌或其顺延牌）。 */
     std::array<int, 4> sidewaysDiscard{-1, -1, -1, -1};
     std::array<bool, 4> sidewaysPending{};
@@ -178,15 +190,22 @@ private:
     bool awaySeat(int seat) const;
 
     void sortHands();
-    /** 「出牌」的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置。 */
-    void recordDiscard(int seat, int id, bool declareRiichi);
+    /** 「出牌」的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置 + 事件流。 */
+    void recordDiscard(int seat, int id, bool tsumogiri, bool declareRiichi);
+    /**
+     * 「副露落位」的**唯一**记账点（Java `sendMeld` 的位置）：推进 `melds[]` + 追加一条事件。
+     *
+     * @param replaceIndex ≥0 时**替换**该下标（加杠：把原来那副碰升级成杠），否则追加
+     */
+    void placeMeld(int seat, const Meld &m, int replaceIndex = -1);
     bool noteDiscard(int seat, bool declareRiichi);
     void noteCalledFromRiver(int from, int index);
     void removeCalledFromRiver(int from, int calledIndex);
     void incRiichiDiscard(int seat);
     void doRiichi(int seat, int discardTile);
     void clearIppatsu();
-    void revealKanDora();
+    /** 杠宝牌翻开（Java `Round.revealKanDora(seat)`）+ 事件流里的一条 `dora_flip`。 */
+    void revealKanDora(int seat);
 
     int redCount(int seat) const;
     bool scoreWith(int seat, const Counts &merged, int winTileId, bool tsumo, bool rinshan,

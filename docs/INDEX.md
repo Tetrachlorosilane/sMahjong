@@ -9,6 +9,7 @@
 
 | 我要…… | 入口 | 关键锚点 |
 | --- | --- | --- |
+| **新会话接上 / 看当前进度** | **`docs/HANDOVER.md`** | 十秒速览 · 已完成（带判据）· 下一步（obs v3 六步）· 环境命令 · 操作纪律 · 待决问题 |
 | 动任何代码 | `AGENTS.md` | §2 铁律 → §3 构建 → §4 验证五层 → §6 约定 |
 | 改协议字段 / 报文 | `docs/PROTOCOL.md`（★ **先改它**） | `AGENTS.md` §2.2（字段判据）· §6.4（文案/结算纪律） |
 | 改规则判定（役种/符/点/振听/流局…） | `server/src/main/java/mahjong/rules/` + `docs/日本麻将.md` | `AGENTS.md` §2.1 · §6.3 · `server/.../test/SelfTest.java` |
@@ -64,6 +65,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 定位 | 外面训练 → 导出权重 → 服务端**纯 Java 手写前向**；训练侧只实现 `ActionPolicy`（拿不到 `Round`） |
+| **v4 框架（已落地，待 obs v3）** | `python/mahjong_ml/v4/`：`spec` 块注册表 · `blocks` 四张量拼装 · `cache` 两级缓存 · `model` 多头 · `harness` 封闭红证 + 均衡审计；命令 `python -m mahjong_ml.v4 check\|plan\|balance` |
 | 现状（v3 谱系） | `docs/TRAINING.md`（P0–P4/P5b 与全部实测）· `python/README.md`（跑法）· `NOTES.md` §6.5（口径/坑/红证） |
 | **下一步（v4）** | **`docs/FEATURES-V4.md`**（规范：信息边界/张量维度/版本契约/消融/验收）· **`docs/TRAINING-V4.md`**（设计：架构/多头/评价/阶段 P0–P5） |
 | 训练端引擎（C++） | `docs/TRAINER-CPP.md`（与 Java 逐字节同源）· `trainer/README.md` |
@@ -140,6 +142,7 @@ mahjong/
 | `docs/TRAINING.md` | 120 KB | 训练方案 **v3 现状**（P0–P4/P5b，含全部实测） | 训练工作流或判据变化 |
 | `docs/FEATURES-V4.md` | 24 KB | **特征 v4 规范**（信息边界/维度/版本/消融/验收） | 张量布局或信息边界变化（**五处一起改**） |
 | `docs/TRAINING-V4.md` | 37 KB | **v4 设计**（架构/多头/评价/阶段 P0–P5/风险） | 架构或评价体系变化 |
+| `docs/HANDOVER.md` | 8 KB | **会话交接**：状态 / 已完成（带判据）/ 下一步 / 环境命令 / 待决问题（**每次交接整段重写**） | 每次会话收尾 |
 | `docs/TRAINER-CPP.md` | 82 KB | 训练端 C++ 引擎：设计、口径、全部实测 | 训练端引擎变化 |
 | `docs/BOT-AI.md` | 16 KB | 机器人 AI **包格式**与随发布清单 | 包格式/清单/发布口径变化 |
 | `docs/input-json.md` | 17 KB | 牌谱导出 JSON 格式（喂复盘器） | 导出格式变化 |

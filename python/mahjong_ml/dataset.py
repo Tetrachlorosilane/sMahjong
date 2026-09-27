@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from . import features
+from . import auxlabels as _aux
 
 #: 候选数上限（一次询问的 `legal` 长度）：正常最多十几个，留足余量；超了直接报错而不是悄悄截断。
 MAX_LEGAL = 64
@@ -94,10 +95,15 @@ def sidecar_path(jsonl: Path) -> Path:
 
 
 def load_sidecar(path: str | Path) -> dict:
-    """读派生特征 sidecar（三段式、小端；格式见 `mahjong.train.TraceFeatures` 的 javadoc）。
+    """读派生特征 sidecar（**七段式**、小端；格式见 `mahjong.train.TraceFeatures` 的 javadoc）。
 
-    返回 `danger[n,73]` / `nlegal[n]` / `cand[Σnlegal,8]`（都是只读视图）+ 候选偏移。
-    `danger` 是**逐决策派生段**（v3 起 73 维：危险度 68 + 牌力/打点 5），int16 存盘。
+    返回 `danger[n,71]` / `nlegal[n]` / `cand[Σnlegal,8]`（都是只读视图）+ 候选偏移，
+    以及 **sidecar v3** 的逐家四段：`danger_per_seat[n,3,34]` / `danger_riichi_per_seat[n,3,34]`
+    （int8）与 `genbutsu_per_seat[n,3,5]` / `suji_per_seat[n,3,5]`（位图，字节内 LSB 在前）。
+    `danger` 是**逐决策派生段**（v3 起 71 维：危险度 68 + 向听/打点 3），int16 存盘。
+
+    ⚠ 逐家段是 v4 的 `tile` 通道来源（`v4/blocks.py` 按 `sc[key][i][col]` 取第 `col` 个对手）——
+    缺段/长度不符**一律报错**（当 0 填就等于悄悄换了个任务）。
     """
     p = Path(path)
     raw = p.read_bytes()
@@ -117,12 +123,30 @@ def load_sidecar(path: str | Path) -> dict:
     nlegal = np.frombuffer(raw, dtype="<i2", count=ndec, offset=off_b)
     off_c = off_b + ndec * 2
     total = int(nlegal.sum())
-    if off_c + total * pcand * 2 != len(raw):
-        raise ValueError(f"{p.name} 长度不自洽：文件 {len(raw)} 字节，按头部推算应为 "
-                         f"{off_c + total * pcand * 2}")
+    # v3 的四段（长度都由 ndec 与固定常量推出来，所以头部不用再加字段）
+    off_d = off_c + total * pcand * 2
+    seat_n = ndec * features.DERIVED_PER_SEAT
+    bit_n = ndec * features.DERIVED_PER_SEAT_BITMAP
+    off_e = off_d + seat_n
+    off_f = off_e + seat_n
+    off_g = off_f + bit_n
+    end = off_g + bit_n
+    if end != len(raw):
+        raise ValueError(f"{p.name} 长度不自洽：文件 {len(raw)} 字节，按头部推算应为 {end}"
+                         f"（老版 sidecar 请重新 --features）")
     danger = np.frombuffer(raw, dtype="<i2", count=ndec * pdec, offset=20).reshape(ndec, pdec)
     cand = np.frombuffer(raw, dtype="<i2", count=total * pcand, offset=off_c).reshape(total, pcand)
+    seat_shape = (ndec, features.DERIVED_SEATS, features.KIND_COUNT)
+    bitmap_shape = (ndec, features.DERIVED_SEATS, features.DERIVED_BITMAP_BYTES)
     return {"ver": ver, "n": ndec, "danger": danger, "nlegal": nlegal, "cand": cand,
+            "danger_per_seat": np.frombuffer(raw, dtype="<i1", count=seat_n,
+                                             offset=off_d).reshape(seat_shape),
+            "danger_riichi_per_seat": np.frombuffer(raw, dtype="<i1", count=seat_n,
+                                                    offset=off_e).reshape(seat_shape),
+            "genbutsu_per_seat": np.frombuffer(raw, dtype="u1", count=bit_n,
+                                               offset=off_f).reshape(bitmap_shape),
+            "suji_per_seat": np.frombuffer(raw, dtype="u1", count=bit_n,
+                                           offset=off_g).reshape(bitmap_shape),
             "offsets": np.concatenate([[0], np.cumsum(nlegal)]).astype(np.int64)}
 
 
@@ -264,7 +288,7 @@ def pick_label(row: dict, label_source: str) -> int:
 
 def _write_one_file(outs: dict, f: Path, file_id: int, i0: int, take: int, lmax: int,
                     label_source: str, require_derived: bool, base: int,
-                    student_prefix: str = "net:") -> tuple[int, int]:
+                    student_prefix: str = "net:", aux: bool = False) -> tuple[int, int]:
     """把一个文件的决策写进 `outs` 的 `[i0, i0+take)` 行（**串行/并行共用同一份行逻辑**）。
 
     ⚠ 这是"逐条填数组"的唯一实现：并行版只是把**不同的行区间**分给不同进程（memmap 是文件映射，
@@ -278,6 +302,10 @@ def _write_one_file(outs: dict, f: Path, file_id: int, i0: int, take: int, lmax:
         raise FileNotFoundError(
             f"缺派生特征 sidecar：{sc_path.name}\n"
             f"  先跑：java -jar server/build/mahjong-server.jar --features <轨迹目录>")
+    # 标签侧（`g*.aux.npz`）：**只有 aux=True 才读**，且与轨迹的决策行一一对应（同一遍遍历）
+    ax = None
+    if aux:
+        ax = _aux.load_aux(_aux.aux_path(f))
     written = 0
     used_teacher = 0
     # 该文件里的决策按行序与 sidecar 行序**一一对应**（同一遍遍历，顺序天然一致）
@@ -343,24 +371,41 @@ def _write_one_file(outs: dict, f: Path, file_id: int, i0: int, take: int, lmax:
             #   那会把**别的网的决策**算进策略损失（off-policy 污染，还静默）。
             pol = str(row.get("policy", ""))
             outs["is_student"][i] = 1 if pol.startswith(student_prefix) else 0
+            # 标签侧列（`--aux`）：**同行号**取自 `g*.aux.npz`；⚠ 这些列**绝不**进 state/cand
+            if ax is not None:
+                if row_idx >= int(ax["n"]):
+                    raise ValueError(f"{f.name}:{ln} 标签侧行数不够（{ax['n']}）—— 重新 --aux 采集")
+                outs["aux_own_shanten_after"][i] = int(ax["own_shanten_after"][row_idx])
+                outs["aux_own_tenpai"][i] = int(ax["own_tenpai"][row_idx])
+                outs["aux_win_flag"][i] = int(ax["win_flag"][row_idx])
+                outs["aux_opp_tenpai"][i] = ax["opp_tenpai"][row_idx]
+                outs["aux_opp_hand"][i] = ax["opp_hand"][row_idx]
+                outs["aux_opp_dealin"][i] = ax["opp_dealin"][row_idx]
             written += 1
             row_idx += 1
     return written, used_teacher
 
 
-#: 一份切分里的全部数组名（`_write_split` 建、`_write_chunk` 续写；顺序无关）
-_OUT_ARRAYS = ("state", "cand", "nlegal", "label", "delta", "game", *RL_COLUMNS)
+#: 一份切分里的全部数组名（`_write_split` 建、`_write_chunk` 续写；顺序无关）。
+#: 标签侧列（`aux_*`）**不是**输入列 —— 只有 `build(aux=True)` 时才建/写。
+_OUT_ARRAYS = ("state", "cand", "nlegal", "label", "delta", "game", *RL_COLUMNS,
+               *_aux.AUX_COMPACT_COLUMNS)
 
 
 def _write_chunk(tasks: list[tuple], out_npz: Path, lmax: int, label_source: str,
-                 require_derived: bool, base: int, student_prefix: str = "net:") -> tuple[int, int]:
-    """并行工作单元：打开一次 memmap，把这一组 `(文件, file_id, i0, take)` 顺序写进去。"""
+                 require_derived: bool, base: int, student_prefix: str = "net:",
+                 aux: bool = False) -> tuple[int, int]:
+    """并行工作单元：打开一次 memmap，把这一组 `(文件, file_id, i0, take)` 顺序写进去。
+
+    ⚠ 只打开**真的存在**的列（标签侧列只有 `aux=True` 那次才建）—— 用"文件在不在"判断，
+    免得把 `aux` 这个开关再沿三条调用路径抄一遍（抄漏一处就是静默不写标签）。
+    """
     outs = {name: np.lib.format.open_memmap(out_npz.with_suffix(f".{name}.npy"), mode="r+")
-            for name in _OUT_ARRAYS}
+            for name in _OUT_ARRAYS if out_npz.with_suffix(f".{name}.npy").is_file()}
     written = used = 0
     for f, file_id, i0, take in tasks:
         w, u = _write_one_file(outs, f, file_id, i0, take, lmax, label_source,
-                               require_derived, base, student_prefix)
+                               require_derived, base, student_prefix, aux)
         written += w
         used += u
     for m in outs.values():
@@ -370,7 +415,8 @@ def _write_chunk(tasks: list[tuple], out_npz: Path, lmax: int, label_source: str
 
 def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_npz: Path, dtype,
                  require_derived: bool = True, label_source: str = "auto",
-                 workers: int = 1, student_prefix: str = "net:") -> tuple[int, int]:
+                 workers: int = 1, student_prefix: str = "net:",
+                 aux: bool = False) -> tuple[int, int]:
     """把切分里的决策写进定长数组（内存映射，逐条填）。返回 `(写入条数, 用了老师标注的条数)`。
 
     ⚠ `cand` 固定用 **uint8** 存：前 88 维是 0/1 one-hot 与 ≤4 的计数，**末尾 8 维是派生量的
@@ -380,6 +426,7 @@ def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_np
     @param counts 第一遍按**同一截断口径**数出来的每文件行数（见 `count_per_file`）
     @param workers `>1` 时按文件分组并行写（各进程写 memmap 的不同行切片，产物与串行逐字节相同）
     @param label_source `auto`（有 `teacher_index` 就用它 —— DAgger）/ `chosen` / `teacher`
+    @param aux 是否把 `g*.aux.npz` 的**标签列**（`aux_*`）一起写进紧凑集
     """
     if n == 0:                                  # 切分为空（数据太少）时也要给出合法的空数组
         np.save(out_npz.with_suffix(".state.npy"), np.zeros((0, features.state_dim()), dtype))
@@ -391,6 +438,10 @@ def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_np
         np.save(out_npz.with_suffix(".game.npy"), np.zeros((0,), np.int32))
         for name, dt in RL_COLUMNS.items():
             np.save(out_npz.with_suffix(f".{name}.npy"), np.zeros((0,), dt))
+        if aux:
+            for name, dt in _aux.AUX_COMPACT_COLUMNS.items():
+                np.save(out_npz.with_suffix(f".{name}.npy"),
+                        np.zeros((0, *_aux.AUX_SHAPES[_aux.compact_key(name)]), dt))
         return 0, 0
     state = np.lib.format.open_memmap(out_npz.with_suffix(".state.npy"), mode="w+",
                                       dtype=dtype, shape=(n, features.state_dim()))
@@ -408,6 +459,13 @@ def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_np
     rl = {name: np.lib.format.open_memmap(out_npz.with_suffix(f".{name}.npy"), mode="w+",
                                           dtype=dt, shape=(n,))
           for name, dt in RL_COLUMNS.items()}
+    # 标签侧列（`--aux`）：形状取自 `aux.AUX_SHAPES`（与 npz 里那几列同形）——
+    # ⚠ 它们是**标签**，与 state/cand 是两套列，绝不参与输入拼装
+    if aux:
+        for name, dt in _aux.AUX_COMPACT_COLUMNS.items():
+            rl[name] = np.lib.format.open_memmap(
+                out_npz.with_suffix(f".{name}.npy"), mode="w+", dtype=dt,
+                shape=(n, *_aux.AUX_SHAPES[_aux.compact_key(name)]))
     base = features.cand_dim() - features.DERIVED_CANDIDATE
     # 每个文件的行区间（前缀和）—— 行号只由"文件顺序 + 文件内行序"决定，与并行度无关
     tasks: list[tuple] = []
@@ -430,7 +488,7 @@ def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_np
         tmp.mkdir(parents=True, exist_ok=True)
         req.write_text(json.dumps({
             "out_npz": str(out_npz), "lmax": lmax, "label_source": label_source,
-            "student_prefix": student_prefix,
+            "student_prefix": student_prefix, "aux": aux,
             "require_derived": require_derived, "base": base,
             "chunks": [[[str(f), file_id, i0, take] for f, file_id, i0, take in ch]
                        for ch in chunks],
@@ -446,7 +504,7 @@ def _write_split(files: list[Path], counts: list[int], n: int, lmax: int, out_np
     used_teacher = 0
     for f, file_id, i0, take in tasks:
         w, u = _write_one_file(outs, f, file_id, i0, take, lmax, label_source, require_derived, base,
-                               student_prefix)
+                               student_prefix, aux)
         written += w
         used_teacher += u
     for m in outs.values():
@@ -458,30 +516,33 @@ class _ChunkArgs:
     """把 `_write_chunk` 的固定参数绑成一个可 pickle 的可调用对象（`Pool.map` 只传数据块）。"""
 
     def __init__(self, out_npz: Path, lmax: int, label_source: str, require_derived: bool, base: int,
-                 student_prefix: str = "net:"):
+                 student_prefix: str = "net:", aux: bool = False):
         self.out_npz = out_npz
         self.lmax = lmax
         self.label_source = label_source
         self.require_derived = require_derived
         self.base = base
         self.student_prefix = student_prefix
+        self.aux = aux
 
     def __call__(self, tasks: list[tuple]) -> tuple[int, int]:
         return _write_chunk(tasks, self.out_npz, self.lmax, self.label_source,
-                            self.require_derived, self.base, self.student_prefix)
+                            self.require_derived, self.base, self.student_prefix, self.aux)
 
 
 def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: float = 0.1,
           split_seed: int = 0,
           max_decisions: int | None = None, dtype=np.float16, quiet: bool = False,
           require_derived: bool = True, label_source: str = "auto",
-          workers: int = 0, student_prefix: str = "net:") -> dict:
+          workers: int = 0, student_prefix: str = "net:", aux: bool = False) -> dict:
     """采集轨迹 → 紧凑数组。返回 `meta`（也写进 `<out_dir>/meta.json`）。
 
     @param src 一个目录，或**多个目录**（DAgger：把学生跑出来的状态并进 BC 数据一起训）
     @param require_derived 缺 `g*.feat.bin` 时是否报错（默认**报错**：悄悄用 0 会让训练与推理
                           的特征口径不一致 —— 那种 bug 根本查不出来）
     @param label_source `auto`（有 `teacher_index` 就用它 —— DAgger 的标注）/ `chosen` / `teacher`
+    @param aux 是否把标签侧 `g*.aux.npz` 并成一组**独立列**（`aux_*`）。⚠ 缺文件**报错**：
+        标签静默填 0 会让"对手手牌信念/危险头"学到全 0 的答案，而训练照跑不误。
     @param student_prefix **哪一行的行为策略算"学生"**（`is_student=1`；策略损失只算这些行）。
                            ⚠ 缺省 `net:` 只适用于"桌面上只有一个网络"的老口径；**跨代对局**
                            （对手也是网络）必须传**这一轮学生的确切策略串**，否则别的网的决策会被
@@ -512,10 +573,10 @@ def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: 
 
     written_train, teacher_train = _write_split(
             train_files, train_counts, n_train, lmax, out_dir / "train.npz", dtype,
-            require_derived, label_source, workers, student_prefix)
+            require_derived, label_source, workers, student_prefix, aux)
     written_val, teacher_val = _write_split(
             val_files, val_counts, n_val, lmax, out_dir / "val.npz", dtype,
-            require_derived, label_source, workers, student_prefix)
+            require_derived, label_source, workers, student_prefix, aux)
     meta = {
         "feature_version": features.FEATURE_VERSION,
         "derived_version": features.DERIVED_VERSION,
@@ -542,6 +603,10 @@ def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: 
         "val_decisions": written_val,
         # 这份紧凑集带了哪些 P3 列（旧数据集没有 → 读回来是 None，P3 会要求重建）
         "rl_columns": sorted(RL_COLUMNS),
+        # 标签侧（`--aux`）：**与输入列物理分离**的另一组列（`aux_*`）
+        "has_aux": bool(aux),
+        "aux_version": _aux.AUX_VERSION if aux else None,
+        "aux_columns": sorted(_aux.AUX_COMPACT_COLUMNS) if aux else [],
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                        encoding="utf-8")
@@ -552,6 +617,9 @@ def build(src: str | Path | list[str | Path], out_dir: str | Path, *, val_frac: 
         print(f"  state {meta['state_dim']} 维 / cand {meta['cand_dim']} 维，"
               f"特征版本 {meta['feature_version']}，切分种子 {split_seed}，"
               f"标签源 {label_source}（训练集里 {teacher_train} 条用了老师标注）")
+        if aux:
+            print(f"  标签侧（aux v{meta['aux_version']}）：{len(meta['aux_columns'])} 列 "
+                  f"（{', '.join(meta['aux_columns'])}）—— 与输入列物理分离")
     return meta
 
 
@@ -577,6 +645,11 @@ def load_split(out_dir: str | Path, split: str) -> dict:
     for name in RL_COLUMNS:
         p = out_dir / f"{split}.{name}.npy"
         out[name] = mm(name) if p.is_file() else None
+    # 标签侧列（`--aux` 那份才有）：**单独一组**，训练时按需取；推理路径不碰
+    out["aux"] = {}
+    for name in _aux.AUX_COMPACT_COLUMNS:
+        p = out_dir / f"{split}.{name}.npy"
+        out["aux"][name] = mm(name) if p.is_file() else None
     return out
 
 
@@ -603,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="哪一行的行为策略算学生（is_student=1；策略损失只算这些行）。"
                          "跨代对局（对手也是网络）要传**这一轮学生的确切策略串**，否则别的网的决策"
                          "会被算进策略损失（缺省 net: 只适合「桌面只有一个网络」的老口径）")
+    ap.add_argument("--aux", action="store_true",
+                    help="把标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了…）并成**独立的一组列**"
+                         "（`aux_*`；缺文件直接报错，不填 0）。⚠ 这是标签，绝不进 state/cand")
     args = ap.parse_args(argv)
 
     if args.cmd == "_count":
@@ -620,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                  for f, fid, i0, take in req["chunks"][k]]
         w, u = _write_chunk(tasks, Path(req["out_npz"]), int(req["lmax"]), req["label_source"],
                             bool(req["require_derived"]), int(req["base"]),
-                            req.get("student_prefix", "net:"))
+                            req.get("student_prefix", "net:"), bool(req.get("aux", False)))
         (req_path.parent / f"res{k}.json").write_text(json.dumps([w, u]), encoding="utf-8")
         return 0
     if args.cmd == "build":
@@ -628,7 +704,7 @@ def main(argv: list[str] | None = None) -> int:
         out = args.out or (args.src + "-compact")
         build(srcs, out, val_frac=args.val_frac, split_seed=args.split_seed,
               max_decisions=args.max_decisions, label_source=args.label_source,
-              workers=args.workers, student_prefix=args.student,
+              workers=args.workers, student_prefix=args.student, aux=args.aux,
               dtype=np.float32 if args.float32 else np.float16)
     else:
         d = load_split(args.src, "train")

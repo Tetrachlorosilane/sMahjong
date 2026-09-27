@@ -31,8 +31,19 @@ const OBS_KEYS = [
   'v', 'seat', 'kind', 'hand', 'hand_red', 'drawn', 'player_draws', 'menzen', 'self_riichi',
   'furiten', 'melds', 'discards', 'dora_indicators', 'riichi', 'ippatsu', 'scores', 'kuitan',
   'round', 'tiles_left', 'dead_wall_left', 'total_discards', 'kan_count', 'any_call', 'visible',
+  // obs v3（见 PROTOCOL §8.2）：事件流 + 立直巡数。`v < 3` 的老轨迹没有它们，只对 v≥3 强制要求。
+  'events', 'riichi_turn',
   'haitei', 'houtei', 'rinshan', 'from', 'called_tile', 'win_note', 'legal',
 ].sort();
+
+/** obs v3 才有的字段（老轨迹不许拿它们当"缺字段"）。 */
+const OBS_KEYS_V3 = ['events', 'riichi_turn'];
+
+/** 事件流的类型白名单与"哪些字段必带"（契约见 PROTOCOL §8.2，两边一起改）。 */
+const EVT_TYPES = ['discard', 'meld', 'kan', 'riichi', 'dora_flip'];
+const EVT_MELD_KINDS = ['chi', 'pon', 'ankan', 'kakan', 'daiminkan'];
+const EVT_DISCARD_KEYS = ['actor', 'tile', 'tsumogiri', 'sideways', 'turn'];
+const EVT_MELD_KEYS = ['actor', 'tile', 'called_tile', 'tiles', 'meld_kind', 'from', 'turn'];
 
 const DECISION_KEYS = new Set(['type', 'game', 'hand_no', 'hand', 'step', 'seat', 'policy',
   'kind', 'legal', 'chosen', 'chosen_index', 'obs', 'hand_delta', 'hand_winner', 'hand_loser',
@@ -98,8 +109,16 @@ for (const f of files) {
     if (!obs) { add(file, ln, '缺少 obs'); continue; }
     const badKeys = Object.keys(obs).filter((k) => !OBS_KEYS.includes(k));
     if (badKeys.length) add(file, ln, `观测里有未登记字段（防泄漏白名单）：${badKeys.join(',')}`);
-    const missKeys = OBS_KEYS.filter((k) => !(k in obs));
+    // ⚠ `events` / `riichi_turn` 是 **obs v3** 才有的：拿老轨迹（v2）当输入时不该要求它们
+    //   （判据是 `obs.v`，不是"文件里有没有" —— 老数据集照样要能过这份校验）。
+    const obsV = Number(obs.v ?? 2);
+    const required = obsV >= 3 ? OBS_KEYS : OBS_KEYS.filter((k) => !OBS_KEYS_V3.includes(k));
+    const missKeys = required.filter((k) => !(k in obs));
     if (missKeys.length) add(file, ln, `观测缺少字段：${missKeys.join(',')}`);
+    if (obsV < 3) {
+      const stray = OBS_KEYS_V3.filter((k) => k in obs);
+      if (stray.length) add(file, ln, `obs v${obsV} 不该出现 obs v3 的字段：${stray.join(',')}`);
+    }
     if (obs.seat !== row.seat) add(file, ln, `obs.seat=${obs.seat} 与 seat=${row.seat} 不一致`);
     if (obs.kind !== row.kind) add(file, ln, `obs.kind=${obs.kind} 与 kind=${row.kind} 不一致`);
     if (JSON.stringify(obs.legal) !== JSON.stringify(row.legal)) {
@@ -157,6 +176,83 @@ for (const f of files) {
     for (const c of obs.dora_indicators) vis[kindOf(c)]++;
     if (JSON.stringify(vis) !== JSON.stringify(obs.visible)) {
       add(file, ln, 'visible 与"牌河+副露+宝牌"的计数对不上');
+    }
+    // ---- obs v3 事件流（PROTOCOL §8.2）：形状 + **用事件流独立重建牌河**（不翻译 Java 的断言）
+    if (obsV >= 3) {
+      if (!Array.isArray(obs.events)) {
+        add(file, ln, 'events 不是数组');
+      } else {
+        const evs = obs.events;
+        const riverFromEvents = [[], [], [], []];
+        const riichiEvTurn = [null, null, null, null];
+        evs.forEach((e, k) => {
+          const at = `events[${k}]`;
+          if (!e || typeof e !== 'object') { add(file, ln, `${at} 不是对象`); return; }
+          if (!EVT_TYPES.includes(e.type)) { add(file, ln, `${at} 未知 type=${e.type}`); return; }
+          if (!Number.isInteger(e.actor) || e.actor < 0 || e.actor > 3) {
+            add(file, ln, `${at} actor 越界：${e.actor}`);
+          }
+          if (!Number.isInteger(e.turn) || e.turn < 0 || e.turn > 30) {
+            add(file, ln, `${at} turn 越界：${e.turn}`);
+          }
+          const tileOk = (c) => /^[0-9][mpsz]$/.test(String(c));
+          if (e.type === 'discard') {
+            for (const key of EVT_DISCARD_KEYS) if (!(key in e)) add(file, ln, `${at} 缺字段 ${key}`);
+            if (typeof e.tsumogiri !== 'boolean' || typeof e.sideways !== 'boolean') {
+              add(file, ln, `${at} tsumogiri/sideways 必须是布尔`);
+            }
+            if (!tileOk(e.tile)) add(file, ln, `${at} tile 牌码可疑：${e.tile}`);
+            if (riverFromEvents[e.actor]) riverFromEvents[e.actor].push(e.tile);
+          } else if (e.type === 'meld' || e.type === 'kan') {
+            for (const key of EVT_MELD_KEYS) if (!(key in e)) add(file, ln, `${at} 缺字段 ${key}`);
+            if (!EVT_MELD_KINDS.includes(e.meld_kind)) {
+              add(file, ln, `${at} meld_kind 未知：${e.meld_kind}`);
+            } else {
+              const isKan = ['ankan', 'kakan', 'daiminkan'].includes(e.meld_kind);
+              if (isKan !== (e.type === 'kan')) {
+                add(file, ln, `${at} type=${e.type} 与 meld_kind=${e.meld_kind} 不一致`);
+              }
+              // 吃/碰 3 张；三种杠 4 张（大明杠 = 手里 3 张 + 被鸣那张）
+              const wantLen = ['ankan', 'kakan', 'daiminkan'].includes(e.meld_kind) ? 4 : 3;
+              if (!Array.isArray(e.tiles) || e.tiles.length !== wantLen
+                  || !e.tiles.every(tileOk)) {
+                add(file, ln, `${at} tiles 形状可疑：${JSON.stringify(e.tiles)}`);
+              }
+              if (!tileOk(e.called_tile)) add(file, ln, `${at} called_tile 可疑：${e.called_tile}`);
+              // 只有吃/碰/大明杠会把牌河里那张**挪走**；加杠拿的是手里的第 4 张、暗杠自摸四张
+              if (e.from !== e.actor && ['chi', 'pon', 'daiminkan'].includes(e.meld_kind)) {
+                const owner = riverFromEvents[e.from];
+                const got = owner ? owner.pop() : undefined;
+                if (got !== e.called_tile) {
+                  add(file, ln, `${at} 被鸣走的不是座位 ${e.from} 牌河最后一张（${got} != ${e.called_tile}）`);
+                }
+              }
+            }
+          } else if (e.type === 'riichi') {
+            if ('tile' in e) add(file, ln, `${at} riichi 事件不该带 tile`);
+            if (e.actor >= 0 && e.actor < 4) riichiEvTurn[e.actor] = e.turn;
+          } else if (!tileOk(e.tile)) {                       // dora_flip
+            add(file, ln, `${at} dora_flip tile 可疑：${e.tile}`);
+          }
+        });
+        // ① 事件流重建出的牌河必须逐张等于 obs.discards（被鸣走的不在牌河里，但**在事件流里**）
+        for (let s = 0; s < 4; s++) {
+          if (JSON.stringify(riverFromEvents[s]) !== JSON.stringify(obs.discards[s] || [])) {
+            add(file, ln, `座位 ${s} 的牌河与事件流重建不一致`);
+          }
+        }
+        // ② riichi_turn 与事件里的 riichi 逐座位对齐（未立直 = 0，见 PROTOCOL §8.2）
+        if (!Array.isArray(obs.riichi_turn) || obs.riichi_turn.length !== 4) {
+          add(file, ln, `riichi_turn 形状可疑：${JSON.stringify(obs.riichi_turn)}`);
+        } else {
+          for (let s = 0; s < 4; s++) {
+            const want = (obs.riichi || [])[s] ? riichiEvTurn[s] : 0;
+            if (obs.riichi_turn[s] !== want) {
+              add(file, ln, `riichi_turn[${s}]=${obs.riichi_turn[s]}，按立直状态与事件应为 ${want}`);
+            }
+          }
+        }
+      }
     }
     // hand_red 必须与 hand 不矛盾（赤五只在 5m/5p/5s 上，且该牌种必须有牌）
     for (let k = 0; k < 34; k++) {

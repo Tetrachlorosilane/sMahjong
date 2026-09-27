@@ -4,6 +4,10 @@
 // 键序或字段名差一个字符，"逐字节一致"就不成立（docs/TRAINER-CPP.md §2 铁律 2）。
 // 这里**逐字段照抄** `Observation.toJson()` 的插入序，不做任何"顺手整理"。
 //
+// ⚠ obs v3（2026-09 起）：多了 `events[]`（本局公开事件流，构造期快照）与 `riichi_turn[]`
+//   （四家立直巡数，未立直 = 0）；两者都必须与 Java 侧**逐字节**一致（`trainer-selfplay-parity.mjs`）。
+//   事件本身的结构与 JSON 渲染在 `event.hpp`。
+//
 // ⚠ 只暴露该座位合法可见的信息（反作弊口径，AGENTS §6.5）：别家手牌、牌山顺序、里宝指示牌、
 //   别家振听一律不进这个结构 —— 它与 Java 那侧是同一条纪律。
 #pragma once
@@ -14,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "event.hpp"
 #include "jsonw.hpp"
 #include "options.hpp"
 #include "tiles.hpp"
@@ -21,7 +26,7 @@
 namespace trainer {
 
 /** 观测格式版本（字段增删要 +1；与 Java `Observation.VERSION` 同步）。 */
-inline constexpr int kObservationVersion = 2;
+inline constexpr int kObservationVersion = 3;
 
 /** 副露的 JSON 形状（Java `Meld.toJson()`）。 */
 struct MeldJson {
@@ -68,6 +73,12 @@ struct Observation {
     bool anyCall = false;
     std::array<uint8_t, kKindCount> visible{};
 
+    // ---- 事件流（obs v3；Java `Observation.events` / `riichiTurn`）----
+    /** 本局**从开局到现在**的公开事件流（有序、只追加；构造期就快照下来）。 */
+    std::vector<Event> events;
+    /** 四家立直巡数（立直宣言发生在该家自己的第几次摸牌；未立直 = 0）。 */
+    std::array<int, 4> riichiTurn{};
+
     // ---- 局面标记 ----
     bool haitei = false;
     bool houtei = false;
@@ -106,7 +117,8 @@ struct Observation {
     std::string toJson() const {
         static const char *kWindNames[4] = {"E", "S", "W", "N"};
         std::string o;
-        o.reserve(2048);
+        // obs v3 起事件流会随小局推进变大（实测 ~2.2 KB/决策）—— reserve 只是提示，不影响字节。
+        o.reserve(4096);
         o += "{\"v\":";
         o += std::to_string(kObservationVersion);
         o += ",\"seat\":";
@@ -202,6 +214,11 @@ struct Observation {
         jsonBool(o, anyCall);
         o += ",\"visible\":";
         jsonU8Array(o, visible.data(), kKindCount);
+        // obs v3：事件流 + 立直巡数（键序与 Java `toJson` 一致：插在 `visible` 与 `haitei` 之间）
+        o += ",\"events\":";
+        eventsJson(o, events);
+        o += ",\"riichi_turn\":";
+        jsonIntArray(o, riichiTurn.data(), 4);
         o += ",\"haitei\":";
         jsonBool(o, haitei);
         o += ",\"houtei\":";

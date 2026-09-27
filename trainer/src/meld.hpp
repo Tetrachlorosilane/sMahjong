@@ -51,4 +51,16 @@ struct Meld {
     int kindCount() const { return tileCount; }
 };
 
+/** `Meld.Kind.wire()`（报文/观测里的 kind 串）—— Java `Meld.Kind.wire()` 逐字一致。 */
+inline const char *meldKindWire(Meld::Kind k) {
+    switch (k) {
+        case Meld::Kind::CHI: return "chi";
+        case Meld::Kind::PON: return "pon";
+        case Meld::Kind::DAIMINKAN: return "daiminkan";
+        case Meld::Kind::ANKAN: return "ankan";
+        case Meld::Kind::KAKAN: return "kakan";
+    }
+    return "chi";
+}
+
 }  // namespace trainer

@@ -97,6 +97,8 @@ public final class SelfTest {
         handEvalTests();
         teacherTests();
         trainingInterfaceTests();
+        obsEventStreamTests();
+        auxLabelTests();
         obsFeaturesTests();
         neuralForwardTests();
         hybridPolicyTests();
@@ -3063,7 +3065,64 @@ public final class SelfTest {
                 java.util.Arrays.equals(mahjong.ai.ObsFeatures.perDecision(mahjong.ai.ObsFeatures.ofObs(json)), decRound));
         check("派生特征：布局自述带版本号（Java/Python 两侧照它对齐）",
                 mahjong.ai.ObsFeatures.describe().contains("perDecision=" + mahjong.ai.ObsFeatures.PER_DECISION)
-                        && mahjong.ai.ObsFeatures.describe().contains("perCandidate=" + mahjong.ai.ObsFeatures.PER_CANDIDATE));
+                        && mahjong.ai.ObsFeatures.describe().contains("perCandidate=" + mahjong.ai.ObsFeatures.PER_CANDIDATE)
+                        && mahjong.ai.ObsFeatures.describe().contains("perSeat=" + mahjong.ai.ObsFeatures.PER_SEAT_DANGER));
+
+        // ---- sidecar v3：逐家四段（D~G）—— 两条通路逐元素一致 + 取值/位图自洽
+        mahjong.ai.ObsFeatures.PerSeat psObs = mahjong.ai.ObsFeatures.perSeat(fromObs);
+        mahjong.ai.ObsFeatures.PerSeat psRound = mahjong.ai.ObsFeatures.perSeat(fromRound);
+        boolean seatOk = true;
+        int genbutsuBits = 0;
+        int sujiBits = 0;
+        for (int j = 0; j < mahjong.ai.ObsFeatures.SEATS; j++) {
+            seatOk = seatOk
+                    && java.util.Arrays.equals(psObs.danger[j], psRound.danger[j])
+                    && java.util.Arrays.equals(psObs.dangerRiichi[j], psRound.dangerRiichi[j])
+                    && java.util.Arrays.equals(psObs.genbutsu[j], psRound.genbutsu[j])
+                    && java.util.Arrays.equals(psObs.suji[j], psRound.suji[j]);
+            for (int k = 0; k < 34; k++) {
+                if (psObs.danger[j][k] < 0 || psObs.danger[j][k] > 100) {
+                    seatOk = false;
+                }
+                if (((psObs.genbutsu[j][k >> 3] >> (k & 7)) & 1) != 0) {
+                    genbutsuBits++;
+                }
+                if (((psObs.suji[j][k >> 3] >> (k & 7)) & 1) != 0) {
+                    sujiBits++;
+                }
+            }
+            // 34 位占 5 字节 ⇒ 最后一字节只允许低 2 位（高位必须是 0）
+            if ((psObs.genbutsu[j][4] & ~0x03) != 0 || (psObs.suji[j][4] & ~0x03) != 0) {
+                seatOk = false;
+            }
+        }
+        check("派生特征（sidecar v3）：逐家四段 obs 通路与 Round 通路逐元素一致", seatOk);
+        check("派生特征（sidecar v3）：逐家段不是全 0（现物 " + genbutsuBits
+                + " 位 / 筋壁 " + sujiBits + " 位）", genbutsuBits > 0 && sujiBits > 0);
+        // 现物与筋壁**互斥**（`Danger.of` 对现物提前 return：suji/wall 都是 false）——
+        // 这条钉住"两张位图不是同一份东西"（写成同一张也能让上面那条绿）。
+        boolean disjoint = true;
+        for (int j = 0; j < mahjong.ai.ObsFeatures.SEATS; j++) {
+            for (int b = 0; b < mahjong.ai.ObsFeatures.BITMAP_BYTES; b++) {
+                if ((psObs.genbutsu[j][b] & psObs.suji[j][b]) != 0) {
+                    disjoint = false;
+                }
+            }
+        }
+        check("派生特征（sidecar v3）：现物位图与筋壁位图互斥（对现物提前 return）", disjoint);
+        // 下标是**相对方位**（0=下家）：把视角换到隔壁座位，同一家的危险度必须挪一格。
+        // 座位 0 的 j=1（対面=2 号家）== 座位 1 的 j=0（下家=2 号家）；另两对同理。
+        Round rRel = newRound();
+        rRel.debugSetup();
+        rRel.discards[2].add(Tiles.id(0, 3));               // 2 号家打出 1m（对 0/1 都是别家）
+        mahjong.ai.ObsFeatures.PerSeat ps0 =
+                mahjong.ai.ObsFeatures.perSeat(mahjong.ai.ObsFeatures.ofRound(rRel, 0, "turn"));
+        mahjong.ai.ObsFeatures.PerSeat ps1 =
+                mahjong.ai.ObsFeatures.perSeat(mahjong.ai.ObsFeatures.ofRound(rRel, 1, "turn"));
+        check("派生特征（sidecar v3）：逐家段按**相对方位**排（换视角就挪格）",
+                ps0.danger[1][0] == ps1.danger[0][0]
+                        && ps0.danger[2][0] == ps1.danger[1][0]
+                        && ps0.danger[0][0] == ps1.danger[2][0]);
 
         // ---- 鸣牌决策也要对拍：`chi` 合成面子必须用到 `called_tile`
         //（漏了那张 → `doraCount` 少算 —— golden 对拍第一版就是这样红的）
@@ -3104,6 +3163,186 @@ public final class SelfTest {
         }
         check("派生特征（鸣牌）：候选逐元素一致（候选 " + cobs.legalKeys().size()
                 + "，其中吃 " + chiSeen + " 条）", claimOk && chiSeen > 0);
+    }
+
+    /** 按行读文本（自检小工具；读不到就返回空表，由调用方判空）。 */
+    private static List<String> readLines(java.nio.file.Path p) {
+        try {
+            return java.nio.file.Files.readAllLines(p, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            return List.of();
+        }
+    }
+
+    /**
+     * 从 `.npy` 字节里取 `[数据偏移, 形状...]`（自检用；只解析我们写出的 v1.0 头）。
+     *
+     * <p>刻意**解析头部**而不是"按固定 128 字节推"：头部长度取决于 shape 的位数，
+     * 写死 128 的话换一个形状就悄悄错位（那正是"看着绿、其实读错"的典型）。
+     */
+    private static int[] npyShape(byte[] b) {
+        final int hl = (b[8] & 0xFF) | ((b[9] & 0xFF) << 8);
+        final String head = new String(b, 10, hl, java.nio.charset.StandardCharsets.US_ASCII);
+        final int i = head.indexOf("'shape': (");
+        final int j = head.indexOf(')', i);
+        final List<Integer> dims = new ArrayList<>();
+        for (String part : head.substring(i + 10, j).split(",")) {
+            if (!part.isBlank()) {
+                dims.add(Integer.parseInt(part.trim()));
+            }
+        }
+        final int[] out = new int[dims.size() + 1];
+        out[0] = 10 + hl;
+        for (int k = 0; k < dims.size(); k++) {
+            out[k + 1] = dims.get(k);
+        }
+        return out;
+    }
+
+    /**
+     * **标签侧文件**（`--aux` → `g<n>.aux.npz`，`FEATURES-V4.md` §5.2）的不变式。
+     *
+     * <p>三件事必须成立，缺一条这条链就不可信：
+     * <ol>
+     *   <li><b>标签不改输入</b>：同一颗种子开/不开 `--aux`，`g*.jsonl` **逐字节相同**
+     *       （标签只许进另一个文件 —— 这是"物理分离"最直接的判据）；</li>
+     *   <li><b>与决策行一一对应</b>：`n` == 该场决策行数（错位就等于给每一行配了别人的答案）；</li>
+     *   <li><b>格式可读 + 覆盖</b>：npz 成员名/形状/版本齐（Python 的 `np.load` 能直接读），
+     *       且各类标签都**真的出现过非零**（否则"标签齐全"是空转）。</li>
+     * </ol>
+     */
+    private static void auxLabelTests() {
+        java.nio.file.Path withAux = null;
+        java.nio.file.Path plain = null;
+        try {
+            withAux = java.nio.file.Files.createTempDirectory("mj-aux");
+            plain = java.nio.file.Files.createTempDirectory("mj-plain");
+            for (java.nio.file.Path dir : new java.nio.file.Path[]{withAux, plain}) {
+                mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+                cfg.games = 1;
+                cfg.workers = 1;
+                cfg.seedBase = 20260927L;
+                cfg.maxHands = 4;
+                cfg.outDir = dir.toString();
+                cfg.aux = dir == withAux;
+                mahjong.train.SelfPlay.run(cfg);
+            }
+        } catch (java.io.IOException e) {
+            failures.add("aux 自测建临时目录失败: " + e);
+            fail++;
+            return;
+        }
+        final java.nio.file.Path auxFile = withAux.resolve("g0.aux.npz");
+        final java.nio.file.Path traceFile = withAux.resolve("g0.jsonl");
+        check("aux：开了 --aux 才有 g0.aux.npz", java.nio.file.Files.isRegularFile(auxFile));
+        check("aux：不开 --aux 时**不产出** g0.aux.npz",
+                !java.nio.file.Files.isRegularFile(plain.resolve("g0.aux.npz")));
+        try {
+            eq("aux：标签不改轨迹（同种子开/不开逐字节相同）",
+                    java.util.Arrays.equals(java.nio.file.Files.readAllBytes(traceFile),
+                            java.nio.file.Files.readAllBytes(plain.resolve("g0.jsonl"))), true);
+        } catch (java.io.IOException e) {
+            failures.add("aux 轨迹比对失败: " + e);
+            fail++;
+            return;
+        }
+
+        int decisions = 0;
+        for (String line : readLines(traceFile)) {
+            if (line.contains("\"type\":\"decision\"")) {
+                decisions++;
+            }
+        }
+        final java.util.Map<String, byte[]> members = new java.util.LinkedHashMap<>();
+        try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(
+                java.nio.file.Files.newInputStream(auxFile))) {
+            java.util.zip.ZipEntry e;
+            while ((e = zin.getNextEntry()) != null) {
+                members.put(e.getName(), zin.readAllBytes());
+            }
+        } catch (java.io.IOException ex) {
+            failures.add("aux npz 读取失败: " + ex);
+            fail++;
+            return;
+        }
+        final String[] want = {"own_shanten_after.npy", "own_tenpai.npy", "opp_tenpai.npy",
+                "opp_hand.npy", "opp_dealin.npy", "win_flag.npy", "hand_delta.npy",
+                "placement.npy", "meta.npy"};
+        check("aux：npz 成员齐全（" + members.keySet() + "）",
+                members.size() == want.length
+                        && members.keySet().containsAll(java.util.Arrays.asList(want)));
+        boolean headerOk = true;
+        for (java.util.Map.Entry<String, byte[]> m : members.entrySet()) {
+            final byte[] b = m.getValue();
+            if (b.length < 12 || (b[0] & 0xFF) != 0x93 || b[1] != 'N' || b[2] != 'U'
+                    || b[3] != 'M' || b[4] != 'P' || b[5] != 'Y' || b[6] != 1 || b[7] != 0) {
+                headerOk = false;
+                continue;
+            }
+            final int hl = (b[8] & 0xFF) | ((b[9] & 0xFF) << 8);
+            if ((10 + hl) % 64 != 0 || hl <= 0 || 10 + hl > b.length) {
+                headerOk = false;
+            }
+        }
+        check("aux：每个成员都是合法 .npy（magic / 版本 1.0 / 头部 64 字节对齐）", headerOk);
+        final int[] ownSh = npyShape(members.get("own_shanten_after.npy"));
+        final int[] ownTp = npyShape(members.get("own_tenpai.npy"));
+        final int[] oppTp = npyShape(members.get("opp_tenpai.npy"));
+        final int[] oppHd = npyShape(members.get("opp_hand.npy"));
+        final int[] dealin = npyShape(members.get("opp_dealin.npy"));
+        final int[] win = npyShape(members.get("win_flag.npy"));
+        final int[] placement = npyShape(members.get("placement.npy"));
+        check("aux：形状与决策行一一对应（n=" + decisions + "，形状 "
+                        + java.util.Arrays.toString(ownTp) + "/" + java.util.Arrays.toString(oppTp)
+                        + "/" + java.util.Arrays.toString(oppHd) + "）",
+                ownTp.length == 2 && ownTp[1] == decisions
+                        && ownSh.length == 2 && ownSh[1] == decisions
+                        && oppTp.length == 3 && oppTp[1] == decisions && oppTp[2] == 3
+                        && oppHd.length == 4 && oppHd[1] == decisions && oppHd[2] == 3
+                        && oppHd[3] == 34
+                        && dealin.length == 3 && dealin[1] == decisions
+                        && win.length == 2 && win[1] == decisions
+                        && placement.length == 2 && placement[1] == decisions);
+        final byte[] ownTpB = members.get("own_tenpai.npy");
+        final byte[] oppTpB = members.get("opp_tenpai.npy");
+        final byte[] oppHdB = members.get("opp_hand.npy");
+        final byte[] winB = members.get("win_flag.npy");
+        final byte[] dealinB = members.get("opp_dealin.npy");
+        final byte[] placeB = members.get("placement.npy");
+        int tenpaiOnes = 0;
+        int oppTenpaiOnes = 0;
+        int dealinOnes = 0;
+        int winOnes = 0;
+        int handTiles = 0;
+        boolean handRange = true;
+        boolean placeOk = true;
+        for (int i = 0; i < decisions; i++) {
+            tenpaiOnes += ownTpB[ownTp[0] + i];
+            winOnes += winB[win[0] + i];
+            final int pl = placeB[placement[0] + i];
+            if (pl < 1 || pl > 4) {
+                placeOk = false;
+            }
+            for (int j = 0; j < 3; j++) {
+                oppTenpaiOnes += oppTpB[oppTp[0] + i * 3 + j];
+                dealinOnes += dealinB[dealin[0] + i * 3 + j];
+                int sum = 0;
+                for (int k = 0; k < 34; k++) {
+                    sum += oppHdB[oppHd[0] + (i * 3 + j) * 34 + k];
+                }
+                // 暗牌张数：13 − 3×副露（他刚摸牌时 +1，最多 14）；1..14 之外一定是错的
+                if (sum < 1 || sum > 14) {
+                    handRange = false;
+                }
+                handTiles += sum;
+            }
+        }
+        check("aux 覆盖：自家听牌出现过（" + tenpaiOnes + " 条）", tenpaiOnes > 0);
+        check("aux 覆盖：对手听牌出现过（" + oppTenpaiOnes + " 条）", oppTenpaiOnes > 0);
+        check("aux 覆盖：和了 / 放铳至少一类出现过（win=" + winOnes + " dealin=" + dealinOnes + "）",
+                winOnes > 0 || dealinOnes > 0);
+        check("aux：顺位回填都在 1..4", placeOk);
+        check("aux：三家暗牌计数都在 1..14 张（合计 " + handTiles + "）", handRange);
     }
 
     /** golden 夹具的魔数（"MJGF"，与 `export.py` 的 `GOLDEN_MAGIC` 同值）。 */
@@ -5693,9 +5932,10 @@ public final class SelfTest {
                 "hand_red", "drawn", "player_draws", "menzen", "self_riichi", "furiten", "melds",
                 "discards", "dora_indicators", "riichi", "ippatsu", "scores", "kuitan", "round",
                 "tiles_left", "dead_wall_left", "total_discards", "kan_count", "any_call",
-                "visible", "haitei", "houtei", "rinshan", "from", "called_tile", "win_note",
-                "legal"));
+                "visible", "events", "riichi_turn", "haitei", "houtei", "rinshan", "from",
+                "called_tile", "win_note", "legal"));
         eq("观测字段白名单（新增字段必须显式登记）", new java.util.TreeSet<>(j1.keySet()), want);
+        eq("obs v3：观测格式版本", mahjong.ai.Observation.VERSION, 3);
 
         // 置换**全部隐藏信息**：别家手牌、别家门清标记、别家振听
         for (int s = 1; s < 4; s++) {
@@ -5707,9 +5947,14 @@ public final class SelfTest {
         }
         r.furitenPerm[1] = true;
         r.furitenTemp[2] = true;
+        // obs v3 又多了两类隐藏量：牌山的**摸牌顺序**与**里宝指示牌**。
+        //   两个钩子都只动隐藏信息（换的是还没被摸走的位置 / 里宝段），公开状态一个字节都没变。
+        r.debugSwapWallTiles(60, 90);
+        r.debugSetUraIndicator(0, Tiles.id(33, 0));
         mahjong.ai.Observation o2 =
                 mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null);
-        eq("置换别家隐藏信息后观测逐字节不变", Json.write(o2.toJson()), Json.write(j1));
+        eq("置换别家隐藏信息 + 牌山顺序 + 里宝后观测逐字节不变",
+                Json.write(o2.toJson()), Json.write(j1));
         // 正向对照：公开信息变化必须被反映（否则"不变"可能是观测整体失效的假绿）
         r.riichi[1] = true;
         check("公开信息（他家立直）变化必须反映到观测",
@@ -5722,6 +5967,27 @@ public final class SelfTest {
                 !Json.write(mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson())
                         .equals(Json.write(j1)));
         r.furitenPerm[0] = false;
+        // 第三个正向对照（obs v3）：**公开事件流**必须跟着公开动作走，且**只追加**
+        //   （挂一个空转的事件流也能让上面那条"逐字节不变"变绿，所以必须正向对照）。
+        Map<String, Object> beforeEv =
+                mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson();
+        r.debugPushDiscard(1, "1z", false);
+        Map<String, Object> afterEv =
+                mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson();
+        List<Map<String, Object>> evB = obsEvents(beforeEv);
+        List<Map<String, Object>> evA = obsEvents(afterEv);
+        eq("公开动作（他家打出一张）让事件流 +1 条", evA.size(), evB.size() + 1);
+        check("事件流只追加：旧事件仍是原样的前缀",
+                Json.write(evA.subList(0, evB.size())).equals(Json.write(evB)));
+        Map<String, Object> evLast = evA.get(evA.size() - 1);
+        check("新增事件 = 座位 1 打出的 1z（牌码级）",
+                "discard".equals(evLast.get("type")) && "1z".equals(evLast.get("tile"))
+                        && Integer.valueOf(1).equals(evLast.get("actor")));
+        check("事件流里的舍牌带逐张属性（tsumogiri/sideways 都在）",
+                evLast.containsKey("tsumogiri") && evLast.containsKey("sideways"));
+        // 未立直家的 `riichi_turn` 必须是 0（内部 -1 → 公开 0，契约见 PROTOCOL §8.2）
+        check("未立直家的 riichi_turn = 0",
+                Json.write(afterEv.get("riichi_turn")).equals("[0,0,0,0]"));
 
         // ---------- ③ 策略适配器：合法动作原样下发，非法/异常/空一律退回内置机器人
         mahjong.ai.Decision dec =
@@ -5895,6 +6161,263 @@ public final class SelfTest {
             p.finalScores[i] = t.seat(i).score;
         }
         return p;
+    }
+
+    /** `obs.events` 的类型化读取（自检里比 JSON 用；`@SuppressWarnings` 只为收窄 Object）。 */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> obsEvents(Map<String, Object> obs) {
+        return (List<Map<String, Object>>) obs.get("events");
+    }
+
+    /**
+     * **obs v3 事件流**（`Observation.events` / `riichi_turn`）与真实报文、与牌河逐条对账。
+     *
+     * <p>为什么必须拿整场模拟来测：事件流是 v4 特征张量 `evt[K,96]` 的唯一来源，它的每一条
+     * 都必须**逐字等于**当初广播出去的公开事件 —— 只测"字段齐全"发现不了"顺序错了 / 少记一条 /
+     * 横置标错人"。四条判据：
+     * <ol>
+     *   <li><b>与报文逐条一致</b>：每次决策那一刻，obs 里的事件流（投影成"类型+牌码+属性"）
+     *       必须**恰好等于**该小局到此为止广播过的那些事件（多一条少一条都红）；</li>
+     *   <li><b>牌河可重建</b>：按事件流回放（鸣牌把那张从牌河拿走），每家重建出的牌河
+     *       必须与 `obs.discards` 逐张相同 —— 被鸣走的舍牌不在牌河里，但**在事件流里**；</li>
+     *   <li><b>只追加</b>：同一小局内后一次询问的事件流必须以前一次为前缀；</li>
+     *   <li><b>`riichi_turn` 与事件对得上</b>，且 <b>覆盖闸门</b>（舍牌/副露/立直/杠/杠宝牌
+     *       五类都真的出现过 —— 否则上面三条可能一条都没被走到）。</li>
+     * </ol>
+     */
+    private static void obsEventStreamTests() {
+        // 广播事件（只认 `recipient == -1` 的广播：discard / meld / riichi / dora_reveal）
+        List<String> bcDiscards = new ArrayList<>();    // seat|tile|tsumogiri|sideways
+        List<String> bcMelds = new ArrayList<>();       // seat|kind|from|called_tile
+        List<Integer> bcRiichi = new ArrayList<>();     // seat
+        List<String> bcDora = new ArrayList<>();        // 最近一条 dora_reveal 的指示牌列表
+        int[] doraReveals = {0};
+        // 全场累计（覆盖闸门用；小局内的那几份比对清单每小局清空，这两个不清）
+        long[] totals = new long[5];                    // 0 舍牌 1 副露 2 杠 3 立直 4 杠宝牌
+        // 每次决策：obs 快照（事件流投影 / 各家牌河 / 立直巡数 / 那一刻的杠宝牌状态）
+        List<List<String>> obsEv = new ArrayList<>();
+        List<List<List<String>>> obsRiver = new ArrayList<>();
+        List<String> obsRiichiTurn = new ArrayList<>();
+        List<String> obsDoraLast = new ArrayList<>();
+        List<Integer> obsDoraCount = new ArrayList<>();
+        // 决策那一刻的**广播侧**快照（要和当时那条 obs 比，不能拿整场跑完之后的清单去比）
+        List<List<String>> obsBcD = new ArrayList<>();
+        List<List<String>> obsBcM = new ArrayList<>();
+        List<List<Integer>> obsBcR = new ArrayList<>();
+
+        final boolean savedKan = Bot.debugAlwaysKan;
+        // ⚠ 机器人默认从不开杠 —— 那样"杠 + 杠宝牌翻开"这两条事件一次都走不到，
+        //   覆盖闸门（④）就会形同虚设。这里临时打开"一有机会就开杠"。
+        Bot.debugAlwaysKan = true;
+        int games = 0;
+        try {
+            for (int game = 0; game < 5; game++) {
+                games++;
+                Table t = new Table("OBSV3", "事件流自测桌", Rules.defaults());
+                t.botDelayMs = 0;
+                t.roundDelayMs = 0;
+                t.seedBase = 771000L + game * 6421L;
+                t.debugDeterministicSeed = true;
+                for (int i = 0; i < 4; i++) {
+                    t.addBot(i);
+                }
+                t.debugEventTap = (recipient, ev) -> {
+                    if (recipient != -1) {
+                        return;                              // 逐座位发的不算公开事件
+                    }
+                    String name = String.valueOf(ev.get("ev"));
+                    // ⚠ 小局边界只能认"这一局收尾"的那两条广播：`round_start` 是**按座位**发的，
+                    //   观战快照走 `sendSpectators`（压根不经过这个 tap）。
+                    if ("agari".equals(name) || "ryuukyoku".equals(name)) {
+                        bcDiscards.clear();
+                        bcMelds.clear();
+                        bcRiichi.clear();
+                        bcDora.clear();
+                        doraReveals[0] = 0;
+                    } else if ("discard".equals(name)) {
+                        bcDiscards.add(ev.get("seat") + "|" + ev.get("tile") + "|"
+                                + ev.get("tsumogiri") + "|" + ev.get("sideways"));
+                        totals[0]++;
+                    } else if ("meld".equals(name)) {
+                        bcMelds.add(ev.get("seat") + "|" + ev.get("kind") + "|" + ev.get("from")
+                                + "|" + ev.get("called_tile"));
+                        String kind = String.valueOf(ev.get("kind"));
+                        if ("ankan".equals(kind) || "kakan".equals(kind)
+                                || "daiminkan".equals(kind)) {
+                            totals[2]++;
+                        } else {
+                            totals[1]++;
+                        }
+                    } else if ("riichi".equals(name)) {
+                        bcRiichi.add(((Number) ev.get("seat")).intValue());
+                        totals[3]++;
+                    } else if ("dora_reveal".equals(name)) {
+                        doraReveals[0]++;
+                        totals[4]++;
+                        bcDora.clear();
+                        for (Object k : (List<?>) ev.get("dora_indicators")) {
+                            bcDora.add(String.valueOf(k));
+                        }
+                    }
+                };
+                t.debugDecisionTap = d -> {
+                    Map<String, Object> obs = d.obs.toJson();
+                    List<String> evs = new ArrayList<>();
+                    for (Map<String, Object> e : obsEvents(obs)) {
+                        evs.add(eventKey(e));
+                    }
+                    obsEv.add(evs);
+                    List<List<String>> river = new ArrayList<>();
+                    List<?> ds = (List<?>) obs.get("discards");
+                    for (int s = 0; s < 4; s++) {
+                        List<String> one = new ArrayList<>();
+                        for (Object c : (List<?>) ds.get(s)) {
+                            one.add(String.valueOf(c));
+                        }
+                        river.add(one);
+                    }
+                    obsRiver.add(river);
+                    obsRiichiTurn.add(Json.write(obs.get("riichi_turn")));
+                    obsDoraLast.add(bcDora.isEmpty() ? "" : bcDora.get(bcDora.size() - 1));
+                    obsDoraCount.add(doraReveals[0]);
+                    obsBcD.add(new ArrayList<>(bcDiscards));
+                    obsBcM.add(new ArrayList<>(bcMelds));
+                    obsBcR.add(new ArrayList<>(bcRiichi));
+                };
+                t.playGame();
+            }
+        } catch (RuntimeException e) {
+            failures.add("obs v3 事件流整场模拟异常: " + e);
+            fail++;
+            return;
+        } finally {
+            Bot.debugAlwaysKan = savedKan;
+        }
+
+        int mismatch = 0, prefixBad = 0, riverBad = 0, turnBad = 0, orderBad = 0, doraBad = 0;
+        List<String> prevEv = new ArrayList<>();
+        for (int i = 0; i < obsEv.size(); i++) {
+            List<String> evs = obsEv.get(i);
+            // ① 事件流 ↔ 广播报文：按类型各抽一条投影，逐条同序比对
+            List<String> dEv = new ArrayList<>();
+            List<String> mEv = new ArrayList<>();
+            List<String> rEv = new ArrayList<>();
+            int doraInObs = 0;
+            for (String k : evs) {
+                if (k.startsWith("discard|")) {
+                    dEv.add(k.substring("discard|".length()));
+                } else if (k.startsWith("meld|") || k.startsWith("kan|")) {
+                    mEv.add(k.substring(k.indexOf('|') + 1));
+                } else if (k.startsWith("riichi|")) {
+                    rEv.add(k.substring("riichi|".length()).split("\\|")[0]);
+                } else if (k.startsWith("dora_flip|")) {
+                    doraInObs++;
+                }
+            }
+            if (!dEv.equals(obsBcD.get(i)) || !mEv.equals(obsBcM.get(i))
+                    || !rEv.equals(obsBcR.get(i).stream().map(String::valueOf)
+                            .collect(java.util.stream.Collectors.toList()))) {
+                mismatch++;
+            }
+            // ③ 只追加：同一小局内后一次询问以前一次为前缀。
+            //   跨小局时事件流会**变短**（新一局从 0 条开始），那是边界不是违背 —— 跳过那一次。
+            if (evs.size() >= prevEv.size() && !evs.subList(0, prevEv.size()).equals(prevEv)) {
+                prefixBad++;
+            }
+            prevEv = evs;
+            // ② 牌河重建：舍牌入河，吃/碰/大明杠把"那一家最后一张"挪走（暗杠不从河里拿、
+            //   加杠拿的是手里的第 4 张，两者都不动牌河）。
+            List<List<String>> rebuilt = new ArrayList<>();
+            for (int s = 0; s < 4; s++) {
+                rebuilt.add(new ArrayList<>());
+            }
+            for (String k : evs) {
+                String[] f = k.split("\\|", -1);
+                if (k.startsWith("discard|")) {              // discard|seat|tile|tsumogiri|sideways
+                    rebuilt.get(Integer.parseInt(f[1])).add(f[2]);
+                } else if (k.startsWith("meld|") || k.startsWith("kan|")) {
+                    int seat = Integer.parseInt(f[1]);       // meld|seat|kind|from|called_tile
+                    int from = Integer.parseInt(f[3]);
+                    if (seat != from && ("chi".equals(f[2]) || "pon".equals(f[2])
+                            || "daiminkan".equals(f[2]))) {
+                        List<String> owner = rebuilt.get(from);
+                        if (owner.isEmpty() || !owner.remove(owner.size() - 1).equals(f[4])) {
+                            orderBad++;                      // 挪走的必须正是被鸣那张
+                        }
+                    }
+                }
+            }
+            if (!rebuilt.equals(obsRiver.get(i))) {
+                riverBad++;
+            }
+            // ④ riichi_turn：立直家的巡数 = 他那条 riichi 事件的 turn（未立直 = 0）
+            if (!riichiTurnFromEvents(evs).equals(obsRiichiTurn.get(i))) {
+                turnBad++;
+            }
+            // ⑤ 杠宝牌：观测里 `dora_flip` 的条数/牌码必须与那一刻的 `dora_reveal` 广播对上
+            if (doraInObs != obsDoraCount.get(i)) {
+                doraBad++;
+            }
+            if (doraInObs > 0) {
+                String last = null;
+                for (String k : evs) {
+                    if (k.startsWith("dora_flip|")) {
+                        last = k.substring("dora_flip|".length());
+                    }
+                }
+                if (!String.valueOf(obsDoraLast.get(i)).equals(last)) {
+                    doraBad++;
+                }
+            }
+        }
+        eq("obs v3 事件流与广播报文逐条一致（失配数）", mismatch, 0);
+        eq("obs v3 牌河可由事件流重建（失配数）", riverBad, 0);
+        eq("obs v3 被鸣走的那张确实是被鸣那张（失配数）", orderBad, 0);
+        eq("obs v3 事件流同一小局内只追加（失配数）", prefixBad, 0);
+        eq("obs v3 riichi_turn 与 riichi 事件一致（失配数）", turnBad, 0);
+        eq("obs v3 杠宝牌事件与 dora_reveal 广播一致（失配数）", doraBad, 0);
+        // 覆盖闸门：五类事件都真的出现过（否则上面几条可能全是空转）
+        check("obs v3 覆盖：舍牌事件（广播 " + totals[0] + " 条）", totals[0] > 100);
+        check("obs v3 覆盖：副露事件（广播 " + totals[1] + " 条）", totals[1] > 0);
+        check("obs v3 覆盖：杠事件（广播 " + totals[2] + " 条）", totals[2] > 0);
+        check("obs v3 覆盖：立直事件（广播 " + totals[3] + " 条）", totals[3] > 0);
+        check("obs v3 覆盖：杠宝牌翻开（广播 " + totals[4] + " 次）", totals[4] > 0);
+        check("obs v3 事件流：决策快照 " + obsEv.size() + " 次 / " + games + " 场",
+                obsEv.size() > 200 && games > 0);
+    }
+
+    /**
+     * 事件的**规范化投影**（自检比对用）：`类型|` + 与**广播报文同序同字段**的那几个值。
+     *
+     * <p>刻意拼得与广播那侧一模一样 —— "事件流 == 报文"就退化成一次字符串比较，
+     * 自检里不必再写第二份字段映射（那种第二份映射本身就是下一个 bug 的温床）。
+     */
+    private static String eventKey(Map<String, Object> e) {
+        String t = String.valueOf(e.get("type"));
+        if ("discard".equals(t)) {
+            return "discard|" + e.get("actor") + "|" + e.get("tile") + "|"
+                    + e.get("tsumogiri") + "|" + e.get("sideways");
+        }
+        if ("meld".equals(t) || "kan".equals(t)) {
+            return t + "|" + e.get("actor") + "|" + e.get("meld_kind") + "|" + e.get("from")
+                    + "|" + e.get("called_tile");
+        }
+        if ("riichi".equals(t)) {
+            return "riichi|" + e.get("actor") + "|" + e.get("turn");
+        }
+        return "dora_flip|" + e.get("tile");
+    }
+
+    /** 从事件流推出四家立直巡数（`[a,b,c,d]`，与 `obs.riichi_turn` 同格式）。 */
+    private static String riichiTurnFromEvents(List<String> evs) {
+        int[] turn = new int[4];
+        for (String k : evs) {
+            if (k.startsWith("riichi|")) {
+                String[] f = k.split("\\|", -1);              // riichi|seat|turn
+                turn[Integer.parseInt(f[1])] = Integer.parseInt(f[2]);
+            }
+        }
+        return "[" + turn[0] + "," + turn[1] + "," + turn[2] + "," + turn[3] + "]";
     }
 
     /**

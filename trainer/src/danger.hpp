@@ -54,25 +54,33 @@ inline bool dangerIsSuji(int kind, const Counts *rivers) {
 }
 
 /**
- * 级别 + 分数 —— Java `Danger.Report` 的二元组（`code` / `genbutsu` / `suji` / `wall` 在
- * 训练端没人读，所以不搬）。
+ * 级别 + 分数 + 三个"为什么安全"的判据 —— Java `Danger.Report` 的镜像。
  *
  * <p>为什么要连级别一起给：teacher（`bot.cpp`）有两处闸门看的是**级别**
  * （`dealScore` 的"已经是 DANGEROUS 就不再抬档"、`shouldKan` 的加杠危险闸门），
  * 而特征工程（`obffeatures.cpp`）只看**分数**。两处必须**同一份实现**，否则"抬档"与
  * "特征里的危险度"会各算一遍、迟早漂 —— 所以分数也从这个函数派生。
+ *
+ * <p>`genbutsu`/`suji`/`wall` 原本"训练端没人读"（所以没搬）—— **sidecar v3 起要读了**：
+ * `genbutsu_per_seat` / `suji_per_seat` 两张位图就是这三个布尔拼出来的
+ * （`suji_per_seat = suji || wall`，与 Java `ObsFeatures.perSeat` 同一条式子）。
  */
 struct DangerReport {
     int level = kDangerSuspicious;
     int score = 0;
+    bool genbutsu = false;
+    bool suji = false;
+    bool wall = false;
 };
 
-/** 对**一家**打 `kind` 的危险度（级别 + 分数）= Java `Danger.of`。 */
+/** 对**一家**打 `kind` 的危险度（级别 + 分数 + 三个判据）= Java `Danger.of`。 */
 inline DangerReport dangerOf(int kind, const Counts &visible, const Counts *rivers,
                              bool theirRiichi, int turn) {
     const bool inRange = kind >= 0 && kind < kKindCount;
     if (rivers != nullptr && inRange && (*rivers)[static_cast<size_t>(kind)] > 0) {
-        return {kDangerSafe, 0};                         // 现物：唯一的硬保证
+        // 现物：唯一的硬保证。⚠ 与 Java 一样**提前返回**（suji/wall 保持 false）——
+        // sidecar v3 的两张位图靠"互斥"这条性质，别把它顺手改成继续往下算。
+        return {kDangerSafe, 0, true, false, false};
     }
     const bool suji = dangerIsSuji(kind, rivers);
     const bool wall = inRange && visible[static_cast<size_t>(kind)] >= 3;
@@ -87,7 +95,7 @@ inline DangerReport dangerOf(int kind, const Counts &visible, const Counts *rive
         level = kDangerSuspicious;
     }
     const int t = std::max(0, std::min(turn, 18));
-    return {level, std::min(100, kDangerBase[level] + t)};
+    return {level, std::min(100, kDangerBase[level] + t), false, suji, wall};
 }
 
 /** 对**一家**打 `kind` 的危险度**分数**（`Danger.Report.score`）。 */

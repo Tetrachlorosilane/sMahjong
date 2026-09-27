@@ -227,4 +227,26 @@ public final class Wall {
     public int[] debugAllTiles() {
         return tiles.clone();
     }
+
+    /**
+     * 供自检：交换牌山里两张的位置（**只动"摸牌顺序"这条隐藏信息**）。
+     *
+     * <p>用途是"隐藏量红证"：把还没摸到的牌换一换，**公开状态一个字节都没变**，
+     * 所以同一座位的观测 JSON 必须逐字节相同（`SelfTest.trainingObservationTests`）。
+     * ⚠ 只该用来换**尚未摸走**的位置（`[dealt, liveEnd)` 或王牌），换到别人手里去就变成改公开信息了。
+     */
+    public void debugSwapTiles(int i, int j) {
+        final int t = tiles[i];
+        tiles[i] = tiles[j];
+        tiles[j] = t;
+    }
+
+    /**
+     * 供自检：覆写一张**里宝指示牌**（隐藏信息；表宝牌才公开）。
+     *
+     * <p>与 {@link #debugSwapTiles} 同一用途：改它之后观测必须逐字节不变。
+     */
+    public void debugSetUra(int i, int id) {
+        dead[SEG_URA + i] = id;
+    }
 }

@@ -31,7 +31,7 @@ import mahjong.util.Json;
 public final class Observation {
 
     /** 观测格式版本：字段增删要 +1（数据集复用靠它判断兼容性）。 */
-    public static final int VERSION = 2;
+    public static final int VERSION = 3;
 
     public final int seat;
     /** {@code "turn"} = 自家摸打询问；{@code "claim"} = 别家舍张的鸣牌询问。 */
@@ -84,6 +84,23 @@ public final class Observation {
     public final boolean anyCall;
     /** 34 维**可见牌**计数 = 四家牌河 + 四家副露 + 宝牌指示牌（公开信息的派生量，省得训练侧重算）。 */
     public final int[] visible;
+
+    // ---------------------------------------------------------------- 事件流（obs v3）
+    /**
+     * 本局**从开局到现在**的公开事件流（有序、只追加；字段表见 `docs/PROTOCOL.md` §8.2）。
+     *
+     * <p>它是 v4 特征张量 `evt[K,96]` 的唯一来源：逐张舍牌的 `tsumogiri/sideways/rip_phase`、
+     * 副露落位、杠与杠宝牌、立直巡数都从这里读。**只含公开信息** —— 别家手牌 / 牌山顺序 /
+     * 里宝都不在里面（隐藏量置换后这份 JSON 必须逐字节不变）。
+     */
+    public final List<Map<String, Object>> events;
+    /**
+     * 四家**立直巡数** = 立直宣言发生在该家自己的第几次摸牌（未立直 = 0）。
+     *
+     * <p>与 {@code events[].turn} 同一把尺子（都按"第几次摸牌"计），所以 `/18` 的归一化
+     * 对两者都成立；`Round` 内部用 `-1` 记"未立直"，在这里翻成 0。
+     */
+    public final int[] riichiTurn;
 
     // ---------------------------------------------------------------- 局面标记
     public final boolean haitei;
@@ -155,6 +172,19 @@ public final class Observation {
         // 各算一份迟早会漂。⚠ 里宝指示牌**不算**可见（`Visible` 只收宝牌指示牌）。
         this.visible = Visible.counts(r.discards, r.melds, r.doraIndicators());
 
+        // obs v3：公开事件流 + 立直巡数。⚠ 在构造期就**拷成 JSON**（而不是在 toJson 里现读
+        // `r.events`）：观测是"决策那一刻的快照"，之后牌局继续推进不该改变它 —— 与
+        // `discards`/`melds`/`riichi` 的拷贝语义一致。
+        List<Map<String, Object>> evs = new ArrayList<>(r.events.size());
+        for (Round.Event e : r.events) {
+            evs.add(eventJson(e));
+        }
+        this.events = evs;
+        this.riichiTurn = new int[4];
+        for (int s = 0; s < 4; s++) {
+            this.riichiTurn[s] = Math.max(0, r.riichiTurn[s]);
+        }
+
         this.riichi = r.riichi.clone();
         this.ippatsu = r.ippatsu.clone();
         this.scores = r.scores.clone();
@@ -212,6 +242,45 @@ public final class Observation {
     }
 
     /**
+     * 一条公开事件的 JSON（`events[]` 的元素；字段表与"哪些字段在哪些类型上出现"见
+     * `docs/PROTOCOL.md` §8.2）。
+     *
+     * <p>刻意**按类型省字段**（而不是一律发 null）：一条事件要重复出现在该小局之后的
+     * 每一次询问里，`events[]` 已经是整份 obs 里最大的一块。
+     */
+    private static Map<String, Object> eventJson(Round.Event e) {
+        Map<String, Object> m = Json.obj();
+        m.put("type", e.type);
+        if (e.tile != null) {
+            m.put("tile", e.tile);
+        }
+        if (e.calledTile != null) {
+            m.put("called_tile", e.calledTile);
+        }
+        if (e.tiles != null) {
+            m.put("tiles", e.tiles);
+        }
+        if (e.meldKind != null) {
+            m.put("meld_kind", e.meldKind);
+        }
+        m.put("actor", e.actor);
+        if (e.from >= 0) {
+            m.put("from", e.from);
+        }
+        m.put("turn", e.turn);
+        if ("discard".equals(e.type)) {
+            m.put("tsumogiri", e.tsumogiri);
+            m.put("sideways", e.sideways);
+        }
+        if (e.ripPhase) {
+            // 只在为真时出现（缺省 = false）：`rip_phase` 对 discard / meld / kan 才有意义，
+            // 而"立直之后"的事件是少数 —— 见 PROTOCOL §8.2。
+            m.put("rip_phase", true);
+        }
+        return m;
+    }
+
+    /**
      * 观测的 JSON 表示（训练数据的输入侧；字段表见 {@code docs/PROTOCOL.md}）。
      *
      * <p>刻意用**定长数组**而不是稀疏列表：34 维计数直接就是网络输入，
@@ -252,6 +321,8 @@ public final class Observation {
                 "kan_count", kanCount,
                 "any_call", anyCall,
                 "visible", visible,
+                "events", events,
+                "riichi_turn", Json.intList(riichiTurn),
                 "haitei", haitei,
                 "houtei", houtei,
                 "rinshan", rinshan,

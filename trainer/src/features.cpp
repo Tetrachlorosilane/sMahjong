@@ -115,6 +115,11 @@ bool oneFile(const std::string &dir, const std::string &name, FeatStat &st) {
     std::string secA;
     std::string secB;
     std::string secC;
+    // sidecar v3 的逐家四段（D~G）：危险度 int8 ×2 + 两张位图（5 字节/家）
+    std::string secD;
+    std::string secE;
+    std::string secF;
+    std::string secG;
     long long decisions = 0;
     long long candidates = 0;
     // 按 `\n` 切行（Java `text.split("\n")` 的语义：**最后一段也算一行**，即使没有结尾换行）
@@ -153,6 +158,22 @@ bool oneFile(const std::string &dir, const std::string &name, FeatStat &st) {
                 for (int x : perDecision(v)) {
                     putI16(secA, std::max(-32768, std::min(32767, x)));
                 }
+                // sidecar v3：逐家四段（D~G）。危险度 int8（0..100 装得下），位图原样 5 字节/家。
+                const PerSeatDerived ps = perSeat(v);
+                for (int j = 0; j < kSeatCount; j++) {
+                    for (int k = 0; k < kKindCount; k++) {
+                        secD.push_back(static_cast<char>(ps.danger[static_cast<size_t>(j)]
+                                                                  [static_cast<size_t>(k)]));
+                        secE.push_back(static_cast<char>(ps.dangerRiichi[static_cast<size_t>(j)]
+                                                                      [static_cast<size_t>(k)]));
+                    }
+                    for (int b = 0; b < kBitmapBytes; b++) {
+                        secF.push_back(
+                                static_cast<char>(ps.genbutsu[static_cast<size_t>(j)][static_cast<size_t>(b)]));
+                        secG.push_back(
+                                static_cast<char>(ps.suji[static_cast<size_t>(j)][static_cast<size_t>(b)]));
+                    }
+                }
                 const JVal *legal = row.find("legal");
                 const int n = legal != nullptr && legal->isArr()
                         ? static_cast<int>(legal->arr.size()) : 0;
@@ -173,7 +194,8 @@ bool oneFile(const std::string &dir, const std::string &name, FeatStat &st) {
         }
     }
     std::string out;
-    out.reserve(20 + secA.size() + secB.size() + secC.size());
+    out.reserve(20 + secA.size() + secB.size() + secC.size() + secD.size() + secE.size()
+                + secF.size() + secG.size());
     putI32(out, kFeatureMagic);
     putI32(out, static_cast<uint32_t>(kFeatureVersion));
     putI32(out, static_cast<uint32_t>(decisions));
@@ -182,6 +204,10 @@ bool oneFile(const std::string &dir, const std::string &name, FeatStat &st) {
     out += secA;
     out += secB;
     out += secC;
+    out += secD;
+    out += secE;
+    out += secF;
+    out += secG;
 
     const std::string outPath = dir + "/" + featureFileName(name);
     std::FILE *f = std::fopen(outPath.c_str(), "wb");     // 二进制模式；无行尾、无 BOM

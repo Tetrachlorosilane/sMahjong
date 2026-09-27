@@ -33,6 +33,9 @@ PRODUCERS = ("java", "cpp")
 CPP_MISSING = {
     "--teacher-label": "DAgger 的老师标注（P2 采集用）；teacher 本体已移植，"
                        "缺的是记录器的 `teacher`/`teacher_index` 两列",
+    "--aux": "标签侧文件 `g*.aux.npz`（P1/P2 的信念与危险头监督用）："
+             "C++ 记录器还没写 npz（Java 侧已落地，见 `docs/FEATURES-V4.md` §5.2）——"
+             " 要标签就用 `MAHJONG_PRODUCER=java` 采这一批",
 }
 
 
@@ -62,10 +65,14 @@ def _guard(p: str, opts: dict[str, object]) -> None:
 
 def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path, *,
                  hands: int = 0, sample: int = 0, rotate: bool = True,
-                 teacher_label: bool = False, name: str | None = None) -> list[str]:
-    """自对弈采集命令（Java 与 C++ 两版**参数口径相同**，所以调用方不必分叉）。"""
+                 teacher_label: bool = False, aux: bool = False,
+                 name: str | None = None) -> list[str]:
+    """自对弈采集命令（Java 与 C++ 两版**参数口径相同**，所以调用方不必分叉）。
+
+    @param aux 额外落标签侧 `g*.aux.npz`（**只有 Java 生产者支持**；C++ 会显式报错）
+    """
     p = producer(name)
-    _guard(p, {"--sample": sample, "--teacher-label": teacher_label})
+    _guard(p, {"--sample": sample, "--teacher-label": teacher_label, "--aux": aux})
     if p == "java":
         cmd = ["java", "-jar", str(JAR), "--selfplay", str(games), "--workers", str(workers)]
     else:
@@ -74,6 +81,8 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
         cmd += ["--rotate"]
     if teacher_label:
         cmd += ["--teacher-label"]
+    if aux:
+        cmd += ["--aux"]
     cmd += ["--policy", policy, "--seed", str(seed), "--out", str(out_dir)]
     if hands:
         cmd += ["--hands", str(hands)]

@@ -88,6 +88,118 @@ public final class Round {
      * （大三元与大四喜要 7 个面子，不可能共存）。
      */
     public final List<Pao>[] pao = new List[4];
+
+    // ================================================================= 公开事件日志（obs v3）
+
+    /**
+     * 本局的**有序公开事件日志**（obs v3 的 `events[]`，契约见 `docs/PROTOCOL.md` §8.2）。
+     *
+     * <p>它只装"客户端看得见"的东西：一条舍牌 / 一次副露 / 一次杠 / 一次立直 / 一次杠宝牌翻开。
+     * 别家手牌、牌山顺序、里宝一律不进这里 —— 进了就等于把训练输入变成上帝视角
+     * （回归：`SelfTest.trainingObservationTests` 的隐藏量红证）。
+     *
+     * <p><b>只追加</b>：整局只往后 add，不重排、不删改；同一小局的每次询问拿到的都是
+     * "从头到现在"的同一份前缀（obs 因此天然支持增量缓存与循环推理）。
+     */
+    public final List<Event> events = new ArrayList<>();
+
+    /**
+     * 各家立直宣言发生在**他自己的第几次摸牌**（未立直 = -1）。
+     *
+     * <p>与 {@link Event#turn} 同一把尺子（都按 `playerDraws` 计），否则同一份特征里
+     * 两个"巡数"会各说各话。发报文时未立直一律写 0（见 `Observation.toJson`）。
+     */
+    public final int[] riichiTurn = {-1, -1, -1, -1};
+
+    /**
+     * 一条**公开事件**。
+     *
+     * <p>字段是**报文级**的（牌码字符串而不是牌 id）：这样"事件流与广播报文逐条一致"
+     * 是可以直接比对的，也免了"id 还是 kind"的歧义 —— 宝牌指示牌本来就是按**牌种**公开的。
+     *
+     * <p>`type` 取值与 `python/mahjong_ml/features.py` 的 `EVT_TYPES` 对齐：
+     * `discard` / `meld`（吃碰）/ `kan`（三种杠）/ `riichi` / `dora_flip`；
+     * `draw` / `agari` / `ryuukyoku` **刻意不记**，理由见 `docs/PROTOCOL.md` §8.2。
+     */
+    public static final class Event {
+        public final String type;
+        /** 主牌牌码（`null` = 无）：舍牌是打出的那张、副露/杠是**被鸣那张**、宝牌翻开的指示牌。 */
+        public final String tile;
+        /** 被鸣那张的牌码（`null` = 无；加杠时是加上的第 4 张，与协议 `meld.called_tile` 同源）。 */
+        public final String calledTile;
+        /** 谁做的（**绝对**座位；`-1` = 无主，例如杠宝牌翻开）。 */
+        public final int actor;
+        /** 被鸣那张来自谁（绝对座位；`-1` = 无）。 */
+        public final int from;
+        /** `chi`/`pon`/`ankan`/`kakan`/`daiminkan`（`null` = 非副露）。 */
+        public final String meldKind;
+        /** 整副副露的牌码（`null` = 非副露）—— 增量缓存靠它累加 `meld_count`。 */
+        public final List<String> tiles;
+        /** 该事件发生在**该 actor 的第几次摸牌**（0 = 还没摸过；`dora_flip` 记翻牌者的）。 */
+        public final int turn;
+        /** 舍牌是否摸切（只对 `discard` 有意义）。 */
+        public final boolean tsumogiri;
+        /** 是否立直宣言那张（横置）；顺延牌**不算**（与 `discard.sideways` 同源）。 */
+        public final boolean sideways;
+        /** 该事件是否发生在"**该 actor 立直之后**"；立直宣言那张算 `false`（它才是分界）。 */
+        public final boolean ripPhase;
+
+        private Event(String type, String tile, String calledTile, int actor, int from,
+                      String meldKind, List<String> tiles, int turn,
+                      boolean tsumogiri, boolean sideways, boolean ripPhase) {
+            this.type = type;
+            this.tile = tile;
+            this.calledTile = calledTile;
+            this.actor = actor;
+            this.from = from;
+            this.meldKind = meldKind;
+            this.tiles = tiles;
+            this.turn = turn;
+            this.tsumogiri = tsumogiri;
+            this.sideways = sideways;
+            this.ripPhase = ripPhase;
+        }
+
+        static Event discard(int seat, int id, int turn, boolean tsumogiri, boolean sideways,
+                             boolean ripPhase) {
+            return new Event("discard", Tiles.toStr(id), null, seat, -1, null, null, turn,
+                    tsumogiri, sideways, ripPhase);
+        }
+
+        static Event meld(int seat, Meld m, int turn, boolean ripPhase) {
+            List<String> ts = new ArrayList<>(m.tiles.length);
+            for (int t : m.tiles) {
+                ts.add(Tiles.toStr(t));
+            }
+            // 杠是**另一种** `type`（它翻宝牌、给岭上牌），不是碰的同类；`meld_kind` 两者都带。
+            return new Event(m.isKan() ? "kan" : "meld", Tiles.toStr(m.calledId),
+                    Tiles.toStr(m.calledId), seat, m.from, m.kind.wire(), ts, turn,
+                    false, false, ripPhase);
+        }
+
+        static Event riichi(int seat, int turn) {
+            return new Event("riichi", null, null, seat, -1, null, null, turn,
+                    false, false, false);
+        }
+
+        static Event doraFlip(int kind, int seat, int turn) {
+            return new Event("dora_flip", Tiles.kindToStr(kind), null, seat, -1, null, null,
+                    turn, false, false, false);
+        }
+
+        /**
+         * 这条事件是否**从牌河里拿走**了一张牌（吃 / 碰 / 大明杠）。
+         *
+         * <p>自检靠它从事件流重建牌河：暗杠不从河里拿（`from == actor`），加杠拿的是**手里的**
+         * 第 4 张（`meld_kind == kakan`，`from` 记的是当初那副碰的来源）—— 两者都不能当成"河里的牌少了"。
+         */
+        public boolean takesFromRiver() {
+            return ("meld".equals(type) || "kan".equals(type)) && from != actor
+                    && ("chi".equals(meldKind) || "pon".equals(meldKind)
+                        || "daiminkan".equals(meldKind));
+        }
+    }
+
     public final boolean[] hadDiscardCalled = new boolean[4];
 
     /**
@@ -386,7 +498,7 @@ public final class Round {
             sortHands();
             final boolean sideways = declareRiichi || sidewaysPending[turn];
             sendDiscard(turn, discardId, tsumogiri, declareRiichi, sideways);
-            recordDiscard(turn, discardId, declareRiichi);
+            recordDiscard(turn, discardId, tsumogiri, declareRiichi);
             totalDiscards++;
             lastDiscardSeat = turn;
             lastDiscardTile = discardId;
@@ -545,7 +657,7 @@ public final class Round {
      * 所以这里复用它 —— 两处各写一份的话，记账迟早会漂。
      */
     public void debugPushDiscard(int seat, String code, boolean declareRiichi) {
-        recordDiscard(seat, Tiles.id(Tiles.parseKind(code), 0), declareRiichi);
+        recordDiscard(seat, Tiles.id(Tiles.parseKind(code), 0), false, declareRiichi);
     }
 
     /** 自测钩子：完整模拟「牌河第 index 张被鸣走」（含移除 + 横置顺延）。 */
@@ -553,11 +665,17 @@ public final class Round {
         removeCalledFromRiver(from, index);
     }
 
-    /** 出牌的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置。 */
-    private void recordDiscard(int seat, int id, boolean declareRiichi) {
+    /** 出牌的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置 + 事件流。 */
+    private void recordDiscard(int seat, int id, boolean tsumogiri, boolean declareRiichi) {
         discards[seat].add(id);
         discardKindsEver[seat][Tiles.kind(id)]++;
-        noteDiscard(seat, declareRiichi);
+        // 横置只在这里算一次：调用方给报文的 `sideways` 用的是**同一个** `noteDiscard`
+        // （`declareRiichi || sidewaysPending[seat]`），所以事件流与广播报文不会各说各话。
+        final boolean sideways = noteDiscard(seat, declareRiichi);
+        // `rip_phase` 不能只看 `riichi[seat]`：立直宣言时 `doRiichi()` 已经置位，
+        // 那张宣言牌本身必须算"立直**之前**"（它是分界，不是立直后的舍牌）。
+        events.add(Event.discard(seat, id, playerDraws[seat], tsumogiri, sideways,
+                riichi[seat] && !declareRiichi));
     }
 
     /** 自测钩子：模拟一次牌河被鸣走。 */
@@ -725,10 +843,19 @@ public final class Round {
             ev.put("called_index", calledIndex);
         }
         table.broadcast(ev);
+        // obs v3 事件流：副露落位的**唯一**记账点 —— 吃/碰/大明杠（`applyMeld`）与暗杠/加杠
+        // （`turnKan`）五条路径都经过这里，所以不会再出现"某条路径忘了记"。
+        events.add(Event.meld(seat, m, playerDraws[seat], riichi[seat]));
     }
 
-    private void sendDora() {
+    private void sendDora(int seat) {
         table.broadcast(Json.obj("ev", "dora_reveal", "dora_indicators", kindsToStrs(doraIndicators())));
+        // obs v3 事件流：**杠**宝牌翻开（开局那张随 `round_start` 一起发，不在这里，
+        // 所以它没有 `dora_flip` 事件 —— 事件流只装"发生在对局过程中"的公开事件）。
+        List<Integer> ind = doraIndicators();
+        if (!ind.isEmpty()) {
+            events.add(Event.doraFlip(ind.get(ind.size() - 1), seat, playerDraws[seat]));
+        }
     }
 
     // ================================================================= 工具
@@ -780,6 +907,16 @@ public final class Round {
 
     public List<Integer> uraIndicators() {
         return wall.uraIndicators();
+    }
+
+    /** 自测钩子：交换牌山两张的位置（**只动隐藏信息**）—— 观测的隐藏量红证用它。 */
+    public void debugSwapWallTiles(int i, int j) {
+        wall.debugSwapTiles(i, j);
+    }
+
+    /** 自测钩子：覆写一张**里宝指示牌**（隐藏信息）—— 观测的隐藏量红证用它。 */
+    public void debugSetUraIndicator(int i, int id) {
+        wall.debugSetUra(i, id);
     }
 
     /**
@@ -1453,6 +1590,10 @@ public final class Round {
         discardsSinceRiichi[seat] = 0;
         scores[seat] -= 1000;
         sticks++;
+        // obs v3：立直巡数（第几次摸牌宣言的）+ 事件流里的一条 `riichi`。
+        // ⚠ 顺序与报文一致：`riichi` 在**宣言牌那条 `discard` 之前**（协议也是先广播 riichi）。
+        riichiTurn[seat] = playerDraws[seat];
+        events.add(Event.riichi(seat, playerDraws[seat]));
         table.broadcast(Json.obj("ev", "riichi", "seat", seat, "stick_index", sticks - 1,
                 "sticks", sticks, "scores", intList(scores)));
     }
@@ -1512,7 +1653,7 @@ public final class Round {
             kanJustHappened = true;
             clearIppatsu();
             sendMeld(seat, m, -1);
-            revealKanDora();
+            revealKanDora(seat);
             return null;
         }
         // 加杠
@@ -1550,7 +1691,7 @@ public final class Round {
             return agariRon(ron, seat, addId, true, false);   // 抢杠：不是燕返
         }
         clearIppatsu();                  // 杠真的成立了，这才打断一发
-        revealKanDora();
+        revealKanDora(seat);
         return null;
     }
 
@@ -1597,10 +1738,10 @@ public final class Round {
         }
     }
 
-    private void revealKanDora() {
+    private void revealKanDora(int seat) {
         if (rules.kanDora) {
             wall.revealDora();
-            sendDora();
+            sendDora(seat);
         }
     }
 
@@ -2309,7 +2450,7 @@ public final class Round {
                 wall.onKan();
                 kanJustHappened = true;
                 updatePao(seat, from, m);
-                revealKanDora();
+                revealKanDora(seat);
                 break;
             }
             default:

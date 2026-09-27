@@ -67,6 +67,12 @@ public final class SelfPlay {
         public int maxHands;
         /** DAgger：对学生座位额外记一次老师的动作（`teacher` / `teacher_index`）。 */
         public boolean teacherLabel;
+        /**
+         * 额外落标签侧文件 `g<n>.aux.npz`（`FEATURES-V4.md` §5.2；训练专用）。
+         *
+         * <p>⚠ 它**不改轨迹**：同一颗种子开不开 `--aux`，`g*.jsonl` 必须逐字节相同。
+         */
+        public boolean aux;
     }
 
     /** 单个策略的统计（按策略标签聚合，跨座位）。 */
@@ -308,7 +314,7 @@ public final class SelfPlay {
             t.addBot(i);
         }
         TraceRecorder rec = new TraceRecorder(g, seed, outDir, labels, rules.startScore,
-                c.sampleEvery, c.recordClaims, outDir != null, c.teacherLabel);
+                c.sampleEvery, c.recordClaims, outDir != null, c.teacherLabel, c.aux);
         t.debugChoiceTap = rec::onChoice;
         t.debugEventTap = (recipient, ev) -> rec.onEvent(recipient, ev, t);
         t.playGame();

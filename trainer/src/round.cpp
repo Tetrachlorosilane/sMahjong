@@ -20,18 +20,6 @@
 namespace trainer {
 namespace {
 
-/** `Meld.Kind.wire()`（报文/观测里的 kind 串）。 */
-inline const char *meldKindWire(Meld::Kind k) {
-    switch (k) {
-        case Meld::Kind::CHI: return "chi";
-        case Meld::Kind::PON: return "pon";
-        case Meld::Kind::DAIMINKAN: return "daiminkan";
-        case Meld::Kind::ANKAN: return "ankan";
-        case Meld::Kind::KAKAN: return "kakan";
-    }
-    return "chi";
-}
-
 inline bool containsInt(const std::vector<int> &v, int x) {
     return std::find(v.begin(), v.end(), x) != v.end();
 }
@@ -241,7 +229,7 @@ RoundResult Round::play() {
         }
         removeOne(hand[static_cast<size_t>(turn)], discardId);
         sortHands();
-        recordDiscard(turn, discardId, declareRiichi);
+        recordDiscard(turn, discardId, tsumogiri, declareRiichi);
         totalDiscards++;
         lastDiscardSeat = turn;
         lastDiscardTile = discardId;
@@ -332,11 +320,27 @@ void Round::noteCalledFromRiver(int from, int index) {
     }
 }
 
-/** 「出牌」的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置。 */
-void Round::recordDiscard(int seat, int id, bool declareRiichi) {
+/** 「出牌」的**唯一**记账点：牌河 + 曾经打出过（振听）+ 横置 + 事件流。 */
+void Round::recordDiscard(int seat, int id, bool tsumogiri, bool declareRiichi) {
     discards[static_cast<size_t>(seat)].push_back(id);
     furiten.recordDiscard(seat, kindOf(id));
-    noteDiscard(seat, declareRiichi);
+    // 横置与 Java 同源：`noteDiscard` 返回的就是报文 `discard.sideways` 的那个值。
+    const bool sideways = noteDiscard(seat, declareRiichi);
+    // `rip_phase` 不能只看 `riichi[seat]`：立直宣言时 `doRiichi()` 已经置位，
+    // 那张宣言牌本身必须算"立直**之前**"（它是分界，不是立直后的舍牌）。
+    events.push_back(Event::discard(seat, id, playerDraws[static_cast<size_t>(seat)], tsumogiri,
+                                    sideways, riichi[static_cast<size_t>(seat)] && !declareRiichi));
+}
+
+/** 副露落位的**唯一**记账点（Java `sendMeld`）：推进 `melds[]` + 追加一条 `meld`/`kan` 事件。 */
+void Round::placeMeld(int seat, const Meld &m, int replaceIndex) {
+    const size_t s = static_cast<size_t>(seat);
+    if (replaceIndex >= 0) {
+        melds[s][static_cast<size_t>(replaceIndex)] = m;      // 加杠：把原来那副碰升级成杠
+    } else {
+        melds[s].push_back(m);
+    }
+    events.push_back(Event::meld(seat, m, playerDraws[s], riichi[s]));
 }
 
 void Round::removeCalledFromRiver(int from, int calledIndex) {
@@ -371,6 +375,10 @@ void Round::doRiichi(int seat, int discardTile) {
     discardsSinceRiichi[static_cast<size_t>(seat)] = 0;
     scores[static_cast<size_t>(seat)] -= 1000;
     sticks++;
+    // obs v3：立直巡数（第几次摸牌宣言的）+ 事件流里的一条 `riichi`。
+    // ⚠ 与 Java 同序：`riichi` 事件在**宣言牌那条 `discard` 之前**（调用方随后才 recordDiscard）。
+    riichiTurn[static_cast<size_t>(seat)] = playerDraws[static_cast<size_t>(seat)];
+    events.push_back(Event::riichi(seat, playerDraws[static_cast<size_t>(seat)]));
 }
 
 void Round::clearIppatsu() {
@@ -379,9 +387,14 @@ void Round::clearIppatsu() {
     }
 }
 
-void Round::revealKanDora() {
+void Round::revealKanDora(int seat) {
     if (rules.kanDora) {
         wall.revealDora();
+        // obs v3 事件流：**杠**宝牌翻开（开局那张随配牌/`round_start` 发出，没有事件）。
+        const std::vector<int> ind = wall.doraIndicators();
+        if (!ind.empty()) {
+            events.push_back(Event::doraFlip(ind.back(), seat, playerDraws[static_cast<size_t>(seat)]));
+        }
     }
 }
 
@@ -648,14 +661,14 @@ RoundResult Round::turnKan(int seat, const Cmd &act, int drawn, bool &ended) {
             removeOne(hand[static_cast<size_t>(seat)], picked[static_cast<size_t>(i)]);
         }
         Meld m(Meld::Kind::ANKAN, tiles.data(), 4, seat, tiles[0]);
-        melds[static_cast<size_t>(seat)].push_back(m);
+        placeMeld(seat, m);
         anyCall = true;
         kanCount++;
         kanByPlayer[static_cast<size_t>(seat)]++;
         wall.onKan();
         kanJustHappened = true;
         clearIppatsu();
-        revealKanDora();
+        revealKanDora(seat);
         return {};
     }
     // 加杠
@@ -675,7 +688,7 @@ RoundResult Round::turnKan(int seat, const Cmd &act, int drawn, bool &ended) {
     const Meld target = melds[static_cast<size_t>(seat)][static_cast<size_t>(targetIdx)];
     std::array<int, 4> tiles{target.tiles[0], target.tiles[1], target.tiles[2], addId};
     Meld m(Meld::Kind::KAKAN, tiles.data(), 4, target.from, addId);
-    melds[static_cast<size_t>(seat)][static_cast<size_t>(targetIdx)] = m;
+    placeMeld(seat, m, targetIdx);
     anyCall = true;
     kanCount++;
     kanByPlayer[static_cast<size_t>(seat)]++;
@@ -688,7 +701,7 @@ RoundResult Round::turnKan(int seat, const Cmd &act, int drawn, bool &ended) {
         return agariRon(ron, seat, addId, true, false);      // 抢杠：不是燕返
     }
     clearIppatsu();                  // 杠真的成立了，这才打断一发
-    revealKanDora();
+    revealKanDora(seat);
     return {};
 }
 
@@ -1139,7 +1152,7 @@ void Round::applyMeld(const Claim &cl, int from, int tileId) {
                 removeOne(hand[static_cast<size_t>(seat)], cl.tiles[static_cast<size_t>(i)]);
             }
             Meld m(Meld::Kind::CHI, tiles.data(), 3, from, tileId);
-            melds[static_cast<size_t>(seat)].push_back(m);
+            placeMeld(seat, m);
             removeCalledFromRiver(from, calledIndex);
             if (rules.kuikae) {
                 // ⚠ 参与运算的必须是**牌种 kind**（`tiles[]` 里存的是 id）
@@ -1166,7 +1179,7 @@ void Round::applyMeld(const Claim &cl, int from, int tileId) {
             std::array<int, 3> tiles{picked[0], picked[1], tileId};
             std::sort(tiles.begin(), tiles.end());
             Meld m(Meld::Kind::PON, tiles.data(), 3, from, tileId);
-            melds[static_cast<size_t>(seat)].push_back(m);
+            placeMeld(seat, m);
             removeCalledFromRiver(from, calledIndex);
             updatePao(seat, from, m);
             if (rules.kuikae) {
@@ -1181,14 +1194,14 @@ void Round::applyMeld(const Claim &cl, int from, int tileId) {
             std::array<int, 4> tiles{kanPicked[0], kanPicked[1], kanPicked[2], tileId};
             std::sort(tiles.begin(), tiles.end());
             Meld m(Meld::Kind::DAIMINKAN, tiles.data(), 4, from, tileId);
-            melds[static_cast<size_t>(seat)].push_back(m);
+            placeMeld(seat, m);
             removeCalledFromRiver(from, calledIndex);
             kanCount++;
             kanByPlayer[static_cast<size_t>(seat)]++;
             wall.onKan();
             kanJustHappened = true;
             updatePao(seat, from, m);
-            revealKanDora();
+            revealKanDora(seat);
             break;
         }
         default:
@@ -1374,6 +1387,13 @@ Observation Round::makeObservation(int seat, const std::string &kind, const std:
     o.totalDiscards = totalDiscards;
     o.kanCount = kanCount;
     o.anyCall = anyCall;
+    // obs v3：公开事件流 + 立直巡数。⚠ **在构造期就拷下来**（Java 同）：观测是"决策那一刻的快照"，
+    // 之后牌局继续推进（别人打牌/鸣牌）不该改变它。
+    o.events = events;
+    for (int s = 0; s < 4; s++) {
+        o.riichiTurn[static_cast<size_t>(s)] = riichiTurn[static_cast<size_t>(s)] < 0
+                ? 0 : riichiTurn[static_cast<size_t>(s)];
+    }
     o.haitei = wall.atLastLiveTile() && kind == "turn";
     o.houtei = wall.atLastLiveTile() && kind == "claim";
     o.rinshan = rinshan;

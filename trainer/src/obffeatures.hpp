@@ -38,11 +38,19 @@
 namespace trainer {
 
 /** 派生特征的版本（变了就要 +1：数据集靠它判兼容）。 */
-inline constexpr int kFeatureVersion = 2;
+inline constexpr int kFeatureVersion = 3;
 /** 逐决策段长度（71 = 68 危险度 + 3 自家牌力/打点；= Java `ObsFeatures.PER_DECISION`）。 */
 inline constexpr int kPerDecision = 2 * kKindCount + 3;
 /** 逐候选段长度（= Java `ObsFeatures.PER_CANDIDATE`）。 */
 inline constexpr int kPerCandidate = 8;
+/** 逐家段的**对手数**（下标 0 = 下家 / 1 = 対面 / 2 = 上家，**相对方位**）。 */
+inline constexpr int kSeatCount = 3;
+/** 逐家危险度段长度（D/E 两段各 `3 × 34`，int8；= Java `ObsFeatures.PER_SEAT_DANGER`）。 */
+inline constexpr int kPerSeatDanger = kSeatCount * kKindCount;
+/** 位图段**每家**的字节数（34 位 → 5 字节，高位空着）。 */
+inline constexpr int kBitmapBytes = 5;
+/** 位图段总长度（F/G 两段各 `3 × 5`；= Java `ObsFeatures.PER_SEAT_BITMAP`）。 */
+inline constexpr int kPerSeatBitmap = kSeatCount * kBitmapBytes;
 /** 危险度那一半的分母（= Java `Features.DERIVED_DANGER_SCALE`）。 */
 inline constexpr int kDerivedDangerScale = 100;
 
@@ -92,6 +100,26 @@ struct FeatureView {
 
 /** 从**轨迹里的 `obs`** 填视图（= Java `ObsFeatures.ofObs`）。形状不对返回 false。 */
 bool featureViewOfObs(const JVal &obs, FeatureView &v);
+
+/**
+ * 逐家派生段（sidecar v3 的 D/E/F/G 四段）—— **相对方位**：下标 0 = 下家、1 = 対面、2 = 上家。
+ *
+ * <p>逐决策段的前 68 维是"对四家取最坏"之后的**聚合量**，拆不回"对哪一家"；而 v4 的
+ * `tile` 张量要的正是逐家通道（`FEATURES-V4.md` §4.1）。位图**字节内 LSB 在前**。
+ */
+struct PerSeatDerived {
+    /** `danger_per_seat[j][k]`：该家**实际状态**下的危险度（0..100）。 */
+    std::array<Counts, kSeatCount> danger{};
+    /** `danger_riichi_per_seat[j][k]`：**假设该家已立直**（弃和口径）。 */
+    std::array<Counts, kSeatCount> dangerRiichi{};
+    /** `genbutsu_per_seat[j]` 位图（5 字节/家，第 k 位 = 牌种 k 是该家的现物）。 */
+    std::array<std::array<uint8_t, kBitmapBytes>, kSeatCount> genbutsu{};
+    /** `suji_per_seat[j]` 位图（**筋或壁** ⇒ 相对安全；位序同上）。 */
+    std::array<std::array<uint8_t, kBitmapBytes>, kSeatCount> suji{};
+};
+
+/** 逐家段（D/E/F/G 的内容）= Java `ObsFeatures.perSeat`。 */
+PerSeatDerived perSeat(const FeatureView &v);
 
 /** 71 维：两套逐张危险度（68）+ 自家牌力与打点（3，= Java `ObsFeatures.perDecision`）。 */
 std::array<int, kPerDecision> perDecision(const FeatureView &v);

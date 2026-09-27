@@ -33,7 +33,14 @@ import mahjong.util.Log;
  *   A: nDec × perDec            int16   逐决策派生量（ObsFeatures.perDecision）
  *   B: nDec × int16             nLegal  每条决策的候选数（与 jsonl 里的决策行**同序**）
  *   C: ΣnLegal × perCand        int16   逐候选派生量（ObsFeatures.perCandidate，按 legal 顺序）
+ *   D: nDec × 102               int8    danger_per_seat（逐家实际口径，相对方位）
+ *   E: nDec × 102               int8    danger_riichi_per_seat（假设该家已立直）
+ *   F: nDec × 15                byte    genbutsu_per_seat 位图（3 家 × 5 字节，LSB 在前）
+ *   G: nDec × 15                byte    suji_per_seat 位图（筋或壁）
  * </pre>
+ * D~G 是 **sidecar v3** 新增的（`ObsFeatures.perSeat`；`FEATURE_VERSION 2 → 3`）——
+ * 它们的长度都由 `nDec` 与固定的每决策常量推出来，所以头部**不用**再加字段；
+ * 读侧（`mahjong_ml/dataset.py` 的 `load_sidecar`）按同一套常量算偏移并校验**总长度**。
  * ⚠ v2 起 A 段从 `uint8` 改成 `int16`：逐决策段不再只有危险度（0..100），
  * 还带上了向听/进张与打点粗估（点数最大 32000）——uint8 会把它截成 mod 256。
  * 读侧按 `int16` 解析（`mahjong_ml/dataset.py` 的 `load_sidecar`）。
@@ -140,6 +147,11 @@ public final class TraceFeatures {
         Grow secA = new Grow(1 << 16);      // nDec × perDec  int16
         Grow secB = new Grow(1 << 12);      // nDec ×          int16
         Grow secC = new Grow(1 << 16);      // ΣnLegal × perCand int16
+        // sidecar v3 的逐家四段（D~G）：危险度 int8 ×2 + 两张位图
+        Grow secD = new Grow(1 << 14);      // nDec × 102  int8（danger_per_seat）
+        Grow secE = new Grow(1 << 14);      // nDec × 102  int8（danger_riichi_per_seat）
+        Grow secF = new Grow(1 << 12);      // nDec × 15   byte（genbutsu 位图）
+        Grow secG = new Grow(1 << 12);      // nDec × 15   byte（suji 位图）
         try (FileChannel in = FileChannel.open(jsonl, StandardOpenOption.READ)) {
             java.nio.ByteBuffer all = java.nio.ByteBuffer.allocate((int) in.size());
             while (all.hasRemaining() && in.read(all) >= 0) {
@@ -165,6 +177,22 @@ public final class TraceFeatures {
                     //   原来按 uint8 写会把后几维**截断成 mod 256**（实测 golden 对拍直接红）。
                     secA.putShort((short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, x)));
                 }
+                // sidecar v3：逐家四段（D~G）。危险度 int8（0..100 装得下），位图原样 5 字节/家。
+                ObsFeatures.PerSeat ps = ObsFeatures.perSeat(v);
+                for (int j = 0; j < ObsFeatures.SEATS; j++) {
+                    for (int x : ps.danger[j]) {
+                        secD.put((byte) x);
+                    }
+                    for (int x : ps.dangerRiichi[j]) {
+                        secE.put((byte) x);
+                    }
+                    for (byte b : ps.genbutsu[j]) {
+                        secF.put(b);
+                    }
+                    for (byte b : ps.suji[j]) {
+                        secG.put(b);
+                    }
+                }
                 List<Object> legal = Json.list(row, "legal");
                 int n = legal == null ? 0 : legal.size();
                 secB.putShort((short) n);
@@ -188,6 +216,10 @@ public final class TraceFeatures {
             writeAll(ch, ByteBuffer.wrap(secA.buf, 0, secA.size));
             writeAll(ch, ByteBuffer.wrap(secB.buf, 0, secB.size));
             writeAll(ch, ByteBuffer.wrap(secC.buf, 0, secC.size));
+            writeAll(ch, ByteBuffer.wrap(secD.buf, 0, secD.size));
+            writeAll(ch, ByteBuffer.wrap(secE.buf, 0, secE.size));
+            writeAll(ch, ByteBuffer.wrap(secF.buf, 0, secF.size));
+            writeAll(ch, ByteBuffer.wrap(secG.buf, 0, secG.size));
             return new long[]{decisions, candidates, ch.size()};
         }
     }

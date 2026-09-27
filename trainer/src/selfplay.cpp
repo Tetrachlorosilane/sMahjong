@@ -421,6 +421,8 @@ void selfplayUsage(std::FILE *out) {
                  "  --rotate      按场轮转座位\n"
                  "  --sample K    每 K 次决策记 1 条（缺省 1 = 全记）\n"
                  "  --no-claims   不记录鸣牌决策\n"
+                 "  --aux         ⚠ **没接**：标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）\n"
+                 "                —— 显式报错，请用 `MAHJONG_PRODUCER=java` 采这一批\n"
                  "  --preset X    规则预设（mleague|tenhou|majsoul|custom）；缺省 mleague\n"
                  "  --out DIR     轨迹输出目录（g<场号>.jsonl + summary.json）\n");
 }
@@ -435,6 +437,8 @@ int selfplayCli(int argc, char **argv) {
         c.games = std::atoi(argv[i++]);
     }
     bool teacherLabel = false;
+    // `--aux`：标签侧文件（`g*.aux.npz`）—— 训练端**没接**（Java 侧已落地），显式报错不静默降级
+    bool auxLabel = false;
     for (; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&](const char *what) -> const char * {
@@ -475,6 +479,8 @@ int selfplayCli(int argc, char **argv) {
             c.preset = next("--preset");
         } else if (a == "--teacher-label") {
             teacherLabel = true;
+        } else if (a == "--aux") {
+            auxLabel = true;
         } else if (a == "--help" || a == "-h") {
             selfplayUsage(stdout);
             return 0;
@@ -490,6 +496,16 @@ int selfplayCli(int argc, char **argv) {
         // ⚠ 显式报错，**不静默降级**（AGENTS §6.5：能力缺失要报错）。
         std::fprintf(stderr, "[trainer] --teacher-label（DAgger 的老师标注）训练端还没接：teacher 本体"
                              "已可用（§6.17），缺的是记录器的 `teacher`/`teacher_index` 两列（§5 M3 的 ⏳）\n");
+        return 2;
+    }
+    if (auxLabel) {
+        // `--aux` = 标签侧文件 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）。Java 侧已落地
+        // （`docs/FEATURES-V4.md` §5.2 / `trainer/src` 里还没有 npz 写出）。
+        // ⚠ **显式报错，不静默降级**：默默跑完只会得到一份"没有标签"的轨迹目录，
+        //   而 P1/P2 的信念/危险头监督要等到训练时才发现少了东西。
+        std::fprintf(stderr, "[trainer] --aux（标签侧 g*.aux.npz）训练端还没接："
+                             "npz 写出尚未移植（Java 侧已落地，见 docs/FEATURES-V4.md §5.2）——"
+                             " 这一批请用 MAHJONG_PRODUCER=java 采\n");
         return 2;
     }
     std::string fatal;

@@ -244,11 +244,13 @@ u      = [u_tile, u_evt', u_ctx] → MLP → [192] （再与 state' 拼接）
 ```
 raw/<label>/g*.jsonl        obs v3 + 动作（协议）        ← 采集（C++ 生产者，候选 3× 吞吐）
 raw/<label>/g*.feat.bin     输入派生 sidecar v3（§5.1）   ← --features（引擎算）
-raw/<label>/g*.aux.npz      标签（§5.2，训练专用）        ← 自对弈时引擎直接落
+raw/<label>/g*.aux.npz      标签（§5.2，训练专用）        ← --selfplay **--aux**（Java 生产者；C++ 显式报错）
 compact/<label>/            紧凑数组（tile/evt/ctx/cand + 标签列）
 ```
 
 - `dataset build` 增 `--aux`（把 `aux.npz` 并成标签列）；**推理路径只读 `feat.bin`**（判据⑥）。
+  ✅ 已落地（2026-09-27）：`python -m mahjong_ml.dataset build <dir> <out> --aux` → 6 个 `aux_*` 列；
+  缺 `g*.aux.npz` **报错**（不填 0）；`python -m mahjong_ml.auxlabels check <dir>` 逐文件核对版本/行数/obs 版本。
 - 复用：`budget.py`（时间预算/缓存档闸门）、`paths.py`（配额 + 自动回收）、`producer.py`（java/cpp 切换）。
 - ⚠ v4 的 sidecar 变大（~340 B/决策 → 一轮 6M 决策 ≈ 2 GB），紧凑集也更大：
   缓存档上限要**按 v4 的字节/场重标**（`budget.fit_cost/fit_disk` 本来就是从台账实测回填的，不用改代码）。
@@ -403,10 +405,142 @@ python -m mahjong_ml.v4.ablate --ckpt <ckpt> --blocks evt.order,tile.per_opp,ctx
 | --- | --- | --- | --- | --- | --- |
 | **P0 规范与契约冻结**（1–2 天） | 本两份文档评审通过 | obs v3（事件流 + `riichi_turn` + 逐张属性）；`FEATURES-V4.md` 落地为代码注册表；sidecar v3 + `aux.npz`；三端骨架（空实现）；**封闭红证与均衡报告框架**；自检扩项 | `FEATURES-V4.md` §9 判据①–③⑦**⑨** 全绿（含训练期封闭三条红证 + `balance.json` 判据）；**不训练** | 注册表 + 契约 + 对拍脚本 | 把"信息平价 / 训练期封闭 / 场外均衡"变成**可测的契约**；后面所有阶段都从这里取判据 |
 | **P1 表征与自监督**（3–5 天） | P0 出口 | Tile/Event/Ctx 塔 + 多头；用**引擎真值**做自监督（危险度/向听进张/听牌/对手手牌信念/终局）；**不碰 teacher** | §8.2 校准表达标 + 判据④（增量==全量）**⑨⑩（封闭三红证 / 对手族分层）** + 参数量/时延达标 | `v4/pretrain` + 首个加密 checkpoint | **第一次不依赖 teacher 就能学到牌理**；也是"信息更全是否更值"的第一个证据 |
-| **P2 teacher 冷启动**（2–3 天） | P1 出口 | 小权重模仿头（0.3）→ 20k 步退火到 **0** | 退火后模仿头贡献 ≈0；牌效/危险头不退化 | `v4/finetune` + 冷启动 checkpoint | 给 RL 一个好起点，**同时把 teacher 从"上界"降级为"起点"** |
-| **P3 自对抗 RL**（1–2 周） | P2 出口 | PPO + 联赛（历史快照 + teacher + 脚本 + v3 最强代）；沿用时间预算/缓存档轮次 | **先过均衡审计**（§7.5，`balance.json` 无超阈）**再读 CI**；**G1：2+2 vs teacher Δ ≥ +2 且 CI 排除 0**（≈5,200 场/臂）；对 `first`/`random` 不退 | `v4-gNN` 谱系 + 台账 + 判据报告 + `balance.json` | **这一阶段的唯一目标就是"强于 teacher"**；不到就回 P1/P2 改表示，不加算力 |
+| **P2 teacher 冷启动**（2–3 天） | P1 出口 | 小权重模仿头（0.3）→ 20k 步退火到 **0** | 退火后模仿头贡献 ≈0；牌效/危险头不退化 | `v4/finetune` + 冷启动 checkpoint | 给 RL 一个好起点，**同时把 teacher 从"上界"降级为"起点"** || **P3 自对抗 RL**（1–2 周） | P2 出口 | PPO + 联赛（历史快照 + teacher + 脚本 + v3 最强代）；沿用时间预算/缓存档轮次 | **先过均衡审计**（§7.5，`balance.json` 无超阈）**再读 CI**；**G1：2+2 vs teacher Δ ≥ +2 且 CI 排除 0**（≈5,200 场/臂）；对 `first`/`random` 不退 | `v4-gNN` 谱系 + 台账 + 判据报告 + `balance.json` | **这一阶段的唯一目标就是"强于 teacher"**；不到就回 P1/P2 改表示，不加算力 |
 | **P4 押し引き与风险敏感**（1 周） | P3 出口 | 分布价值 + 信念/危险头进推理；风险敏感决策规则扫描 | 放铳率下降且顺位点不降（§8.4）+ 分布校准达标 | 风险敏感策略变体 | 把"学得更准"变成"打得更好"（v3 一直卡在这里） |
 | **P5 推理与上线**（3–5 天） | P4 出口（或 G1 达标即可先做） | Java/C++ 增量缓存 + 循环推理；int8 量化选项；`packbot` v4 包；`docs/BOT-AI.md` 更新 | 单决策 ≤2 ms 特征 + ≤1.5 ms 网络；三端 parity；bot-ai 包可加载并打赢 teacher 的 2+2 复现 | 服务端可用的 v4 机器人包（随下一个 release） | 让强度**落到玩家能选的那一代 AI 上**（否则一切只在训练盘里） |
+
+> **P0 已落地的部分（2026-09-27）—— 训练准备**：`python/mahjong_ml/v4/`
+> （`spec` 块注册表 · `blocks` 四张量拼装 · `cache` 两级缓存 · `model` 多头 · `harness` 封闭红证 + 均衡审计），
+> 命令 `python -m mahjong_ml.v4 {check|plan|spec|fingerprint|balance}`：
+>
+> | 已绿 | 判据 |
+> | --- | --- |
+> | 契约 | 块宽度**铺满**四个张量（import 期断言）· 块清单指纹 `e1f5dd0fc1e9aba8` · 缺字段/错版本/未知块 id **一律报错**（不填 0） |
+> | 消融 | 6 个块逐个关掉 → 该块整块归零、其它块不受影响（规范 §7） |
+> | 增量 == 全量 | 张量级 Δ=0 · GRU 表示级 Δ=0（判据④；曾因把 56 个 padding token 也喂进 GRU 而 Δ=1.76e-2，已修） |
+> | 封闭红证 | ① 挂上隐藏真值标签后 logits **逐位不变** · ③ 奖励路径无过程隐藏量（含负向对照与"墙钟 `wall` 不误伤"）· ⑥ 推理路径不碰 `aux` |
+> | 模型 | 1,360,168 参数（≤3M）· 多头形状正确 · 上线必需头 = 策略 + 分布价值 + 对手听牌 + 危险 · 前向确定性（无 dropout） |
+> | 均衡审计 | `balance.json`（座位偏差 / 对手 CV / 亲家 / 结局）+ 阈值（1% / 5%）+ **负向对照**（座位偏斜必须判不均衡） |
+> | 自检 | `python/selfcheck.py` 新增「特征 v4」组：**410 项全绿**（原 313；含 obs v3 红证、数据集层闸门、v4 数据集与预训练可复现） |
+>
+> **obs v3 三端落地（P0 全部 6 步 ✅，2026-09-27）**：`events[]`/`riichi_turn[]` 由 Java 权威实现
+> （判据 `SelfTest.obsEventStreamTests`），C++ **逐字节**镜像（200 场完整半庄 200/200），契约与校验器
+> 同步（`PROTOCOL.md` §8.2 + `selfplay-check` 的独立重建牌河）；**sidecar v3**（逐家危险度/安全度四段）
+> Java + C++ + Python 读侧一起落地（`trainer-features-parity` 逐字节，实测 518.5 B/决策）；
+> 数据集层对 obs v2 / 老 sidecar **硬拒绝**（`v4/traces.py`）。
+> 契约用 `v4 spec` 现场打印，**别再抄文档**（本节的表与代码不一致时以代码为准并回来改）。
+
+### 第一步已跑：teacher 预训练（2026-09-27 实测）
+
+P0 收口后**第一条可跑的训练回路**（P1/P2 的合并雏形）：
+
+```powershell
+# ① 采集（teacher 自对弈 + 标签侧；Java 生产者，12 workers ≈ 112 s / 150 场）
+java -jar server\build\mahjong-server.jar --selfplay 150 --workers 12 `
+     --policy teacher,teacher,teacher,teacher --seed 20260927 --hands 0 --aux `
+     --out S:\mahjong-training\raw\v4-bc-001
+java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-bc-001 --workers 20
+# ② 轨迹 → v4 四张量 + 标签（`v4/dataset.py`；98,103 训练 / 5,994 验证，lmax=27）
+python -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-bc-001 S:\mahjong-training\compact\v4-bc-001 --aux
+# ③ teacher 预训练（`v4/pretrain.py`；6 epoch / batch 128 / 270 s on RTX 5060）
+python -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-bc-001 --label v4-bc-001 --epochs 6
+```
+
+| 指标（val = 8 场 / 5,994 决策） | epoch 1 | epoch 6 |
+| --- | --- | --- |
+| **教师动作一致率 top-1** | 0.528 | **0.608** |
+| 基线：永远选第一个合法动作 | 0.168 | 0.168 |
+| policy 交叉熵 | 1.418 | **1.192** |
+| value（HL-Gauss CE） | 3.87 | **6.63** ⚠ 不降反升 |
+| belief_hand / belief_tenpai BCE | 0.597 / 0.144 | 0.608 / 0.173 ⚠ 略升 |
+| danger BCE（被选中候选） | 0.313 | 0.328 ⚠ 略升 |
+| effect MSE（逐候选，向听/进张） | 0.032 | 0.026 |
+
+按动作类型（epoch 6）：`discard 0.50（n=4,525）` · `pass 1.00（1,172）` · `riichi 0.86（133）` ·
+`ron 1.00（59）` · `pon 0.06（54）` · `tsumo 1.00（28）` · `chi 0.07（15）` · `kan 0.62（8）`。
+
+**怎么读这张表**（这一轮的价值一半在结论里）：
+1. **策略头确实学到了**：0.528 → 0.608，是"永远打第一张"的 **3.6 倍**；`discard` 这类**真正要选**的动作
+   到了 0.50（平均 8.8 个候选），`riichi` 0.86 —— 说明四张量里的信息够用。
+2. ⚠ `pass`/`ron`/`tsumo` 接近 1.00 **不全是本事**（这几类要么位置固定 —— `pass` 永远在最后 ——
+   要么是终局动作），所以**别只看总 top-1**；`discard` 与 `pon`/`chi` 才是分水岭。
+3. ⚠ **辅助头这一轮没收敛**：`value` 不降反升（3.87 → 6.63）、`belief_*` 与 `danger` 基本平/略升。
+   这是**多任务权重冲突**的典型样子（策略头的梯度把共享主干拉向另一边），
+   不是实现错误 —— 但 P1 必须处理：按头分层学习率 / 先冻结主干只训头 / 或把 aux 头放到第二阶段。
+4. ⚠ `pon`/`chi`（54 / 15 条）样本太少，**不足以判**（P1 的采集要按动作类型加权重或专门补样本）。
+5. 这一轮的 checkpoint `S:\mahjong-training\ckpt\v4-bc-001\model.pt`（5.5 MB）**还不能上线**：
+   上线要 Java/C++ 侧的 v4 前向 + 增量缓存（P5），且必须先过 §7.5 的均衡审计。
+
+**判据**：`python/selfcheck.py` 里钉着这条回路的三件事 —— 数据集列形状/标签齐全、
+obs v2 轨迹被硬拒绝、**同种子两次训练的 `history` 逐字段相同**（410 项全绿）。
+
+### 第二轮：分阶段训练 + 掩码事件重建（2026-09-27，辅助头收敛）
+
+第一轮暴露的问题：**辅助头不收敛**（`value` 的 CE 不降反升 3.87 → 6.63）—— 典型的**多任务权重冲突**
+（策略头的梯度把共享主干拉向另一边）。这一轮按计划三件事一起做：
+
+1. **数据放大**：150 → **400 场**（262,095 训练 / 14,965 验证，val = 20 场）；采集 384 s（12w）+
+   派生 116 s + **并行数据集构建 75 s**（8 进程，与串行**逐字节相同**）。
+2. **分阶段训练**（`--stage-a 0.25 --stage-b 0.35`，头 lr = 主干 ×3）：
+   **a** 只训 `policy`+`effect`（主干先学会"打哪张"）→ **b 冻结主干**只训各头（新头在固定表示上收敛）
+   → **c** 联合微调（注册权重全开 + 余弦降 lr）。
+3. **P1 的掩码事件重建**（pretext，`--mask-frac 0.15 --ssl-weight 0.2`）：把真实事件 token 置 0，
+   用事件塔的输出重建**事件类型**（8 类）；pretext 头**只训练**，不进 `inference_heads()`。
+
+| 指标（val 14,965 条） | 第一轮最好 | ep1 [a] | ep3 [b] | ep7 [c] | **ep10 [c]** |
+| --- | --- | --- | --- | --- | --- |
+| **教师动作一致率** | 0.608 | 0.581 | 0.603 | 0.606 | **0.619** |
+| policy CE | 1.192 | 1.259 | 1.177 | 1.152 | **1.104** |
+| value CE | 6.63 ⚠ | 4.32 | 3.73 | 3.53 | **3.59** |
+| belief_hand BCE | 0.608 | 0.778 | 0.586 | 0.583 | **0.582** |
+| belief_tenpai BCE | 0.173 | 0.591 | 0.373 | 0.159 | **0.140** |
+| danger BCE | 0.328 | 0.889 | 0.301 | 0.296 | **0.297** |
+| effect MSE | 0.026 | 0.0206 | 0.0188 | 0.0207 | **0.0207** |
+| ssl_acc（掩码类型重建，chance 0.125） | — | 0.968 | 0.968 | 0.968 | **0.968** |
+
+按动作类型（ep10）：`discard 0.52（n=11,315）` · `pass 0.99（2,926）` · `riichi 0.83（286）` ·
+`ron 1.00（149）` · `pon 0.28（161，第一轮 0.06）` · `tsumo 1.00（59）` · `kan 0.80（46）` ·
+`chi 0.09（23）`。成本：**851 s**（10 epoch × 2,047 步，RTX 5060）。
+
+**三条结论**（判据都在表里）：
+1. **分阶段奏效**：`b` 段（冻主干只训头）一步就把三个辅助头从"没收敛"拉到"收敛"
+   （`bt 0.591 → 0.373`、`danger 0.889 → 0.301`、`value 4.39 → 3.73`），`c` 段再把 `bt` 压到 **0.140**。
+   ⇒ "先让主干学会打牌，再让头在固定表示上收敛，最后联合微调"这条路线**可复用**（P2 的退火也照它）。
+2. **策略头仍在涨**（0.608 → 0.619，`policy` CE 1.19 → 1.10），且**数据翻 2.7 倍只换来 +0.011** ——
+   与 v3 的经验一致：**BC 一致率的天花板不是算力**（teacher 自己的取舍里有大量近似平局的动作，
+   学生不可能逐条复现）。要再往上必须换目标（自对弈回报，P3）。
+3. ⚠ **pretext 太容易**：掩码事件类型一致率 **0.968**（chance 0.125）—— 事件类型几乎由上下文决定，
+   对表示学习**几乎没贡献**。P1 若还要自监督，得换更难的掩码目标（连 `tile_kind` 一起重建、
+   或掩码整段时间窗），否则这条损失只是白占权重。
+4. ⚠ **别跨阶段比 train loss**：`b` 段的 train loss 反而涨（2.5 → 3.65）—— 那是辅助头的随机初始化
+   被算进总损失了；**只有 val 的逐头曲线可以跨阶段比**（表里就是这个口径）。
+
+**下一步（P1 正式化的收尾）**：① 换更难的 pretext（或按结论 3 直接砍掉，把权重让给 policy）；
+② `harness.balance` 的 §7.5 均衡审计（座位/对手族分层）**还没跑过** —— 判据⑩要求它；
+③ 放量（P3 的 6M 决策规模）时数据集构建要再压（现在 8 进程 ≈3,500 决策/s）；
+④ v4 前向的 Java/C++ 落地（P5）之前，checkpoint 只能离线评估。
+
+### P0 剩余工作：obs v3 落地清单（Java → C++，含**逐字节对拍**的先后次序）
+
+**为什么必须按这个次序**：`MAHJONG_PRODUCER=cpp` 的判据是"同种子产物逐字节相同"，所以
+**先 Java（权威实现）→ 再 C++ 镜像 → 最后才允许 v4 采集走 C++**。在 C++ 落地前，
+v4 采集必须 `MAHJONG_PRODUCER=java`；C++ 侧遇到 obs v3 请求要**显式报错**（不许悄悄回退 v2）。
+
+| # | 端 | 文件 | 改什么 | 判据 |
+| --- | --- | --- | --- | --- |
+| ✅ 1 | Java | `game/Round.java` | 加**有序事件日志** `List<Event>`，在既有记账点追加（**每类一个漏斗**，绝不每个分支各记一份）：`recordDiscard()`（带 `tsumogiri`/`sideways`/`ripPhase`/`turn`）、`sendMeld()`（**吃/碰/杠五条路径的唯一出口**；杠发 `type=kan`）、`doRiichi()`、`sendDora()`。`draw`/`agari`/`ryuukyoku` **刻意不发**（理由见 `PROTOCOL.md` §8.2）。同时加 `int[] riichiTurn = {-1,…}`（立直宣言时记 **`playerDraws[seat]`**，与 `events[].turn` 同一把尺子；原写的 `totalDiscards` 会让同一个"巡数"在一份特征里长出两个量纲） | ✅ `SelfTest.obsEventStreamTests`：整场模拟里事件流与广播报文**逐条同源**（牌码/摸切/横置/被鸣那张全对上）、牌河可由事件流重建、同小局只追加、`riichi_turn` 与 riichi 事件一致；五类事件各有覆盖闸门（否则判据会空转） |
+| ✅ 2 | Java | `ai/Observation.java` | `VERSION = 2 → 3`；`toJson()` 增加 `events[]`（`type/tile/aka/called_tile/actor/from/meld_kind/turn/tsumogiri/sideways/rip_phase/seq_delta`，**相对方位由特征侧旋转**）与 `riichi_turn[]` | ✅ `SelfTest.trainingInterfaceTests` 白名单加两个键；**红证**：换掉别家手牌 + **牌山摸牌顺序** + **里宝指示牌** 后 `toJson()` 逐字节相同（新加了两个只动隐藏量的钩子）；另加三条**正向对照**（公开动作必须让事件流 +1 且旧前缀原样保留，防"事件流被冻住"也能变绿） |
+| ✅ 3 | 契约 | `docs/PROTOCOL.md` §8.2 · `tools/selfplay-check.mjs` | 字段表加 `events` / `riichi_turn`（标 obs v3）；`OBS_KEYS` 同步 | ✅ `node tools\selfplay-check.mjs <轨迹目录>` DATASET PASS；**判据按 `obs.v` 分档**（v2 老轨迹照样 PASS，不拿新字段去卡旧数据）；四条注入式负向对照各自变红（删 `riichi_turn` / 改舍牌码 / `pon`→`daiminkan` / v2 带 `events`） |
+| ✅ 4 | Java | `ai/ObsFeatures.java` | sidecar **derived_version 2 → 3**：加 `danger_per_seat[3][34]` / `danger_riichi_per_seat[3][34]` / `genbutsu_per_seat[3][34]` / `suji_per_seat[3][34]`（后两组**位图**：34 位 → 5 B/家） | ✅ `SelfTest.obsFeaturesTests` 扩断言（两条通路逐元素一致 / 非全 0 / 位图互斥 / 相对方位）；`TraceFeatures` 写 D~G 四段；**实测 518.5 B/决策**（`TRAINER-CPP.md` §6.21） |
+| ✅ 5 | C++ | `trainer/src/*` | 镜像 #1/#2/#4（事件日志 + obs v3 + sidecar v3）；未实现前**显式报错** | ✅ **两半都落地**：obs v3（`event.hpp` + 四个漏斗 + `observation.hpp` v3，§6.20，200 场逐字节 200/200）；sidecar v3（`danger.hpp` 补 `genbutsu/suji/wall` + `obffeatures.perSeat` + `features.cpp` 写 D~G，§6.21，`trainer-features-parity` 3/3 逐字节）；三套 parity + `opts-parity` 全绿 |
+| ✅ 6 | Python | `mahjong_ml/v4/spec.py` · **新增 `v4/traces.py`** | 把 `OBS_VERSION_V4` 的"降级"路径改成**数据集层硬拒绝**（obs v2 数据不再进 v4 训练） | ✅ `v4 check` 新增「数据集层」组：obs v2 **硬拒绝**（不再只是 `assemble(allow_degraded=False)`）、有 sidecar v3 时 `tile.danger`/`tile.safety` 不降级、缺则逐块记名降级；`selfcheck.py` +16 条（含 `iter_decisions` 在 v2 那一行报错） |
+
+⚠ 三条纪律（#1~#6 全部落地后的现状）：
+① **v4 采集现在两侧都能开**（Java 与 C++ 的 obs/sidecar 都到 v3，且逐字节对拍过）——
+切 `MAHJONG_PRODUCER=cpp` 只影响速度；⚠ 切之前先把"`events` 累积 vs 增量"那条口径定了（`HANDOVER.md` §6）；
+② **老轨迹/老 sidecar 一律硬拒绝**（obs v2 在 `v4/traces.iter_decisions` 报错；`derived_version != 3`
+在 `dataset.load_sidecar` 报错）——重采/重跑 `--features` 即可，**不许**混进 v4 训练；
+③ 每步都要跑对应层自检（L1 / selfplay-check / trainer-*-parity / `v4 check`），**不许只看编译过**。
 
 **如果只做一半**：P0+P1 就能回答"信息更全 + 自监督是否更快更强"；P3 才是 G1。任何阶段失败都可以**停在
 上一阶段**并把结论写进 `NOTES.md`（不欠账、不假装）。
