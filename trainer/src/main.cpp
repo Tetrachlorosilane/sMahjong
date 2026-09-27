@@ -39,6 +39,8 @@
 #include "shanten.hpp"
 #include "tiles.hpp"
 #include "turnoptions.hpp"
+#include "v4features.hpp"
+#include "v4policy.hpp"
 #include "visible.hpp"
 #include "wall.hpp"
 #include "yaku_codes.hpp"
@@ -2283,12 +2285,22 @@ int main(int argc, char** argv) {
                      "                                   （= Java --features，逐字节对拍）\n"
                      "                                   --workers 缺省/0 = max(1, 核数×3/4)，钳制到 [1, 文件数]\n"
                      "  net <net.bin> <轨迹1.jsonl> …     逐条 decision 行打印网络 logits（与 tools/NetProbe.java 逐字符对拍）\n"
-                     "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %%.9g）\n");
+                     "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %%.9g）\n"
+                     "  v4net <net.bin 格式2> <轨迹1.jsonl> …  逐条 decision 行打印 **v4** 策略头 logits\n"
+                     "                                   （与 tools/V4Probe.java 逐字符对拍；格式同 net）\n"
+                     "  v4golden <夹具> [--tol 1e-4]     读 python/tests/golden/forward-v4.bin：四张量 + 四个推理头 + 红证\n"
+                     "                                   全部通过 exit 0 并打印一行汇总；任一不过 exit 1\n");
         return 2;
     }
     const std::string cmd = argv[1];
     if (cmd == "net") {
         return trainer::netCli(argc - 1, argv + 1);
+    }
+    if (cmd == "v4net") {
+        return trainer::v4NetCli(argc - 1, argv + 1);
+    }
+    if (cmd == "v4golden") {
+        return trainer::v4GoldenCli(argc - 1, argv + 1);
     }
     if (cmd == "selfplay") {
         return trainer::selfplayCli(argc - 1, argv + 1);

@@ -183,7 +183,7 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 - **编码器**：`MLP(96 → 192)` + 可学习 `type`/`meld_kind` 嵌入 + **相对巡目位置编码**（sin/cos，16 维）
   + 相对方位偏置。事件 token **不做** absolute seat 编码（一律相对自己）。
 
-### 4.3 `cand`：n × 128（= 基础 88 + 派生 24 + 预留 16）
+### 4.3 `cand`：n × 128（= 基础 88 + 派生 11 + 预留 29）
 
 | 段 | 宽 | 内容 |
 | --- | --- | --- |
@@ -191,6 +191,14 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | 派生（引擎算） | 11 | ① `after_shanten/8` ② `ukeire_kinds/34` ③ `ukeire_tiles/136` ④ `ukeire_good/34` ⑤ `wait_kinds/34` ⑥ `wait_tiles/136` ⑦ `score_han/13` ⑧ `score_points/32000` ⑨ `score_expected/32000`（打点粗估 × 和了率） ⑩ `danger_after_all/100`（打这**张之后**对四家的最坏危险度） ⑪ `danger_after_riichi/100`（①②④⑤⑥ 就是 v3 的逐候选 8 维里的 7 项） |
 | 预留 | 29 | 0 |
 | **合计** | **128** | = 88 + 11 + 29（⚠ 早期草案写的"24 + 16"是**拍的分法**，落地时按"只留有名有姓的维"改成 11 + 29） |
+
+⚠ **落地现状（2026-09-27 实测，别当成"已经全给了"）**：
+- **①~⑧（= v3 的逐候选 8 维）确实进 `cand[88:96]`** —— 但这是**修好之后**的事：
+  在此之前 `v4/traces.sidecar_dict` 没把 C 段带进来，`compact/v4-bc-001/002` 的
+  **`cand[88:128]` 整整 40 列全是 0**（`degraded` 记了但没人查）。修 `sidecar_dict` +
+  在 `v4/dataset` 里**硬拒 `Tensors.degraded` 非空**之后重采重训，教师一致率 0.619 → **0.903**。
+- **⑨⑩⑪ 目前恒 0**（离线 sidercar 的 C 段只有 8 维，Java/C++ 的实时实现也留 0）——
+  三端一致、不构成漂移，但这三维是"设计里承诺、尚未接线"的欠账（填它们要 sidecar 段长 +1 版）。
 
 > **权威清单现场打印**：`python -m mahjong_ml.v4 spec`（块 id / 宽度 / 依赖的 obs 字段 / 版本），
 > `python -m mahjong_ml.v4 fingerprint` 给块清单指纹（写进 `net.bin` 格式 2）。
@@ -304,24 +312,58 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 3. `net.bin` 格式 2 的**块清单**必须与当前注册表**逐块匹配**（块 id + 宽 + 顺序）——
    允许"注册表有、权重没用到"的块缺失（= 消融，§7），但**绝不允许宽度或顺序不符**。
 
+### 6.1 `net.bin` 格式 2 的逐字段布局（P5 落地，2026-09）
+
+⚠ **魔数与 v3 相同（`MJNN`），靠 `format` 区分**：v3 是 `format=1`（定长 MLP，无块清单），
+v4 是 `format=2`。拿错了两边都在**构造期**报错（不是对局里算出奇怪动作）。
+
+```
+头部（64 B，小端）：
+  magic u32 "MJNN" · format u32 = 2 · featureVersion u32 = 4 · obsVersion u32 = 3
+  · derivedVersion u32 = 3 · dModel u32 · tileD u32 · nHeads u32 · valueBins u32
+  · nBlocks u32 · nTensors u32 · fingerprint 16 B（ASCII 的 16 个十六进制字符） · params u32
+块清单（nBlocks 条，按注册表顺序；子集 = 消融）：
+  idLen u16 · id(utf8) · width u32
+张量表（nTensors 条，**名字升序**，名字 = PyTorch `state_dict()` 的键）：
+  nameLen u16 · name(utf8) · ndim u8 · dims u32×ndim · 数据 f32（行主序、紧凑、无对齐）
+```
+
+- **拓扑固定、宽度可变**：只有 `dModel / tileD / nHeads / valueBins` 四个宽度进头部（与 v3 的
+  `hidden/head/trunk_layers` 同一思路）⇒ golden 夹具能用**小网络**（32/16/2/5，~200 KB）进仓库，
+  而上线照跑 192/64/4/51（1,360,168 参数、5.4 MB）。
+- **加载期校验（三端各自做，缺一不可）**：① 魔数/格式号/特征版本/obs 版本；② 每个块的 id 已注册、
+  宽度相等、**注册表下标严格递增**（顺序或重复不对也算错）；③ **指纹**（`[[id,width],…]` 的 sha256
+  前 16 位十六进制）与"按文件里那份清单重算"逐字符相同，全量清单还要与注册表指纹相同；
+  ④ **每一层要用的张量都取一遍**并按 `[rows,cols]` 核对形状，最后断言"文件里的张量名没有一个是
+  没人读的"（少张量 / 多张量 / 改名 / 形状不符全在构造期炸）；⑤ 尾部多字节也算错。
+- **位图与布尔**：`hand_red` / `riichi` / `ippatsu` 在 obs JSON 里是**布尔数组**（不是计数）——
+  三端都必须按真值读（2026-09-27 的实测漂移，见 `NOTES.md` §6.5 第 7 轮）。
+
 ---
 
 ## 7. 消融开关（信息平价的可证性）
 
-每个块都有 **id**，可在**不改代码**的前提下关掉（填 0 并跳过对应编码器）：
+每个块都有 **id**，可在**不改代码**的前提下关掉（填 0 并跳过对应编码器）。
+**权威清单 = `spec.BLOCKS`**（`python -m mahjong_ml.v4 spec` 现场打印；Java `V4Features.BLOCK_IDS`、
+C++ `v4features.cpp` 是同名同序的镜像），当前 16 个：
 
 ```
-tile.own | tile.per_opp | tile.danger | tile.safety | tile.global
-evt.discard_attrs | evt.order | evt.meld_src | evt.riichi_phase
-ctx.points | ctx.riichi_turn | ctx.ask
-derived.danger | derived.effect | derived.score
+tile.own(3) tile.per_opp(18) tile.safety(6) tile.danger(6) tile.global(15)
+evt.stream(96)
+ctx.round(8) ctx.points(12) ctx.wall(8) ctx.self(10) ctx.seats(12) ctx.ask(8) ctx.reserved(6)
+cand.base(88) cand.derived(11) cand.reserved(29)
 ```
+
+⚠ 早期草案里的 `evt.discard_attrs | evt.order | evt.meld_src | evt.riichi_phase` 与
+`derived.danger | derived.effect | derived.score` **从来没有落地**（事件流没再细分、派生量按张量的
+`cand.derived` / `tile.danger` / `tile.safety` 分）—— 别照那份清单写 `--ablate`，未知 id 会直接报错。
 
 - **判据**：关掉某块后，同种子自对弈产物应**逐字节相同**（除了该块全 0）——
   保证"消融只是信息变化，不是行为变化"。
 - **用途**：`NOTES.md` §6.5 那类"这条特征值不值"的问题，从此由**消融矩阵**回答（设计文档 §8.3），
   不再靠争论。
-- ⚠ 消融块一旦关掉，**推理端也必须关**（`net.bin` 格式 2 的块清单就是干这个的）。
+- ⚠ 消融块一旦关掉，**推理端也必须关**（`net.bin` 格式 2 的块清单就是干这个的：
+  清单里没有的块，Java/C++ 加载后会把对应通道置 0 —— 判据见 `SelfTest.v4ForwardTests` 的消融断言）。
 
 ---
 

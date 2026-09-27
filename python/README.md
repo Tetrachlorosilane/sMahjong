@@ -157,6 +157,29 @@ python\.venv\Scripts\python.exe -m mahjong_ml.v4 check
 python\.venv\Scripts\python.exe -m mahjong_ml.v4 plan
 ```
 
+**P5：导出 v4 权重（服务端/C++ 直接跑）+ 三端对拍**（规范 `docs/FEATURES-V4.md` §6.1）：
+
+```powershell
+# ① v4 checkpoint → net.bin **格式 2**（带块清单 + 张量表；Java/C++ 手写前向直读）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.export weights `
+    --ckpt S:\mahjong-training\ckpt\v4-bc-004\model.pt --out ..\tools\build\v4-bc-004\net.bin
+# ② 服务端/训练端用法与 v3 一字不差（按 format 自动分派两代前向）
+java -jar server\build\mahjong-server.jar --selfplay 100 --policy net:tools\build\v4-bc-004\net.bin,teacher,teacher,teacher --out .tmp-v4self
+trainer\build\trainer.exe selfplay 100 --policy "net:tools\build\v4-bc-004\net.bin,teacher,teacher,teacher" --out .tmp-v4self-cpp
+# ③ 打成分发给玩家的 bot-ai 包（v4 自动走 v4/export.py；⚠ `--alpha auto` 对 v4 未实现，用 --alpha <数值>）
+python\.venv\Scripts\python.exe -m mahjong_ml.packbot --from-ckpt S:\mahjong-training\ckpt\v4-bc-004 --out bot-ai --alpha 0
+# ④ 三端对拍（Python 夹具 ↔ Java ↔ C++）与性能
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.export golden --trace S:\mahjong-training\raw\v4-bc-002 --out tests\golden\forward-v4.bin --cases 10
+node tools\trainer-v4-parity.mjs --golden         # 两侧各自与夹具比（特征 + 前向 + 红证，容差 1e-4）
+node tools\trainer-v4-parity.mjs --selfcheck      # 比较器负向对照
+node tools\trainer-v4-parity.mjs tools\build\v4-bc-004\net.bin <轨迹目录>   # Java↔C++ 逐行（实测 1,885 条 maxΔ=0）
+java -cp "server\build\mahjong-server.jar;tools\build" tools.V4Probe --bench tools\build\v4-bc-004\net.bin <轨迹.jsonl> 200
+```
+
+> ⚠ **性能实测（单线程 Java，1.36M 参数）**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策 ——
+> 远高于设计预算（≤2 + ≤1.5 ms）。**当 bot 可以，当自对弈采集主力太慢**；下一轮做增量事件缓存
+> （`docs/TRAINING-V4.md` §P5）。
+
 特征规格（**唯一来源** = `mahjong_ml/features.py`，`python -m mahjong_ml.features` 打印分段偏移）：
 
 | 段 | 维度 | 由谁算 |

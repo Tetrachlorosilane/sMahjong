@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "jsonscan.hpp"
+#include "obffeatures.hpp"
 
 namespace trainer {
 
@@ -90,6 +91,15 @@ int64_t netMixSeed(int64_t gameSeed, int seat);
 
 /** 布局自述（日志用，与 Java `Features.describe()` 同义）。 */
 std::string netDescribe();
+
+/**
+ * `Features.candidate(key, derived)` 的**可复用入口**（96 列 = 88 基础 + 8 派生）。
+ *
+ * <p>为什么不给 v4 再写一份：v4 的 `cand[n,128]` 前 96 列就是 v3 的那一份
+ * （Java `V4Features.candMatrix` → `Features.candidate`），再写一遍必然漂移。
+ */
+std::vector<float> netCandidateVector(const std::string &key,
+                                      const std::array<int, kPerCandidate> &derived);
 
 /**
  * `trainer net <net.bin> <轨迹1.jsonl> [更多...]`：逐条 decision 行打印 logits，

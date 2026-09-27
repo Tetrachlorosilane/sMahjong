@@ -1,0 +1,51 @@
+{
+  "cases": 10,
+  "format": 1,
+  "dims": {
+    "d_model": 32,
+    "tile_d": 16,
+    "n_heads": 2,
+    "value_bins": 5
+  },
+  "net_bytes": 208398,
+  "bytes": 573336,
+  "trace": "S:\\mahjong-training\\raw\\v4-bc-002",
+  "seed": 20260928,
+  "blocks_fingerprint": "e1f5dd0fc1e9aba8",
+  "case_kinds": [
+    "turn",
+    "turn",
+    "claim",
+    "claim",
+    "claim",
+    "turn",
+    "claim",
+    "turn",
+    "turn",
+    "claim"
+  ],
+  "coverage": [
+    "aka_evt",
+    "aka_hand",
+    "claim",
+    "evt_dora_flip",
+    "evt_kan",
+    "evt_meld",
+    "furiten",
+    "ippatsu",
+    "own_meld",
+    "riichi_any",
+    "self_riichi",
+    "tedashi",
+    "tsumogiri",
+    "turn"
+  ],
+  "required_tags": [
+    "turn",
+    "claim",
+    "own_meld",
+    "riichi_any",
+    "ippatsu"
+  ],
+  "tol": 0.0001
+}

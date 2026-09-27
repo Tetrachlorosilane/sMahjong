@@ -181,6 +181,14 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool) 
             traces.gate_obs(obs, where=f"{f.name}:{ln}")
             side = traces.sidecar_dict(sc, j)
             t = blocks.assemble(obs, side, allow_degraded=False)
+            # ⚠ **降级 = 静默换任务**：`blocks.assemble` 的 `allow_degraded=False` 只拦"版本不够"
+            #   那两条路；侧存段的**缺失**（例如 `sidecar_dict` 忘了给 `cand`）会走"填 0 +
+            #   `degraded.add(...)`"那条路 —— 没有这一条断言，`cand[88:128]` 就会整块是 0，
+            #   而训练照跑、指标照出（2026-09-27 实测踩到：`v4-bc-002` 的 40 列全 0）。
+            if t.degraded:
+                raise spec.ContractError(
+                    f"{f.name}:{ln} 张量拼装发生降级：{sorted(t.degraded)} —— 这些块会被静默填 0"
+                    f"（等于删掉那一路信息）。检查 obs 版本、sidecar 段长与 `traces.sidecar_dict`")
             legal = list(row.get("legal") or [])
             # ⚠ `blocks` 是按 **obs.legal** 展开候选的，而标签下标来自 **行上的 legal** ——
             #   两者必须逐字相同（不同就是拿别人的下标当标签，且不报错）

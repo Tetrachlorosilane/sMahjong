@@ -107,15 +107,29 @@ def sidecar_dict(sc: Mapping[str, Any], i: int) -> dict[str, Any]:
     """把整份 sidecar 的**第 i 条决策**转成 `blocks.assemble(obs, sidecar)` 要的那张表。
 
     ⚠ 位图在这里展开成 34 宽（文件里是打包的 5 字节）—— 特征侧要的是"每个牌种一位"。
+
+    ⚠ **`cand`（逐候选 8 维，C 段）必须带进来**：少了它就是 `cand[88:96]` 静默全 0
+    （= 把"牌效 / 危险"这一路信息整块删掉，而训练照跑、指标照出）。2026-09-27 实测
+    `compact/v4-bc-002`：`cand[88:128]` **逐列 maxabs = 0**（262,095 条决策全零），
+    原因就是这里没给 `cand` 而 `dataset` 又没查 `Tensors.degraded`。判据：
+    `python/selfcheck.py` 的「v4 数据集不许有降级块」+ `dataset._write_file` 的硬拒。
     """
     if i < 0 or i >= int(sc["n"]):
         raise spec.ContractError(f"sidecar 里没有第 {i} 条决策（共 {int(sc['n'])} 条）")
+    lo, hi = int(sc["offsets"][i]), int(sc["offsets"][i + 1])
+    cand = np.asarray(sc["cand"][lo:hi], dtype=np.float32)
+    # 逐候选段必须与这一条决策的候选数**逐条对齐**（错位 = 把别人的牌效目标当输入，且不报错）
+    n_legal = int(sc["nlegal"][i])
+    if cand.shape[0] != n_legal:
+        raise spec.ContractError(
+            f"sidecar 第 {i} 条：逐候选段 {cand.shape[0]} 行 != nLegal {n_legal} —— sidecar 坏了")
     return {
         "derived_version": spec.DERIVED_VERSION_V4,
         "danger_per_seat": np.asarray(sc["danger_per_seat"][i], dtype=np.float32),
         "danger_riichi_per_seat": np.asarray(sc["danger_riichi_per_seat"][i], dtype=np.float32),
         "genbutsu_per_seat": unpack_bitmap(sc["genbutsu_per_seat"][i]).astype(np.float32),
         "suji_per_seat": unpack_bitmap(sc["suji_per_seat"][i]).astype(np.float32),
+        "cand": cand,
     }
 
 

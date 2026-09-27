@@ -174,9 +174,9 @@ public final class Policies {
      * "同种子可复现"立刻失效（见 {@link PolicyFactory}）。
      */
     public static PolicyFactory net(String weightsPath, float alpha, float temp) {
-        final NeuralPolicy policy;
+        final LogitPolicy policy;
         try {
-            policy = NeuralPolicy.load(java.nio.file.Path.of(weightsPath));
+            policy = NetWeights.load(java.nio.file.Path.of(weightsPath));
         } catch (Exception e) {
             throw new IllegalArgumentException("加载神经网络权重失败：" + weightsPath
                     + " —— " + e.getMessage(), e);
@@ -197,7 +197,7 @@ public final class Policies {
      * <p>兜底与 {@link #hybrid} 同口径：网络返回 null / 非法 / 抛异常 → 用老师这一次的回包
      * （`α = 0` 时就是重新问一次 {@code Bot}），**绝不给牌桌线程抛异常**（AGENTS §6.5）。
      */
-    static Policy sampled(NeuralPolicy net, float alpha, float temp, Random rng) {
+    static Policy sampled(LogitPolicy net, float alpha, float temp, Random rng) {
         return d -> {
             Action teacher = null;
             Map<String, Object> tcmd = null;
@@ -248,7 +248,7 @@ public final class Policies {
      *
      * <p>兜底：网络返回 null / 非法 / 抛异常时**直接用老师这一次的回包**（不再多算一遍 Bot）。
      */
-    public static Policy hybrid(NeuralPolicy net, float alpha) {
+    public static Policy hybrid(LogitPolicy net, float alpha) {
         return d -> {
             Action teacher = null;
             Map<String, Object> tcmd;

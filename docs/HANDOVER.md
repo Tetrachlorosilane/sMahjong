@@ -12,10 +12,10 @@
 | --- | --- |
 | 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `8b069fa`（obs v3 + v4 两轮预训练），再往前 `06d9ebd`（本文件首次落地）|
 | 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`8446ea5b`（= v1.12.0 的 tag）**，其 tree `6c746e4c…` **== 本地 `8b069fa` 的 tree** ⇒ **已同步**（§2.11）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree |
-| 发布 | **v1.12.0 已上线**（release **#397670321**，2 个资产：client + server；**不带机器人包** —— v4 权重还不能导出）；`bot-ai/` 沿用 v1.11.0 三个（已开包核对 `sd=615/cd=96` 与服务端同规格）|
-| 数据盘 | `S:\mahjong-training` = **11.37 GB**（`raw` 1.64 · `compact` 9.66 · `ckpt` 0.08 · `league` 0.001）；S 盘可用 **218.3 GB / 231.5 GB**（本轮做过全清，见 §2.3）。v4 两轮：`raw\v4-bc-001` 0.45 / `v4-bc-002` 1.19、`compact\v4-bc-001` 2.13 / `v4-bc-002` 5.71 GB |
-| 训练进度 | **v3 谱系已到平台**；**v4 已完成两轮 teacher 预训练**：教师一致率 **0.608 → 0.619**（首合法基线 0.165），**所有辅助头都收敛**（`value` 6.63→3.59、`belief_tenpai` 0.173→0.140、`danger` 0.328→0.297），见 §2.9/§2.10 |
-| v4 状态 | **P0 全部收口**（`v4 check` PASS、`v4 plan` **12/13 绿**、selfcheck **419/0**）：obs v3 三端 + sidecar v3 + 数据集层硬闸门 + **标签侧 `aux.npz`**；下一步是 **P1 收尾**（§7.5 均衡审计 + 更难的自监督 + 放量，见 §3） |
+| 发布 | **v1.12.0 已上线**（release **#397670321**，2 个资产：client + server；那版**不带机器人包** —— 当时 v4 还不能导出）。**现在 v4 已能打包**（`packbot --from-ckpt <v4 ckpt 目录>`，见 §2.12）：下一个 release 可以带 v4 包（先看 §3 ① 的性能结论） |
+| 数据盘 | `S:\mahjong-training` ≈ **17 GB**（`compact` 又多了 `v4-bc-003` 5.7 GB）；S 盘可用 ≈ **212 GB**。数据集：`raw\v4-bc-002` 1.19 GB → `compact\v4-bc-003`（**修好 `cand` 派生段后重建**，262,095 训练 / 14,965 验证）；checkpoint `ckpt\v4-bc-004`（教师一致率 **0.903**）与 `v4-bc-003`（0.165，阶段 c 塌掉的那份，留作对照） |
+| 训练进度 | **v3 谱系已到平台**；**v4 teacher 预训练三轮**：0.608（§2.9）→ 0.619（§2.10）→ **0.903**（§2.12，接上 `cand` 派生段 + 阶段 c 降 lr 之后） |
+| v4 状态 | **P0 全部收口** + **P5 前向三端落地**（`net.bin` 格式 2 · Java `V4Policy` · C++ `v4policy` · golden 夹具 · 三端对拍 maxΔ=0）。**下一件要紧事是性能**（前向 ≈40 ms/决策 ≫ 1.5 ms 预算，见 §3 ①） |
 | 并行工作 | ⚠ **有另一个会话在同一仓库工作**（见 §5 第 1 条：推送要串行 + 比 tree sha）；本次推送前其改动已在基线里（§2.11） |
 
 ---
@@ -227,9 +227,42 @@
   （tag 指向的提交就是打包时那份源码，注释与行号变了、类文件语义不变）。
 - 本地草稿与摘要表：`release\RELEASE-v1.12.0.md`（`release\` 已 gitignore）。
 
+### 2.12 P5：v4 前向三端落地 + 两个"静默"真 bug（2026-09-27）
+
+**主线**（用户要求"编写 P5 的 Java/C++ v4 前向"）：
+
+- **`net.bin` 格式 2**（`python/mahjong_ml/v4/export.py`）：`MJNN` + `format=2` + 块清单 + 张量表
+  （74 个张量、名字升序、float32）；`weights` 与 `golden` 两个子命令；同权重两次导出**逐字节相同**。
+- **Java**：`ai/V4Features.java`（obs → 四张量，实时算 `perSeat`/`perCandidate` 派生量）、
+  `ai/V4Policy.java`（三塔 + 融合 + 七头手写前向）、`ai/NetWeights.java`（按 `format` 分派两代）、
+  `ai/Logits.java` + `LogitPolicy`（v3/v4 共用"argmax/采样/先验"一份实现）；
+  `SelfTest.v4ForwardTests` 用夹具逐元素钉住（L1 1403 → **1423/0**）。
+- **C++**：`trainer/src/v4features.*` / `v4policy.*` + `v4net` / `v4golden` 子命令 +
+  `policies.hpp` 按 `format` 分派（v3 路径一位不变）。
+- **夹具与对拍**：`python/tests/golden/forward-v4.bin`（小网络 32/16/2/5，10 个用例，**带覆盖闸门**）；
+  `tools/V4Probe.java` + `tools/trainer-v4-parity.mjs`
+  （`--golden` / `--selfcheck` / 逐行对拍，退出码 0/1/2/3）。
+- **判据（实测）**：Java golden `特征 maxΔ=5.96e-08 / 前向 maxΔ=5.03e-08 / argmax 10/10 / 红证 0`；
+  C++ 同数字；**Java↔C++ 1,885 条决策逐字符相同、maxΔ=0**；Java 端到端 8 场自对弈 +
+  `selfplay-check` DATASET PASS；`packbot` 能打 v4 包并在服务端挂载成功。
+- ⚠ **性能没达标**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策（单线程）≫ 预算 2 + 1.5 ms ⇒ **下一轮第一件事**。
+
+**过程中抓到的两个真 bug**（详见 `NOTES.md` §6.5 第七轮）：
+
+1. **`cand[88:128]` 40 列全 0**（`sidecar_dict` 没给逐候选 C 段 + `dataset` 不查 `Tensors.degraded`）
+   ⇒ 修好后同数据同超参：教师一致率 **0.619 → 0.903**（`ckpt\v4-bc-004`）。旧数据集 `v4-bc-001/002` 作废。
+2. **阶段 c 把策略头练塌**（top1 → 首合法基线 0.165）⇒ 新增 `--stage-c-lr-mult`（用 0.1）。
+
+**顺带修的**（都是"对拍/夹具"抓出来的）：obs 里 `hand_red`/`riichi`/`ippatsu` 是**布尔数组**
+（Java 曾把后两个读成 0，8 个通道恒 0 —— 旧夹具恰好没人立直所以没暴露）；`linear()` 的**别名安全**；
+`gruStep` 必须返回新数组；C++ 的 `%.9g` 排版要按 Java 的 dtoa 口径（`javaG9`）。
+
 ---
 
-## 3. 下一步：**P1 收尾（均衡审计 + 更难的自监督）+ 放量**
+## 3. 下一步：**性能（增量缓存）→ 再 P1 收尾 → 放量**
+
+> 优先级变了：P5 之前"checkpoint 只能离线评估"，现在**能上线了但太慢** —— 40 ms/决策的网
+> 当 bot 可以、当自对弈采集主力不行。所以第一件事是把前向压回预算内。
 
 **清单在 `docs/TRAINING-V4.md` §「P0 剩余工作」**（六步**全部 ✅**）+ **§9 P1 设计**。摘要：
 
@@ -249,14 +282,18 @@
 唯一的**已知能力缺口**：C++ 生产者不产 `aux.npz`（训练端 `--aux` 显式报错）——
 第一轮的教师模仿不受影响（标签来自轨迹的 `chosen_index`），P2 若要整条走 C++ 得补 npz 写出。
 
-**这一轮（P1 收尾）要做的四件**（按优先级，前两条是判据要求的）：
-① **§7.5 均衡审计还没跑过**（判据⑩要求：座位偏差 / 对手族 CV / 亲家 / 结局）——
-   `harness.balance` 已有骨架，要在 `v4-bc-002` 的**采集轨迹**上出一份 `balance.json`；
-② **更难的自监督**（现在的掩码事件类型一致率 0.968 ≈ 白给）：换"连 `tile_kind` 一起重建"
+**这一轮要做的事**（按优先级）：
+
+① **性能：把 v4 前向压回预算**（P5 验收里唯一没达标的项，实测 4.6 + 40 ms/决策）——
+   按性价比：**增量事件缓存**（把 `v4/cache.py` 的 `EventStream` 语义搬到 Java：GRU 隐状态跨决策复用，
+   `recompute()` 仍是基准路径，判据仍是"增量 == 全量"）→ 稠密循环优化（扁平 `float[]` + 行偏移、
+   去逐行方法调用）→ 必要时缩 `dModel`（那要重训）。
+② **§7.5 均衡审计还没跑过**（判据⑩要求：座位偏差 / 对手族 CV / 亲家 / 结局）——
+   `harness.balance` 已有骨架，要在 `v4-bc-003` 的**采集轨迹**上出一份 `balance.json`；
+③ **更难的自监督**（现在的掩码事件类型一致率 0.968 ≈ 白给）：换"连 `tile_kind` 一起重建"
    或"掩码整段窗口"，或者按结论砍掉 SSL、把权重让给 policy；
-③ **放量**：P3 的 6M 决策规模下，数据集构建（现 8 进程 ≈3,500 决策/s）与磁盘（v4 数据集 ≈22 KB/决策）
+④ **放量**：P3 的 6M 决策规模下，数据集构建（现 8 进程 ≈3,500 决策/s）与磁盘（v4 数据集 ≈22 KB/决策）
    都要再核一遍预算；
-④ **P5 的前半**（可选）：v4 前向的 Java/C++ 落地 —— 在此之前 checkpoint 只能离线评估、打不了对局。
 
 **三条纪律（不许省）**：
 ① **两侧的 obs/sidecar 都到 v3 了**，切 `MAHJONG_PRODUCER=cpp` 只影响速度 ——
@@ -273,9 +310,11 @@
 - **第 5 轮 ✅**：第一轮 teacher 预训练（§2.9，`v4/dataset.py` + `v4/pretrain.py`）。
 - **第 6 轮 ✅**：分阶段训练（辅助头收敛）+ 掩码事件重建 + 数据集并行化（§2.10）。
 - **第 7 轮 ✅**：提交 + 发布 **v1.12.0**（§2.11：远端 tree == 本地 tree 为判据，2 个资产 digest 逐一核对）。
+- **第 8 轮 ✅**：**P5 三端 v4 前向**（§2.12）+ 修掉两个静默 bug（`cand` 派生段全 0 / 阶段 c 塌）+ 教师一致率 0.903。
 
-**下一轮的起点**：从 §3 的四件里挑 **① §7.5 均衡审计**（判据⑩，至今没跑过）——
-它是唯一"判据要求但从未执行"的一项；harness 骨架在 `v4/harness.py`，数据用 `v4-bc-002` 的采集轨迹。
+**下一轮的起点**：§3 的 ① **性能**（把前向压回 1.5 ms 预算，先做增量事件缓存）——
+它是 P5 唯一没达标的验收项；之后回到 ② **§7.5 均衡审计**（判据⑩，至今没跑过，
+harness 骨架在 `v4/harness.py`，数据用 `compact/v4-bc-003` 的采集轨迹）。
 
 ---
 
@@ -304,6 +343,14 @@ cd python
 # v4 训练回路（P1/P2：轨迹 → 四张量 → teacher 预训练；§2.9）
 .venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw\v4-bc-001 S:\mahjong-training\compact\v4-bc-001 --aux
 .venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-bc-001 --label v4-bc-001 --epochs 6
+
+# P5：v4 权重导出（net.bin **格式 2**）+ 三端对拍 + 性能（§2.12）
+.venv\Scripts\python.exe -m mahjong_ml.v4.export weights --ckpt S:\mahjong-training\ckpt\v4-bc-004\model.pt --out ..\tools\build\v4-bc-004\net.bin
+.venv\Scripts\python.exe -m mahjong_ml.v4.export golden --trace S:\mahjong-training\raw\v4-bc-002 --out tests\golden\forward-v4.bin --cases 10   # 覆盖闸门要求 ippatsu 等标签
+node tools\trainer-v4-parity.mjs --golden                              # Java 与 C++ **各自**与 Python 夹具比（特征+前向+红证）
+node tools\trainer-v4-parity.mjs --selfcheck                           # 比较器负向对照（扰动必须 FAIL）
+node tools\trainer-v4-parity.mjs tools\build\v4-bc-004\net.bin .tmp-v4fix   # Java↔C++ 逐行（实测 1,885 条 maxΔ=0）
+java -cp "server/build/mahjong-server.jar;tools/build" tools.V4Probe --bench tools\build\v4-bc-004\net.bin .tmp-v4fix\g0.jsonl 200
 
 # 训练端 C++（改了 trainer/ 之后必跑；判据见 §2.6/§2.7 与 docs\TRAINER-CPP.md §6.20/§6.21）
 pwsh -File trainer\build.ps1                                                          # 增量编译 + 编后自检

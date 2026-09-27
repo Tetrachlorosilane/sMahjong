@@ -668,6 +668,11 @@ std::string netDescribe() {
             + std::to_string(kNetCand) + "（base 88 + derived 8）";
 }
 
+std::vector<float> netCandidateVector(const std::string &key,
+                                      const std::array<int, kPerCandidate> &derived) {
+    return candidateOf(key, derived);          // 与 v3 前向**同一份**实现（见 net.hpp 的说明）
+}
+
 // ------------------------------------------------------------------ CLI
 
 int netCli(int argc, char **argv) {

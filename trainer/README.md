@@ -140,6 +140,43 @@ node tools\selfplay-check.mjs <dir>                                         # �
 （`random` 下 0/500 —— 它**跟策略走**），
 所以完整半庄验收**至少 200 场**（`docs/TRAINER-CPP.md` §6.15 有原案）。
 
+### v4 前向（`net.bin` **格式 2**）：`v4net` / `v4golden`
+
+训练端也吃 v4 权重（三塔 + 多头，`net.bin` 格式 2）。两个子命令与 `net` 同形：
+
+```powershell
+# ① golden 夹具自检：四张量 + 四个推理头 + 红证（Python 侧 blocks.assemble 是基准）
+trainer\build\trainer.exe v4golden python\tests\golden\forward-v4.bin [--tol 1e-4]
+#   实测：golden cases=10 tol=0.000100000 特征 maxΔ=5.96e-08 前向 maxΔ=5.03e-08 argmax=10/10 红证 maxΔ=0 → PASS
+
+# ② 与 Java 逐行对拍（真实权重 + 真实轨迹）
+javac -encoding UTF-8 -cp server\build\mahjong-server.jar -d tools\build tools\V4Probe.java
+java -cp "server\build\mahjong-server.jar;tools\build" tools.V4Probe NET.BIN TRACE.jsonl > java.txt
+trainer\build\trainer.exe v4net NET.BIN TRACE.jsonl > cpp.txt
+#   逐行比：n 与 argmax 必须完全相同、logits 逐元素 |Δ| ≤ 1e-6
+
+# ③ 训练端直接跑 v4 权重（`--policy net:<权重文件>` 按 `format` 自动分派：1 = v3、2 = v4）
+trainer\build\trainer.exe selfplay 300 --workers 8 --out DIR `
+    --policy "net:tools\build\v4-bc-004\net.bin,teacher,teacher,teacher"
+```
+
+判据（实测数字取自 `tools\build\v4-bc-004\net.bin`：格式 2、192/64/4/51、1,360,168 参数、
+指纹 `e1f5dd0fc1e9aba8`；语料 `.tmp-v4fix\g0.jsonl` 与 `g1.jsonl`）：
+
+- `v4net` 的输出与 `tools/V4Probe.java` **逐字符相同**（`step=<s> n=<n> argmax=<i> logits=<%.9g,…>`；
+  一条决策都没有的文件打一行 `# <文件> 0 条`）。实测 **1885 条决策 / 16509 个 logit 格：整行逐字符
+  相同 1885/1885、n 与 argmax 全同、逐元素 maxΔ = 0**。
+  ⚠ 值用**自带的 `javaG9`**（不是直接 `%.9g`）：Java Formatter 在"十进制恰好一半"时 half-up、
+  glibc `printf` 是 ties-to-even，两边会差 1 个末位（`759.8515625f` → Java `759.851563` /
+  printf `759.851562`，**float 位模式完全相同**）。这是排版差异，不改数值、也不放松判据。
+- `v4golden` 的 `--tol` 缺省 `1e-4`；任一不过就 **exit 1** 并打出超差最多的格子
+  （形如 `c0.tile[k0][ch27] Δ=2.98e-08`）。红证 = `heads.policy.bias` 整体 +1 后**每条 logit 恰好 +1**
+  —— 少了它，"对拍通过"可能是"权重压根没读进去"。
+- 分派在加载期做：格式 1 仍走原来的 v3 路径（**行为一位不变**），格式 2 走 `v4features` + `v4policy`；
+  拿错版本、块清单乱序、指纹不符、有张量没人读**都在加载期报错**。
+  `net:<权重文件>@α`（teacher 先验）**仍然显式报错**未接线（与 v3 同一个口径）。
+- ⚠ v4 的 obs 必须 **v3 及以上**（要 `events` / `riichi_turn`）：拿到老轨迹**报错退出，不填 0**。
+
 ---
 
 ## 接进 Python 训练工作流（`MAHJONG_PRODUCER`）

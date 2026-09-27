@@ -24,6 +24,7 @@
 #include "java_rand.hpp"
 #include "net.hpp"
 #include "observation.hpp"
+#include "v4policy.hpp"
 
 namespace trainer {
 
@@ -171,6 +172,53 @@ inline Policy makeNetPolicy(std::shared_ptr<const Net> net, float temp, JavaRand
     };
 }
 
+/**
+ * `net:<权重文件>` 且权重是 **v4（格式 2）** 时的策略本体（= Java `V4Policy.chooseIndex/SampleIndex`）。
+ *
+ * <p>与 v3 那条（`makeNetPolicy`）**同一套语义**：`temp <= 0` ⇒ argmax（并列取最小下标）、
+ * `temp > 0` ⇒ 从 `softmax(logits / T)` 采样；失败返回 `valid = false`（不悄悄换动作）。
+ * 权重按 `shared_ptr` 共享 —— `V4Policy::forwardAll` 是 `const` 且不改任何状态，
+ * 所以多个自对弈 worker 线程同时前向是安全的（见 `v4policy.hpp` 的说明）。
+ */
+inline Policy makeV4NetPolicy(std::shared_ptr<const V4Policy> net, float temp, JavaRandom rng) {
+    return [net, temp, rng](const Decision &d) mutable {
+        Cmd c;
+        if (d.obs == nullptr) {
+            return c;
+        }
+        // Java `chooseWithPrior`：`legal` 为空 → `Action.of(PASS)`（与 v3 同一条兜底）
+        std::vector<std::string> keys = d.obs->legalKeys();
+        if (keys.empty()) {
+            c.valid = true;
+            c.action = actionOf(kActPass);
+            return c;
+        }
+        JVal obsJson;
+        if (!jsonParse(d.obs->toJson(), obsJson) || !obsJson.isObj()) {
+            return c;
+        }
+        std::vector<float> logits;
+        std::string err;
+        if (!v4Logits(*net, obsJson, logits, err)) {
+            return c;
+        }
+        const int pick = temp > 0.f ? netSampleSoftmax(logits, temp, rng) : netArgmax(logits);
+        bool ok = false;
+        const Action a = pick < 0 ? Action{} : actionParse(keys[static_cast<size_t>(pick)], ok);
+        if (pick < 0) {
+            c.valid = true;
+            c.action = actionOf(kActPass);
+            return c;
+        }
+        if (!ok) {
+            return c;
+        }
+        c.valid = true;
+        c.action = a;
+        return c;
+    };
+}
+
 /** ASCII 空白裁剪（Java `String.trim()` 的等价物，只处理 ≤ 0x20 的字符）。 */
 inline std::string trimAscii(const std::string &s) {
     size_t b = 0;
@@ -237,6 +285,27 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
                   "请先用 Java 生产者（**不静默降级**）。纯网络（`@0` 或缺省）与 `#<T>` 温度采样已支持。";
             return nullptr;
         }
+        // ⚠ **按格式分派**（= Java `mahjong.ai.NetWeights.loadBytes`）：两个加载器共用魔数 `MJNN`，
+        //   靠头部的 `format` 区分 —— 1 = v3 定长 MLP、2 = v4（三塔 + 多头）。拿错版本一律
+        //   加载期报错，**不"尽力而为"**。格式 1 走的还是原来那条 `loadNet`（行为一位不变）。
+        int format = 0;
+        std::string peekErr;
+        if (!v4WeightFormatOf(rest, format, peekErr)) {
+            err = "加载神经网络权重失败：" + rest + " —— " + peekErr;
+            return nullptr;
+        }
+        if (format == 2) {
+            std::shared_ptr<V4Policy> loadedV4 = std::make_shared<V4Policy>();
+            std::string loadErrV4;
+            if (!v4LoadPolicy(rest, *loadedV4, loadErrV4)) {
+                err = "加载 v4 神经网络权重失败：" + rest + " —— " + loadErrV4;
+                return nullptr;
+            }
+            const std::shared_ptr<const V4Policy> sharedV4 = loadedV4;
+            return [sharedV4, temp](int seat, int64_t gameSeed) {
+                return makeV4NetPolicy(sharedV4, temp, JavaRandom(netMixSeed(gameSeed, seat)));
+            };
+        }
         std::shared_ptr<Net> loaded = std::make_shared<Net>();
         std::string loadErr;
         if (!loadNet(rest, *loaded, loadErr)) {
@@ -248,7 +317,6 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
             return makeNetPolicy(shared, temp, JavaRandom(netMixSeed(gameSeed, seat)));
         };
     }
-
     std::string n = name;
     for (char &c : n) {
         if (c >= 'A' && c <= 'Z') {

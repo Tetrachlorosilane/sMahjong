@@ -268,7 +268,7 @@ def _stage_of(step: int, total: int, frac_a: float, frac_b: float) -> str:
 def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict) -> None:
     torch.save({"model": model.state_dict(),
                 "ssl_head": ssl_head.state_dict(),
-                "config": {"model": "v4", "params": model.param_count()},
+                "config": {"model": "v4", "params": model.param_count(), "dims": model.dims()},
                 "dataset_meta": meta,
                 "feature_version": spec.FEATURE_VERSION_V4,
                 "blocks_fingerprint": spec.fingerprint(),
@@ -335,12 +335,13 @@ def train(args) -> dict:
                 for p in trunk:
                     p.requires_grad = stage != "b"
                 print(f"  -- 进入阶段 {stage}（step {gstep}/{total_steps}）")
-            # c 段余弦降 lr（a/b 段保持常数）
+            # c 段余弦降 lr（a/b 段保持常数）；`--stage-c-lr-mult` 再整体缩一档
             if stage == "c":
                 c_start = int(total_steps * (args.stage_a + args.stage_b))
                 prog = max(0.0, min(1.0, (gstep - c_start) / max(1, total_steps - c_start)))
                 for pg, base in zip(opt.param_groups, base_lrs):
-                    pg["lr"] = base * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog)))
+                    pg["lr"] = base * args.stage_c_lr_mult * (
+                        0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog)))
             idx = np.sort(perm[step * args.batch:(step + 1) * args.batch])
             if idx.size == 0:
                 break
@@ -419,6 +420,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stage-a", type=float, default=0.25, help="阶段 a（策略+牌效）占总步数比例")
     ap.add_argument("--stage-b", type=float, default=0.35, help="阶段 b（冻主干只训头）占比")
     ap.add_argument("--head-lr-mult", type=float, default=3.0, help="头的学习率倍数（主干 = --lr）")
+    # ⚠ 2026-09-27 实测：把 `cand` 的派生段真正喂进来之后（此前是整块 0），a/b 段的教师一致率
+    #   从 0.619 涨到 **0.837**，但 c 段（联合微调、主干 lr = `--lr`）**当场把策略头练塌**
+    #   （top1 掉回首合法基线 0.165，策略 CE 恒定 ⇒ 融合输出 ReLU 全死、logits 变成常数）。
+    #   所以 c 段的主干 lr 必须再降一档：这个倍率乘在 a/c 的基准 lr 上（缺省 1.0 = 老行为）。
+    ap.add_argument("--stage-c-lr-mult", type=float, default=1.0,
+                    help="阶段 c（联合微调）学习率相对 --lr 的倍率（塌了就调小，例如 0.1）")
     # P1 自监督：掩码事件重建
     ap.add_argument("--mask-frac", type=float, default=0.15, help="掩码多少比例的真实事件 token（0 = 关）")
     ap.add_argument("--ssl-weight", type=float, default=0.2, help="掩码重建损失权重")

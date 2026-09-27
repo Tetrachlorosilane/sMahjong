@@ -520,6 +520,62 @@ obs v2 轨迹被硬拒绝、**同种子两次训练的 `history` 逐字段相同
 ③ 放量（P3 的 6M 决策规模）时数据集构建要再压（现在 8 进程 ≈3,500 决策/s）；
 ④ v4 前向的 Java/C++ 落地（P5）之前，checkpoint 只能离线评估。
 
+### 第三轮：把 `cand` 的派生段接上 + 阶段 c 的学习率（2026-09-27，教师一致率 0.619 → 0.903）
+
+**这一轮不是"调参"，是两个真 bug 的收口**（都是"训练照跑、指标照出"的那一类）：
+
+1. **`cand[88:128]` 整整 40 列一直是 0**（实测 `compact/v4-bc-002`：逐列 `maxabs = 0`）。
+   根因两条一起：① `v4/traces.sidecar_dict` 只带了逐家四段位图/危险度，**没带逐候选 C 段**，
+   于是 `blocks.cand_matrix` 走"per_cand is None"那条路**静默填 0**并只记了个 `degraded`；
+   ② `v4/dataset._write_file` **从不检查 `Tensors.degraded`**。
+   ⇒ 修法（两处都要）：`sidecar_dict` 带上 `cand`（按 `offsets` 切片 + 与 `nLegal` 对账），
+   `_write_file` 遇到非空 `degraded` **直接报错**（"降级 = 静默换任务"）。
+   **顺带**：`cand[96:99]`（v4 新 3 维）与预留 29 列**仍是 0**（离线侧与实时侧一致，不构成漂移；
+   填它们要 sidecar 段长 +1 版 —— 欠账记在 `FEATURES-V4.md` §4.3）。
+2. **阶段 c（联合微调）会把策略头练塌**：`--stage-c-lr-mult 1.0`（= 主干 1e-3）时，
+   `c` 段第一步就 `top1 0.837 → 0.165`（= 首合法基线）、策略 CE 恒定 1.897 ⇒
+   融合输出 ReLU 全死、logits 变成常数（argmax 恒取第 0 条）。加 `--stage-c-lr-mult`（乘在 a/c 基准
+   lr 上）后 `0.1` 就正常。
+
+| 项 | 修正前（v4-bc-002，10 epoch） | **修正后（v4-bc-003/004，10 epoch）** |
+| --- | --- | --- |
+| 数据 | 262,095 训练 / 14,965 验证（同） | 同（`compact/v4-bc-003` 70 s 重建） |
+| **教师动作一致率（val）** | 0.619 | **0.903**（a/b 段就到 0.837；c 段再 +0.066） |
+| policy CE | 1.104 | **0.294** |
+| discard 类 top-1 | 0.52 | **0.89**（n=11,315） |
+| pon / riichi / kan | 0.28 / 0.83 / 0.80 | **0.73 / 0.81 / 0.85** |
+| value / belief_tenpai / danger | 3.59 / 0.140 / 0.297 | 3.53 / **0.278** / 0.302 |
+| ssl_acc（掩码类型重建） | 0.968 ⚠ 饱和 | 0.968 ⚠ 饱和（结论 3 不变） |
+| 成本 | 851 s | 933 s（`--stage-c-lr-mult 0.1` 那次） |
+
+**结论**：① **候选侧派生量（牌效/危险）是这批数据里最值钱的一块信息** —— 接上它，同一份 400 场数据
+的教师一致率从 0.619 跳到 0.903（配合同样的分阶段超参）；② "c 段必须单独降 lr"这条要写进默认
+动作（不是可选优化）；③ 之前"BC 天花板 ≈ 数据不敏感（2.7× 数据只 +0.011）"的结论**要修正**：
+那时 `cand` 是残缺的，瓶颈不在数据量而在**输入缺了 40 列**。
+
+### P5 已落地：三端 v4 前向（2026-09-27）
+
+**目标**（本文件 §9 的 P5 行）：Java/C++ 侧的 v4 前向 + `net.bin` 格式 2 + bot-ai 包可加载；
+**判据**是"三端 parity"，`packbot`/int8/增量缓存等属于同一阶段但**这轮只做了前向与打包**。
+
+| 交付 | 落点 | 判据（实测） |
+| --- | --- | --- |
+| 权重导出（格式 2） | `python/mahjong_ml/v4/export.py`（`weights` / `golden` 两个子命令） | 同权重两次导出**逐字节相同**；形状审计覆盖全部 74 个张量（缺/多/改名/形状不符都报错） |
+| Java 特征拼装 | `server/src/main/java/mahjong/ai/V4Features.java` | 与 Python `blocks.assemble` 在 golden 夹具上**逐元素 maxΔ=5.96e-08** |
+| Java 前向 | `server/.../ai/V4Policy.java` + `NetWeights.java`（按 `format` 分派两代） | 四头**逐元素 maxΔ=5.03e-08**、argmax 10/10、红证 0；`SelfTest.v4ForwardTests`（L1 1403 → **1423**） |
+| C++ 镜像 | `trainer/src/v4features.*` / `v4policy.*` + `v4net` / `v4golden` 子命令 | golden 同上；**Java↔C++ 1,885 条决策逐行 maxΔ=0**（`tools/trainer-v4-parity.mjs`） |
+| 端到端 | `--policy net:<v4 net.bin>,teacher,teacher,teacher` | Java 8 场 / 98 小局跑通 + `selfplay-check` **DATASET PASS**；训练端同策略可跑 |
+| bot-ai 包 | `python -m mahjong_ml.packbot --from-ckpt <v4 ckpt 目录>` | 包内 `net.bin` 5,316 KB、服务端启动挂载成功（`--bot-ai v4-bc-004`） |
+
+⚠ **性能预算没达标（实测，必须记下来）**：1.36M 参数、单线程 Java ——
+**特征 ≈4.6 ms/决策**（预算 ≤2 ms）、**前向 ≈35–40 ms/决策**（预算 ≤1.5 ms）⇒ 约 25 决策/秒。
+原因是这份架构每次决策都要**全量重算**：60 步 GRU + 60 token 的 Transformer + 逐候选交叉注意力，
+≈45M MAC。**下一轮的三条路**（按性价比排）：① **增量事件缓存**（`v4/cache.py` 的 `EventStream`
+语义搬到 Java：GRU 隐状态跨决策复用，`recompute()` 仍是基准路径）；② 稠密循环的内层优化
+（扁平 `float[]` + 行偏移、消除逐行方法调用）；③ 必要时缩 `dModel`（那要重训）。
+⚠ 在达标之前，v4 网**只适合当 bot**（对局里偶尔想一会儿），**不适合当自对弈采集的主力**
+（C++ 侧同架构约 95 决策/秒/核，比 Java 快但仍比 teacher-first 那类策略慢一两个量级）。
+
 ### P0 剩余工作：obs v3 落地清单（Java → C++，含**逐字节对拍**的先后次序）
 
 **为什么必须按这个次序**：`MAHJONG_PRODUCER=cpp` 的判据是"同种子产物逐字节相同"，所以

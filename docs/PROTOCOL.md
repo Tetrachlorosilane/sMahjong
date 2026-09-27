@@ -1247,6 +1247,28 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 - **一致性**由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具
   （`python/tests/golden/forward.bin`）逐元素钉住（容差 1e-4）+ 一条红证。
 
+**进程内 v4 策略（P5，2026-09）**：同一套策略串（`net:<权重文件>[@<α>][#<T>]`）**按权重文件的
+`format` 自动分派**两代前向 —— `format=1` 走上面的 v3 定长 MLP、`format=2` 走 v4 三塔 + 多头
+（`mahjong/ai/V4Policy.java`，同样零第三方依赖）。
+
+```bash
+# ① v4 checkpoint → net.bin 格式 2（带块清单 + 张量表；规范见 docs/FEATURES-V4.md §6）
+python -m mahjong_ml.v4.export weights --ckpt <v4 model.pt> --out <net.bin>
+# ② 用法与 v3 一字不差（分派在 mahjong.ai.NetWeights，拿错版本构造期报错）
+java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
+     --policy net:<net.bin>,teacher,teacher,teacher --out <dir>
+```
+
+- **输入**是四张量 `tile[34,48] / evt[60,96] / ctx[64] / cand[n,128]`（`mahjong/ai/V4Features.java`）；
+  `tile.danger/safety` 与 `cand` 的派生段在推理时**由引擎实时算**（`ObsFeatures.perSeat/perCandidate`），
+  离线训练读的是 sidecar —— 两条通路必须同值，判据是 golden 夹具
+  （`python/tests/golden/forward-v4.bin`，10 个用例、覆盖面带闸门）。
+- **判据**：`SelfTest.v4ForwardTests`（特征 + 四个推理头逐元素 ≤1e-4、argmax 全同、红证 +
+  消融/版本/指纹负向对照）；三端逐行对拍 `node tools/trainer-v4-parity.mjs <net.bin> <轨迹目录>`
+  （Java↔C++，实测 1,885 条决策 maxΔ=0）。
+- ⚠ **性能**（实测 1.36M 参数、单线程）：特征 ≈4.6 ms + 前向 ≈40 ms / 决策 —— 远高于设计里的
+  "≤2 ms + ≤1.5 ms"预算，**增量缓存（事件塔复用）与稠密循环优化是下一轮的事**（`docs/TRAINING-V4.md` §P5）。
+
 **P5b 混合（teacher 先验）**：策略串写成 `net:<权重文件>@<α>`（α 缺省 0 = 纯网络），
 语义是 `argmax(student(obs) + α · 1[该候选 == 老师在本信息集的动作])`。
 

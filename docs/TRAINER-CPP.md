@@ -998,6 +998,40 @@ Java 权威实现 2026-09-27 落地（`docs/PROTOCOL.md` §8.2 · `NOTES.md` §6
 （`v4/traces.load_sidecar` 再对一次 `DERIVED_VERSION_V4`），**重跑 `--features` 即可**；
 `compact/*` 里的旧 `derived_version` 由 `load_split` 拒绝（原有闸门）。
 
+### 6.22 v4 前向镜像（`net.bin` 格式 2，2026-09-27，已完成）
+
+**为什么这一步是 P5 的"训练端"那一半**：v4 世代的采集席都是 `net:<上一代>`，训练端如果只会读
+v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个数量级）。镜像之后
+`--policy net:<v4 net.bin>,teacher,teacher,teacher` 在 C++ 生产者上直接可用。
+
+| 落点 | 内容 |
+| --- | --- |
+| 新增 `src/v4features.{hpp,cpp}` | obs → `tile[34][48] / evt[60][96] / ctx[64] / cand[n][128]`；布局表、块注册表、**自写 sha256 指纹**、消融置 0；obs v<3 / 未知块 id / 未知通道 / seat 越界一律报错 |
+| 新增 `src/v4policy.{hpp,cpp}` | `net.bin` **格式 2** 加载（头部 / 块清单递增 / 宽度 / 指纹 / 逐张量形状 / "有张量没人读" / 尾部多字节**全部加载期报错**）+ 三塔/融合/七头前向 + `v4net` / `v4golden` 两个 CLI |
+| `src/net.{hpp,cpp}` | 暴露 `netCandidateVector`（v4 的 `cand[0:96]` 复用 v3 同一份实现，不写第二套） |
+| `src/policies.hpp` | `net:` 前缀**按文件头 `format` 分派**（1 → 原 `loadNet` 路径，行为一位不变；2 → v4）；`@α` 仍显式报错未接线 |
+| `src/main.cpp` | 注册 `v4net` / `v4golden`（用法文本同步） |
+
+**判据（实测）**：
+
+| 项 | 结果 |
+| --- | --- |
+| `trainer v4golden python/tests/golden/forward-v4.bin` | `特征 maxΔ=5.96e-08 前向 maxΔ=5.03e-08 argmax=10/10 红证 maxΔ=0 → PASS`（与 Java 数字**逐项相同**） |
+| Java↔C++ 逐行对拍（1.36M 参数真权重 / `.tmp-v4fix` g0+g1） | **1,885 条决策逐字符相同、argmax 1,885/1,885、16,509 格 maxΔ = 0**（`node tools/trainer-v4-parity.mjs <net.bin> <轨迹目录>`） |
+| v3 回归 | `trainer-net-parity.mjs --golden` PASS（maxΔ=0）；`trainer-selfplay-parity.mjs 2 0 teacher 20260101` 逐字节一致 |
+| 端到端 | `trainer selfplay 1 --policy "net:tools\build\v4-bc-004\net.bin,teacher,teacher,teacher"` 跑通（≈95 决策/秒/核） |
+
+**两条只有跨语言对拍才会暴露的坑**（都已钉进注释与夹具）：
+
+1. **obs 里的 `hand_red` / `riichi` / `ippatsu` 是布尔数组**，用"只认数字"的读法会整段变 0
+   （Java 侧 8 个 `ctx.seats` 通道曾经恒 0）。⚠ 当时的夹具 10 个用例里有 7 个**没人立直**，
+   所以三端全绿也没抓到 —— 现在 `v4/export.py` 的选例带**覆盖闸门**（`REQUIRED_TAGS` 含
+   `riichi_any` / `ippatsu`），红证：旧 jar 在新夹具上报 `c6.ctx[i38] Δ=1.000` 并 FAIL。
+2. **`%.9g` 的十进制排版**：Java `Formatter` 在"恰好一半"时是 **half-up**，glibc `printf` 是
+   **ties-to-even**（例 `-759.8515625f` → `-759.851563` vs `-759.851562`；两者 float32 位模式**相同**）。
+   `v4net` 因此自带 `javaG9`（按 Java 的 dtoa 口径排版）⇒ 对拍是**整行逐字符**相同，
+   而不是"数值接近"。
+
 ---
 
 ## 7. 目录与构建

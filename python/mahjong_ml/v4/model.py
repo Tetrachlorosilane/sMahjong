@@ -58,13 +58,14 @@ HEAD_SPECS: tuple[HeadSpec, ...] = (
 class TileTower(nn.Module):
     """逐牌种共享 MLP + 自注意力 → `[B,34,TILE_D]` 与池化向量。"""
 
-    def __init__(self, d_tile: int = TILE_D) -> None:
+    def __init__(self, d_tile: int = TILE_D, n_heads: int = N_HEADS,
+                 d_model: int = D_MODEL) -> None:
         super().__init__()
         self.enc = nn.Sequential(nn.Linear(C_TILE, d_tile), nn.ReLU(),
                                  nn.Linear(d_tile, d_tile), nn.ReLU())
-        self.attn = nn.MultiheadAttention(d_tile, N_HEADS, batch_first=True)
+        self.attn = nn.MultiheadAttention(d_tile, n_heads, batch_first=True)
         self.norm = nn.LayerNorm(d_tile)
-        self.proj = nn.Linear(d_tile, D_MODEL)
+        self.proj = nn.Linear(d_tile, d_model)
 
     def forward(self, tile: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.enc(tile)
@@ -76,11 +77,11 @@ class TileTower(nn.Module):
 class EventTower(nn.Module):
     """事件流：MLP → GRUCell（增量）→ 小 Transformer（窗口内顺序）。"""
 
-    def __init__(self, d: int = D_MODEL) -> None:
+    def __init__(self, d: int = D_MODEL, n_heads: int = N_HEADS) -> None:
         super().__init__()
         self.enc = nn.Sequential(nn.Linear(C_EVT, d), nn.ReLU(), nn.Linear(d, d))
         self.cell = nn.GRUCell(d, d)
-        layer = nn.TransformerEncoderLayer(d, N_HEADS, dim_feedforward=2 * d, dropout=0.0,
+        layer = nn.TransformerEncoderLayer(d, n_heads, dim_feedforward=2 * d, dropout=0.0,
                                           batch_first=True, norm_first=True)
         self.tr = nn.TransformerEncoder(layer, num_layers=1)
 
@@ -114,11 +115,11 @@ class Mlp(nn.Module):
 class Fusion(nn.Module):
     """关键张注意力 + 状态/增量**两轮双向**（设计 §5.2）。"""
 
-    def __init__(self, d: int = D_MODEL) -> None:
+    def __init__(self, d: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS) -> None:
         super().__init__()
-        self.tile_proj = nn.Linear(TILE_D, d)
-        self.q_tile = nn.MultiheadAttention(d, N_HEADS, batch_first=True)
-        self.q_evt = nn.MultiheadAttention(d, N_HEADS, batch_first=True)
+        self.tile_proj = nn.Linear(tile_d, d)
+        self.q_tile = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.q_evt = nn.MultiheadAttention(d, n_heads, batch_first=True)
         self.gate = nn.Linear(2 * d, d)
         self.write = nn.Linear(d, d)
         self.film = nn.Linear(d, d)
@@ -142,10 +143,10 @@ class Fusion(nn.Module):
 class Heads(nn.Module):
     """多头：策略 / 分布价值 / 顺位 / 信念（对手手牌、听牌）/ 危险 / 牌效。"""
 
-    def __init__(self, d: int = D_MODEL) -> None:
+    def __init__(self, d: int = D_MODEL, value_bins: int = VALUE_BINS) -> None:
         super().__init__()
         self.policy = nn.Linear(d, 1)
-        self.value = nn.Linear(d, VALUE_BINS)
+        self.value = nn.Linear(d, value_bins)
         self.placement = nn.Linear(d, 4)
         self.belief_hand = nn.Linear(d, 3 * 34)
         self.belief_tenpai = nn.Linear(d, 3)
@@ -168,16 +169,27 @@ class Heads(nn.Module):
 
 
 class V4Model(nn.Module):
-    """v4 全模型。`forward` 返回**每个头**的输出；推理只用 `inference_heads()`。"""
+    """v4 全模型。`forward` 返回**每个头**的输出；推理只用 `inference_heads()`。
 
-    def __init__(self) -> None:
+    ⚠ **只有四个宽度可变**（`d_model / tile_d / n_heads / value_bins`），**拓扑固定**
+    （三塔 + 融合 + 多头）—— 与 v3 的 `hidden/head/trunk_layers` 同一个思路：
+    宽度写进 `net.bin` 格式 2 的头部，于是 golden 夹具能用**小网络**（几十 KB）钉住前向，
+    而上线权重照跑 192/64/4/51。
+    """
+
+    def __init__(self, *, d_model: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
+                 value_bins: int = VALUE_BINS) -> None:
         super().__init__()
-        self.tile = TileTower()
-        self.event = EventTower()
-        self.ctx = Mlp(C_CTX, D_MODEL)
-        self.cand = Mlp(C_CAND, D_MODEL)
-        self.fusion = Fusion()
-        self.heads = Heads()
+        if d_model % n_heads or tile_d % n_heads:
+            raise ValueError(f"n_heads={n_heads} 必须同时整除 d_model={d_model} 与 tile_d={tile_d}")
+        self.dims_cfg = {"d_model": int(d_model), "tile_d": int(tile_d),
+                         "n_heads": int(n_heads), "value_bins": int(value_bins)}
+        self.tile = TileTower(tile_d, n_heads, d_model)
+        self.event = EventTower(d_model, n_heads)
+        self.ctx = Mlp(C_CTX, d_model)
+        self.cand = Mlp(C_CAND, d_model)
+        self.fusion = Fusion(d_model, tile_d, n_heads)
+        self.heads = Heads(d_model, value_bins)
 
     # ---------------------------------------------------------------- 前向
     def forward(self, tile: torch.Tensor, evt: torch.Tensor, ctx: torch.Tensor,
@@ -201,16 +213,20 @@ class V4Model(nn.Module):
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
+    def dims(self) -> dict[str, int]:
+        """四个宽度（写进 checkpoint 的 `config.dims`，导出时用来核对张量表）。"""
+        return dict(self.dims_cfg)
+
     def block_fingerprint_note(self) -> dict[str, Any]:
         from . import spec
         return {"feature_version": spec.FEATURE_VERSION_V4, "blocks": spec.fingerprint(),
-                "params": self.param_count()}
+                "params": self.param_count(), "dims": self.dims()}
 
 
-def build(seed: int = 20260927) -> V4Model:
-    """建一个**确定**的模型（便于自检逐位比较）。"""
+def build(seed: int = 20260927, **dims: int) -> V4Model:
+    """建一个**确定**的模型（便于自检逐位比较）。`dims` 见 `V4Model.__init__`。"""
     torch.manual_seed(seed)
-    m = V4Model()
+    m = V4Model(**dims)
     m.eval()
     return m
 

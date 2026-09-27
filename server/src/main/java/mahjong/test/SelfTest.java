@@ -101,6 +101,7 @@ public final class SelfTest {
         auxLabelTests();
         obsFeaturesTests();
         neuralForwardTests();
+        v4ForwardTests();
         hybridPolicyTests();
         samplingPolicyTests();
         botAiTests();
@@ -3474,6 +3475,255 @@ public final class SelfTest {
             }
         }
         check("golden：红证 —— 输出偏置 +1 后每条 logit 恰好 +1（对拍不是空转）", shifted);
+    }
+
+    /** v4 golden 夹具的魔数（"MJ4G"，与 `v4/export.py` 的 `GOLDEN_MAGIC` 同值）。 */
+    private static final int V4_GOLDEN_MAGIC = 0x4D4A3447;
+
+    /**
+     * **v4（P5）的 golden 对拍**：`python/tests/golden/forward-v4.bin` 里带着一个小 v4 的权重
+     * （`net.bin` **格式 2**，带块清单与张量表）、若干真实 obs，以及 Python 侧按
+     * `v4/blocks.assemble` 拼出的 `tile/evt/ctx/cand` 与四个推理头的输出。
+     *
+     * <p>为什么要独立一套夹具、而不是复用 v3 的：v4 的输入不是"state/cand 两个向量"，
+     * 而且 `tile.danger/safety` 与 `cand` 的派生段在**推理时必须由引擎实时算**
+     * （离线那侧读的是 sidecar）—— "训练输入 == 推理输入"这条只能靠它钉住。
+     * 2026-09-27 就是它对拍抓出了两个真 bug：① `hand_red` 是**布尔数组**（用 `ints()` 读会
+     * 整列变 0）；② `linear()` 不是别名安全的（隐藏层原地覆盖 ⇒ logits 整体偏 0.0044）。
+     *
+     * <p>夹具不在就跳过（与 {@link #neuralForwardTests} 同一口径：可选文件不该让规则引擎自检红）。
+     */
+    private static void v4ForwardTests() {
+        // ① 布局与块清单的自洽（表是契约的一部分，改宽度必须在这里先红）
+        int tileSum = 0;
+        for (int w : mahjong.ai.V4Features.TILE_WIDTHS) {
+            tileSum += w;
+        }
+        eq("v4：tile 通道宽度合计", tileSum, mahjong.ai.V4Features.C_TILE);
+        int evtSum = 0;
+        for (int w : mahjong.ai.V4Features.EVT_WIDTHS) {
+            evtSum += w;
+        }
+        eq("v4：evt 字段宽度合计", evtSum, mahjong.ai.V4Features.C_EVT);
+        int ctxSum = 0;
+        for (int w : mahjong.ai.V4Features.CTX_WIDTHS) {
+            ctxSum += w;
+        }
+        eq("v4：ctx 分组宽度合计", ctxSum, mahjong.ai.V4Features.C_CTX);
+        eq("v4：块清单条数", mahjong.ai.V4Features.BLOCK_IDS.length, 16);
+        check("v4：块清单指纹是 16 位十六进制",
+                mahjong.ai.V4Features.fingerprint().matches("[0-9a-f]{16}"));
+        check("v4：单块清单的指纹 != 全量清单指纹（防呆：指纹真的在算清单）",
+                !mahjong.ai.V4Features.fingerprint(java.util.List.of("tile.own"),
+                        java.util.List.of(3)).equals(mahjong.ai.V4Features.fingerprint()));
+
+        // ② 负向对照：obs v2 必须**报错**（不许把 evt 整块填 0 了事）
+        boolean rejected = false;
+        try {
+            mahjong.ai.V4Features.assemble(new java.util.HashMap<>(java.util.Map.of("v", 2)));
+        } catch (IllegalArgumentException e) {
+            rejected = e.getMessage() != null && e.getMessage().contains("obs v");
+        }
+        check("v4：obs v2 被硬拒（不静默降级）", rejected);
+
+        java.nio.file.Path fx = null;
+        for (String cand : new String[]{"python/tests/golden/forward-v4.bin",
+                "../python/tests/golden/forward-v4.bin", "../../python/tests/golden/forward-v4.bin"}) {
+            if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
+                fx = java.nio.file.Path.of(cand);
+                break;
+            }
+        }
+        if (fx == null) {
+            System.out.println("（提示）v4 golden 夹具不在，跳过 P5 对拍：python/tests/golden/forward-v4.bin");
+            return;
+        }
+        byte[] raw;
+        try {
+            raw = java.nio.file.Files.readAllBytes(fx);
+        } catch (java.io.IOException e) {
+            check("读 v4 golden 夹具", false);
+            return;
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        eq("v4 golden 夹具魔数（MJ4G）", bb.getInt(), V4_GOLDEN_MAGIC);
+        eq("v4 golden 夹具格式版本", bb.getInt(), 1);
+        int nCases = bb.getInt();
+        int netLen = bb.getInt();
+        byte[] netBytes = new byte[netLen];
+        bb.get(netBytes);
+        mahjong.ai.V4Policy net = null;
+        try {
+            net = mahjong.ai.V4Policy.loadBytes(netBytes, fx.toString());
+        } catch (java.io.IOException e) {
+            check("v4 权重能被 V4Policy 加载（" + e.getMessage() + "）", false);
+            return;
+        }
+        check("v4：权重里的块指纹 == Java 重算的注册表指纹",
+                net.blockFingerprint().equals(mahjong.ai.V4Features.fingerprint()));
+        check("v4：块清单齐全（没有消融缺失）", net.missingBlocks().isEmpty());
+        boolean dispatched = false;
+        try {
+            dispatched = mahjong.ai.NetWeights.loadBytes(netBytes, "fx") instanceof mahjong.ai.V4Policy;
+        } catch (java.io.IOException e) {
+            dispatched = false;
+        }
+        check("v4：格式 2 由 NetWeights 分派到 V4Policy", dispatched);
+        eq("v4：推理头宽度（value）", net.valueBins(), 5);
+
+        // ③ 逐元素对拍：四张量（特征）+ 四个推理头（前向）
+        float worstFeat = 0f;
+        float worstHead = 0f;
+        int argmaxOk = 0;
+        java.util.Map<String, Object> firstObs = null;
+        for (int c = 0; c < nCases; c++) {
+            int obsLen = bb.getInt();
+            byte[] ob = new byte[obsLen];
+            bb.get(ob);
+            java.util.Map<String, Object> obs = Json.asObj(Json.tryParse(new String(ob, java.nio.charset.StandardCharsets.UTF_8)));
+            if (firstObs == null) {
+                firstObs = obs;
+            }
+            int n = bb.getShort() & 0xFFFF;
+            for (int i = 0; i < n; i++) {
+                // ⚠ 先读长度再挪位置：`bb.position() + (bb.getShort() & 0xFFFF)` 里
+                //   `bb.position()` 会**先求值**（读到的是还没读那个 u16 的位置）⇒ 每次少挪 2 字节，
+                //   整个夹具从第二个候选起就错位（症状：第二条决策的 obs 解析成 null）。
+                int kl = bb.getShort() & 0xFFFF;
+                bb.position(bb.position() + kl);
+            }
+            float[][] tile = v4ReadMat(bb, mahjong.ai.V4Features.KIND_COUNT, mahjong.ai.V4Features.C_TILE);
+            float[][] evt = v4ReadMat(bb, mahjong.ai.V4Features.K_EVT, mahjong.ai.V4Features.C_EVT);
+            float[] ctx = v4ReadVec(bb, mahjong.ai.V4Features.C_CTX);
+            float[][] cand = v4ReadMat(bb, n, mahjong.ai.V4Features.C_CAND);
+            float[] logits = v4ReadVec(bb, n);
+            float[] value = v4ReadVec(bb, net.valueBins());
+            float[] belief = v4ReadVec(bb, 3);
+            float[][] danger = v4ReadMat(bb, n, 4);
+
+            mahjong.ai.V4Features.Tensors t = mahjong.ai.V4Features.assemble(obs);
+            worstFeat = Math.max(worstFeat, maxAbs(t.tile, tile));
+            worstFeat = Math.max(worstFeat, maxAbs(t.evt, evt));
+            worstFeat = Math.max(worstFeat, maxAbs(t.ctx, ctx));
+            worstFeat = Math.max(worstFeat, maxAbs(t.cand, cand));
+            java.util.Map<String, float[]> o;
+            try {
+                o = net.forwardAll(obs);
+            } catch (java.io.IOException e) {
+                check("v4 前向抛异常：" + e.getMessage(), false);
+                return;
+            }
+            worstHead = Math.max(worstHead, maxAbs(o.get("policy"), logits));
+            worstHead = Math.max(worstHead, maxAbs(o.get("value"), value));
+            worstHead = Math.max(worstHead, maxAbs(o.get("belief_tenpai"), belief));
+            worstHead = Math.max(worstHead, maxAbs(o.get("danger"), v4Flatten(danger)));
+            if (v4Argmax(o.get("policy")) == v4Argmax(logits)) {
+                argmaxOk++;
+            }
+        }
+        check("v4 golden：四张量逐元素一致（最大误差 " + worstFeat + "）", worstFeat < 1e-4f);
+        check("v4 golden：四个推理头逐元素一致（最大误差 " + worstHead + "）", worstHead < 1e-4f);
+        eq("v4 golden：每条的 argmax 与 Python 一致", argmaxOk, nCases);
+
+        // ④ 红证：策略头偏置 +1 ⇒ 每条 logit 恰好 +1
+        if (firstObs != null) {
+            mahjong.ai.V4Policy shifted = net.debugOutputBiasShift(1.0f);
+            try {
+                float[] a = net.logits(firstObs);
+                float[] b = shifted.logits(firstObs);
+                boolean ok = a.length > 0 && a.length == b.length;
+                for (int i = 0; i < a.length && ok; i++) {
+                    if (Math.abs((b[i] - a[i]) - 1.0f) > 1e-3f) {
+                        ok = false;
+                    }
+                }
+                check("v4 golden：红证 —— 策略头偏置 +1 后每条 logit 恰好 +1", ok);
+            } catch (java.io.IOException e) {
+                check("v4 红证前向抛异常：" + e.getMessage(), false);
+            }
+
+            // ⑤ 消融：关掉事件流 ⇒ evt 整块 0、tile 不动（规范 §7；推理端也必须能关）
+            mahjong.ai.V4Features.Tensors ab = mahjong.ai.V4Features.assemble(
+                    firstObs, java.util.Set.of("evt.stream"));
+            float evtMax = 0f;
+            for (float[] row : ab.evt) {
+                evtMax = Math.max(evtMax, maxAbs(row, new float[row.length]));
+            }
+            eq("v4：消融 evt.stream 后事件张量全 0", evtMax, 0f);
+            mahjong.ai.V4Features.Tensors full = mahjong.ai.V4Features.assemble(firstObs);
+            check("v4：消融 evt.stream 不影响 tile（关一块只关一块）",
+                    maxAbs(ab.tile, full.tile) == 0f);
+
+            // ⑥ 权重体检的负向对照：把特征版本改坏 ⇒ 构造期报错（不是对局里算出乱动作）
+            byte[] broken = netBytes.clone();
+            java.nio.ByteBuffer.wrap(broken).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(8, 3);
+            String msg = null;
+            try {
+                mahjong.ai.V4Policy.loadBytes(broken, "broken");
+            } catch (java.io.IOException e) {
+                msg = e.getMessage();
+            }
+            check("v4：特征版本不符被构造期拒绝（" + msg + "）",
+                    msg != null && msg.contains("特征版本"));
+        }
+    }
+
+    private static float[][] v4ReadMat(java.nio.ByteBuffer bb, int rows, int cols) {
+        float[][] m = new float[rows][cols];
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                m[r][c] = bb.getFloat();
+            }
+        }
+        return m;
+    }
+
+    private static float[] v4ReadVec(java.nio.ByteBuffer bb, int n) {
+        float[] v = new float[n];
+        for (int i = 0; i < n; i++) {
+            v[i] = bb.getFloat();
+        }
+        return v;
+    }
+
+    private static float[] v4Flatten(float[][] m) {
+        float[] out = new float[m.length * (m.length > 0 ? m[0].length : 0)];
+        int k = 0;
+        for (float[] row : m) {
+            for (float v : row) {
+                out[k++] = v;
+            }
+        }
+        return out;
+    }
+
+    private static float maxAbs(float[][] a, float[][] b) {
+        float worst = 0f;
+        for (int i = 0; i < a.length && i < b.length; i++) {
+            worst = Math.max(worst, maxAbs(a[i], b[i]));
+        }
+        return worst;
+    }
+
+    private static float maxAbs(float[] a, float[] b) {
+        float worst = 0f;
+        for (int i = 0; i < a.length && i < b.length; i++) {
+            worst = Math.max(worst, Math.abs(a[i] - b[i]));
+        }
+        return worst;
+    }
+
+    private static int v4Argmax(float[] out) {
+        int best = -1;
+        float bestVal = Float.NEGATIVE_INFINITY;
+        for (int i = 0; i < out.length; i++) {
+            if (out[i] > bestVal) {
+                bestVal = out[i];
+                best = i;
+            }
+        }
+        return best;
     }
 
     /**

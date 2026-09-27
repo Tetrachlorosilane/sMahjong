@@ -28,7 +28,7 @@ import mahjong.util.Log;
  * <p>一致性由 `SelfTest.neuralForwardTests` 用 Python 导出的 golden 夹具逐元素钉住（容差 1e-4）：
  * 特征拼装 + 前向 两侧必须一样。**这是"训练与推理是同一个东西"的唯一保证。**
  */
-public final class NeuralPolicy implements ActionPolicy {
+public final class NeuralPolicy implements LogitPolicy {
 
     /** 权重文件魔数（"MJNN"）。 */
     public static final int MAGIC = 0x4D4A4E4E;
@@ -231,14 +231,10 @@ public final class NeuralPolicy implements ActionPolicy {
      * @param teacher 老师在本信息集的动作；{@code null} 或不在 `legal` 里 = 无先验（不惩罚任何人）
      * @param alpha   先验权重（logit 单位）。0 = 纯网络；≳ 几个 logit 差就足以压过学生自己的偏好
      */
+    @Override
     public Action chooseWithPrior(Decision d, Action teacher, float alpha) {
-        List<Action> legal = d.legal();
-        if (legal.isEmpty()) {
-            return Action.of(Action.PASS);
-        }
-        int prior = (teacher == null || alpha <= 0f) ? -1 : d.obs.indexOf(teacher);
-        int best = chooseIndex(d.obs.toJson(), d.obs.legalKeys(), prior, alpha);
-        return best < 0 ? Action.of(Action.PASS) : legal.get(best);
+        // 实现只有一份：`LogitPolicy` 的默认方法（v4 的 V4Policy 共用同一段）
+        return LogitPolicy.super.chooseWithPrior(d, teacher, alpha);
     }
 
     /**
@@ -257,20 +253,11 @@ public final class NeuralPolicy implements ActionPolicy {
     /**
      * 取最大值下标；并列取**最小下标**。
      *
-     * <p>⚠ 从 {@link #chooseIndex} 里原样抽出来的那段循环 —— 抽它只是为了让"采样"与"贪心"共用
-     * 一份兜底路径，**行为必须逐位不变**（原来是"严格大于才更新"，所以并列天然取最小下标；
-     * 别改成随机破平或 `>=`）。
+     * <p>⚠ 逻辑已挪进 {@link Logits#argmaxOf}（v3/v4 两代共用同一份，别在这里再抄一遍）：
+     * 原来是"严格大于才更新"，所以并列天然取最小下标 —— **别改成随机破平或 `>=`**。
      */
     private static int argmaxOf(float[] out) {
-        int best = -1;
-        float bestVal = Float.NEGATIVE_INFINITY;
-        for (int i = 0; i < out.length; i++) {
-            if (out[i] > bestVal) {
-                bestVal = out[i];
-                best = i;
-            }
-        }
-        return best;
+        return Logits.argmaxOf(out);
     }
 
     /**
@@ -286,14 +273,10 @@ public final class NeuralPolicy implements ActionPolicy {
      *
      * @param temp 采样温度（logit 单位）。T→0⁺ 趋近贪心；T 越大越接近均匀抽样
      */
+    @Override
     public Action chooseSampled(Decision d, Action teacher, float alpha, float temp, Random rng) {
-        List<Action> legal = d.legal();
-        if (legal.isEmpty()) {
-            return Action.of(Action.PASS);
-        }
-        int prior = (teacher == null || alpha <= 0f) ? -1 : d.obs.indexOf(teacher);
-        int pick = sampleIndex(d.obs.toJson(), d.obs.legalKeys(), prior, alpha, temp, rng);
-        return pick < 0 ? Action.of(Action.PASS) : legal.get(pick);
+        // 实现只有一份：`LogitPolicy` 的默认方法（v4 的 V4Policy 共用同一段）
+        return LogitPolicy.super.chooseSampled(d, teacher, alpha, temp, rng);
     }
 
     /**
@@ -323,38 +306,7 @@ public final class NeuralPolicy implements ActionPolicy {
      * 采样参数写错不该变成"随机乱打"。
      */
     public static int sampleSoftmax(float[] logits, float temp, Random rng) {
-        int n = logits.length;
-        if (n == 0) {
-            return -1;
-        }
-        float max = Float.NEGATIVE_INFINITY;
-        for (float v : logits) {
-            if (v > max) {
-                max = v;
-            }
-        }
-        double[] w = new double[n];
-        double sum = 0;
-        for (int i = 0; i < n; i++) {
-            double e = Math.exp((logits[i] - (double) max) / temp);
-            if (Double.isNaN(e)) {
-                e = 0;                                  // -inf - (-inf) = NaN：当成权重 0
-            }
-            w[i] = e;
-            sum += e;
-        }
-        if (!(sum > 0)) {
-            int fb = argmaxOf(logits);
-            return fb < 0 ? 0 : fb;                     // 全 NaN 时 argmaxOf 给 -1：退回第 0 条
-        }
-        double r = rng.nextDouble() * sum;
-        for (int i = 0; i < n; i++) {
-            r -= w[i];
-            if (r <= 0) {
-                return i;
-            }
-        }
-        return n - 1;                                   // 浮点尾巴：返回最后一条
+        return Logits.sampleSoftmax(logits, temp, rng);
     }
 
     /**

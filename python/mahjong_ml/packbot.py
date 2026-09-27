@@ -81,11 +81,22 @@ def _ascii_name(name: str, *, kind: str = "", policy: str = "") -> str:
 
 
 def export_net(ckpt: Path, out_bin: Path) -> int:
-    """checkpoint（`model.pt`）→ Java 侧权重文件；返回字节数。已存在就直接用。"""
+    """checkpoint（`model.pt`）→ Java 侧权重文件；返回字节数。已存在就直接用。
+
+    **两代自动分派**（v3 = `net.bin` 格式 1，v4 = 格式 2）：判断依据是 checkpoint 的
+    `config.model`。⚠ v4 的 `--alpha auto`（让位曲线）**没有实现**：那条曲线是 v3 的
+    `hybrid.analyse`（吃 state/cand 615/96），对 v4 的张量布局不成立 —— 传了就报错，别静默给个数。
+    """
     if out_bin.is_file():
         return out_bin.stat().st_size
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     cfg = ck["config"]
+    if cfg.get("model") == "v4":
+        from .v4 import export as v4export
+        sd = ck["model"]
+        dims = dict(cfg.get("dims") or v4export.dims_from_state(sd))
+        blob = v4export.save_net(sd, dims, out_bin, label=ckpt.parent.name, source=str(ckpt))
+        return blob.stat().st_size
     if cfg["state_dim"] != features.state_dim() or cfg["cand_dim"] != features.cand_dim():
         raise SystemExit(f"{ckpt} 的特征维度 ({cfg['state_dim']},{cfg['cand_dim']}) != 代码 "
                          f"({features.state_dim()},{features.cand_dim()})")
@@ -229,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         if alpha_mode == "auto":
             if not args.data:
                 raise SystemExit("--alpha auto 需要 --data <紧凑数据集>")
+            ck_cfg = torch.load(model_pt, map_location="cpu", weights_only=False).get("config") or {}
+            if ck_cfg.get("model") == "v4":
+                raise SystemExit(f"{ck}: v4 权重暂不支持 `--alpha auto`（让位曲线是 v3 的 "
+                                 f"state/cand 口径）；要么用 `--alpha <数值>`，要么等 v4 的混合口径")
             alpha, rep = alpha_for(model_pt, Path(args.data), args.split, args.target)
             note += (f"；α=auto（让位 {rep['defer_curve'].get(alpha, 0) * 100:.1f}%，"
                      f"数据集 {Path(args.data).name}）")

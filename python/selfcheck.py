@@ -1670,18 +1670,44 @@ _scd = {"n": 1, "ver": v4_spec.DERIVED_VERSION_V4,
         "danger_per_seat": np.arange(1, 103, dtype=np.int8).reshape(1, 3, 34),
         "danger_riichi_per_seat": np.arange(1, 103, dtype=np.int8).reshape(1, 3, 34),
         "genbutsu_per_seat": np.zeros((1, 3, 5), dtype=np.uint8),
-        "suji_per_seat": np.zeros((1, 3, 5), dtype=np.uint8)}
+        "suji_per_seat": np.zeros((1, 3, 5), dtype=np.uint8),
+        # ⚠ 逐候选段（C 段）**必须**在这张表里：2026-09-27 就是因为它缺了，
+        #   `cand[88:128]` 整整 40 列在 v4-bc-001/002 里**全 0**（训练照跑、指标照出）
+        "nlegal": np.array([2], dtype=np.int16),
+        "offsets": np.array([0, 2], dtype=np.int64),
+        "cand": np.arange(1, 17, dtype=np.int16).reshape(2, 8)}
 _scd["genbutsu_per_seat"][0, :, 0] = 0b00000001                # 0 号牌种是三家现物
 _side = v4_traces.sidecar_dict(_scd, 0)
 eq("v4 数据集层：sidecar_dict 带上 derived_version", _side["derived_version"],
    v4_spec.DERIVED_VERSION_V4)
 eq("v4 数据集层：位图展开成 34 宽", tuple(np.asarray(_side["genbutsu_per_seat"]).shape), (3, 34))
+eq("v4 数据集层：sidecar_dict **带逐候选段**（少了它 cand[88:128] 会静默全 0）",
+   tuple(np.asarray(_side["cand"]).shape), (2, 8))
+ok(bool((np.asarray(_side["cand"])[1] == _scd["cand"][1]).all()),
+   "v4 数据集层：逐候选段按 offsets 切片（第二条 == 文件里的第二条）")
+_scd_bad = dict(_scd, nlegal=np.array([3], dtype=np.int16))     # 逐候选行数与 nLegal 不符
+try:
+    v4_traces.sidecar_dict(_scd_bad, 0)
+    ok(False, "v4 数据集层：逐候选段与 nLegal 错位必须报错")
+except v4_spec.ContractError as _e:
+    ok("nLegal" in str(_e), "v4 数据集层：逐候选段与 nLegal 错位被硬拒 ✓", str(_e)[:60])
 _td2 = v4_blocks.assemble(_v4obs, _side, allow_degraded=False)
 ok(not ({"tile.danger", "tile.safety"} & _td2.degraded),
    "v4 数据集层：有 sidecar v3 时 tile.danger / tile.safety 不降级（正向对照）")
 _s0, _w0 = v4_blocks.TILE_OFF["safety_genbutsu"]
 ok(bool((_td2.tile[0, _s0:_s0 + _w0] == 1.0).all()) and bool((_td2.tile[7, _s0:_s0 + _w0] == 0).all()),
    "v4 数据集层：现物位图按牌种落到 safety_genbutsu 三个对手通道")
+# 逐候选派生段真的进 `cand[88:96]`（v4-bc-001/002 全 0 的那个坑的正面判据）
+_cb = int(np.asarray(_side["cand"]).shape[0])
+ok(_cb > 0 and bool((_td2.cand[:_cb, 88:96] != 0).any()),
+   "v4 数据集层：逐候选派生段进了 cand[88:96]（不是全 0）",
+   f"max={float(np.abs(_td2.cand[:_cb, 88:96]).max()):.3f}")
+# 降级闸门：sidecar 不给 cand ⇒ `Tensors.degraded` 里必须有 `cand.derived`（dataset 靠它硬拒）
+_side_nocand = dict(_side)
+_side_nocand.pop("cand")
+_td3 = v4_blocks.assemble(_v4obs, _side_nocand, allow_degraded=False)
+ok("cand.derived" in _td3.degraded,
+   "v4 数据集层：sidecar 缺逐候选段 ⇒ 记为降级（`Tensors.degraded`，dataset 据此硬拒）")
 
 # 文件级：`iter_decisions` 逐行过闸门（一条 v3 + 一条 v2 ⇒ 读到第二条必须抛）
 _trdir = scratch("v4-traces")
@@ -1926,6 +1952,69 @@ eq("v4 均衡：阈值口径（离散 1% / 对手 CV 5%）",
 _bout = v4_harness.write_balance(_bdir)
 ok(_bout.is_file() and json.loads(_bout.read_text(encoding="utf-8"))["balanced"] is True,
    "v4 均衡：write_balance 落盘且结论一致")
+
+# ---- P5：v4 权重导出（`net.bin` 格式 2）+ golden 夹具 --------------------------------------
+import struct as _struct                                               # noqa: E402
+from mahjong_ml.v4 import export as v4_export                          # noqa: E402
+
+_v4shape = v4_export.expected_shapes(v4_export.FULL_DIMS)
+eq("P5 导出：期望张量表条数（74 个张量）", len(_v4shape), 74)
+eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 74)
+_v4sd = v4_model.build(20260928).state_dict()
+_v4dims = v4_export.dims_from_state(_v4sd)
+eq("P5 导出：从权重形状反推的维度", _v4dims, v4_export.FULL_DIMS)
+_v4blob = v4_export.net_blob(_v4sd, _v4dims)
+_v4blob2 = v4_export.net_blob(_v4sd, _v4dims)
+ok(_v4blob == _v4blob2 and len(_v4blob) > v4_export.HEADER_BYTES,
+   "P5 导出：同权重两次导出**逐字节相同**（固定顺序 + 无压缩）",
+   f"{len(_v4blob)} B")
+_pnet = scratch("v4-net") / "net.bin"
+_v4p = v4_export.save_net(_v4sd, _v4dims, _pnet)
+_eq = v4_export.read_net(_v4p)
+eq("P5 导出：读回的格式号", _eq["format"], v4_export.NET_FORMAT)
+eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
+eq("P5 导出：读回的张量数", len(_eq["tensors"]), 74)
+eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
+eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
+ok(all(tuple(np.asarray(_eq["tensors"][k]).shape) == s for k, s in _v4shape.items()),
+   "P5 导出：读回的每个张量形状与契约一致")
+# 导出 → 读回 → 载入模型 → 前向必须与原始模型逐位相同（"导出的就是训练的那个"）
+_v4m2 = v4_model.build(1)
+_v4m2.load_state_dict(v4_export.state_from_net(_eq), strict=True)
+_v4m2.eval()
+_tv = v4_blocks.assemble(_v4obs, _side, allow_degraded=False)
+import torch as _torch                                                  # noqa: E402
+with _torch.no_grad():
+    _args = (_torch.from_numpy(_tv.tile[None]), _torch.from_numpy(_tv.evt[None]),
+             _torch.from_numpy(_tv.ctx[None]), _torch.from_numpy(_tv.cand[None]))
+    _o1 = v4_model.build(20260928)(*_args)
+    _o2 = _v4m2(*_args)
+ok(bool((_o1["policy"] == _o2["policy"]).all()),
+   "P5 导出：导出→读回→载入后的 logits 与原始模型逐位相同")
+# 形状审计的负向对照：少一个张量 / 形状不对 ⇒ `net_blob` 必须报错（不是导出个坏文件）
+try:
+    v4_export.net_blob({k: v for k, v in _v4sd.items() if k != "heads.policy.bias"}, _v4dims)
+    ok(False, "P5 导出：缺张量必须报错")
+except v4_export.NetFormatError as _e:
+    ok("heads.policy.bias" in str(_e), "P5 导出：缺张量被形状审计抓住 ✓", str(_e)[:60])
+# golden 夹具：存在、版本、覆盖闸门、用例数与 meta 一致
+_gold = Path(__file__).resolve().parent / "tests" / "golden" / "forward-v4.bin"
+ok(_gold.is_file(), "P5 夹具：python/tests/golden/forward-v4.bin 在仓库里")
+_gmeta = json.loads(_gold.with_suffix(".json").read_text(encoding="utf-8"))
+eq("P5 夹具：格式号", _gmeta["format"], v4_export.GOLDEN_FORMAT)
+eq("P5 夹具：块指纹 == 注册表指纹", _gmeta["blocks_fingerprint"], v4_spec.fingerprint())
+eq("P5 夹具：用小网络（能进仓库）", _gmeta["dims"], v4_export.GOLDEN_DIMS)
+ok(set(v4_export.REQUIRED_TAGS) <= set(_gmeta["coverage"]),
+   "P5 夹具：覆盖闸门里的标签全都覆盖到了",
+   f"coverage={_gmeta['coverage']}")
+ok("ippatsu" in _gmeta["coverage"] and "riichi_any" in _gmeta["coverage"],
+   "P5 夹具：覆盖面带立直/一发（Java 把布尔数组读成 0 的那条漂移就是它抓的）")
+_graw = _gold.read_bytes()
+_gmagic, _gfmt, _gcases, _gnetlen = _struct.unpack_from("<4I", _graw, 0)
+eq("P5 夹具：魔数（MJ4G）", _gmagic, v4_export.GOLDEN_MAGIC)
+eq("P5 夹具：用例数与 meta 一致", _gcases, _gmeta["cases"])
+ok(_gnetlen == _gmeta["net_bytes"] and len(_graw) == _gmeta["bytes"],
+   "P5 夹具：内嵌权重长度与总长度都与 meta 对得上")
 
 # ---------------------------------------------------------------- 汇总
 

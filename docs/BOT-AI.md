@@ -247,9 +247,14 @@ python -m mahjong_ml.packbot --out bot-ai `
 > 内置的 `teacher / first / pass / random` 不受影响。
 > ⚠ **这 3 个包彼此之间的强度差别在实测里都证不出来**（见各行），选谁主要是选**打法风格**，不是选强弱；
 > 要"更强"目前只有内置 `teacher`（四强互啄里得点最高）。
-> ⚠ **v1.12.0 未随包发布新的机器人 AI 包**（v4 权重还不能导出：服务端/C++ 侧尚无 v4 前向，阶段 P5）
-> —— 上面这 3 个包**仍是当前可用的包**：已开包核对权重头为 `magic=MJNN ver=1 sd=615 cd=96`
-> （服务端 `Features.STATE = 544 + 71 = 615`），与本版同规格，可直接放进 `bot-ai/`。
+> ⚠ **v1.12.0 未随包发布新的机器人 AI 包**：那版发布时 v4 前向还没落地，`bot-ai/` 继续用
+> v1.11.0 的三个（已开包核对权重头 `magic=MJNN ver=1 sd=615 cd=96`，与本版同规格）。
+> **v1.12.0 之后的 `main` 上 v4 已经能打包**（`docs/FEATURES-V4.md` §6.1 的 `net.bin` **格式 2**）：
+> `python -m mahjong_ml.packbot --from-ckpt <v4 ckpt 目录>` 会按 `config.model == "v4"` 自动走
+> `v4/export.py`，服务端 `NetWeights` 按 `format` 分派到 `V4Policy`。⚠ 两条限制：
+> ① **v4 的 `--alpha auto` 未实现**（让位曲线是 v3 的 state/cand 口径）—— 传了直接报错，请用 `--alpha <数值>`；
+> ② v4 前向实测 ≈35–40 ms/决策（单线程 Java，见 `docs/TRAINING-V4.md` §P5），
+> **当 bot 可以、当自对弈主力还太慢**。
 
 
 > ⚠ **发布口径**：深度模型包**不带 teacher 先验**（`bot.json` 不写 `alpha`）。先验（`--alpha auto`）

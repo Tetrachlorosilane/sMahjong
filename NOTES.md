@@ -1935,6 +1935,47 @@ npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14 张、
 （`mahjong_ml.auxlabels`）。**教训**：Windows 上别用保留设备名当文件名（`aux` / `con` / `nul` / `prn` / `com?` / `lpt?`），
 它只在**某些工具**上炸，症状是"文件明明在、就是打不开"。
 
+**第七轮：P5 三端 v4 前向 + 两个"静默"真 bug（2026-09-27）**
+
+这一轮的主线是"把 v4 真正跑起来"（`net.bin` 格式 2 + Java/C++ 手写前向 + golden 夹具 + 三端对拍），
+但**过程中抓到的两个真 bug 比主线本身更值钱** —— 都属于"训练照跑、指标照出"的那一类：
+
+1. ⚠ **`cand[88:128]` 整整 40 列全 0**（实测 `compact/v4-bc-002`：逐列 `maxabs = 0`，262,095 条决策）。
+   根因是**两条一起**：`v4/traces.sidecar_dict` 只带逐家四段（D~G），**没带逐候选 C 段**，
+   于是 `blocks.cand_matrix` 走 `per_cand is None` 那条路**静默填 0**（只 `degraded.add("cand.derived")`），
+   而 `v4/dataset._write_file` **从不检查 `Tensors.degraded`**。修法两处都要：
+   `sidecar_dict` 带上 `cand`（按 `offsets` 切片 + 与 `nLegal` 对账，错位也报错）+
+   `_write_file` 遇到非空 `degraded` **直接抛**（"降级 = 静默换任务"）。**代价**：
+   一批数据集（`v4-bc-001/002`）作废、重采重训一轮。**收益**：同数据同超参，教师一致率 **0.619 → 0.903**。
+   ⇒ **教训**：`Tensors.degraded` 这种"事件标记"必须有一条**硬闸门**去消费它，否则等于没有。
+2. ⚠ **阶段 c（联合微调）把策略头练塌**：主干 lr 仍按 `--lr`（1e-3）从第一步就联合训练时，
+   `c` 段第一步 `top1 0.837 → 0.165`（= 首合法基线）、policy CE 恒定 1.897（融合输出 ReLU 全死、
+   logits 变常数 ⇒ argmax 恒取第 0 条）。加 `--stage-c-lr-mult`（乘在 a/c 基准 lr 上），`0.1` 就正常。
+   ⚠ 这个塌法**在 val 上表现为"policy CE 一动不动"**，第一轮数据（`cand` 全 0）时恰好不明显 ——
+   **输入一变，超参的安全边界就变**。
+3. ⚠ **夹具的覆盖面必须写成闸门**（否则"全绿"是假的）：Java 把 obs 里的 `riichi`/`ippatsu`
+   （**布尔数组**）按"只认数字"读 ⇒ 8 个 `ctx.seats` 通道恒 0，而 Python 读成 1。
+   旧夹具 7 个用例**恰好都没人立直**，三端对拍全绿却没抓到。修法：`v4/export.py` 的选例改成
+   "按状态标签贪心覆盖" + `REQUIRED_TAGS`（含 `riichi_any` / `ippatsu`）**覆盖不到就报错**；
+   红证：旧 jar 在新夹具上报 `c6.ctx[i38] Δ=1.000 → FAIL`，修完 10/10 PASS。
+   ⇒ **教训**：对拍夹具的价值 = 覆盖面的价值；"用例数"不是指标，"覆盖了哪些分支"才是。
+4. **`linear` 的别名安全**（Java 前向）：`linear(h, h, W, b)` 原地覆盖时，第 r 行会读到已被改写的
+   `x[0..r)` ⇒ logits 整体偏 0.0044（golden 现形为"前向 maxΔ=0.0099"）。torch 的 `nn.Linear`
+   天然不别名，所以这条只有自己写前向时才会踩。同类的还有 **`gruStep` 必须返回新数组**
+   （`gh` 要读整条旧 h）。
+5. **跨语言的十进制排版**：Java `Formatter` 的 `%.9g` 在"恰好一半"时 **half-up**，glibc `printf`
+   是 **ties-to-even**（`-759.8515625f` → `-759.851563` vs `-759.851562`，float32 位模式**相同**）。
+   ⇒ C++ 侧的 `v4net` 自带 `javaG9`，对拍判据才能写成"整行逐字符相同"。
+
+**判据（本机实测）**：`L1 --selftest` **1423/0**（+20：`v4ForwardTests` 的特征/前向/argmax/红证 +
+消融 + 版本/指纹负向对照）· `python selfcheck.py` **445/0**（+26：`sidecar_dict` 带 C 段 /
+逐候选与 nLegal 对账 / 降级闸门 / 导出往返 / 形状审计 / 夹具覆盖闸门）·
+`node tools/trainer-v4-parity.mjs --golden` **PASS**（Java 与 C++ 各与 Python 夹具一致）·
+`node tools/trainer-v4-parity.mjs tools\build\v4-bc-004\net.bin .tmp-v4fix` **1,885 条决策 maxΔ=0、argmax 全同** ·
+`--selfcheck` 证明比较器不是空转（扰动 logits/argmax/行数都会 FAIL）。
+**性能实测（没达标，记在这里）**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策（单线程 Java）——
+预算 ≤2 + ≤1.5 ms；下一轮靠**增量事件缓存** + 稠密循环优化（`docs/TRAINING-V4.md` §P5）。
+
 ---
 
 ## 6.6 teacher（内置机器人）的五层取舍
