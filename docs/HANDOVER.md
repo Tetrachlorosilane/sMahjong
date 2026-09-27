@@ -11,7 +11,7 @@
 | 项 | 值 |
 | --- | --- |
 | 分支 / HEAD | `Training` · **本文件所在提交**（`git log -1 --oneline` 取真值）；其父提交 `8b069fa`（obs v3 + v4 两轮预训练），再往前 `06d9ebd`（本文件首次落地）|
-| 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`8446ea5b`（= v1.12.0 的 tag）**，其 tree `6c746e4c…` **== 本地 `8b069fa` 的 tree** ⇒ **已同步**（§2.11）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree |
+| 远端 | `Tetrachlorosilane/sMahjong@Training` 头 = **`daacdc68`**（P5 的第二个提交；其 tree `5b56699a…` **== 本地 HEAD 的 tree**）⇒ **已同步**（§2.12）。⚠ 走 REST 推送时**本地与远端的提交 sha 本来就不同**，判据只有 tree；⚠⚠ **二进制文件（`forward-v4.bin`）进不了 `github_commit_files`**（它只收文本），要走 `POST /git/blobs`（base64）→ `POST /git/trees`（inline `sha`）→ `POST /git/commits` → `PATCH /git/refs`，见 §2.12 |
 | 发布 | **v1.12.0 已上线**（release **#397670321**，2 个资产：client + server；那版**不带机器人包** —— 当时 v4 还不能导出）。**现在 v4 已能打包**（`packbot --from-ckpt <v4 ckpt 目录>`，见 §2.12）：下一个 release 可以带 v4 包（先看 §3 ① 的性能结论） |
 | 数据盘 | `S:\mahjong-training` ≈ **17 GB**（`compact` 又多了 `v4-bc-003` 5.7 GB）；S 盘可用 ≈ **212 GB**。数据集：`raw\v4-bc-002` 1.19 GB → `compact\v4-bc-003`（**修好 `cand` 派生段后重建**，262,095 训练 / 14,965 验证）；checkpoint `ckpt\v4-bc-004`（教师一致率 **0.903**）与 `v4-bc-003`（0.165，阶段 c 塌掉的那份，留作对照） |
 | 训练进度 | **v3 谱系已到平台**；**v4 teacher 预训练三轮**：0.608（§2.9）→ 0.619（§2.10）→ **0.903**（§2.12，接上 `cand` 派生段 + 阶段 c 降 lr 之后） |
@@ -256,6 +256,15 @@
 **顺带修的**（都是"对拍/夹具"抓出来的）：obs 里 `hand_red`/`riichi`/`ippatsu` 是**布尔数组**
 （Java 曾把后两个读成 0，8 个通道恒 0 —— 旧夹具恰好没人立直所以没暴露）；`linear()` 的**别名安全**；
 `gruStep` 必须返回新数组；C++ 的 `%.9g` 排版要按 Java 的 dtoa 口径（`javaG9`）。
+
+**推送（本地 `ae065d8` / tree `5b56699a…`，37 个文件 = 24 改 + 13 增）**：
+① **文本 36 个**走 `github_commit_files`（一次带过去，基线 `cf53c76d`）→ 远端 `7f6a4a67`；
+② ⚠ **二进制（`python/tests/golden/forward-v4.bin`，573,336 B）它不收**（只收文本）⇒
+   单独走四步：`POST /git/blobs`（`content` = base64、`encoding: base64`；**大 payload 用 `bodyFile`
+   落盘再发**，别塞进工具参数）→ `POST /git/trees`（`base_tree` = 上一步的 tree + 该文件的
+   `sha` 条目）→ `POST /git/commits`（parent = 上一步提交）→ `PATCH /git/refs/heads/Training`
+   （`force: false`）⇒ 远端 `daacdc68`，其 tree `5b56699a…` **== 本地 HEAD 的 tree**（判据达成）。
+   ⚠ 上传前用 `git hash-object <file>` 对一下 blob sha（本次 `deee0bcd…` 两侧一致）。
 
 ---
 
