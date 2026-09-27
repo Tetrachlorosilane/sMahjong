@@ -1,5 +1,7 @@
 # upstream-parse-check — 用**上游真解析器**验导出的牌谱
 
+> **板块 ⑥ 验证与文档纪律** · 索引：`docs/INDEX.md` · 相关：`NOTES.md` §9.6 · `docs/input-json.md`
+
 `tools/tenhou-log-check.mjs` 是我们**照抄规格复刻**的校验器（判据来自 `docs/input-json.md` 与
 上游 `convlog` 源码）。复刻得再像也还是两份代码，所以导出格式动过之后，最好再拿
 **mjai-reviewer 自己的解析/转换代码**跑一遍 —— 这个目录就是那件事的最小工具。

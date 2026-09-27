@@ -133,5 +133,26 @@ for (const f of walk('.')) {
 }
 ok(bad.length === 0, `${refs} 条 §引用全部解得出目标`, bad.slice(0, 20).join('\n         '));
 
+// ---------------------------------------------------------------- ④ 索引完整
+// `docs/INDEX.md` 是文档总索引：它**列出的路径必须存在**，且 `docs/` 下**每份 .md 都要被列出**
+// —— 加文档忘了登记，或者搬家后索引指着旧路径，都会在这里红（负向对照见 `AGENTS.md` §8）。
+const INDEX = 'docs/INDEX.md';
+if (!existsSync(INDEX)) {
+    ok(false, `${INDEX} 存在（文档总索引）`, 'AGENTS.md §0 与 §5 都指向它');
+} else {
+    const idxText = readFileSync(INDEX, 'utf8').replace(/\r\n/g, '\n');
+    // ① docs/ 下每份 .md（除索引自己）都要在索引里出现
+    const docFiles = readdirSync('docs').filter((f) => f.endsWith('.md') && f !== 'INDEX.md');
+    const unlisted = docFiles.filter((f) => !idxText.includes(f));
+    ok(unlisted.length === 0, `${INDEX} 登记了 docs/ 下全部 ${docFiles.length} 份 .md`,
+       `未登记：${unlisted.join(', ')}`);
+    // ② 索引里以反引号列出的仓库内文件路径都要真的存在（`*` 通配写法只展示、不校验）
+    const paths = new Set([...idxText.matchAll(/`([^`\n]+\.(?:md|mjs|ps1|sh))`/g)]
+        .map((m) => m[1])
+        .filter((p) => /^(docs|tools|client|python|trainer|server)\//.test(p) && !p.includes('*')));
+    const badPaths = [...paths].filter((p) => !existsSync(p));
+    ok(badPaths.length === 0, `${INDEX} 里提到的 ${paths.size} 条路径都存在`, badPaths.join(', '));
+}
+
 console.log(failed === 0 ? '[doc-refs] PASS' : `[doc-refs] FAIL（${failed} 条）`);
 process.exit(failed === 0 ? 0 : 1);

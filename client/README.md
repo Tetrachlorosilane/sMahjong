@@ -1,5 +1,7 @@
 # 立直麻将 · Qt6 客户端（Windows）
 
+> **板块 ③ 客户端** · 索引：`docs/INDEX.md` · 相关：`AGENTS.md` §3.3 · `AGENTS.md` §6.2（布局不变量）· `docs/THEME.md`
+
 Qt 6 Widgets + C++17，MinGW 构建。**只负责界面与通信，不做任何规则判定** ——
 役种、番数、符数、点数、振听、流局、连庄全部由 Java 服务端裁定。
 

@@ -6,27 +6,17 @@
 
 ## 0. 怎么用这份文档
 
-**两份文件，一套章节号**：
-
-| 文件 | 定位 | 什么时候读 |
-| --- | --- | --- |
-| **`AGENTS.md`**（本文件） | **手册**：铁律、判据、命令、不变量、速查表 | **动代码前必读**：§2 铁律 → §3 构建 → §4 验证 → §6 约定 |
-| **`NOTES.md`**（根目录） | **细节分册**：完整案例与红证、几何推导、全量症状表、素材管线、已知限制 | **需要时查**（章节号与本文件一一对应） |
+**三份文件，一套章节号**：**本文件 = 手册**（判据 / 命令 / 不变量 / 速查表，**动代码前必读**）·
+**`NOTES.md` = 细节分册**（案例 / 红证 / 推导 / 全量症状 / 已知限制，**需要时查**；章节号与本文件一一对应）·
+**`docs/INDEX.md` = 文档总索引**（六个板块 · 按任务 / 按角色查 · 目录树 · 文档清单；玩家看 `README.md`）。
 
 > ⚠ **本文件必须"每次会话都读得完"**：它是自动加载的工作区指令，而**指令预算只有 64 KB** ——
 > 超了会被**静默截断**（后面的章节等于不存在，而且不报错）。所以**判据留下、细节进 `NOTES.md`**（见 §8）。
 
 **按轻重缓急读**：① §2 铁律（违反必出 bug，改代码前先扫一遍）→ ② §3 构建 / §4 验证五层
 （"编译通过"不算验证）→ ③ §6 代码约定（按主题分组的硬约束）→ ④ §7 症状表（报障时按症状查）
-→ 其余（§5 目录、§8 文档维护）需要时再翻。
-
-文档地图：`docs/PROTOCOL.md`（协议契约 —— **改协议先改它**）· `docs/DESIGN.md`（架构与规则取舍）·
-`docs/AUDIT.md`（审计与修复清单，条目号 `S-nn`）· `docs/THEME.md`（材质包/设置文件）·
-`docs/THIRD-PARTY.md`（第三方许可与分发义务）· `docs/DEPLOY.md`（Ubuntu 部署）·
-`docs/BOT-AI.md`（**机器人 AI 包格式**）·
-`client/README.md`（客户端构建与链接方式）· `README.md`（**面向玩家**）· `NOTES.md`（**细节分册**）·
-`docs/TRAINING.md`（机器学习训练方案 · **P0–P4 与 P5b 已落地**；P5 只落了最小可用子集、P6 未做）。
-### 2.3 十四条曾经踩过的坑（同类问题会再犯）
+→ 其余（§5 板块地图、§8 文档维护）需要时再翻。
+### 2.3 十五条曾经踩过的坑（同类问题会再犯）
 
 > 这里只有**判据**（"再遇到同类问题，代码该怎么写"）。每条的**报障原文 / 根因推导 / 红证数据**
 > 在 **`NOTES.md` §2.3**（同编号）。**新踩的坑请按同样格式加在这里 + 详情写进 NOTES。**
@@ -60,7 +50,10 @@
     ⚠ **牌谱导出踩过同一条**：庄家第 14 张若取"排序后最后一张"而不是 `drawn`，整场手牌账会错位，
     复盘器（状态机重放）会直接拒收整份牌谱；**鸣牌串也必须写真实牌码**（赤五 51/52/53 与普通五
     15/25/35 是两套码，别把被鸣那张复制 n 份）。判据：`tools/tenhou-log-check.mjs` 的第 ⑧ 条。
-    （NOTES §2.3-11、§9.6.4）
+    ⚠ **`rule` 里 `aka` 与 `aka51/52/53` 必须说同一件事**（都是"**每种**赤五几张"）：真天鳳牌譜里
+    日本客户端写 `"aka":1`、国际客户端只写 aka51/52/53 —— 别再写 `aka:0` + `aka51:1` 这种官方格式里
+    不存在的组合。该检查器现在还查 ⑨摸牌 ≤70 / ⑩立直必须真听牌 / ⑪和了形（含七对子·国士）/
+    ⑫赤五每局唯一 / ⑬天鳳规则的立直门槛。（NOTES §2.3-11、§9.6.4~§9.6.6）
 12. **振听有三种，且「自己打出过的牌」≠「牌河」**：舍张振听要算上**被鸣走的舍牌**
     （唯一记账点 `Round.recordDiscard`，账在 `discardKindsEver`）；同巡振听在被给 `ron` 却见逃
     （含超时未答）时置位、自家下次摸牌解除；立直见逃 → `furitenPerm` 到本局结束。
@@ -74,6 +67,14 @@
     **五个检查点**看这个标志（`play()` 主循环开头 / `ask()` 后 / `claimPhase()` 后与它的等待循环 /
     `Table.awaitAction` 循环开头），局间由 `sleepMs`（切片）与 `awaitRoundConfirm` 提前醒。
     漏一个就是"票都通过了，牌桌还在等"。（NOTES §2.3-14）
+15. **规则预设决定"能不能喂复盘器"：M.League 独有的合法动作会被天鳳规则的复盘器整份拒收。**
+    《天鳳》《雀魂》要求「持点 ≥1000 **且** 剩余可摸牌 ≥4 张」才能立直；**M.League 两者都不要**
+    （mleague 预设 `riichiMinScore=0 / riichiMinTilesLeft=0`，docs/日本麻将.md L382）。网页版复盘器
+    （Mortal）按**天鳳规则**重放，遇到这种立直会判**规则违规、整份牌谱拒收**，而且**只有"被分析的那家"
+    自己做了该动作时才报错** —— 症状是「换一个座位分析就正常」（2026-09-27 用户那份就是：座位 2
+    在東3 只剩 2 张牌时立直）。判据：`tools/tenhou-log-check.mjs` 第 ⑬ 条；导出时客户端会往
+    `problems` 塞 `riichi_few_tiles_r<N>s<seat>` / `riichi_low_score_r<N>s<seat>`（回放窗口状态栏可见）。
+    **要复盘就用 tenhou 预设建房**（大厅有预设下拉）。（NOTES §2.3-15、§9.6.6）
 ## 1. 这是什么
 
 一套完整可运行的四人立直麻将联网游戏：
@@ -172,21 +173,12 @@ Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 
 **Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（→ 仓库根 `.qt/`，已 gitignore）。
 参数与"哪些能自动取"见 `client/README.md`。
 
-### `build\` 与 `dist\` 的关系（两者**不应该**整目录相同）
+### `build\` 与 `dist\` 的关系
 
-| 目录 | 内容 | 何时更新 |
-| --- | --- | --- |
-| `client\build\` | 构建目录：exe + Qt 运行时 + `CMakeFiles/`、`mj_moc/`、`*.obj`、`st/` 等中间产物 | **每次**构建 |
-| `client\dist\` | 发布目录：**只含运行必需**（exe + Qt DLL + platforms/styles/tls + tiles/ + fonts/） | **只有带 `-Deploy`** 时 |
-
-所以「一致」只应针对**可交付子集**（上表 dist 那几类），比对方法：
-```powershell
-# 只在 build  /  只在 dist  /  两边都有但内容不同
-pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项都是 0
-```
-⚠ 判据**不要用 exe 哈希**：每次构建都 clean 重建 + 重新链接，PE 头时间戳不同 →
-同一份源码的哈希也会变，比哈希会次次报警（等于没有信号）。
-`build.ps1` 现在会在**不带 `-Deploy`** 且 `dist\` 早于最新源文件时打印提醒（语义判据，不会误报）。
+**判据**：`build\` **每次**构建都更新；`dist\` **只有带 `-Deploy`** 时更新 ⇒ **发布前必须先 `-Deploy`**
+（否则包里是旧 exe）。⚠ **不要比 exe 哈希**：clean 重建 + 重新链接会改 PE 头时间戳，同一份源码哈希也会变，
+比哈希次次报警（等于没有信号）—— 比**可交付子集**（exe + Qt DLL + platforms/styles/tls + tiles/ + fonts/）
+的有无与内容。表的注解与踩坑见 `NOTES.md` §3.2。
 
 ### 3.4 构建避坑
 
@@ -224,7 +216,7 @@ java -jar server\build\mahjong-server.jar --selftest
 
 ```powershell
 client\dist\mahjong-client.exe --selftest client\build\st
-# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 852 项）；并产出 tiles.png / table.png / river_overflow.png
+# 期望：检查项 N，失败 0 / SELFTEST PASS（当前 854 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
 覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
@@ -269,7 +261,7 @@ node tools\trainer-action-parity.mjs      # 同上：动作键/下标/回包/落
 node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/input-json.md 再解一遍，见 NOTES §9.6）
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
-node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解（见 §8）
+node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解 + `docs/INDEX.md` 完整性（见 §8）
 ```
 
 > ⏱ `e2e-test` 耗时与加速开关见 NOTES §4。
@@ -299,39 +291,21 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 `--autoplay` 会记录**每次 ask 的选项类型**，排查"某个按钮没出现"非常有用。
 **客户端全部命令行模式**（`--selftest` / `--lobbytest` / `--autoplay` / `--demo` / `--replay` /
 `--gentiles` / `--fontprobe`）的说明见 **NOTES §4 末表**。
-## 5. 目录结构
+## 5. 目录结构（板块地图）
 
-```
-mahjong/
-├─ docs/             日本麻将.md 规则原文（权威依据）· PROTOCOL.md 协议契约 ★ 改协议先改这里 ·
-│                    DESIGN.md 架构与取舍 · AUDIT.md 审计条目（S-nn）· DEPLOY.md Ubuntu 部署 ·
-│                    TRAINING.md 机器学习训练方案（P0–P4 已落地）· **BOT-AI.md 机器人 AI 包格式**（§6.6）·
-│                    THEME.md 材质包/设置 · THIRD-PARTY.md 许可义务 · images/ 截图资产
-├─ server/           build.sh·run.sh（Ubuntu）/ build.ps1（Windows）+ src/main/java/mahjong/
-│                    util(Json/Log) · core(Tiles Meld Rules Wall) · rules(Shanten Agari Evaluator
-│                    Payments Visible HandEval) · game(Round Table + WinCheck/RoundOptions/
-│                    RoundClaims/RoundScoring 这些纯判据) · replay(Replay Store Recorder)
-│                    **player(PlayerStore —— 玩家档案，见 §6.8)** · net(Server Session)
-│                    bot(Bot=牌效 AI/teacher) · ai(★训练接口：PolicyFactory/Observation/Action/
-│                    **BotAis 机器人 AI 注册表**) · train(SelfPlay/TraceRecorder) ·
-│                    test(SelfTest ★ 改规则在这里加断言)
-├─ client/           build.ps1 + assets/{tiles(38 个 <牌码>.svg), i18n(<locale>.json), fonts} + src/
-│                    src：main.cpp(入口/命令行模式) · SelfTest.cpp · AutoPlay.cpp · i18n/Lang
-│                    net(NetClient/Protocol) · model(Tile TableModel AutoPolicy Settings Theme)
-│                    ui(TileRenderer TableView ActionBar AutoBar LobbyDialog ResultDialog
-│                       SettingsDialog MainWindow ReplayWindow WallView)
-├─ tools/           联调脚本 + 静态检查 + 打包。**完整清单见 glob tools/\***（名字自解释）：
-│                    *-test.mjs = 真 socket 回归（§4 L3）· i18n-* = 文案三件套 · mock-server = L4 假服务端 ·
-│                    test-client.mjs = 联调共用小客户端 · doc-refs-check.mjs = 文档引用自检 ·
-│                    package-release.ps1 + make-zip.mjs = 发布打包（NOTES §9.5）
-├─ python/           **训练侧（Python）**：`mahjong_ml/`（features · dataset · bc · dagger · ppo · offline_rl ·
-│                    awr · online=世代循环/阶梯/配对/跨代筛选 · budget=时间预算与资源闸门 · paths=数据根与配额回收 · league · eval）+ `selfcheck.py`
-├─ trainer/          **训练端 C++ 自对弈引擎**（C++23/clang++，build/ 不进仓库）：自对弈 + 派生特征，
-│                    与 Java **逐字节**同源；`pwsh -File trainer\build.ps1 [-NoSelfTest]`；对拍见 §4；
-│                    设计、口径与全部实测见 **`docs/TRAINER-CPP.md`**（服务端**不变**）
-└─ 运行时数据（**都不进仓库**，见 .gitignore）：`replays/` 对局记录 · `players/` 玩家档案 ·
-                     `bot-ai/` 机器人 AI 包（与 jar/start.sh 同层，启动时自动挂载）
-```
+**完整目录树、文档清单与"哪个文件属于哪个板块"见 `docs/INDEX.md`**（它同时是文档总索引）。一句话版：
+
+| 板块 | 主要落点 |
+| --- | --- |
+| ① 规则与引擎（唯一权威方） | `server/src/main/java/mahjong/{core,rules,game}/` · `docs/日本麻将.md` · `docs/DESIGN.md` · `docs/AUDIT.md` |
+| ② 协议与两端契约 | `docs/PROTOCOL.md` ★（改协议先改它）· `docs/input-json.md` |
+| ③ 客户端（Qt6 Widgets） | `client/src/{ui,model,net}/` · `client/README.md` · `docs/THEME.md` |
+| ④ 训练（v3 现状 → v4 目标） | `python/mahjong_ml/` · `trainer/` · `docs/TRAINING.md` · `docs/FEATURES-V4.md` · `docs/TRAINING-V4.md` · `docs/TRAINER-CPP.md` · `docs/BOT-AI.md` |
+| ⑤ 运维与发布 | `docs/DEPLOY.md` · `docs/THIRD-PARTY.md` · `tools/package-release.ps1` + `make-zip.mjs` |
+| ⑥ 验证与文档纪律 | `tools/*-test.mjs` · `tools/*-parity*.mjs` · `python/selfcheck.py` · `AGENTS.md` · `NOTES.md` · `docs/INDEX.md` |
+
+运行时数据（**都不进仓库**，见 `.gitignore`）：`replays/` 对局记录 · `players/` 玩家档案 ·
+`bot-ai/` 机器人 AI 包（与 `jar`/`start.sh` 同层，启动时自动挂载）。
 
 ---
 
@@ -672,6 +646,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 | 牌河/副露牌太小、盘偏扁、立直棒叠点数 | §6.2 的不变量（比例、区带、固定左缘）；改完**必须看图**（L2 出 `table.png`） |
 | `dist\` 里的 exe 不是最新 | 带 `-Deploy` 重新构建（`build\` 每次更新，`dist\` 只在 `-Deploy` 时更新） |
 | **训练盘（`S:`）采集/训练中途开始报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样（目录一度还能枚举、余量正常），⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据见 `NOTES.md` §6.5 |
+| **网页版复盘器「只有分析某一家时报错」**（换一个座位就正常） | 那一家做过**天鳳规则不允许**的动作（M.League 允许）：最常见是**立直时牌山不足 4 张**或**持点不足 1000**（§2.3-15）。引擎只校验"被分析那家"自己的动作。判据：`node tools\tenhou-log-check.mjs` 第 ⑬ 条；要复盘就用 **tenhou 预设**建房 |
 ## 8. 文档维护约定（AGENTS.md / NOTES.md 的分工）
 
 **本文件是"每次会话自动加载"的工作区指令，而指令预算只有 64 KB —— 一旦超过，后面的章节会被
@@ -691,7 +666,8 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 ⚠ **`NOTES.md` 独有**的章节一律取编号 **≥10**（AGENTS 里同号常是别的主题：AGENTS §8 是文档维护，
 而"已知限制"原来也叫 §8，于是「见 §8」指不明白 —— 现已改号为 **NOTES §10**）；
 ③ **改完跑 `node tools\doc-refs-check.mjs`**：它会查 AGENTS 的**字节预算**、章节号**完整性**、
-   以及全仓 `§引用`是否**都解得出目标**（拆分/搬章节时最该跑的一条）。
+   全仓 `§引用`是否**都解得出目标**（拆分/搬章节时最该跑的一条），以及 **`docs/INDEX.md` 的完整性**
+   （索引列出的路径都存在 + `docs/` 下每份 `.md` 都被登记 —— 加文档忘了登记会被抓出来）。
 
 其它：`README.md` 面向玩家（改了玩家看得见的行为就同步）；`docs/PROTOCOL.md` 两端唯一契约
 （**改协议先改它**）；`docs/DESIGN.md` 架构与取舍；`docs/AUDIT.md` 审计条目（`S-nn`）；`docs/DEPLOY.md` 部署。

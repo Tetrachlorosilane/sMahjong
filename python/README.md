@@ -1,5 +1,7 @@
 # 训练侧（Python）—— 环境与纪律
 
+> **板块 ④ 训练（跑法）** · 索引：`docs/INDEX.md` · 相关：`docs/TRAINING.md`（v3 方案）· `docs/FEATURES-V4.md` + `docs/TRAINING-V4.md`（v4）· `NOTES.md` §6.5
+
 这里是 `docs/TRAINING.md` 的**可执行部分**：只放源码与环境说明，**不放数据、不放环境**。
 
 - **训练数据一律在 S 盘**：`S:\mahjong-training\`（卷标 `Silicon_files`）——见 TRAINING §0.1.1。

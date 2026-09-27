@@ -1,5 +1,7 @@
 # 自定义输入 JSON 牌谱的格式说明
 
+> **板块 ② 协议（牌谱导出格式）** · 索引：`docs/INDEX.md` · 相关：`NOTES.md` §9.6 · `tools/tenhou-log-check.mjs`
+
 本文说明 `mjai-reviewer` **唯一接受的自定义输入**——也就是 tenhou.net/6 格式牌谱 JSON——是如何组织的，
 以及手写 / 改造这类牌谱时必须满足的约束。
 

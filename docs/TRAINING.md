@@ -1,5 +1,7 @@
 # 立直麻将 · 机器学习训练方案（以 teacher 为基模 → 自对抗进化）
 
+> **板块 ④ 训练（v3 现状）** · 索引：`docs/INDEX.md` · 相关：`docs/FEATURES-V4.md` + `docs/TRAINING-V4.md`（v4）· `python/README.md`（跑法）· `NOTES.md` §6.5
+
 > **状态（2026-09）**：**P0–P4 与 P5b 已落地** —— 每节标题上标了 ✅ 的就是已实施、且下面就是
 > **实测数字与红证**；没标的是计划（P5 只落了最小可用子集：对手池 + 加权采样 + Plackett-Luce Elo +
 > 位移矩阵 + 配对检验；PSRO-lite 的"最佳响应 + 多样性下限"与 P6 搜索增强都还没做）。
@@ -7,7 +9,10 @@
 >
 > 相关文档：`docs/PROTOCOL.md` §8（**训练接口的权威契约**：观测字段 / 动作空间 / 自对弈 CLI / 数据格式）·
 > `AGENTS.md` §6.5（训练接口的红线）· `NOTES.md` §6.6（teacher 的策略与"改 teacher = 改标签"）·
-> `docs/DESIGN.md`「teacher（内置机器人）」· `NOTES.md` §10.4（训练侧已知限制）。
+> `docs/DESIGN.md`「teacher（内置机器人）」· `NOTES.md` §10.4（训练侧已知限制）·
+> ⚠ **下一代（v4）已另立两份文档，本文的 P0–P4 是 v3 谱系的历史与现状**：
+> `docs/FEATURES-V4.md`（**规范**：信息边界 = 人类玩家可见的全部 · 张量维度 · 版本契约）·
+> `docs/TRAINING-V4.md`（**设计**：架构 / 多头 / 评价体系 / 阶段目标 P0–P5）。
 
 ---
 
