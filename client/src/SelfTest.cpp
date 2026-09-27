@@ -2459,10 +2459,15 @@ int run(const QString& outDir)
         check(!root.isEmpty(), QStringLiteral("牌谱：JSON 可解析"));
         checkEq(QString::number(root.value(QStringLiteral("name")).toArray().size()),
                 QStringLiteral("4"), QStringLiteral("牌谱：四家名字"));
-        // rule：局制 + 赤五声明（三麻用的 aka 必须是 0，四麻写 aka51/52/53）
+        // rule：局制 + 赤五声明。⚠ `aka` 与 aka51/52/53 必须**说同一件事**（每种赤五几张）：
+        //   真天鳳牌譜日本客户端写 `{"disp":"般南喰赤","aka":1}`（整份日志 3 张赤五 = 每种 1 张），
+        //   国际客户端只写 aka51/52/53。硬编码 `aka: 0` 会造出格式里不存在的
+        //   "赤五 0 张 + aka51=1" 自相矛盾组合（详见 TenhouLog.cpp 那段注释）。
         const QJsonObject rl = root.value(QStringLiteral("rule")).toObject();
         checkEq(rl.value(QStringLiteral("disp")).toString(), QStringLiteral("般南喰赤"),
                 QStringLiteral("牌谱：半庄 → disp 不含「東」（含「東」会被判成東風戦）"));
+        checkEq(QString::number(rl.value(QStringLiteral("aka")).toInt()), QStringLiteral("1"),
+                QStringLiteral("牌谱：aka=3（每种 1 张）→ aka 也写 1，不能写 0"));
         checkEq(QString::number(rl.value(QStringLiteral("aka51")).toInt()), QStringLiteral("1"),
                 QStringLiteral("牌谱：aka=3 → aka51=1"));
         checkEq(QString::number(rl.value(QStringLiteral("aka53")).toInt()), QStringLiteral("1"),
@@ -2602,6 +2607,8 @@ int run(const QString& outDir)
                     QStringLiteral("牌谱：東風戦照实写「東」（让 Mortal 明确拒绝，而不是按半庄算错）"));
             checkEq(QString::number(r2.value(QStringLiteral("aka51")).toInt()), QStringLiteral("0"),
                     QStringLiteral("牌谱：aka=0 → aka51=0"));
+            checkEq(QString::number(r2.value(QStringLiteral("aka")).toInt()), QStringLiteral("0"),
+                    QStringLiteral("牌谱：aka=0 → aka 也是 0（两边永远说同一件事）"));
         }
 
         // ---- 完整牌谱（mjlog XML）----

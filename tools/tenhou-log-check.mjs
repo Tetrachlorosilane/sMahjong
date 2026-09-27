@@ -532,20 +532,226 @@ function checkHands(root, errs) {
                     const code = d.slice(1);
                     const t = code === '60' ? drawn : parseInt(code, 10);
                     if (t === null || !take(t)) errs.push(`${tag} 座位${seat} 第${i}巡：立直宣言牌 ${d} 不在手里`);
-                } else if (d[0] === 'k') {
+                } else {
+                    // 出表里的鸣牌串只有两种：加杠、暗杠。⚠ **不能只看 `d[0]`** ——
+                    // 关键字位置编码来源（加杠 `k` 可以在 [0]/[2]/[4]），而暗杠的 `a` 固定在 [6]
+                    // （串形如 `121212a12`，首字符是牌码）→ 旧代码只认 `d[0] === 'a'`，
+                    // 于是**整条暗杠被静默跳过**：既没扣手牌、也没把它算成副露，
+                    // 收尾手牌就会多 3 张（2026-09-27 的用户文件就是这么被误报的）。
                     const parsed = parseNaki(d, seat, `${tag} 座位${seat} 的出表`);
                     if (parsed.error) { errs.push(parsed.error); break; }
-                    if (!take(parsed.called)) errs.push(`${tag} 座位${seat} 第${i}巡：加杠的第 4 张 ${parsed.called} 不在手里`);
-                } else if (d[0] === 'a') {
-                    const nums = nakiTiles(d, 6).map((p) => parseInt(p, 10));
-                    for (const n of nums) if (!take(n)) errs.push(`${tag} 座位${seat} 第${i}巡：暗杠 ${n} 不在手里`);
-                    melds++;
+                    if (parsed.kind === 'kakan') {
+                        if (!take(parsed.called)) errs.push(`${tag} 座位${seat} 第${i}巡：加杠的第 4 张 ${parsed.called} 不在手里`);
+                    } else if (parsed.kind === 'ankan') {
+                        for (const n of parsed.tiles) {
+                            if (!take(n)) errs.push(`${tag} 座位${seat} 第${i}巡：暗杠 ${n} 不在手里`);
+                        }
+                        melds++;
+                    } else {
+                        errs.push(`${tag} 座位${seat} 第${i}巡：出表里出现了不该出现的 ${parsed.kind} 串（${d}）`);
+                    }
                 }
             }
             const left = [...hand.values()].reduce((a, b) => a + b, 0);
             const expect = 13 - 3 * melds;
             if (left !== expect && left !== expect + 1) {
                 errs.push(`${tag} 座位${seat}：收尾手牌 ${left} 张（期望 ${expect} 或 ${expect + 1}，副露 ${melds}）`);
+            }
+        }
+    });
+}
+
+/**
+ * 第三层：**引擎（libriichi / Mortal 状态机）会查、而结构检查查不到**的语义。
+ *
+ * 为什么必须单独有一层：结构合法 + 取/出配平 + 收尾张数对，**都不代表能与引擎对账** ——
+ * 上面几层只保证"这份日志自洽"，而复盘器是拿它**重放一局牌**，于是下面这些会直接拒收整份日志：
+ *
+ * - ⑨ **摸牌数 ≤ 70**：活牌山只有 70 张（136 − 配牌 52 − 王牌 14）。荒牌流局恰好 70 摸；
+ *   有杠时"杠把牌山末尾移进王牌、岭上摸牌不占活牌山"，所以**鸣牌串不算摸**、总数仍是 70。
+ * - ⑩ **立直宣言后必须真的听牌**（打掉宣言牌后的 13 张 + 副露）。宣言那张必须是**手切**时的真实牌，
+ *   记错一张 → 引擎重建出来的手牌不听牌 → 整份日志被拒（AGENTS §2.3-11 的同一根线）。
+ * - ⑪ **和了必须是和了形**：标准型 / 七对子 / 国士无双（三者都算，别只写标准型）。
+ * - ⑫ **赤五每局每种至多 1 张**（一手牌只有一张红五；整份日志里出现 8 次是正常的 —— 每局重洗）。
+ *
+ * 判据来自 `docs/input-json.md` 与上游 `convlog`，2026-09-27 用一份 11 局的真实导出逐条对过。
+ */
+function checkSemantics(root, errs) {
+    const KW = new Set(['c', 'p', 'k', 'a', 'm']);
+    const norm = (t) => (t === 51 ? 15 : t === 52 ? 25 : t === 53 ? 35 : t);
+    const kindIdx = (t) => {
+        const n = norm(t);
+        if (n >= 11 && n <= 19) return n - 11;
+        if (n >= 21 && n <= 29) return 9 + (n - 21);
+        if (n >= 31 && n <= 39) return 18 + (n - 31);
+        return 27 + (n - 41);
+    };
+    const nameOf = (i) => (i < 9 ? `${i + 1}m` : i < 18 ? `${i - 8}p` : i < 27 ? `${i - 17}s` : 'ESWNPC'[i - 27]);
+    const setsOk = (c, i, left) => {
+        if (left === 0) return true;
+        while (i < 34 && c[i] === 0) i++;
+        if (i >= 34) return false;
+        if (c[i] >= 3) {
+            c[i] -= 3;
+            if (setsOk(c, i, left - 1)) { c[i] += 3; return true; }
+            c[i] += 3;
+        }
+        if (i < 27 && i % 9 <= 6 && c[i + 1] > 0 && c[i + 2] > 0) {
+            c[i]--; c[i + 1]--; c[i + 2]--;
+            if (setsOk(c, i, left - 1)) { c[i]++; c[i + 1]++; c[i + 2]++; return true; }
+            c[i]++; c[i + 1]++; c[i + 2]++;
+        }
+        return false;
+    };
+    const countsOf = (tiles) => {
+        const c = new Array(34).fill(0);
+        for (const t of tiles) c[kindIdx(t)]++;
+        return c;
+    };
+    const isChiitoi = (c) => c.filter((n) => n === 2).length === 7;
+    const isKokushi = (c) => {
+        const need = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33];
+        if (need.some((i) => c[i] === 0)) return false;
+        return need.reduce((a, i) => a + c[i], 0) === 14;
+    };
+    const isAgari = (c, melds) => {
+        if (melds === 0 && (isChiitoi(c) || isKokushi(c))) return true;
+        for (let i = 0; i < 34; i++) {
+            if (c[i] >= 2) {
+                c[i] -= 2;
+                const ok = setsOk(c, 0, 4 - melds);
+                c[i] += 2;
+                if (ok) return true;
+            }
+        }
+        return false;
+    };
+    const waitsOf = (tiles, melds) => {
+        const c = countsOf(tiles);
+        const w = [];
+        for (let i = 0; i < 34; i++) {
+            if (c[i] >= 4) continue;
+            c[i]++;
+            if (isAgari(c, melds)) w.push(nameOf(i));
+            c[i]--;
+        }
+        return w;
+    };
+
+    (root.log || []).forEach((k, ki) => {
+        if (!Array.isArray(k) || k.length < 17) return;
+        const tag = `第${ki + 1}局`;
+        const res = k[16];
+        const isRyu = Array.isArray(res) && res[0] !== '和了';
+        const aka = new Map();
+        let draws = 0;
+        const hands = [];
+        const meldCounts = [];
+        for (let seat = 0; seat < 4; seat++) {
+            const hand = (k[4 + 3 * seat] || []).map((x) => norm(parseInt(x, 10)));
+            for (const raw of k[4 + 3 * seat] || []) {
+                const n = parseInt(raw, 10);
+                if (n === 51 || n === 52 || n === 53) aka.set(n, (aka.get(n) ?? 0) + 1);
+            }
+            let melds = 0;
+            let drawn = null;
+            const takes = k[5 + 3 * seat] || [];
+            const disc = k[6 + 3 * seat] || [];
+            for (let i = 0; i < takes.length; i++) {
+                const tk = takes[i];
+                if (typeof tk === 'number') {
+                    draws++;
+                    if (tk === 51 || tk === 52 || tk === 53) aka.set(tk, (aka.get(tk) ?? 0) + 1);
+                    hand.push(norm(tk));
+                    drawn = norm(tk);
+                } else {
+                    const parsed = parseNaki(tk, seat, `${tag} 座位${seat} 取表`);
+                    if (parsed.error) return;
+                    parsed.tiles.forEach((t, q) => {
+                        if (q === parsed.keyPos / 2) return;
+                        const at = hand.indexOf(norm(t));
+                        if (at >= 0) hand.splice(at, 1);
+                    });
+                    melds++;
+                }
+                const d = disc[i];
+                if (d === undefined) continue;
+                if (d === 0) continue;
+                if (typeof d === 'number') {
+                    const t = d === 60 ? norm(drawn) : norm(d);
+                    const at = hand.indexOf(t);
+                    if (at >= 0) hand.splice(at, 1);
+                } else if (d.startsWith('r')) {
+                    const code = d.slice(1);
+                    const t = code === '60' ? norm(drawn) : norm(parseInt(code, 10));
+                    const at = hand.indexOf(t);
+                    if (at >= 0) hand.splice(at, 1);
+                    const w = waitsOf(hand, melds);
+                    if (w.length === 0) {
+                        errs.push(`${tag} 座位${seat}：立直宣言后**不听牌**（手=${hand.slice().sort((a, b) => a - b).join(',')} 副露=${melds}）——引擎会拒收整份日志`);
+                    }
+                } else {
+                    const parsed = parseNaki(d, seat, `${tag} 座位${seat} 出表`);
+                    if (parsed.error) return;
+                    if (parsed.kind === 'ankan') {
+                        for (const t of parsed.tiles) {
+                            const at = hand.indexOf(norm(t));
+                            if (at >= 0) hand.splice(at, 1);
+                        }
+                        melds++;
+                    } else if (parsed.kind === 'kakan') {
+                        const at = hand.indexOf(norm(parsed.called));
+                        if (at >= 0) hand.splice(at, 1);
+                    }
+                }
+            }
+            hands.push(hand);
+            meldCounts.push(melds);
+        }
+        // ⑨ 摸牌数
+        if (draws > 70) {
+            errs.push(`${tag}：摸牌 ${draws} 次 > 70（活牌山只有 70 张）——引擎报「draws exceeds 70」`);
+        } else if (isRyu && draws !== 70) {
+            errs.push(`${tag}：荒牌流局的摸牌数应为 70，实际 ${draws}`);
+        }
+        // ⑫ 赤五每局唯一
+        for (const [n, c] of aka) {
+            if (c > 1) errs.push(`${tag}：赤五 ${n} 在同一局出现 ${c} 次（每种只有 1 张）`);
+        }
+        // ⑪ 和了形
+        if (!isRyu) {
+            const nWin = (res.length - 1) / 2;
+            for (let w = 0; w < nWin; w++) {
+                const detail = res[2 + w * 2];
+                if (!Array.isArray(detail)) continue;
+                const who = detail[0], target = detail[1];
+                const tsumo = who === target;
+                let tile = null;
+                if (tsumo) {
+                    const takes = k[5 + 3 * who] || [];
+                    for (let i = takes.length - 1; i >= 0; i--) {
+                        if (typeof takes[i] === 'number') { tile = norm(takes[i]); break; }
+                    }
+                } else {
+                    const disc = k[6 + 3 * target] || [];
+                    const takes = k[5 + 3 * target] || [];
+                    for (let i = disc.length - 1; i >= 0; i--) {
+                        const d = disc[i];
+                        if (typeof d === 'number' && d !== 0) {
+                            tile = d === 60 ? (typeof takes[i] === 'number' ? norm(takes[i]) : null) : norm(d);
+                            break;
+                        }
+                        if (typeof d === 'string' && d.startsWith('r') && d.slice(1) !== '60') {
+                            tile = norm(parseInt(d.slice(1), 10));
+                            break;
+                        }
+                    }
+                }
+                if (tile === null) { errs.push(`${tag}：和了牌定位失败（赢家 ${who}）`); continue; }
+                const hand = tsumo ? hands[who] : [...hands[who], tile];
+                if (!isAgari(countsOf(hand), meldCounts[who])) {
+                    errs.push(`${tag} 座位${who}：和了形不成立（手=${hands[who].slice().sort((a, b) => a - b).join(',')}${tsumo ? '' : '+' + tile} 副露=${meldCounts[who]}）`);
+                }
             }
         }
     });
@@ -572,6 +778,7 @@ function checkFile(path) {
     (root.log || []).forEach((k, i) => checkKyoku(k, i, errs));
     checkScores(root, errs);
     checkHands(root, errs);
+    checkSemantics(root, errs);
     return errs.map((e) => `${path}: ${e}`);
 }
 

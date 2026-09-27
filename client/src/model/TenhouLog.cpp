@@ -266,13 +266,21 @@ TenhouLog::Result TenhouLog::build(const ReplayModel& rp)
     }
     root.insert(QStringLiteral("name"), names);
     // `disp` 决定参考实现怎么判局制：含「東」= 東風戦（只支持半庄的引擎会**明确拒绝**，
-    // 好过假装半庄再按错的期望值算）。`aka` 是三麻用的字段，四麻写 aka51/52/53。
+    // 好过假装半庄再按错的期望值算）。
+    //
+    // ⚠ **`aka` 必须与 aka51/52/53 一致地报"每种赤五几张"**（2026-09-27 修）：
+    //   真实天鳳牌譜里这个字段就是**每种**的张数 —— 日本客户端写 `{"disp":"般南喰赤","aka":1}`
+    //   （整份日志里 3 张赤五，即每种 1 张），国际客户端写 `aka51/52/53 = 1` 而不写 `aka`。
+    //   旧实现把它硬编码成 0，于是同一份 `rule` 里出现"赤五 0 张 + aka51/52/53 = 1"的自相矛盾，
+    //   而 /6 的官方格式里**没有这种组合**：只看 `aka` 的消费者（例如按 `rule` 给引擎配规则集的
+    //   网页版复盘器）会当成"本局无赤牌"，紧接着在日志里读到 `5mr`/`5pr` → 规则集不匹配。
+    //   两边都写、且都写每种 1 张，是唯一对三种读法都成立的组合（求和 > 0 / 只看 aka / 只看 per-suit）。
     root.insert(QStringLiteral("rule"),
                 QJsonObject { { QStringLiteral("disp"),
                                 // 解析器按这个日文串判三麻/東風戦 —— 牌谱格式常量，不是界面文案
                                 tonpuu ? QStringLiteral("般東喰赤")      // i18n-keep
                                        : QStringLiteral("般南喰赤") },    // i18n-keep
-                              { QStringLiteral("aka"), 0 },
+                              { QStringLiteral("aka"), akaPerSuit },
                               { QStringLiteral("aka51"), akaPerSuit },
                               { QStringLiteral("aka52"), akaPerSuit },
                               { QStringLiteral("aka53"), akaPerSuit } });
