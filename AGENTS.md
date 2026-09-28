@@ -545,6 +545,14 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   ⇒ 要降方差只能上**偏置** shaping（会改最优策略，只能靠 2+2 对局强度判成败）或补 PPO 数值口径。
   ⚠ 这两类的判据都要用**绝对量纲的残差比**，**别用 EV**（`Φ_t`/`ctx.points` 本身在合法特征里 ⇒ 会被刷高）。
   详见 NOTES §6.5 第十九/二十轮、`docs/TRAINING-V4.md` §14.8–§14.9。
+- **PPO 的数值口径不许省**（v3 有、v4 曾缺，实测代价很大）：`--grad-clip 0.5`（日志里 `|g|` 是
+  **裁剪前**范数 —— 砍与不砍 loss 逐位相同）、`--kl-early-stop 0.03` + `--kl-min-steps 100`
+  （`kl_stop_hit` 纯函数判据；越过停**整轮**）、**双口径 KL**（`kl` / `kl_inv` —— 只看 `kl`
+  会被少数大 `ρ` 的行掩盖）、`--objective ppo` 与 `--rwr-beta>0` **硬拒**（二次加权）、
+  优势**只归一化一次**（手级路径已全局 z-score ⇒ 训练里 `norm="none"`）。
+  ⚠ 实测：裁剪前 `|g|=6.33`（上限 0.5，**12.7×**）、单批 KL 在第一处生效点就 0.0707 > 0.03，
+  而 **102 步**就把学生行 top1 推到 0.893（跑满 5144 步才 0.897）⇒ **一轮的价值在"重新采一批"，
+  不在 epoch 数**（多轮 × 每轮短）。见 NOTES §6.5 第二十一轮 / `docs/TRAINING-V4.md` §14.10。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-{selfplay,aux}-parity.mjs`），
   不是"能跑"。C++ 侧还没实现的（`--teacher-label`、
