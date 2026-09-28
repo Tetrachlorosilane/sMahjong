@@ -192,6 +192,34 @@ def _fit_baseline(v_row: np.ndarray, r_row: np.ndarray, keep: np.ndarray | None,
     return mu_r - beta * mu_v, beta
 
 
+def _clip_grad(opt, clip: float) -> float:
+    """按**总范数**裁剪梯度，返回**裁剪前**的范数（`clip<=0` = 关闭，返回 nan）。
+
+    为什么必须有（v3 有、v4 一直没有）：PPO 的替代项在 `ρ` 很大时对 logits 的梯度是无界的，
+     一个坏 batch（例如一整批都是 teacher 的动作）能把 logits 幅度推上去，下一批就是 inf/NaN。
+    v3 用 0.5；这里同口径。**返回裁剪前的范数**是为了让日志能看出"到底有没有被砍" ——
+    只看 loss 是看不出来的（砍与不砍的 loss 逐位相同）。
+    """
+    if not clip or clip <= 0:
+        return float("nan")
+    params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
+    if not params:
+        return float("nan")
+    return float(torch.nn.utils.clip_grad_norm_(params, float(clip)))
+
+
+def kl_stop_hit(kl: float, *, threshold: float, step: int, min_steps: int) -> bool:
+    """**KL 早停**的判据（纯函数，自检直接喂数）。
+
+    为什么要有它：离线单轮 PPO 只有 1~2 个 epoch，一旦 KL(π_old‖π_new) 越过阈值，再往下跑就是
+    "离行为策略太远、替代项的估计不再可信"（v3 的阈值 0.03）。`min_steps` 是刻意的：
+    第一批的 KL 噪声大（几十条的 Monte-Carlo），不该拿它判生死。
+    """
+    if not threshold or threshold <= 0 or step < max(0, int(min_steps)):
+        return False
+    return bool(math.isfinite(kl) and kl > threshold)
+
+
 def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
                     rank_weight: float, is_student: np.ndarray | None,
                     mode: str = "gae", baseline_fit: str = "scale") -> dict:
@@ -315,8 +343,22 @@ def _row_weights(data: dict, idx, beta: float, device: str):
     return keep, w
 
 
+def assert_ppo_excludes_rwr(objective: str, rwr_beta: float) -> None:
+    """**PPO 时禁 RWR**（§14 P2-⑥；抽成函数是为了自检能直接喂数）。
+
+    PPO 的替代项已经用优势（回报减基线）加权了，再叠一层 `exp(回报/β)` 等于把**同一个回报**
+    平方加权：少数高回报行会主导整个策略损失，而日志里看不出来（`clip_frac`/`kl`/`gate` 全正常）。
+    """
+    if objective == "ppo" and rwr_beta and rwr_beta > 0:
+        raise SystemExit(
+            f"--objective ppo 与 --rwr-beta {rwr_beta:g} 不能同时用：优势已经是回报加权的，"
+            f"再乘一层 exp(回报/β) 等于对同一份回报**二次加权**（高回报行会主导策略损失）。"
+            f"要 PPO 就把 --rwr-beta 设 0；要 RWR 就用 --objective rwr")
+
+
 def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
-                row_keep: torch.Tensor | None, key: str = "value") -> torch.Tensor:
+                row_keep: torch.Tensor | None, key: str = "value",
+                norm: str = "batch") -> torch.Tensor:
     """`A = R − E[V(s)]`，**只在学生行上归一化**（设计 §7.4 / v3 P4 的硬口径）。
 
     - `R` = 数据集里的 `value`（`final_scores − 起点`，千点）或 **`rtg`（逐决策 reward-to-go）**；
@@ -326,12 +368,16 @@ def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     - `E[V(s)]` = 值头 51 个分箱的期望（分箱中心 `linspace(-30, +30)`，与 `VALUE_RANGE` 同量纲）；
     - ⚠ **归一化只用学生行**：把对手/老师那 3/4 的行算进均值方差，会把优势的尺度带偏
       （v3 实测过学生行占比 0.75 而非 0.25 那种静默失真）。
+    @param norm `batch` = **批内** z-score（老行为；缺点是一个 epoch 里每批的尺子都不同，
+        PPO 的 clip ε 因此失去语义 —— 只有"V 随 critic 每步重算"的遗留路径才该用它）；
+        `none` = 原样（配合 `adv_fixed` 的**全局**归一化：那条路径在 `_hand_advantage` 里
+        已经按学生行全局 z-score 过一次，**绝不能再归一化第二次**）。
     """
     center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS,
                             device=out["value"].device)
     v_hat = (torch.softmax(out["value"], dim=-1) * center).sum(-1)
     adv = b[key] - v_hat
-    if row_keep is not None:
+    if norm == "batch" and row_keep is not None:
         k = row_keep > 0
         if bool(k.any()):
             sel = adv[k]
@@ -431,7 +477,8 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  ppo: tuple | None = None,
                  value_key: str = "value",
                  policy_temp: float = 1.0,
-                 adv_fixed: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, float]]:
+                 adv_fixed: torch.Tensor | None = None,
+                 adv_norm: str = "batch") -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -474,7 +521,10 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
             1, b["label"][:, None]).squeeze(1)
         # `adv_fixed`（手级 GAE 的预计算优势，**已按学生行全局归一化**）优先：
         #   一条样本的优势在整轮里是常量 ⇒ baseline 不再"跟着 critic 动"（§14 P2-①）。
-        adv = adv_fixed if adv_fixed is not None else _advantages(out, b, row_keep, key=value_key)
+        #   ⚠ 那条路径**不能**再归一化第二次（全局一次 + 批内一次 = 优势尺度被反复钉成 1，
+        #   而 `A` 的大小区间本来是有意义的）。
+        adv = (adv_fixed if adv_fixed is not None
+               else _advantages(out, b, row_keep, key=value_key, norm=adv_norm))
         # ⚠⚠ **两道数值保险**（2026-09-28 实测：不加就是"训练跑到第 757 步整批 NaN"）。
         # 机制：**非学生行**（teacher / 随机 的动作）在**学生网**下几乎必然是零概率 ——
         # 实测 `logp_new` 能到 −1000 量级（网的 logits 幅度到 563，`#0.5` 再翻倍）⇒
@@ -501,6 +551,11 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
             if n_sel > 0:
                 sub = slice(None) if sel is None else sel
                 parts["kl"] = float((logp_old - logp_new)[sub].mean())
+                # **双口径 KL**（§14 P2）：`kl` 是 `KL(π_old‖π_new)`（在"老分布采出来的行"上的均值）；
+                # `kl_inv` 是它的**反向** `KL(π_new‖π_old) = E_old[ρ·log(π_new/π_old)]`
+                # （重要性加权估计）。两者一起看才知道"是策略整体挪了"还是"少数行被放大" ——
+                # 单看 `kl` 会被那少数行掩盖（实测两轮里 kl 都 ≲0.07，而 logits 幅度在涨）。
+                parts["kl_inv"] = float((ratio[sub].detach() * (logp_new - logp_old)[sub]).mean())
                 r = ratio[sub]
                 parts["clip_frac"] = float(((r - 1.0).abs() > clip_eps).float().mean())
                 # `logp_gap` = `|log π_new − log π_old|` 的最大值：温度口径或权重没对上时它会先炸
@@ -850,6 +905,11 @@ def train(args) -> dict:
                    float(getattr(args, "ppo_entropy", 0.01) or 0.0))
         print(f"PPO：clip={ppo_cfg[0]:g} entropy={ppo_cfg[1]:g}；"
               f"优势在学生行上归一化、策略损失只算学生行")
+        # ⚠ **PPO 时禁 RWR**（§14 P2-⑥）：见 `assert_ppo_excludes_rwr` 的推导。
+        assert_ppo_excludes_rwr(objective, rwr_beta)
+        print(f"PPO：grad-clip {float(getattr(args, 'grad_clip', 0.5) or 0.0):g}、"
+              f"KL 早停阈值 {float(getattr(args, 'kl_early_stop', 0.03) or 0.0):g}"
+              f"（min_steps {int(getattr(args, 'kl_min_steps', 100) or 0)}）")
         # ---- 口径闸门（2026-09-28 加；这条闸门就是为了不让 `#0.5` 那个 bug 再发生一次）----
         kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
                                            logp_tr, temp, device)
@@ -919,6 +979,7 @@ def train(args) -> dict:
     stage_steps = {"a": 0, "b": 0, "c": 0}
     t0 = time.perf_counter()
     gstep = 0
+    stop_reason: str | None = None
     for epoch in range(1, args.epochs + 1):
         rng = np.random.default_rng(args.seed + epoch)
         perm = rng.permutation(n)
@@ -962,9 +1023,12 @@ def train(args) -> dict:
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
             adv_b = None if adv_tr is None else torch.from_numpy(adv_tr[idx]).to(device)
+            # ⚠ 优势**只归一化一次**：`adv_tr`（手级路径）已在 `_hand_advantage` 里按学生行全局
+            #   z-score 过 ⇒ 这里 `norm="none"`；遗留路径（V 每步重算的 final/rtg 口径）才是批内。
             loss, parts = compute_loss(out, b, weights if only else (STAGE_WEIGHTS.get(stage) or weights),
                                        ssl, row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
-                                       policy_temp=p_temp, adv_fixed=adv_b)
+                                       policy_temp=p_temp, adv_fixed=adv_b,
+                                       adv_norm=("none" if adv_tr is not None else "batch"))
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -973,7 +1037,21 @@ def train(args) -> dict:
                                  f"诊断看 train_parts 的 kl / clip_frac / logp_gap；不落盘废 checkpoint")
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            gn = _clip_grad(opt, float(getattr(args, "grad_clip", 0.5) or 0.0))
             opt.step()
+            if gn == gn:                                   # 非 NaN ⇒ 记下裁剪前范数
+                parts["grad_norm"] = gn
+            # **KL 早停**：越过阈值就停整轮（不是只停这个 epoch —— 离线单轮本来就 1~2 个 epoch，
+            # 而"离行为策略太远"这件事跨 epoch 只会更严重）。
+            if kl_stop_hit(float(parts.get("kl", float("nan"))),
+                           threshold=float(getattr(args, "kl_early_stop", 0.03) or 0.0),
+                           step=gstep, min_steps=int(getattr(args, "kl_min_steps", 100) or 0)):
+                stop_reason = (f"KL 早停：step {gstep} 的 KL(π_old‖π_new)="
+                               f"{parts.get('kl', float('nan')):.4f} > "
+                               f"{float(getattr(args, 'kl_early_stop', 0.03)):g}"
+                               f"（kl_inv={parts.get('kl_inv', float('nan')):.4f}）")
+                print(f"  !! {stop_reason}")
+                break
             if dc:
                 dc.tick()
             run += float(loss.detach()) * idx.size
@@ -1007,12 +1085,16 @@ def train(args) -> dict:
               + (f" | **学生行 top1 {ev_stu['top1']:.3f}**(n={ev_stu['n']})" if ev_stu else "")
               + (f" | 学生行 policy {ev_stu['loss_policy']:.3f}" if ev_stu else "")
               + (f" | KL {row['train_parts'].get('kl', float('nan')):.4f}"
+                 f"/{row['train_parts'].get('kl_inv', float('nan')):.4f}"
                  f" clip {row['train_parts'].get('clip_frac', float('nan')):.3f}"
                  f" |A| {row['train_parts'].get('adv_abs', float('nan')):.2f}"
                  f" gap {row['train_parts'].get('logp_gap', float('nan')):.2f}"
+                 f" |g| {row['train_parts'].get('grad_norm', float('nan')):.2f}"
                  if "kl" in row["train_parts"] else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
+        if stop_reason:
+            break
     if mon:
         mon.close()
     wall = time.perf_counter() - t0
@@ -1026,6 +1108,10 @@ def train(args) -> dict:
         "args": {k: v for k, v in vars(args).items()},
         "epochs": args.epochs, "batch": args.batch, "steps_per_epoch": steps,
         "stage_steps": stage_steps, "wall_seconds": wall, "history": history,
+        "stop_reason": stop_reason, "grad_clip": float(getattr(args, "grad_clip", 0.5) or 0.0),
+        "kl_early_stop": float(getattr(args, "kl_early_stop", 0.03) or 0.0),
+        "adv_norm": ("global" if adv_tr is not None else
+                     ("batch" if objective == "ppo" else "n/a")),
         "final_val_top1": history[-1]["val_top1"] if history else None,
         "stages": {"a": "policy+effect（主干先会打牌）", "b": "冻主干只训头", "c": "联合微调（余弦降 lr）",
                    "ssl": f"掩码事件重建 frac={args.mask_frac} weight={args.ssl_weight}"},
@@ -1076,6 +1162,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="行为策略的采样温度（缺省从数据集 meta 的 `student` 串里解析 `#T`，再缺省 1.0）")
     ap.add_argument("--ppo-clip", type=float, default=0.2, help="PPO 截断 ε")
     ap.add_argument("--ppo-entropy", type=float, default=0.01, help="熵奖励系数（学生行上）")
+    ap.add_argument("--grad-clip", type=float, default=0.5,
+                    help="梯度总范数裁剪（v3 同口径 0.5；0 = 关）。日志里的 `|g|` 是**裁剪前**的范数")
+    ap.add_argument("--kl-early-stop", type=float, default=0.03,
+                    help="KL(π_old‖π_new) 的早停阈值（v3 同口径 0.03；0 = 关）—— 越过就停整轮")
+    ap.add_argument("--kl-min-steps", type=int, default=100,
+                    help="KL 早停生效前至少跑多少步（第一批的 Monte-Carlo KL 噪声大，别拿它判生死）")
     ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
                     help="值头目标 / 优势回报的来源：final = 整场结果（旧口径）/ "
                          "rtg = **逐决策 reward-to-go**（λ=1 的 GAE 目标；需要新版采集器的轨迹）/ "
