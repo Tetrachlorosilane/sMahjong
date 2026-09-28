@@ -260,6 +260,19 @@ def cmd_plan(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_value_audit(args: argparse.Namespace) -> int:
+    """价值头审计：转发给 `v4/value_audit.py`（判据口径与红证见 `docs/TRAINING-V4.md` §8.2）。"""
+    from . import value_audit
+    return value_audit.main([
+        "--data", args.data, "--split", args.split, "--batch", str(args.batch),
+        "--value-key", args.value_key,
+        *(["--device", args.device] if args.device else []),
+        *(["--out", args.out] if args.out else []),
+        *(["--strict"] if args.strict else []),
+        *[x for c in args.ckpt for x in ("--ckpt", c)],
+    ])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -276,6 +289,16 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--equal-shares", action="store_true",
                    help="四个座位本就该等分时才用对手配额 CV 判红（1+2+1 这种别开）")
     b.set_defaults(fn=cmd_balance)
+    va = sub.add_parser("value-audit", help="价值头分布判据审计（§8.2：CRPS/覆盖率/EV/ρ）")
+    va.add_argument("--data", required=True, help="紧凑数据集目录（含 val.* / meta.json）")
+    va.add_argument("--split", default="val")
+    va.add_argument("--ckpt", action="append", required=True, help="checkpoint 目录（可重复）")
+    va.add_argument("--device", default=None)
+    va.add_argument("--batch", type=int, default=2048)
+    va.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg"])
+    va.add_argument("--out", default=None)
+    va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
+    va.set_defaults(fn=cmd_value_audit)
     args = ap.parse_args(argv)
     return args.fn(args)
 

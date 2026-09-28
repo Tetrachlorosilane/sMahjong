@@ -2336,6 +2336,90 @@ eq("P5 夹具：用例数与 meta 一致", _gcases, _gmeta["cases"])
 ok(_gnetlen == _gmeta["net_bytes"] and len(_graw) == _gmeta["bytes"],
    "P5 夹具：内嵌权重长度与总长度都与 meta 对得上")
 
+# ---- 价值头审计（`v4/value_audit.py`；判据口径 §8.2）----------------------------------------
+from mahjong_ml.v4 import value_audit as v4_va                          # noqa: E402
+# 为什么必须有这一组：`val_loss_value` 单独看会骗人 —— "每个局面都输出边缘分布"这个退化解也有
+# 很小的 CE，而塌掉的值头正是收敛到那个解（第十二轮 v4-ppo-002 实测 EV 0.006）。
+# 这一组用**合成分布**钉住每条判据的语义与边界；红证 = 错输入必须给出错判据。
+# ⚠ 夹具的真值**必须落在箱中心**（`CENTERS[[5,25,45]]`，对称 ⇒ 均值恰为 0），否则"点预测"自己就带
+# 量化误差（第一版拿 0/±10 当中心，MAE 报 0.39、覆盖率报 0 —— 假红，见 NOTES §6.5 第十二轮）。
+_va_bins = v4_va.CENTERS.size
+_cy = v4_va.CENTERS[[5, 25, 45]]
+
+
+def _pointmass(vals, centers=v4_va.CENTERS):
+    p = np.zeros((vals.size, centers.size))
+    p[np.arange(vals.size), np.argmin(np.abs(centers[None, :] - vals[:, None]), axis=1)] = 1.0
+    return p
+
+
+# ① 完美点预测：CRPS/MAE 归零、EV=1、覆盖率 100%
+_m_perfect = v4_va.metrics(_pointmass(_cy), _cy)
+eq("价值头审计：完美点预测 MAE = 0", _m_perfect["mae"], 0.0, 1e-12)
+eq("价值头审计：完美点预测 CRPS = 0", _m_perfect["crps"], 0.0, 1e-12)
+eq("价值头审计：完美点预测 EV = 1", _m_perfect["ev"], 1.0, 1e-9)
+for _lvl in (0.5, 0.8, 0.95):
+    eq(f"价值头审计：完美点预测 {_lvl:g} 覆盖率 = 1", _m_perfect[f"cov{_lvl:g}"], 1.0)
+# ② 退化（常数）预测：CRPS == 那个常数的 MAE；取常数 = 真值均值 ⇒ EV 恰为 0（"没有状态信号"）
+_degen = np.tile(_pointmass(np.zeros(1))[0], (_cy.size, 1))
+_m_degen = v4_va.metrics(_degen, _cy)
+eq("价值头审计：退化在均值上的 CRPS == mae_const", round(_m_degen["crps"], 9),
+   round(_m_degen["mae_const"], 9))
+ok(abs(_m_degen["ev"]) < 1e-9, "价值头审计：常数预测（无状态信号）EV = 0",
+   f"EV={_m_degen['ev']:.2e}")
+# ③ **均值对、分布错**：EV 满分而 CRPS/覆盖率仍差 ⇒ 两条判据互不替代（这就是"CE 好看"的陷阱）
+_wide = np.zeros((_cy.size, _va_bins))
+for _i, _c in enumerate(_cy):
+    _wide[_i, np.argmin(np.abs(v4_va.CENTERS - _c))] = 0.6
+    for _off in (-4, 4):
+        _wide[_i, np.argmin(np.abs(v4_va.CENTERS - _c)) + _off] = 0.2
+_m_wide = v4_va.metrics(_wide, _cy)
+eq("价值头审计：对称加宽后均值不变 ⇒ EV 仍 = 1", _m_wide["ev"], 1.0, 1e-9)
+# 离散 CRPS 的解析值：p=(0.6 在 c, 0.2 在 c±d) ⇒ E|X−y| − ½E|X−X'| = 0.4d − 0.32d = 0.08d
+_d = 4 * (2.0 * v4_model.VALUE_RANGE / _va_bins)
+eq("价值头审计：对称加宽分布的 CRPS == 解析值 0.08·d（离散 CRPS 公式逐项对得上）",
+   round(_m_wide["crps"], 9), round(0.08 * _d, 9))
+ok(_m_wide["crps"] > 0.0,
+   "价值头审计：**均值满分而 CRPS > 0** ⇒ 两条判据互不替代（分布形状被单独度量）",
+   f"EV={_m_wide['ev']:.3f} CRPS={_m_wide['crps']:.4f}")
+# ④ 覆盖率：过窄必然欠覆盖（这正是 v4 实测的失败模式）
+_m_narrow = v4_va.metrics(_pointmass(np.zeros(1)).repeat(_cy.size, 0), _cy)
+ok(_m_narrow["cov0.95"] < 0.95, "价值头审计：过窄区间 **欠覆盖**（红证方向对）",
+   f"cov95={_m_narrow['cov0.95']:.2f}")
+eq("价值头审计：覆盖率判据容差 = 3pp", v4_va.COVERAGE_TOL, 0.03)
+# ⑤ HL-Gauss CE：边缘分布预测的 CE == 标签分布的熵；条件预测必须**低于**它（判据不是空转）
+_y_ce = np.array([-5.0, 5.0, 5.0])
+_t_ce = v4_model.hl_gauss_targets(_torch.from_numpy(_y_ce)).numpy()
+eq("价值头审计：`hl_gauss_ce(边缘分布, 标签)` == `marginal_ce(标签)`",
+   round(v4_va.hl_gauss_ce(np.tile(_t_ce.mean(0), (3, 1)), _t_ce), 9),
+   round(v4_va.marginal_ce(_t_ce), 9))
+ok(v4_va.hl_gauss_ce(_t_ce, _t_ce) < v4_va.marginal_ce(_t_ce),
+   "价值头审计：**条件**预测的 CE 低于边缘基线（否则这个指标分不出好坏）",
+   f"cond={v4_va.hl_gauss_ce(_t_ce, _t_ce):.4f} < marg={v4_va.marginal_ce(_t_ce):.4f}")
+# ⑥ `rtg` 的两条结构事实（组内常量 + `value − rtg` = 已滚入点数）：这是**契约**，不是"可预测性"
+_rg_game = np.array([0, 0, 0, 0])
+_rg_hand = np.array([1, 1, 1, 1])
+_rg_seat = np.array([0, 0, 1, 1])
+_rg_val = np.array([20.0, 21.0, 20.0, 21.0])
+_rg_rtg = np.array([5.0, 5.0, 7.0, 7.0])
+_st = v4_va.rtg_structure(_rg_val, _rg_rtg, _rg_game, _rg_hand, _rg_seat)
+eq("价值头审计：`rtg` 在 (game,hand,seat) 内是常量（极差 = 0）", _st["rtg_round_spread_max"], 0.0)
+_acc = _rg_val - _rg_rtg
+eq("价值头审计：`rtg_known_var_share` = Var(value−rtg)/Var(rtg)（定义自洽）",
+   round(_st["rtg_known_var_share"], 9), round(float(_acc.var() / _rg_rtg.var()), 9))
+_bad = v4_va.rtg_structure(_rg_val, np.array([5.0, 6.0, 7.0, 7.0]), _rg_game, _rg_hand, _rg_seat)
+ok(_bad["rtg_round_spread_max"] > 0.0,
+   "价值头审计：组内不再是常量时必须报出来（红证：这条检查不是恒 0）",
+   f"spread={_bad['rtg_round_spread_max']}")
+# ⑦ 逐小局聚合：3 个小局、预测逐组正确 ⇒ round_mae = 0 且 ρ = 1
+_grp = v4_va.round_groups(np.zeros(6), np.array([0, 0, 1, 1, 2, 2]))
+eq("价值头审计：按 (game, hand_no) 聚合出 3 个小局", len(_grp), 3)
+_gm = v4_va.group_metrics(np.array([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
+                          np.array([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]), _grp)
+eq("价值头审计：小局内预测正确 ⇒ round_mae = 0", round(_gm["round_mae"], 9), 0.0)
+eq("价值头审计：小局级 ρ = 1（3 个互不相同的小局）", round(_gm["round_pearson"], 9), 1.0)
+
+
 # ---------------------------------------------------------------- 汇总
 
 # 收尾清掉 scratch（它是**手写**的目录，删得掉；`tempfile` 建的那种在本沙箱下删不掉 —— 见文件头）

@@ -247,6 +247,11 @@ python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw
      S:\mahjong-training\compact\v4-sp-004 --aux --student "net:tools\build\<上一代>\net.bin@0#0.5"
 # PPO + `--value-target rtg`：值头目标与优势的 R **同源**（都是逐决策回报）；
 # `--behaviour-temp 0.5` 必须与采集时的 `#0.5` 一致，否则 log π_old 是错的分布
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
+     --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-ppo-002 `
+     --ckpt S:\mahjong-training\ckpt\v4-bc-004 [--value-key auto] [--strict] [--out audit.json]
+# 判据（§8.2）：CE < 边缘基线、EV ≥ 0.1、CRPS < 气候学基线、50/80/95% 覆盖率与标称差 ≤ 3pp
+# 实测（2026-09-28）：整场口径 EV 0.44–0.57 但覆盖率不达标；`rtg` 口径（v4-ppo-002）EV 0.006 = 塌了
 python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 `
      --label v4-ppo-002 --epochs 4 --batch 256 --objective ppo --value-target rtg `
      --behaviour "tools\build\<上一代>\net.bin" --behaviour-temp 0.5 --init "tools\build\<上一代>\net.bin" `
