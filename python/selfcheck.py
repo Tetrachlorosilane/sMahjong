@@ -2519,6 +2519,53 @@ eq("v4 回路：默认不限步数（`--max-steps 0` ⇒ 命令里不出现它�
 ok(not any(Path(str(c[0])).name.lower().startswith("java")
            for c in _lo2.commands.values()),
    "v4 回路：加了这些开关之后**仍然没有 JVM**（`--no-java` 的判据不因新开关失效）")
+
+# ---- 第二十三轮：**值头闸门进回路**（目标里那条判据以前断在回路之外）------------------------
+# 为什么钉：回路以前只看 2+2 顺位点，`value-audit` 的 EV/覆盖率**没人判** ⇒ 目标里
+# "覆盖率 ≤3pp" 这条判据等于没接上。现在每轮出口跑一次 `--strict --ev-ref legit` 并进台账。
+eq("v4 回路：值头目标 → 审计主口径的映射（final→value / rtg→rtg / delta→delta）",
+   (v4_loop.AUDIT_TARGET["final"], v4_loop.AUDIT_TARGET["rtg"], v4_loop.AUDIT_TARGET["delta"]),
+   ("value", "rtg", "delta"))
+ok("audit" in _lo2.phases() and "audit" in _lo2.commands,
+   "v4 回路：`audit` 是这条回路的相之一（每轮出口都跑）", str(_lo2.phases()))
+_loa = _lo2.commands["audit"]
+ok("value-audit" in _loa and "--strict" in _loa and _flag(_loa, "--ev-ref") == "legit",
+   "v4 回路：审计相带 `--strict --ev-ref legit`（**合法天花板×0.7**，不是废掉的绝对门槛 0.4）")
+eq("v4 回路：审计相的主口径跟着 `--value-target`（不是写死 value）",
+   _flag(_loa, "--target"), "delta")
+eq("v4 回路：审计相读的是**这一轮的紧凑集与 checkpoint**",
+   (_flag(_loa, "--data").endswith("compact\\v4-sc2-g03"),
+    _flag(_loa, "--ckpt").endswith("ckpt\\v4-sc2-g03")), (True, True))
+ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
+   "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
+# 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）
+import mahjong_ml.paths as _ml_paths                                        # noqa: E402
+_gate_root = scratch("v4-audit-gate")
+(_gate_root / "league").mkdir(parents=True, exist_ok=True)
+_gate_old_root = _ml_paths.DATA_ROOT
+try:
+    _ml_paths.DATA_ROOT = _gate_root
+    for _tag, _ev, _cov in (("pass", 0.055, (0.52, 0.79, 0.94)),
+                            ("fail_ev", 0.030, (0.52, 0.79, 0.94)),
+                            ("fail_cov", 0.055, (0.46, 0.79, 0.94))):
+        (_gate_root / "league" / f"v4-sc2-{_tag}-audit.json").write_text(json.dumps({
+            f"v4-sc2-{_tag}": {"target": "delta", "ev_delta": _ev, "ev_ref": 0.0693,
+                               "ev_need": 0.0485, "cov0.5": _cov[0], "cov0.8": _cov[1],
+                               "cov0.95": _cov[2]}}, ensure_ascii=False), encoding="utf-8")
+    _gc = v4_loop.LoopConfig(label="v4-sc2", init="X:/net.bin", value_target="delta", no_java=True)
+
+    def _fake_round(tag: str):
+        return type("R", (), {"label": f"v4-sc2-{tag}", "ckpt_label": f"v4-sc2-{tag}"})()
+
+    _gate = {t: v4_loop._read_audit(_gc, _fake_round(t))
+             for t in ("pass", "fail_ev", "fail_cov", "missing")}
+    ok(_gate["pass"]["ok"] and not _gate["fail_ev"]["ok"] and not _gate["fail_cov"]["ok"],
+       "v4 回路：闸门正反两面（都过 → ok；EV 不够 → 不过；某档覆盖率差 >3pp → 不过）",
+       f"pass={_gate['pass']['ok']} ev={_gate['fail_ev']['ok']} cov={_gate['fail_cov']['ok']}")
+    ok(not _gate["missing"]["read"] and not _gate["missing"]["ok"],
+       "v4 回路：审计文件缺失/读不到 ⇒ **按未过处理**（不默认放行）")
+finally:
+    _ml_paths.DATA_ROOT = _gate_old_root
 _lo_env = os.environ.get("MAHJONG_NO_JAVA")
 os.environ["MAHJONG_NO_JAVA"] = "1"
 try:

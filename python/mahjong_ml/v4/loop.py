@@ -46,10 +46,13 @@ from .. import paths, producer
 ROOT = Path(__file__).resolve().parents[3]
 
 #: 一轮里要跑的相（与 `budget.PHASES` 同集合 —— 那个模型算时长用的就是这几个名字）。
-PHASES = ("collect", "features", "compact", "train", "export", "eval")
+PHASES = ("collect", "features", "compact", "train", "export", "audit", "eval")
 #: 哪些相是 `python -m …`（**工作目录必须是 `python/`**，否则 `mahjong_ml` 不在 sys.path 上 ——
 #: 实测报 `No module named 'mahjong_ml'`）。node / 训练端可执行仍从仓库根跑。
-PY_PHASES = frozenset({"compact", "train", "export"})
+PY_PHASES = frozenset({"compact", "train", "export", "audit"})
+#: 值头目标（训练口径）→ `value-audit --target` 的**主口径**名字。
+#: ⚠ 这两处必须同一把尺子：`final` 是"整场 − 起点"，审计里叫 `value`；漏了映射就会拿错列去量。
+AUDIT_TARGET = {"final": "value", "rtg": "rtg", "delta": "delta"}
 
 
 @dataclass
@@ -87,6 +90,8 @@ class LoopConfig:
     grad_clip: float = 0.5
     kl_early_stop: float = 0.03
     kl_min_steps: int = 100
+    #: `--strict-gate`：值头闸门（`audit` 相）不过就**停整条回路**（缺省只记账，不停）。
+    strict_gate: bool = False
 
     def student_spec(self, net: Path) -> str:
         """采集/数据集共用的学生策略串：**逐字同一个字符串**（`is_student` 靠字符串相等判定）。"""
@@ -174,6 +179,17 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
         "--ckpt", str(paths.DATA_ROOT / "ckpt" / r.ckpt_label / "model.pt"),
         "--out", str(r.net_out), "--label", r.ckpt_label,
     ]
+    # **值头/优势的判据（目标里那条闸门）在每一轮出口上跑一遍** —— 以前回路只看 2+2 顺位点，
+    # 值头的 EV/覆盖率**没人判**（"覆盖率 ≤3pp"这条判据就断在回路之外了）。
+    # `--ev-ref legit`：合法天花板现算（0.7×），**不是**旧的绝对门槛 0.4（§14.8.4 已废）。
+    r.commands["audit"] = [
+        _py(), "-m", "mahjong_ml.v4", "value-audit",
+        "--data", str(r.compact), "--ckpt", str(paths.DATA_ROOT / "ckpt" / r.ckpt_label),
+        "--target", AUDIT_TARGET.get(cfg.value_target, "value"),
+        "--split", "val", "--batch", str(cfg.batch),
+        "--strict", "--ev-ref", "legit",
+        "--out", str(paths.DATA_ROOT / "league" / f"{r.label}-audit.json"),
+    ]
     r.commands["eval"] = [
         str(producer.TRAINER), "selfplay", str(cfg.eval_games), "--workers", str(cfg.eval_workers),
         "--rotate", "--policy", f"net:{r.net_out},net:{r.net_out},teacher,teacher",
@@ -193,8 +209,51 @@ def assert_no_java(cfg: LoopConfig, rounds: list[Round]) -> None:
         raise SystemExit(f"--no-java 但第 {label} 轮的 {phase} 相要起 JVM：{' '.join(cmd)}")
 
 
-def _run(cmd: list[str], what: str, *, cwd: Path | None = None) -> float:
-    """跑一条命令，返回墙钟秒数。失败**当场抛出**（不吞）。"""
+def _audit_json_path(label: str) -> Path:
+    return paths.DATA_ROOT / "league" / f"{label}-audit.json"
+
+
+def _read_audit(cfg: LoopConfig, r: Round) -> dict[str, Any]:
+    """从 `value-audit --out` 的 JSON 里抽出**这一轮的闸门结论**（判据的机器可读版）。
+
+    判据三条（§14.8.4）：`EV ≥ 0.7 × 合法天花板`（`--ev-ref legit` 现算）、CE < 边缘基线、
+    CRPS < 气候学、50/80/95% 覆盖率与标称差 ≤3pp。这里只判**EV 与覆盖率**（最硬的两条），
+    其余留在 JSON 里由人看 —— 闸门要少而明确，多了就没人理。
+    """
+    p = _audit_json_path(r.label)
+    out: dict[str, Any] = {"read": False, "ok": False, "path": str(p), "label": r.label}
+    if not p.is_file():
+        return out
+    try:
+        rep = json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        return out
+    row = rep.get(Path(paths.DATA_ROOT / "ckpt" / r.ckpt_label).name)
+    if not isinstance(row, dict):
+        row = next((v for v in rep.values() if isinstance(v, dict)), {})
+    if not row:
+        return out
+    key = str(row.get("target") or AUDIT_TARGET.get(cfg.value_target, "value"))
+    ev = row.get(f"ev_{key}")
+    ref = row.get("ev_ref")
+    need = row.get("ev_need")
+    cov = {f"{lvl:g}": row.get(f"cov{lvl:g}") for lvl in (0.5, 0.8, 0.95)}
+    cov_ok = all(c is not None and abs(float(c) - float(lvl)) <= 0.03 + 1e-9
+                 for lvl, c in ((0.5, cov["0.5"]), (0.8, cov["0.8"]), (0.95, cov["0.95"])))
+    ev_ok = (ev is not None and need is not None and float(ev) >= float(need))
+    out.update({"read": True, "target": key, "ev": ev, "ev_ref": ref, "ev_need": need,
+                "cov": cov, "ev_ok": bool(ev_ok), "cov_ok": bool(cov_ok),
+                "ok": bool(ev_ok and cov_ok)})
+    return out
+
+
+def _run(cmd: list[str], what: str, *, cwd: Path | None = None,
+         allow_fail: bool = False) -> float:
+    """跑一条命令，返回墙钟秒数。失败**当场抛出**（不吞）—— 除非 `allow_fail`。
+
+    `allow_fail` 只给**判据相**用（`value-audit --strict` 用退出码 2 表示"判据没过"）：
+    那种失败要**记进台账**并（在 `--strict-gate` 下）决定是否停下，而不是把异常抛得一地都是。
+    """
     where = cwd or ROOT
     print(f"\n▶ {what}\n  $ {' '.join(cmd)}\n  （cwd={where}）", flush=True)
     t0 = time.perf_counter()
@@ -202,9 +261,10 @@ def _run(cmd: list[str], what: str, *, cwd: Path | None = None) -> float:
     env.setdefault("PYTHONPATH", str(ROOT / "python"))     # 双保险：-m 找不到包时还有它
     r = subprocess.run(cmd, cwd=str(where), env=env)       # noqa: S603 —— 命令由本模块自己拼
     dt = time.perf_counter() - t0
-    if r.returncode != 0:
+    if r.returncode != 0 and not allow_fail:
         raise SystemExit(f"{what} 失败（退出码 {r.returncode}）：{' '.join(cmd)}")
-    print(f"  ✓ {what} 用时 {dt:.1f}s", flush=True)
+    flag = "" if r.returncode == 0 else f"（退出码 {r.returncode}）"
+    print(f"  {'✓' if r.returncode == 0 else '✗'} {what}{flag} 用时 {dt:.1f}s", flush=True)
     return dt
 
 
@@ -283,6 +343,17 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
                         ("train", f"训练（{cfg.objective}）"),
                         ("export", "导出 net.bin")):
         seconds[phase] = _run(r.commands[phase], what, cwd=ROOT / "python")
+    # 判据相：`value-audit --strict --ev-ref legit`（EV ≥ 0.7×合法天花板 + 覆盖率 ≤3pp + CE/CRPS）
+    seconds["audit"] = _run(r.commands["audit"], "值头判据（value-audit --strict）",
+                            cwd=ROOT / "python", allow_fail=True)
+    audit = _read_audit(cfg, r)
+    gate_ok = bool(audit.get("ok"))
+    print(f"  判据：{'✅ 值头闸门通过' if gate_ok else '❌ 值头闸门未过'}"
+          f"{'' if audit.get('read') else '（审计输出没读到，按未过处理）'}")
+    if cfg.strict_gate and not gate_ok:
+        raise SystemExit(f"第 {generation} 代（{r.label}）的值头闸门未过（--strict-gate）—— "
+                         f"审计：{paths.DATA_ROOT / 'league' / (r.label + '-audit.json')}；"
+                         f"要么修值头口径，要么去掉 --strict-gate 只记账")
     seconds["eval"] = _run(r.commands["eval"], f"2+2 评测（{cfg.eval_games} 场）", cwd=ROOT)
     got = judge(r.eval_dir, f"net:{r.net_out}", "teacher")
     print("  判据：" + f"Δ={got['delta']:+.2f} 顺位点 [{got['lo']:+.2f}, {got['hi']:+.2f}] "
@@ -295,6 +366,7 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
         "compact": str(r.compact), "eval_dir": str(r.eval_dir),
         "seconds": {k: round(v, 1) for k, v in seconds.items()},
         "seconds_total": round(sum(seconds.values()), 1),
+        "audit": audit,
         "eval": got,
     }
     return row
@@ -337,6 +409,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kl-early-stop", type=float, default=0.03,
                     help="KL(π_old‖π_new) 早停阈值（0 = 关；v3 同口径 0.03）")
     ap.add_argument("--kl-min-steps", type=int, default=100, help="KL 早停生效前至少跑多少步")
+    ap.add_argument("--strict-gate", action="store_true",
+                    help="值头闸门（`value-audit --strict --ev-ref legit`：EV ≥ 0.7×合法天花板 + "
+                         "覆盖率 ≤3pp）不过就**停整条回路**；缺省只记账不停（先看几轮再决定）")
     ap.add_argument("--seed", type=int, default=20261010)
     ap.add_argument("--producer", choices=producer.PRODUCERS, default=None,
                     help="缺省读 MAHJONG_PRODUCER，再缺省 **cpp**（v4 回路就是为脱离 Java 建的）")
@@ -361,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
         baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,
         kl_early_stop=args.kl_early_stop, kl_min_steps=args.kl_min_steps,
+        strict_gate=args.strict_gate,
     )
     net_in = Path(args.init)
     if not net_in.is_file() and not args.dry_run:
