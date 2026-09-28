@@ -321,7 +321,8 @@ v4 的轮次**不再手敲命令**：一条命令跑完一轮的八个相（计�
 | 派生特征 | **C++**（`trainer features`） | sidecar `g*.feat.bin`（与 Java 逐字节） |
 | 校验 | node | `tools/selfplay-check.mjs`（含 `reward_to_go` 的独立重算） |
 | 紧凑集 | Python | `v4.dataset --aux --student "<与采集逐字相同的串>"`（`is_student` 靠字符串相等判定） |
-| 训练 | Python | `v4.pretrain --objective ppo --behaviour <上一代> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`）+ 数值口径（grad-clip / KL 早停 / 双口径 KL） |
+| **值头先行**（可选） | Python | `--critic-steps N > 0` 时先跑 `v4.pretrain --only-heads value --freeze-trunk --objective bc --value-target <同>`：主干与**策略头都不动** ⇒ KL 恒 0、不占 KL 预算；产物当 PPO 的 `--init` |
+| 训练 | Python | `v4.pretrain --objective ppo --behaviour <采集那份> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`）+ 数值口径（grad-clip / KL 早停 / 双口径 KL） |
 | 导出 | Python | `v4.export weights` → 格式 2 `net.bin`（下一轮的 `--init`/`--behaviour` 就是它） |
 | **判据** | Python | `v4 value-audit --strict --ev-ref legit`（**EV ≥ 0.7 × 合法天花板 + 覆盖率 ≤3pp**）→ `league/<label>-audit.json`；`--strict-gate` 时不过就**停整条回路** |
 | 评测+判据 | **C++**（`trainer selfplay`）+ Python | 2+2 同牌山（`net,net,teacher,teacher`）→ `eval.paired_test`（按 seed 配对 + bootstrap + `required_n`）→ 台账 `league/<label>-v4.json` |
@@ -347,6 +348,27 @@ python -m mahjong_ml.v4 loop --label v4-g01 --init <net.bin> --generations 3 --d
 `--kl-early-stop`、`--kl-min-steps`、`--max-steps`（=「每轮短」那条杠杆）。
 以前这些**只活在 shell 历史里** ⇒ 一轮的实际训练口径不可复现；现在它们显式进 `train` 命令
 （`--dry-run` 与台账都看得见），自检钉住"命令里真的带上了"。
+
+#### 一轮的**预算配方**（第二十五轮的战役实测把两个坑钉出来了）
+
+| 症状（实测） | 根因 | 配方 |
+| --- | --- | --- |
+| `--max-steps 100` 配 `--kl-min-steps 100` ⇒ **KL 早停永不触发**（三代 `stop_reason` 全 `None`，KL 从 0.079 掉到 0.0085 没人管） | 判据只在 `step ≥ min_steps` 时看，而一轮最多 100 步 | `effective_kl_min_steps()` 把 `min_steps` 钳到**轮长的 1/5**（日志会喊"原值够不着"） |
+| 学生行 top1 **逐轮掉**（0.890 → 0.798 → 0.785，n≈17k） | 每轮只 100 步**联合微调**（`--stage-a 0 --stage-b 0`）、KL 又没管住、行为策略每轮换 | 别把 `--stage-a/--stage-b` 设 0：**分阶段**（a = 策略+牌效、b = 冻主干只训头、c = 联合） |
+| 值头 EV ≈ 0（−0.075 / −0.004 / +0.016），闸门三代全 FAIL | 100 步里值头学不动 `delta`（它从"整场口径"的旧头起步） | 给够步数（几百步 / `--epochs ≥ 2`），或先 `--stage-b` 让头在冻住的表示上收敛 |
+
+**推荐的长轮配方**（与 `v4-sp-004` 上实测过的那轮同源；`--stage-a/--stage-b` 是**比例**，不是步数）：
+
+```powershell
+python -m mahjong_ml.v4 loop --label v4-mr02 --init <net.bin> --generations 1 --games 120 `
+  --objective ppo --value-target delta --advantage hand --rank-weight 0.2 `
+  --max-steps 600 --epochs 2 --stage-a 0.2 --stage-b 0.3 --kl-min-steps 60 `
+  --eval-games 150 --no-java
+```
+
+⚠ **对照实验的做法**：两次跑**同一个 `--seed`** ⇒ 采集用同一副牌山、评测也用同一副牌山
+（`seed + 5000 + 代`），于是"换配方"变成**同数据同牌山的 A/B**（牌山相同 ⇒ 两次的 Δ 直接可比）。
+`v4-mr01`（坏配方）与 `v4-mr02`（这份配方）就是这么配的对。
 
 **判据（"训练端脱离 Java"）**：
 ① `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` PASS —— 标签侧
