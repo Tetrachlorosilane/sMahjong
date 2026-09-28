@@ -160,6 +160,25 @@ def blocks_of(tensor: str) -> tuple[Block, ...]:
     return out
 
 
+def block_slices() -> dict[str, tuple[str, int, int]]:
+    """块 id → `(张量, 起始通道, 宽度)`：块在 `BLOCKS` 里就是**按布局顺序**声明的
+    （每个张量的块宽度合计 == 该张量宽度，见上面的断言），所以累加即可。
+
+    用途：**消融矩阵**要在紧凑集上把某块整段置 0（`docs/TRAINING-V4.md` §8.3/§14 P0）——
+    没有这张表就只能手抄通道号（必然漂移）。
+    """
+    out: dict[str, tuple[str, int, int]] = {}
+    off: dict[str, int] = {}
+    for b in BLOCKS:
+        start = off.get(b.tensor, 0)
+        out[b.bid] = (b.tensor, start, b.width)
+        off[b.tensor] = start + b.width
+    for t, want in _TENSOR_WIDTH.items():
+        if off.get(t, 0) != want:
+            raise ContractError(f"{t} 的块偏移合计 {off.get(t, 0)} != {want}")
+    return out
+
+
 def fingerprint(blocks: Sequence[Block] = BLOCKS) -> str:
     """块清单指纹（有序 id+width）→ 写进 `net.bin`/`net.json`，加载时逐块核对。"""
     payload = json.dumps([[b.bid, b.width] for b in blocks], separators=(",", ":"))

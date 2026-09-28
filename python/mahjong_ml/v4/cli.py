@@ -270,6 +270,11 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
         *(["--out", args.out] if args.out else []),
         *(["--strict"] if args.strict else []),
         *(["--ceiling"] if getattr(args, "ceiling", False) else []),
+        *(["--calibrate"] if getattr(args, "calibrate", False) else []),
+        "--calib-rows", str(args.calib_rows),
+        *(["--gae-target", args.gae_target] if getattr(args, "gae_target", None) else []),
+        "--gae-lambda", f"{args.gae_lambda:g}", "--gae-gamma", f"{args.gae_gamma:g}",
+        "--rank-weight", f"{args.rank_weight:g}",
         *[x for c in args.ckpt for x in ("--ckpt", c)],
     ])
 
@@ -280,11 +285,17 @@ def cmd_loop(argv: list[str]) -> int:
     return loop.main(argv)
 
 
+def cmd_ablate(argv: list[str]) -> int:
+    """消融矩阵（`python -m mahjong_ml.v4 ablate`）—— 逐头/逐块关掉，同一预算出表。"""
+    from . import ablate
+    return ablate.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `loop` 的参数集自成一套（见 `v4/loop.py`）：整段转走，别让 argparse 去猜
-    if argv and argv[0] == "loop":
-        return cmd_loop(argv[1:])
+    # `loop` / `ablate` 的参数集自成一套（见 `v4/loop.py` / `v4/ablate.py`）：整段转走
+    if argv and argv[0] in ("loop", "ablate"):
+        return cmd_loop(argv[1:]) if argv[0] == "loop" else cmd_ablate(argv[1:])
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="打印块清单与张量形状").set_defaults(fn=cmd_spec)
@@ -310,11 +321,18 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--out", default=None)
     va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     va.add_argument("--ceiling", action="store_true", help="另报引擎真值特征的线性参照")
+    va.add_argument("--calibrate", action="store_true", help="另报温度缩放前后（修欠覆盖）")
+    va.add_argument("--calib-rows", type=int, default=20000)
+    va.add_argument("--gae-target", default=None, help="另报手级 GAE 的 λ-回报口径（值是行为策略权重）")
+    va.add_argument("--gae-lambda", type=float, default=0.9)
+    va.add_argument("--gae-gamma", type=float, default=1.0)
+    va.add_argument("--rank-weight", type=float, default=0.0)
     va.set_defaults(fn=cmd_value_audit)
     # ⚠ `loop` 的参数集在 `v4/loop.py`（几十个开关），这里**不能用 `REMAINDER` 子解析器**：
     #   argparse 会把 `--label` 这种选项当成父级的未知参数直接报错（实测）。所以 `main()` 在
     #   进 argparse **之前**就把 `loop` 之后的参数整段转走；这里留一行是为了 `--help` 里能看到它。
     sub.add_parser("loop", help="v4 世代回路：采集(C++)/紧凑集/训练/评测/台账（不依赖 Java）")
+    sub.add_parser("ablate", help="消融矩阵：逐头/逐块关掉，同一预算下出表")
     args = ap.parse_args(argv)
     return args.fn(args)
 
