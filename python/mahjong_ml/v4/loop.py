@@ -208,18 +208,16 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     train += ["--baseline-fit", cfg.baseline_fit]
     r.commands["train"] = train
     # ⚠ 导出的是**最终那份权重**：开了值头相就导 critic 那份（含新练的值头），否则导 PPO 那份。
+    _final_ck = paths.DATA_ROOT / "ckpt" / final_ckpt_label(cfg, r)
     r.commands["export"] = [
         _py(), "-m", "mahjong_ml.v4.export", "weights",
-        "--ckpt", str((r.critic_ckpt if cfg.critic_steps > 0
-                       else paths.DATA_ROOT / "ckpt" / r.ckpt_label) / "model.pt"),
+        "--ckpt", str(_final_ck / "model.pt"),
         "--out", str(r.net_out), "--label", r.ckpt_label,
     ]
-    # **值头/优势的判据（目标里那条闸门）在每一轮出口上跑一遍** —— 以前回路只看 2+2 顺位点，
-    # 值头的 EV/覆盖率**没人判**（"覆盖率 ≤3pp"这条判据就断在回路之外了）。
-    # `--ev-ref legit`：合法天花板现算（0.7×），**不是**旧的绝对门槛 0.4（§14.8.4 已废）。
+    # **判据必须判同一份权重**（否则"闸门过了"与"上线的那份"是两回事）。
     r.commands["audit"] = [
         _py(), "-m", "mahjong_ml.v4", "value-audit",
-        "--data", str(r.compact), "--ckpt", str(paths.DATA_ROOT / "ckpt" / r.ckpt_label),
+        "--data", str(r.compact), "--ckpt", str(_final_ck),
         "--target", AUDIT_TARGET.get(cfg.value_target, "value"),
         "--split", "val", "--batch", str(cfg.batch),
         "--strict", "--ev-ref", "legit",
@@ -244,6 +242,38 @@ def assert_no_java(cfg: LoopConfig, rounds: list[Round]) -> None:
         raise SystemExit(f"--no-java 但第 {label} 轮的 {phase} 相要起 JVM：{' '.join(cmd)}")
 
 
+#: 每个相的人话标签（**执行顺序由 `PHASES` 单独决定**，这里只管"打印什么"）。
+#: ⚠ 第二十七轮踩过：执行顺序原本是在 `run_round` 里**另写一份元组**，加 `critic` 相时两份漂移了 ——
+#: `--dry-run` 按 `PHASES` 打印（顺序对）、真跑按那份元组执行（critic 跑在 `train` 前 ⇒ 拿不到 PPO
+#: 的 ckpt 当场报错）。现在**只有一处顺序**：`phase_order()` 读 `PHASES`，谁都别另写。
+PHASE_WHAT = {
+    "collect": "采集（自对弈）",
+    "features": "派生特征（sidecar）",
+    "check": "轨迹校验（selfplay-check）",
+    "compact": "紧凑集（四张量 + 标签）",
+    "train": "训练（策略）",
+    "critic": "值头相（冻主干只训 value，KL 恒 0）",
+    "export": "导出 net.bin",
+    "audit": "值头判据（value-audit --strict）",
+    "eval": "2+2 评测",
+}
+
+
+def phase_order(r: Round) -> list[str]:
+    """要执行的相**按顺序**（唯一真相 = `PHASES`；`check` 由采集相之后紧跟执行）。"""
+    want = list(PHASES)
+    want.insert(want.index("features") + 1, "check")
+    return [p for p in want if p in r.commands]
+def final_ckpt_label(cfg: LoopConfig, r: Round) -> str:
+    """**这一轮最终会导出的那份权重**的 checkpoint 目录名。
+
+    ⚠ 第二十八轮修的真 bug：`audit` 相曾经写死看 `<tag>`（PPO 那份），而开了值头相时 `export`
+    导出的是 `<tag>-critic` ⇒ **闸门判的不是我们要上线的那份权重**（实测两者的 EV 差
+    2.93 vs 6.03）。判据与产物必须指同一份东西。
+    """
+    return f"{r.ckpt_label}-critic" if cfg.critic_steps > 0 else r.ckpt_label
+
+
 def _audit_json_path(label: str) -> Path:
     return paths.DATA_ROOT / "league" / f"{label}-audit.json"
 
@@ -259,11 +289,11 @@ def _read_audit(cfg: LoopConfig, r: Round) -> dict[str, Any]:
     out: dict[str, Any] = {"read": False, "ok": False, "path": str(p), "label": r.label}
     if not p.is_file():
         return out
-    try:
-        rep = json.loads(p.read_text(encoding="utf-8"))
-    except ValueError:
-        return out
-    row = rep.get(Path(paths.DATA_ROOT / "ckpt" / r.ckpt_label).name)
+    row = json.loads(_audit_json_path(r.label).read_text(encoding="utf-8"))
+    # 审计 JSON 的键 = checkpoint 目录名。**先按"最终那份权重"的名字找**（`<tag>-critic`），
+    # 找不到再退回"第一个 dict"（老 JSON / 手工审计的产物）。
+    want = final_ckpt_label(cfg, r)
+    row = rep.get(want) if isinstance((rep := row), dict) else None
     if not isinstance(row, dict):
         row = next((v for v in rep.values() if isinstance(v, dict)), {})
     if not row:
@@ -370,28 +400,28 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
 
     seconds: dict[str, float] = {}
     print(f"\n===== 第 {generation} 代（{r.label}）：{games} 场 / producer={cfg.producer} =====")
-    for phase, what in (("collect", "采集（自对弈）"), ("features", "派生特征（sidecar）")):
+    audit: dict[str, Any] = {}
+    gate_ok = False
+    for phase in phase_order(r):
+        what = PHASE_WHAT.get(phase, phase)
+        if phase == "train":
+            what = f"训练（{cfg.objective}）"
+        elif phase == "eval":
+            what = f"2+2 评测（{cfg.eval_games} 场）"
+        # 判据相：`value-audit --strict --ev-ref legit`（EV ≥ 0.7×合法天花板 + 覆盖率 ≤3pp + CE/CRPS）。
+        # ⚠ 它用**退出码 2** 表示"判据没过"（不是命令失败）⇒ `allow_fail`，结论由 `_read_audit` 读 JSON。
         seconds[phase] = _run(r.commands[phase], what,
-                              cwd=ROOT / "python" if phase in PY_PHASES else ROOT)
-    _run(r.commands["check"], "轨迹校验（selfplay-check）", cwd=ROOT)
-    for phase, what in (("compact", "紧凑集（四张量 + 标签）"),
-                        ("critic", "值头先行（冻主干 + 只训 value，KL 恒 0）"),
-                        ("train", f"训练（{cfg.objective}）"),
-                        ("export", "导出 net.bin")):
-        if phase in r.commands:
-            seconds[phase] = _run(r.commands[phase], what, cwd=ROOT / "python")
-    # 判据相：`value-audit --strict --ev-ref legit`（EV ≥ 0.7×合法天花板 + 覆盖率 ≤3pp + CE/CRPS）
-    seconds["audit"] = _run(r.commands["audit"], "值头判据（value-audit --strict）",
-                            cwd=ROOT / "python", allow_fail=True)
-    audit = _read_audit(cfg, r)
-    gate_ok = bool(audit.get("ok"))
-    print(f"  判据：{'✅ 值头闸门通过' if gate_ok else '❌ 值头闸门未过'}"
-          f"{'' if audit.get('read') else '（审计输出没读到，按未过处理）'}")
-    if cfg.strict_gate and not gate_ok:
-        raise SystemExit(f"第 {generation} 代（{r.label}）的值头闸门未过（--strict-gate）—— "
-                         f"审计：{paths.DATA_ROOT / 'league' / (r.label + '-audit.json')}；"
-                         f"要么修值头口径，要么去掉 --strict-gate 只记账")
-    seconds["eval"] = _run(r.commands["eval"], f"2+2 评测（{cfg.eval_games} 场）", cwd=ROOT)
+                              cwd=ROOT / "python" if phase in PY_PHASES else ROOT,
+                              allow_fail=(phase == "audit"))
+        if phase == "audit":
+            audit = _read_audit(cfg, r)
+            gate_ok = bool(audit.get("ok"))
+            print(f"  判据：{'✅ 值头闸门通过' if gate_ok else '❌ 值头闸门未过'}"
+                  f"{'' if audit.get('read') else '（审计输出没读到，按未过处理）'}")
+            if cfg.strict_gate and not gate_ok:
+                raise SystemExit(
+                    f"第 {generation} 代（{r.label}）的值头闸门未过（--strict-gate）—— "
+                    f"审计：{_audit_json_path(r.label)}；要么修值头口径，要么去掉 --strict-gate 只记账")
     got = judge(r.eval_dir, f"net:{r.net_out}", "teacher")
     print("  判据：" + f"Δ={got['delta']:+.2f} 顺位点 [{got['lo']:+.2f}, {got['hi']:+.2f}] "
           f"p={got['p']:.3f}（n={got['n']}；按观测 sd 检出 Δ=2 需 {got['required_n_for_2']} 场）")

@@ -2562,6 +2562,28 @@ eq("v4 回路：开了值头相 ⇒ **导出 critic 那份权重**（最终 net.
    Path(_flag(_lo3.commands["export"], "--ckpt")).parent, _lo3.critic_ckpt)
 ok("critic" not in v4_loop.plan_commands(_lo_cfg2, 3, _lo_net, 50).phases(),
    "v4 回路：`--critic-steps 0`（缺省）**不加**这个相 —— 旧行为逐位不变")
+# ⚠ 第二十七轮踩过的**漂移**：执行顺序原本在 `run_round` 里**另写一份元组**，加 `critic` 相时两份
+#   不一致 —— `--dry-run` 按 `PHASES` 打印（顺序对）、真跑按那份元组执行（critic 跑在 train 前
+#   ⇒ 拿不到 PPO 的 ckpt，实测当场报 `找不到 model.pt`）。现在只有 `phase_order()` 一处真相。
+eq("v4 回路：执行顺序只有一处真相（`phase_order` = `PHASES` + `check` 紧跟 features）",
+   v4_loop.phase_order(_lo3), ["collect", "features", "check", "compact", "train", "critic",
+                               "export", "audit", "eval"])
+ok(v4_loop.phase_order(_lo3).index("critic") > v4_loop.phase_order(_lo3).index("train"),
+   "v4 回路：**执行顺序**里 critic 也在 train 之后（不只 `phases()` 显示的顺序）")
+ok(set(v4_loop.PHASE_WHAT) >= set(v4_loop.PHASES) | {"check"},
+   "v4 回路：每个相都有人话标签（漏一个就会打印裸 id，不好读）",
+   str(sorted(set(v4_loop.PHASES) | {"check"} - set(v4_loop.PHASE_WHAT))))
+# ⚠ 第二十八轮修的真 bug：`audit` 写死看 `<tag>`（PPO 那份），而开了值头相时 `export` 导的是
+#   `<tag>-critic` ⇒ **闸门判的不是要上线的那份权重**（实测两者 EV 差 −2.93 vs −6.03）。
+eq("v4 回路：判据与产物**指同一份权重**（开了值头相 ⇒ audit/export 都看 `<tag>-critic`）",
+   (v4_loop.final_ckpt_label(_lo_cfg3, _lo3),
+    Path(_flag(_lo3.commands["audit"], "--ckpt")).name,
+    Path(_flag(_lo3.commands["export"], "--ckpt")).parent.name),
+   ("v4-sc3-g01-critic", "v4-sc3-g01-critic", "v4-sc3-g01-critic"))
+eq("v4 回路：没开值头相时两者都看 `<tag>`（旧行为逐位不变）",
+   (v4_loop.final_ckpt_label(_lo_cfg2, _lo2),
+    Path(_flag(_lo2.commands["audit"], "--ckpt")).name),
+   ("v4-sc2-g03", "v4-sc2-g03"))
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）
