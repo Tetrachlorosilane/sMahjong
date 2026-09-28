@@ -97,8 +97,8 @@ final class V4Cache {
     /**
      * **前缀校验**：把槽里旧窗口的行与新 obs 的窗口行在重叠区间上逐元素比对。
      *
-     * <p>重叠区间（绝对事件下标）：`[max(0, E-K), min(seen, E))`；新位置 `i-E+K`、旧位置 `i-seen+K`。
-     * 任何一格不等 ⇒ 返回 false（调用方丢掉整个槽、从零重建）。
+     * <p>重叠区间（绝对事件下标）：`[max(E-K, seen-len), min(seen, E))`；新位置 `i-(E-K)`、
+     * 旧位置 `i-(seen-len)`。任何一格不等 ⇒ 返回 false（调用方丢掉整个槽、从零重建）。
      *
      * @param fresh 本决策的窗口 token 行（`V4Features.eventMatrix` 的输出，长度 == K）
      */
@@ -127,7 +127,8 @@ final class V4Cache {
      * 窗口整体左移 `delta` 行（引用级移动，不搬浮点），空出来的尾部由调用方填新行。
      *
      * <p>为什么恒是"左移 delta"：窗口**总是贴着事件流的尾巴**（新事件在尾部、前部是 padding），
-     * 所以 `E` 变 `E+delta` 时，两种窗口长度下行的位移都等于 `-delta`。
+     * 所以 `E` 变 `E+delta` 时，绝对下标 `i` 的行从 `i-(seen-len)` 移到 `i-(E-len')`，
+     * 而两种窗口长度下这个位移都等于 `-delta`（不管窗口有没有满）。
      */
     static void shiftRows(float[][] rows, int delta) {
         if (delta <= 0) {
