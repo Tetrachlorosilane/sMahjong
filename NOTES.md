@@ -2638,6 +2638,11 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   ⚠ 三条仍在的硬要求：`bodyFile` 用**绝对路径**；`PATCH /git/refs/…` 的 body 也走文件
   （内联字符串会被当字符串发走、422 `is not an object`）；提交对象的 message **必须带尾随换行**，
   否则远端 commit sha 与本地不同（内容一样、对象不一样 → 本地区远端分叉）。
+  ⚠⚠ **`files[]` 一律用 `file:`（从磁盘读），别用内联 `content`**（2026-09-28 实测）：
+  那一次我把 `V4Cache.java` 的新文件用内联 `content` 发出去（手抄的正文），
+  **提交成功、工具报「回读校验一致」，但远端 tree `a8006188` ≠ 本地 tree `0a31ed86`** ——
+  手抄只要差一个空格或注释就分叉，而**只看"已提交"是发现不了的**（判据只有 tree 相等）。
+  发现后立刻用 `file:` 重推一个提交，远端 tree 才等于本地 tree。**新增文件也走 `file:`**。
 - **broker 的 git 通道 502 时的兜底**（`github_git_push` 报 `git push 失败（退出码 128）` +
   代理 `error: 502`，而 REST 照常通）：走 REST 自己造**逐字节相同**的提交 ——
   `POST /git/blobs`（每个改动文件一个，base64）→ `POST /git/trees`（**带 `base_tree` = 本地父提交的
