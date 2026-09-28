@@ -270,9 +270,13 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
         *(["--device", args.device] if args.device else []),
         *(["--out", args.out] if args.out else []),
         *(["--strict"] if args.strict else []),
+        "--ev-ref", getattr(args, "ev_ref", "floor"),
         *(["--ceiling"] if getattr(args, "ceiling", False) else []),
         *(["--calibrate"] if getattr(args, "calibrate", False) else []),
         "--calib-rows", str(args.calib_rows),
+        *(["--readout"] if getattr(args, "readout", False) else []),
+        "--readout-rows", str(args.readout_rows),
+        "--readout-mlp-steps", str(args.readout_mlp_steps),
         *(["--gae-target", args.gae_target] if getattr(args, "gae_target", None) else []),
         "--gae-lambda", f"{args.gae_lambda:g}", "--gae-gamma", f"{args.gae_gamma:g}",
         "--rank-weight", f"{args.rank_weight:g}",
@@ -323,9 +327,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="主口径（P1b 的小局级值头用 `--target delta` 量）")
     va.add_argument("--out", default=None)
     va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
+    va.add_argument("--ev-ref", default="floor", choices=["floor", "legit"],
+                    help="EV 判据参照：floor = 绝对 0.1；legit = 现算合法天花板 × 0.8（§14.8.4）")
     va.add_argument("--ceiling", action="store_true", help="另报引擎真值特征的线性参照")
     va.add_argument("--calibrate", action="store_true", help="另报温度缩放前后（修欠覆盖）")
     va.add_argument("--calib-rows", type=int, default=20000)
+    va.add_argument("--readout", action="store_true",
+                    help="读出头探针：冻结躯干换池化/换读出深度，看 EV 能到多少")
+    va.add_argument("--readout-rows", type=int, default=40000)
+    va.add_argument("--readout-mlp-steps", type=int, default=1500)
     va.add_argument("--gae-target", default=None, help="另报手级 GAE 的 λ-回报口径（值是行为策略权重）")
     va.add_argument("--gae-lambda", type=float, default=0.9)
     va.add_argument("--gae-gamma", type=float, default=1.0)

@@ -190,12 +190,15 @@ def load_model(ckpt: str | Path, device: str) -> M.V4Model:
 
 def audit(data_dir: str | Path, split: str, ckpts: list[str],
           device: str | None = None, batch: int = 2048,
-          value_key: str = "auto", target: str = "auto") -> dict[str, dict]:
+          value_key: str = "auto", target: str = "auto",
+          ev_ref: str = "floor") -> dict[str, dict]:
     """对每个 ckpt 报一份判据表。
 
     @param value_key 判据按哪一列的目标算（`auto` = 从 ckpt 的 `metrics.json` 读 `value_target`）
     @param target **主口径**：`auto`（同上）/ `value` / `rtg` / `delta` —— P1b 之后值头可能学的是
         "本小局收支"（`delta`），拿 `value` 去量它是"用另一把尺子量"（§14.6）
+    @param ev_ref `floor` = 用绝对门槛 `EV_FLOOR`；`legit` = 现算**合法天花板**（`legit_full` 那组，
+        同口径）并用 `EV ≥ 0.8 × 天花板` 当判据（§14.8.4：绝对门槛对实现值类目标不可达）
     """
     data = ds.load_split(data_dir, split)
     lens = {k: (int(data[k].shape[0]) if data.get(k) is not None else -1)
@@ -240,11 +243,42 @@ def audit(data_dir: str | Path, split: str, ckpts: list[str],
         m["ev"] = m[f"ev_{want}"] if f"ev_{want}" in m else explained_variance(prob @ CENTERS, y)
         name = Path(ck).name
         report[name] = {"path": str(ck), "value_target": target, "target": want, **struct, **m}
+    if ev_ref == "legit":
+        # 现算**合法天花板**（同一口径）—— 判据用比例，不再用绝对门槛（§14.8.4）
+        tr = ds.load_split(data_dir, "train")
+        for name, row in report.items():
+            want = str(row.get("target", "value"))
+            if tr.get(want) is None:
+                continue
+            n_tr = int(tr["nlegal"].shape[0])
+            x_tr = _cols_of(tr, CEIL_GROUPS[CEIL_REF_KEY], n_tr)
+            x_va = _cols_of(data, CEIL_GROUPS[CEIL_REF_KEY], n)
+            y_tr = _target_of(tr, want, n_tr)[0]
+            y_va = _target_of(data, want, n)[0]
+            ref = ridge_ev(x_tr, y_tr, x_va, y_va)
+            row["ev_ref"] = float(ref)
+            row["ev_ref_frac"] = float(EV_CEILING_FRAC)
+            row["ev_need"] = float(EV_CEILING_FRAC * ref)
     return report
 
 
-def verdicts(row: dict, value_key: str = "value") -> list[tuple[bool, str]]:
-    """把一行判据翻成 PASS/FAIL（`False` = 不合格）。判据口径见 `docs/TRAINING-V4.md` §8.2。"""
+#: 合法天花板判据的比例：`EV ≥ EV_CEILING_FRAC × legit 天花板`。
+#:
+#: 为什么是 0.7 而不是更高的数：① 参照本身是**线性**岭回归，val 上 n=3.5 万 ⇒ 抽样噪声约 ±0.005
+#: （相对 ±7%）；② 它是线性参照，非线性上限可能略高。取 0.7 能把两件事**分开**：
+#: "学到了这一口径的信号"（实测 0.72–0.80 × 天花板）与"塌成均值"（EV ≈ 0.02 ⇒ 0.3 × 天花板）。
+#: 取 0.8 会在噪声里判生死（`v4-hand-003` 实测 0.72 就是这么被判 FAIL 的）。
+EV_CEILING_FRAC = 0.7
+
+
+def verdicts(row: dict, value_key: str = "value",
+             ev_ref: float | None = None) -> list[tuple[bool, str]]:
+    """把一行判据翻成 PASS/FAIL（`False` = 不合格）。判据口径见 `docs/TRAINING-V4.md` §8.2 / §14.8.4。
+
+    @param ev_ref **合法天花板参照**（同口径的 `legit*` 岭回归 EV）。给了就用
+        `EV ≥ 0.8 × 天花板` 当判据，不再用绝对值 `EV_FLOOR` —— 绝对门槛在"实现值"类目标上
+        是**构造上不可达**的（小局收支的合法天花板只有 0.069，第十九轮实测）。
+    """
     out = []
     ev = row.get(f"ev_{value_key}")
     share = row.get("rtg_known_var_share")
@@ -252,8 +286,14 @@ def verdicts(row: dict, value_key: str = "value") -> list[tuple[bool, str]]:
             f"；已滚入部分的方差份额 {share:.2f} 只是目标侧的结构数，**不是 EV 上界**）"
             if value_key == "rtg" and share is not None else "")
     if ev is not None:
-        out.append((ev >= EV_FLOOR,
-                    f"解释方差 EV({value_key}) {ev:+.4f} ≥ {EV_FLOOR:g}{hint}"))
+        if ev_ref is not None and np.isfinite(ev_ref) and ev_ref > 0:
+            need = EV_CEILING_FRAC * ev_ref
+            out.append((ev >= need,
+                        f"解释方差 EV({value_key}) {ev:+.4f} ≥ {EV_CEILING_FRAC:g} × 合法天花板 "
+                        f"{ev_ref:.4f} = {need:.4f}{hint}"))
+        else:
+            out.append((ev >= EV_FLOOR,
+                        f"解释方差 EV({value_key}) {ev:+.4f} ≥ {EV_FLOOR:g}{hint}"))
     ce, ce_m = row.get(f"ce_{value_key}"), row.get(f"ce_marginal_{value_key}")
     if ce is not None and ce_m is not None:
         out.append((ce < ce_m, f"CE({value_key}) {ce:.4f} < 边缘基线 {ce_m:.4f}"))
@@ -304,15 +344,110 @@ def _flat_aux(data: dict, n: int, *, with_opp_hand: bool) -> tuple[np.ndarray, l
     return np.concatenate([x, np.ones((n, 1))], axis=1), names
 
 
+#: 引擎真值列的**合法性分组** —— 上界判据必须按这个分组读。
+#:
+#: ⚠ 第十九轮之前的 `ceiling_report` 把 `own_shanten/own_tenpai/win_flag/opp_tenpai/opp_dealin`
+#: **一锅端**叫 "state" 参照，于是报出来的 `EV(delta)=0.632` 被当成"合法信息的天花板"。
+#: 但 `win_flag` 是**本小局的结局本身**（"我这局和了没有"）、`opp_tenpai/opp_dealin/opp_hand`
+#: 是**别家的隐藏真值** —— 拿它们预测本小局收支等于**用答案预测答案**，那不是天花板，是作弊。
+#: 合法的只有"决策那一刻自家能算的"：做牌后的向听/听牌（`legit_own`）与引擎牌效
+#: `HandEval.afterDiscard`（`legit_engine`，也就是 `cand.derived` 的来源）。
+CEIL_GROUPS: dict[str, tuple[str, ...]] = {
+    "legit_own": ("aux_own_shanten_after", "aux_own_tenpai"),
+    "legit_engine": ("effect",),
+    "legit": ("aux_own_shanten_after", "aux_own_tenpai", "effect"),
+    "legit_ctx(公开状态)": ("ctx",),
+    "legit_visible(状态+牌效)": ("ctx", "cand_agg"),
+    "legit_full(全部合法)": ("ctx", "cand_agg", "aux_own_shanten_after", "aux_own_tenpai", "effect"),
+    "label_win(结局)": ("aux_win_flag",),
+    "label_opp(隐藏)": ("aux_opp_tenpai", "aux_opp_dealin"),
+    "label_hand(隐藏)": ("aux_opp_hand",),
+    "label_all": ("aux_win_flag", "aux_opp_tenpai", "aux_opp_dealin", "aux_opp_hand"),
+    "everything": ("aux_own_shanten_after", "aux_own_tenpai", "effect", "aux_win_flag",
+                   "aux_opp_tenpai", "aux_opp_dealin", "aux_opp_hand"),
+}
+
+#: 判据的**合法天花板参照组**（`--ev-ref legit` 用它现算；改组名必须同步改这里 —— 自检钉住）
+CEIL_REF_KEY = "legit_full(全部合法)"
+
+
+def _cand_agg(data: dict, n: int) -> np.ndarray:
+    """逐候选派生量的**合法聚合**（按合法候选取 mean / max）—— "牌效"这条合法信息臂。
+
+    为什么要它：`legit_own` 只有"我打算打哪张 → 之后向听几"这一个数，
+    而"**所有**候选里最好的一张能进几张有效牌"这种牌效信息是决策那一刻完全合法的。
+    不把这条臂量出来，"delta 学不动"就可能被误诊成"特征不够好"。
+    """
+    from . import spec as S
+    _, s0, w0 = S.block_slices()["cand.derived"]
+    cand = np.asarray(data["cand"][:n, :, s0:s0 + w0], dtype=np.float64)
+    nleg = np.asarray(data["nlegal"][:n], dtype=np.int64)
+    m = np.arange(cand.shape[1])[None, :] < nleg[:, None]
+    w = m[:, :, None].astype(np.float64)
+    cnt = np.maximum(w.sum(axis=1), 1.0)
+    mean = (cand * w).sum(axis=1) / cnt
+    mx = np.where(m[:, :, None], cand, -np.inf).max(axis=1)
+    return np.concatenate([mean, np.where(np.isfinite(mx), mx, 0.0)], axis=1)
+
+
+def _cols_of(data: dict, keys: tuple[str, ...], n: int) -> np.ndarray:
+    """按列名取一份特征矩阵（一维列当一列、多维列展平），末列接截距。
+
+    ⚠ **逐候选列**（`effect` 的形状是 `[n, L, 3]`）必须先在**候选维**上取一行，
+    否则 train/val 的 `L` 不同（29 vs 21）会拼出两个宽度不同的矩阵，
+    报错长这样：`matmul … size 88 is different from 64`。取的是**这一手实际打出的那张**的
+    引擎牌效（`label` 下标）—— 与 `cand.derived` 同源，是决策那一刻真能算的量。
+    """
+    per_cand = {"effect", "cand"}
+    cols: list[np.ndarray] = []
+    for key in keys:
+        if key == "cand_agg":
+            cols.append(_cand_agg(data, n))
+            continue
+        arr = data.get(key)
+        if arr is None:
+            continue
+        a = np.asarray(arr[:n], dtype=np.float64)
+        if key in per_cand and a.ndim == 3:
+            lab = np.asarray(data["label"][:n], dtype=np.int64)
+            a = a[np.arange(n), np.clip(lab, 0, a.shape[1] - 1)]
+        cols.append(a[:, None] if a.ndim == 1 else a.reshape(n, -1))
+    x = np.concatenate(cols, axis=1) if cols else np.zeros((n, 0))
+    return np.concatenate([x, np.ones((n, 1))], axis=1)
+
+
 def ceiling_report(data_dir: str | Path, split: str = "val", *,
                    lam: float = 1e-3) -> dict[str, dict[str, float]]:
-    """**引擎真值特征的线性参照**：`value` / `rtg` / 小局收支 `delta` 各能解释多少。
+    """**引擎真值特征的线性参照**，按 `CEIL_GROUPS` 的**合法性**分组报 `value` / `rtg` / `delta`。
 
-    为什么要它：`rtg` 值头训不出来时，必须分清"是我们的训练/架构不行"还是"这个目标本身
-    就没有可解释的方差"。这里把标签侧的引擎真值（自家向听/听牌/和了 + 对手听牌/放铳）线性喂进去，
-    再看它能不能排 rtg —— 排不动，就不是训练的问题。
-    ⚠ `with_opp_hand=True` 那一栏用了**别家的真手牌**（推理端拿不到），只作"作弊参照"。
+    为什么要它：值头训不出来时，必须分清"是我们的训练/架构不行"还是"这个目标本身
+    就没有可解释的方差"。**判据只读 `legit` 那一行** —— 含 `label_*` 的行是作弊上界
+    （`win_flag` 就是本小局结局，`opp_*` 是别家隐藏真值），只用来回答"信息在不在标签里"。
     """
+    tr = ds.load_split(data_dir, "train")
+    va = ds.load_split(data_dir, split)
+    out: dict[str, dict[str, float]] = {}
+    for tag, keys in CEIL_GROUPS.items():
+        n_tr = int(tr["nlegal"].shape[0])
+        n_va = int(va["nlegal"].shape[0])
+        x_tr = _cols_of(tr, keys, n_tr)
+        x_va = _cols_of(va, keys, n_va)
+        row: dict[str, float] = {"features": float(x_tr.shape[1])}
+        for key, scale in (("value", 1.0), ("rtg", 1.0), ("delta", 1000.0)):
+            if tr.get(key) is None:
+                continue
+            y_tr = np.asarray(tr[key][:n_tr], dtype=np.float64) / scale
+            y_va = np.asarray(va[key][:n_va], dtype=np.float64) / scale
+            if not np.isfinite(y_tr).all() or not np.isfinite(y_va).all():
+                continue
+            row[f"ev_{key}"] = ridge_ev(x_tr, y_tr, x_va, y_va, lam)
+        out[tag] = row
+    return out
+
+
+def _legacy_ceiling(data_dir: str | Path, split: str = "val", *,
+                    lam: float = 1e-3) -> dict[str, dict[str, float]]:
+    """老口径（`state` / `oracle_hand` 两栏）—— 只作历史数字的对照，新判据别用它。"""
     tr = ds.load_split(data_dir, "train")
     va = ds.load_split(data_dir, split)
     out: dict[str, dict[str, float]] = {}
@@ -321,7 +456,7 @@ def ceiling_report(data_dir: str | Path, split: str = "val", *,
         n_va = int(va["nlegal"].shape[0])
         x_tr, names = _flat_aux(tr, n_tr, with_opp_hand=with_hand)
         x_va, _ = _flat_aux(va, n_va, with_opp_hand=with_hand)
-        row: dict[str, float] = {"features": float(x_tr.shape[1])}
+        row: dict[str, float] = {"features": float(x_tr.shape[1]), "columns": float(len(names))}
         for key, scale in (("value", 1.0), ("rtg", 1.0), ("delta", 1000.0)):
             y_tr = np.asarray(tr[key][:n_tr], dtype=np.float64) / scale
             y_va = np.asarray(va[key][:n_va], dtype=np.float64) / scale
@@ -329,7 +464,184 @@ def ceiling_report(data_dir: str | Path, split: str = "val", *,
                 continue
             row[f"ev_{key}"] = ridge_ev(x_tr, y_tr, x_va, y_va, lam)
         out[tag] = row
-    out["state"]["columns"] = float(len(names))            # type: ignore[assignment]
+    return out
+
+
+def _std_ridge_ev(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
+                  y_val: np.ndarray, lam: float = 1.0) -> float:
+    """**先标准化再岭回归**的解释方差（读出头探针专用）。
+
+    为什么不能直接用 `ridge_ev`：探针要比的是**宽度差一个数量级**的特征块（192 vs 576），
+    而 `lam=1e-3` 是在**未标准化**的原始尺度上惩罚的 —— 谁的量纲大谁被压得多，
+    比较就不公平了。这里用 train 的均值/标准差把每列拉齐，惩罚才是可比的。
+    """
+    mu = x_train.mean(axis=0)
+    sd = x_train.std(axis=0)
+    sd = np.where(sd < 1e-8, 1.0, sd)
+    a = np.concatenate([(x_train - mu) / sd, np.ones((x_train.shape[0], 1))], axis=1)
+    b = np.concatenate([(x_val - mu) / sd, np.ones((x_val.shape[0], 1))], axis=1)
+    w = np.linalg.solve(a.T @ a + lam * np.eye(a.shape[1]), a.T @ y_train)
+    return explained_variance(b @ w, y_val)
+
+
+def _mlp_probe(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
+               y_val: np.ndarray, *, hidden: int = 256, steps: int = 1500,
+               lr: float = 1e-3, batch: int = 4096, seed: int = 20260927,
+               device: str = "cpu") -> float:
+    """**非线性探针**：同一份冻结特征喂两层 MLP，看"深度"能不能单独把 EV 抬起来。
+
+    与 `_std_ridge_ev` 配对读：`MLP ≫ ridge` ⇒ 瓶颈是**读出头太浅**；
+    `MLP ≈ ridge` ⇒ 瓶颈在**特征本身**（再多层也白搭）。
+    """
+    torch.manual_seed(seed)
+    mu = x_train.mean(axis=0)
+    sd = np.where(x_train.std(axis=0) < 1e-8, 1.0, x_train.std(axis=0))
+    xt = torch.from_numpy(((x_train - mu) / sd).astype(np.float32)).to(device)
+    yt = torch.from_numpy(y_train.astype(np.float32)).to(device)
+    xv = torch.from_numpy(((x_val - mu) / sd).astype(np.float32)).to(device)
+    net = torch.nn.Sequential(
+        torch.nn.Linear(xt.shape[1], hidden), torch.nn.GELU(),
+        torch.nn.Linear(hidden, hidden), torch.nn.GELU(),
+        torch.nn.Linear(hidden, 1)).to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    n = xt.shape[0]
+    for _ in range(steps):
+        idx = torch.randperm(n, generator=gen)[:batch].to(device)
+        opt.zero_grad(set_to_none=True)
+        loss = torch.nn.functional.mse_loss(net(xt[idx]).squeeze(-1), yt[idx])
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        pred = net(xv).squeeze(-1).cpu().numpy().astype(np.float64)
+    return explained_variance(pred, y_val)
+
+
+def _grab(cap: dict, name: str, idx: int | None = None):
+    """抓某个子模块的输出到共享的 `cap` 里（hook 必须**返回 None**，否则会把输出替换掉）。"""
+    def hook(_m, _inp, out) -> None:
+        cap[name] = (out[idx] if idx is not None else out).detach()
+    return hook
+
+
+def pool_features(u: torch.Tensor, mask: torch.Tensor) -> dict[str, torch.Tensor]:
+    """把候选表示 `u`（`[B,L,D]`）按几种方式池化成状态向量（读出头探针的**唯一池化实现**）。
+
+    ⚠ `mean_all` 是**现行**读法（`V4Model.forward` 里的 `u.mean(dim=1)`）：它对**全部 L 个槽位**
+    求平均，含掩码掉的填充槽 —— 于是状态里混进一个正比于 `(L−合法数)/L` 的常数项。
+    其余三种都只在**合法候选**上算（`mean` / `max` / `std`）。
+    """
+    m = mask if mask is not None else torch.ones(u.shape[:2], dtype=torch.bool, device=u.device)
+    w = m.unsqueeze(-1).to(u.dtype)
+    cnt = w.sum(dim=1).clamp(min=1.0)
+    mean_m = (u * w).sum(dim=1) / cnt
+    mx = u.masked_fill(~m.unsqueeze(-1), torch.finfo(u.dtype).min).max(dim=1).values
+    var = ((u - mean_m.unsqueeze(1)) ** 2 * w).sum(dim=1) / cnt
+    return {"mean_all": u.mean(dim=1), "mean": mean_m, "max": mx,
+            "std": var.clamp(min=0).sqrt()}
+
+
+@torch.no_grad()
+def forward_pools(model: M.V4Model, data: dict, n: int, device: str,
+                  batch: int = 2048, rows: int = 0) -> dict[str, np.ndarray]:
+    """把冻结躯干在**不同池化方式**下的状态向量各取一份，供线性/非线性探针比较。
+
+    动机（`docs/TRAINING-V4.md` §14.7）：现行值头读的是 `u.mean(dim=1)` —— 对**全部 L 个槽位**
+    （含掩码掉的填充槽）求平均。这个池化有三个可疑之处，探针要把它们**分开**量：
+
+    - `mean_all` vs `mean`：填充槽（`cand` 全 0 → 一个常数偏置向量）被平均进去，于是状态随
+      "本巡有几个合法候选"漂移；
+    - `max` / `std`：**均值把信息抹平**（"某一张牌特别危险"这种信号在均值里只剩 1/L）；
+    - `tile_pool` / `h_evt`：融合层手上**本来就有**、但最后没进值头的两个向量（代码事实⑥）。
+    """
+    cap: dict[str, torch.Tensor] = {}
+    hooks = [model.tile.register_forward_hook(_grab(cap, "tile_pool", 1)),
+             model.event.register_forward_hook(_grab(cap, "h_evt", 1)),
+             model.fusion.register_forward_hook(_grab(cap, "u"))]
+    try:
+        idx_all = (np.linspace(0, n - 1, rows).astype(np.int64) if 0 < rows < n
+                   else np.arange(n))
+        acc: dict[str, list[np.ndarray]] = {}
+        for i0 in range(0, idx_all.shape[0], batch):
+            idx = idx_all[i0:i0 + batch]
+            b = _batch(data, idx, device)
+            model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+            u = cap["u"]                                            # [B,L,D]
+            blocks = {**pool_features(u, b["mask"]),
+                      "tile_pool": cap["tile_pool"], "h_evt": cap["h_evt"]}
+            for k, v in blocks.items():
+                acc.setdefault(k, []).append(v.float().cpu().numpy())
+        return {k: np.concatenate(v, axis=0).astype(np.float64) for k, v in acc.items()}
+    finally:
+        for h in hooks:
+            h.remove()
+
+
+def _pool_groups(pool: dict[str, np.ndarray]) -> dict[str, list[str]]:
+    """探针要比较的**特征块组合**（名字 → 组成块）。"""
+    return {
+        "mean_all": ["mean_all"],
+        "mean": ["mean"],
+        "max": ["max"],
+        "std": ["std"],
+        "state(tile_pool)": ["tile_pool"],
+        "h_evt(未用)": ["h_evt"],
+        "mean+max+std": ["mean", "max", "std"],
+        "mean_all+tile_pool+h_evt": ["mean_all", "tile_pool", "h_evt"],
+        "all": ["mean", "max", "std", "tile_pool", "h_evt"],
+    }
+
+
+def readout_report(data_dir: str | Path, split: str, ckpt: str, *,
+                   targets: tuple[str, ...] = ("delta", "value", "rtg"),
+                   train_rows: int = 40000, val_rows: int = 20000,
+                   lam: float = 1.0, mlp: bool = True, mlp_steps: int = 1500,
+                   device: str | None = None, batch: int = 2048) -> dict:
+    """**读出头探针**：同一份冻结躯干，换池化方式 / 换读出深度，看 EV 能到多少。
+
+    判据（`docs/TRAINING-V4.md` §14.7 的下一步）：
+    - 某个池化块的 ridge EV ≫ `mean_all` ⇒ **瓶颈是池化**（值头读错了向量）；
+    - MLP ≫ ridge ⇒ **瓶颈是读出深度**；
+    - 两者都 ≈ `mean_all` ⇒ 瓶颈在**躯干表示**（那就要动特征/躯干，不是动头）。
+    """
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    tr = ds.load_split(data_dir, "train")
+    va = ds.load_split(data_dir, split)
+    model = load_model(ckpt, dev)
+    ptr = forward_pools(model, tr, int(tr["nlegal"].shape[0]), dev, batch, train_rows)
+    pva = forward_pools(model, va, int(va["nlegal"].shape[0]), dev, batch, val_rows)
+    n_tr = next(iter(ptr.values())).shape[0]
+    n_va = next(iter(pva.values())).shape[0]
+    i_tr = (np.linspace(0, int(tr["nlegal"].shape[0]) - 1, n_tr).astype(np.int64)
+            if n_tr < int(tr["nlegal"].shape[0]) else np.arange(n_tr))
+    i_va = (np.linspace(0, int(va["nlegal"].shape[0]) - 1, n_va).astype(np.int64)
+            if n_va < int(va["nlegal"].shape[0]) else np.arange(n_va))
+    groups = _pool_groups(ptr)
+    out: dict = {"ckpt": str(ckpt), "split": split, "train_rows": n_tr, "val_rows": n_va,
+                 "blocks": {k: int(v.shape[1]) for k, v in ptr.items()}, "ridge": {}, "mlp": {}}
+    for tgt in targets:
+        if tr.get(tgt) is None:
+            continue
+        y_tr = _target_of(tr, tgt, int(tr["nlegal"].shape[0]))[0][i_tr]
+        y_va = _target_of(va, tgt, int(va["nlegal"].shape[0]))[0][i_va]
+        if not np.isfinite(y_tr).all() or not np.isfinite(y_va).all():
+            continue
+        row: dict[str, float] = {}
+        for name, parts in groups.items():
+            row[name] = _std_ridge_ev(np.concatenate([ptr[p][:, :] for p in parts], axis=1), y_tr,
+                                      np.concatenate([pva[p][:, :] for p in parts], axis=1), y_va, lam)
+        out["ridge"][tgt] = row
+        if mlp:
+            best = max(row, key=lambda k: row[k])
+            out["mlp"][tgt] = {
+                "mean_all": _mlp_probe(ptr["mean_all"], y_tr, pva["mean_all"], y_va,
+                                       steps=mlp_steps, device=dev),
+                "best_ridge_pool": best,
+                "best_ridge_pool_mlp": _mlp_probe(
+                    np.concatenate([ptr[p] for p in groups[best]], axis=1), y_tr,
+                    np.concatenate([pva[p] for p in groups[best]], axis=1), y_va,
+                    steps=mlp_steps, device=dev),
+            }
     return out
 
 
@@ -538,12 +850,22 @@ def main(argv: list[str] | None = None) -> int:
                          "P1b 的小局级值头（`--value-target delta`）要用它才量得对")
     ap.add_argument("--out", default=None)
     ap.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
+    ap.add_argument("--ev-ref", choices=["floor", "legit"], default="floor",
+                    help="EV 判据的参照：floor = 绝对门槛 0.1（老口径）；legit = 现算**合法天花板**"
+                         "并用 `EV ≥ 0.8 × 天花板`（§14.8.4 —— 绝对门槛对 `delta`/`rtg` 不可达）")
     ap.add_argument("--ceiling", action="store_true",
                     help="另报**引擎真值特征的线性参照**（value / rtg / delta 各能解释多少方差）")
     ap.add_argument("--calibrate", action="store_true",
                     help="另报**温度缩放**前后的覆盖率/CRPS（一个标量，修欠覆盖最便宜的一招）")
     ap.add_argument("--calib-rows", type=int, default=20000,
                     help="拟合温度用训练切分的前多少行（一个标量，两万行足够）")
+    ap.add_argument("--readout", action="store_true",
+                    help="另报**读出头探针**：冻结躯干换池化方式（mean/max/std/tile_pool/h_evt）"
+                         "与换读出深度（ridge vs MLP）时 EV 能到多少 —— 用来判定瓶颈在池化、"
+                         "在读出深度、还是在躯干表示")
+    ap.add_argument("--readout-rows", type=int, default=40000,
+                    help="读出头探针在 train 上抽多少行（val 抽它的 1/2）")
+    ap.add_argument("--readout-mlp-steps", type=int, default=1500)
     ap.add_argument("--gae-target", default=None, metavar="BEHAVIOUR",
                     help="另报**手级 GAE 的 λ-回报**口径（P1 的判据口径）：值是行为策略 ckpt/net.bin；"
                          "配合 `--gae-lambda` / `--rank-weight` / `--gae-gamma`")
@@ -573,14 +895,41 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.ceiling:
         ceil = ceiling_report(args.data, args.split)
-        print(f"引擎真值特征的线性参照（在 train 上闭式拟合、在 {args.split} 上量 EV；"
-              f"features = 用了几列）：")
+        print(f"引擎真值特征的线性参照（在 train 上闭式拟合、在 {args.split} 上量 EV）："
+              f"**判据只读 `legit` 行**")
         for tag, row in ceil.items():
-            if tag not in ("state", "oracle_hand"):
-                continue
-            note = "（含别家**真手牌**，推理端拿不到 ⇒ 只作作弊参照）" if tag == "oracle_hand" else ""
-            print(f"  {tag:<12}{note}features={int(row.get('features', 0))}  "
-                  + "  ".join(f"EV({k[3:]})={v:+.4f}" for k, v in row.items() if k.startswith("ev_")))
+            note = ""
+            if tag.startswith("label_"):
+                note = "   ⚠ 作弊上界（含本小局结局 / 别家隐藏真值，推理端拿不到）"
+            elif tag == "legit":
+                note = "   ← 合法天花板（决策那一刻自家能算的）"
+            print(f"  {tag:<20}features={int(row.get('features', 0)):>3}  "
+                  + "  ".join(f"EV({k[3:]})={v:+.4f}" for k, v in row.items()
+                              if k.startswith("ev_")) + note)
+
+    if args.readout:
+        for ck in args.ckpt:
+            rep = readout_report(args.data, args.split, ck, train_rows=args.readout_rows,
+                                 val_rows=max(1000, args.readout_rows // 2),
+                                 mlp_steps=args.readout_mlp_steps,
+                                 device=args.device, batch=args.batch)
+            print(f"\n读出头探针（{Path(ck).name}；冻结躯干，train {rep['train_rows']} 行 / "
+                  f"{rep['split']} {rep['val_rows']} 行；块宽度 {rep['blocks']}）")
+            for tgt, row in rep["ridge"].items():
+                best = max(row, key=lambda k: row[k])
+                print(f"  口径 {tgt}（对同一份冻结表示做标准化岭回归，在 val 上量 EV）：")
+                for name, ev in sorted(row.items(), key=lambda kv: -kv[1]):
+                    mark = "   ← 最好" if name == best else ("   ← 现行读法" if name == "mean_all" else "")
+                    print(f"    {name:<28}{ev:+.4f}{mark}")
+                m = rep.get("mlp", {}).get(tgt)
+                if m:
+                    print(f"    非线性（2×256 MLP，{args.readout_mlp_steps} 步）："
+                          f"mean_all {m['mean_all']:+.4f} · "
+                          f"{m['best_ridge_pool']} {m['best_ridge_pool_mlp']:+.4f}")
+            if args.out:
+                p = Path(args.out)
+                p.with_name(p.stem + ".readout" + p.suffix).write_text(
+                    json.dumps({"readout": rep}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.calibrate:
         for ck in args.ckpt:
@@ -596,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"   {k:<9}前 {b[k]:+.4f} → 温度 {at[k]:+.4f} → loc-scale {a[k]:+.4f}{mark}")
 
     report = audit(args.data, args.split, args.ckpt, device=args.device, batch=args.batch,
-                   target=args.target)
+                   target=args.target, ev_ref=args.ev_ref)
     bad = False
     for name, row in report.items():
         print(f"\n== {name} （n={int(row['n'])}，训练时的值头目标 {row.get('value_target')}）==")
@@ -613,8 +962,12 @@ def main(argv: list[str] | None = None) -> int:
         if key == "auto":
             # 主口径优先（`--target delta` 时判据就该按 delta 读，而不是 ckpt 的 value_target）
             key = str(row.get("target") or row.get("value_target", "value"))
+        if "ev_ref" in row:
+            print(f"   合法天花板（`legit_full` 92 列，同口径现算）EV = {row['ev_ref']:.4f}"
+                  f" ⇒ 判据线 {row['ev_need']:.4f}")
         print(f"   ---- 判据（口径：{key}）----")
-        for passed, text in verdicts(row, key):
+        for passed, text in verdicts(row, key,
+                                     ev_ref=row.get("ev_ref") if args.ev_ref == "legit" else None):
             print(f"   [{'ok  ' if passed else 'FAIL'}] {text}")
             bad = bad or not passed
     if args.out:

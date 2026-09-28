@@ -168,9 +168,33 @@ def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> 
     return out
 
 
+def _fit_baseline(v_row: np.ndarray, r_row: np.ndarray, keep: np.ndarray | None,
+                  mode: str) -> tuple[float, float]:
+    """把 baseline **线性重标定**到奖励的尺度：用 `α + β·V` 当基线（最小二乘闭式）。
+
+    为什么要这一步（第十九轮的红证）：P1b 的 `std(A_raw)/std(delta)=2.671×` **不是**"critic 没用"，
+    而是**量纲接错了** —— 行为策略 `v4-p3-001` 的值头学的是**整场**收文（`value_target=final`），
+    它的 `V_old` 实测 `std 12.392` 千点，而奖励（本小局收支）只有 `std 5.047` 千点。
+    `A = r − V` 于是把"整场尺度"的量从"小局尺度"的量里减掉，优势方差必然被放大（≈√(5²+12²)=13）。
+    ⚠ 基线只要是**状态（动作无关）的函数**，怎么线性变换都**不改变梯度的期望** —— 变的只是方差。
+    所以"按最小二乘把尺度对齐"是同一族基线里**方差最小**的那一个（`β=0` 的常数基线是它的嵌套特例
+    ⇒ 重标定后 `std(A)` **不可能**比"只减均值"更差；自检把这条钉成红证）。
+    """
+    if mode == "none":
+        return 0.0, 1.0
+    v = v_row if keep is None else v_row[keep]
+    r = r_row if keep is None else r_row[keep]
+    mu_v, mu_r = float(v.mean()), float(r.mean())
+    if mode == "mean":
+        return mu_r, 0.0
+    var = float(((v - mu_v) ** 2).mean())
+    beta = float(((v - mu_v) * (r - mu_r)).mean()) / var if var > 1e-12 else 0.0
+    return mu_r - beta * mu_v, beta
+
+
 def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
                     rank_weight: float, is_student: np.ndarray | None,
-                    mode: str = "gae") -> dict:
+                    mode: str = "gae", baseline_fit: str = "scale") -> dict:
     """小局级信用分配 → 逐决策的 `(adv, vtarget)` + 体检数字。
 
     两种模式（`docs/TRAINING-V4.md` §14.6）：
@@ -203,8 +227,13 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     d_row = np.asarray(data["delta"][:n], dtype=np.float64) / 1000.0
     rp_row = np.asarray(rp[:n], dtype=np.float64) if rp is not None else None
     term_hand = next_hand < 0
+    keep_m = None if is_student is None else (np.asarray(is_student[:n]) > 0)
+    # ★ 基线的尺度对齐（见 `_fit_baseline` 的推导）：在**学生行**上做最小二乘。
+    alpha, beta = _fit_baseline(v_row, d_row, keep_m, baseline_fit)
+    v_used_h = alpha + beta * v_h
+    v_used_row = alpha + beta * v_row
     if mode == "hand":
-        adv = d_row - v_row                              # 小局级 baseline，无跨小局 bootstrap
+        adv = d_row - v_used_row                          # 小局级 baseline，无跨小局 bootstrap
         vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点）
         r_h = d_row[reward_rows]
         if rank_weight and rp_row is not None:
@@ -213,11 +242,11 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     else:
         r_h = v4adv.hand_reward(data["delta"][:n], rp_row, hand_of_row, next_hand, reward_rows,
                                 rank_weight=rank_weight)
-        adv_h, vt_h = v4adv.gae_hand(r_h, v_h, next_hand, gamma=gamma, lam=lam)
+        adv_h, vt_h = v4adv.gae_hand(r_h, v_used_h, next_hand, gamma=gamma, lam=lam)
         adv = v4adv.expand_hand(adv_h, hand_of_row)
         vtarg = v4adv.expand_hand(vt_h, hand_of_row)
         stat_extra = {"mode": "gae", "bootstrap": 1.0}
-    keep = None if is_student is None else (np.asarray(is_student[:n]) > 0)
+    keep = keep_m
     raw = adv.copy()                       # 归一化**之前**的优势：方差削减要在它上面量
     if keep is not None and keep.any():
         mu = float(adv[keep].mean())
@@ -226,7 +255,9 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     stats = {"hands": float(starts.size), "gamma": float(gamma), "lam": float(lam),
              "rank_weight": float(rank_weight), "reward_mean": float(r_h.mean()),
              "reward_std": float(r_h.std()), "v_old_mean": float(v_h.mean()),
-             "v_old_std": float(v_h.std()), **stat_extra}
+             "v_old_std": float(v_h.std()), "baseline_fit": baseline_fit,
+             "baseline_alpha": float(alpha), "baseline_beta": float(beta),
+             "v_used_std": float(v_used_h.std()), **stat_extra}
     ref = raw if keep is None else raw[keep]
     # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
     #   整列 std ≈0.5 ⇒ 拿它比参考量会得到"看起来砍掉 95%"的假象（第一版报的 0.054×）。
@@ -244,8 +275,18 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
         "base_name": base_name, "base_std": float(np.std(base)),
         "adv_std_raw": float(ref.std()),
         "std_ratio_raw": float(ref.std() / np.std(base)) if np.std(base) > 0 else float("nan"),
+        "std_ratio_unfit": float(np.std((d_row - v_row)[keep] if keep is not None else d_row - v_row)
+                                 / np.std(base)) if np.std(base) > 0 else float("nan"),
         "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
     })
+    # ★ 红证：重标定后**不可能**比"只减均值"更差（`β=0` 是它的嵌套特例；最小二乘的解就是最优）。
+    #   这条断言是"2.671× 那种量纲事故"的守卫：再出现同类接错，日志里先炸，而不是悄悄训完。
+    if baseline_fit == "scale" and mode == "hand" and np.isfinite(stats["std_ratio_raw"]):
+        limit = stats["std_ratio_unfit"] if np.isfinite(stats["std_ratio_unfit"]) else 1.0
+        if stats["std_ratio_raw"] > min(1.0, limit) + 1e-6:
+            raise SystemExit(f"基线重标定后优势方差不降反升（{stats['std_ratio_raw']:.4f}× > "
+                             f"{min(1.0, limit):.4f}×）—— 最小二乘解不可能比常数基线差，"
+                             f"说明 `_fit_baseline` 或优势构造写错了")
     return {"adv": adv.astype(np.float32), "vtarget": vtarg.astype(np.float32), "stats": stats}
 
 
@@ -832,24 +873,34 @@ def train(args) -> dict:
                               lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
                               rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
                               is_student=np.asarray(train_data["is_student"]) if keep_tr is not None
-                              else None, mode=mode)
+                              else None, mode=mode,
+                              baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"))
         adv_tr = res["adv"]
         vtar_tr = res["vtarget"]
         res_va = _hand_advantage(val_data, v_old_va,
                                  gamma=float(getattr(args, "gae_gamma", 1.0) or 1.0),
                                  lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
                                  rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
-                                 is_student=None, mode=mode)
+                                 is_student=None, mode=mode,
+                                 baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"))
         val_extra = {"vtarget": res_va["vtarget"]}
         s = res["stats"]
         print(f"  小局 {int(s['hands'])} 个 / 模式 {s['mode']} / γ={s['gamma']:g} λ={s['lam']:g} "
-              f"rank_weight={s['rank_weight']:g}")
+              f"rank_weight={s['rank_weight']:g} / 基线拟合 {s['baseline_fit']}")
         print(f"  小局奖励：mean {s['reward_mean']:+.3f} std {s['reward_std']:.3f} 千点；"
               f"V_old：mean {s['v_old_mean']:+.3f} std {s['v_old_std']:.3f}")
+        if s["baseline_fit"] == "scale":
+            print(f"  基线重标定：α={s['baseline_alpha']:+.3f} β={s['baseline_beta']:.4f} ⇒ "
+                  f"std(V_used) {s['v_used_std']:.3f}（原 {s['v_old_std']:.3f}）"
+                  f"—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**")
         if "std_ratio_raw" in s:
+            unfit = s.get("std_ratio_unfit")
+            extra = (f"（**未重标定**时 {unfit:.3f}× ⇒ 量纲接错的代价）"
+                     if unfit is not None and np.isfinite(unfit)
+                     and abs(unfit - s["std_ratio_raw"]) > 1e-6 else "")
             print(f"  优势体检（**归一化之前**）：std(A_raw) {s['adv_std_raw']:.3f} vs "
                   f"std({s['base_name']}) {s['base_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
-                  f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）")
+                  f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）{extra}")
             print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
                   f"（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）")
         print(f"  （用时 {time.perf_counter() - t_v:.1f}s；优势已冻结、不再随 critic 变动）")
@@ -1038,6 +1089,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gae-gamma", type=float, default=1.0, help="手级 GAE 的 γ（半庄只有 8~12 小局）")
     ap.add_argument("--rank-weight", type=float, default=0.0,
                     help="整场**顺位点**项的权重（与评测口径 `rank_points` 同量纲；0 = 只用小局收支）")
+    ap.add_argument("--baseline-fit", choices=["scale", "mean", "none"], default="scale",
+                    help="把行为策略的 `V_old` **线性重标定**到奖励尺度（最小二乘 `α+β·V`）："
+                         "scale = 拟合截距+斜率（缺省，同族里方差最小）/ mean = 只减均值 / "
+                         "none = 原样相减（P1b 那版，量纲不一致时会把优势方差放大 2.7×）")
     # 消融矩阵（§8.3 / §14 P0）
     ap.add_argument("--drop-heads", default=None, metavar="H1,H2",
                     help="**丢掉**点名的头（补集写法：其余头照常训）—— 消融矩阵用")
