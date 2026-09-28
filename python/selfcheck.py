@@ -2603,6 +2603,18 @@ ok("步数不够" in v4_loop.value_gate_feasible(1000, 1200)[1]
 eq("v4 回路：规划期步数估算 = min(max_steps, 行数/batch) × epochs（行数 ≈ 场次×650）",
    (v4_loop.planned_steps(1000, 256, 600, 2), v4_loop.planned_steps(120, 256, 600, 2)),
    (1200, 608))
+# `--eval-vs prev`：多轮战役里"这一轮有没有长进"要用**同牌山配对**量（对 teacher 的绝对锚另算）。
+# ⚠ 第 1 代没有"上一轮" ⇒ 自动退回 teacher（不报错、也不静默拿自己跟自己比）。
+_lo_cfg4 = v4_loop.LoopConfig(label="v4-sc4", init="X:/net.bin", no_java=True, eval_vs="prev")
+_p4 = Path("X:/prev.bin")
+_lo4 = v4_loop.plan_commands(_lo_cfg4, 2, _p4, 1000)
+eq("v4 回路：`--eval-vs prev` 把上一轮放对面（标签 a=本轮 / b=上一轮）",
+   (_lo4.eval_label_a.endswith("-g02\\net.bin"), _lo4.eval_label_b), (True, f"net:{_p4}"))
+ok(f"net:{_p4},net:{_p4}" in _flag(_lo4.commands["eval"], "--policy"),
+   "v4 回路：`prev` 模式的评测策略串是 2+2 对**上一轮**（同牌山 ⇒ 配对可比）",
+   _flag(_lo4.commands["eval"], "--policy")[-48:])
+eq("v4 回路：第 1 代（没有上一轮）自动退回 teacher",
+   v4_loop.plan_commands(_lo_cfg4, 1, _p4, 1000).eval_label_b, "teacher")
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）

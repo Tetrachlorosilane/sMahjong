@@ -663,6 +663,21 @@ CE 过 ✅、覆盖率 **2.9 / 1.1 / 0.3pp 全过** ✅、CRPS 2.386 vs 气候�
   （例 `--max-steps 2000 --epochs 2`）+ `--kl-early-stop 0.15`（否则 60 步就被 KL 掐掉）。
 - **判据**：`python/selfcheck.py` **641/0**（+5）；`NOTES.md` §6.5 第三十一/三十二轮。
 
+### 2.36 第三十三轮：多轮战役开跑（`--eval-vs prev` + S 盘轮换）（2026-09-28）
+
+- **用户点名**：跑 5 轮，保持 S 盘阈值，可轮换删除已用的大规模数据集与过时数据。
+- **新增 `--eval-vs {teacher,prev}`**：多轮战役真正的问题是"**这一轮比上一轮强了吗**"，所以
+  `prev` 把上一轮的 net.bin 放对面 ⇒ 2+2 **同牌山配对**（`net:本轮×2 vs net:上一轮×2`）。
+  第 1 代退回 teacher；真跑时缺上一轮的 net **当场报错**（不静默退 teacher，否则两种口径混进同一条曲线）。
+- **配方**（前两轮量出来的两个轴）：`--games 1000` + `--max-steps 2000 --epochs 2`（⇒ 4000 步）
+  + `--kl-early-stop 0.15` + `--critic-steps 0`；评测 200 场/轮 + `--eval-vs prev`，seed 固定。
+- **轮换**：`release/run-campaign.ps1` 每轮成功后删 `raw/<tag>`（3 GB）、`compact/<tag>`（**15 GB**）、
+  `raw/eval-<tag>`（0.4 GB），只留 `ckpt/<tag>`、`tools/build/<tag>/net.bin`、台账与审计 JSON
+  ⇒ 峰值 ≈ 一轮（19 GB），5 轮滚动。⚠ 外层 `python -m` 必须带 `PYTHONPATH=<repo>/python`
+  （第一次跑就栽在这条：`No module named 'mahjong_ml'`）。
+- **判据**：`python/selfcheck.py` **644/0**（+3：`prev` 的标签/策略串、第 1 代退回 teacher、缺文件语义）；
+  台账 `league/v4-camp01-v4.json` 逐轮追加。
+
 ### 2.14 P3 开局一轮（自对弈 + RWR）+ §7.5 均衡审计（2026-09-27）
 
 - **§7.5 均衡审计（判据⑩，首次执行）**：`raw/v4-sp-001`（C++ 400 场 / 292,724 决策）→

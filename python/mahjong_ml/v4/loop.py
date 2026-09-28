@@ -76,6 +76,9 @@ class LoopConfig:
     workers: int = 24
     eval_games: int = 2000
     eval_workers: int = 24
+    #: 评测的对手是谁：`teacher` = 2+2 对 teacher（强度锚，绝对口径）；
+    #: `prev` = 2+2 对**上一轮的 net**（同牌山配对 ⇒ 直接量"这一轮有没有长进"，多轮战役该看这个）。
+    eval_vs: str = "teacher"
     seed: int = 20261010
     hands: int = 0
     producer: str = "cpp"
@@ -129,6 +132,9 @@ class Round:
     compact: Path
     eval_dir: Path
     commands: dict[str, list[str]] = field(default_factory=dict)
+    #: 评测两侧的标签（`judge` 用它们去轨迹里找系列；由 `plan_commands` 决定是不是 `prev` 模式）
+    eval_label_a: str = ""
+    eval_label_b: str = "teacher"
 
     @property
     def critic_ckpt(self) -> Path:
@@ -223,9 +229,19 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
         "--strict", "--ev-ref", "legit",
         "--out", str(paths.DATA_ROOT / "league" / f"{r.label}-audit.json"),
     ]
+    # 评测：`prev` 模式把**上一轮那份权重**放对面（同牌山 2+2 ⇒ 配对比较"这一轮有没有长进"）；
+    # 第 1 代没有"上一轮"（`net_in` 就是起点那代）⇒ 退回 `teacher`。
+    # ⚠ 这里**不查文件是否存在**（`--dry-run` 的第 2 代本来就还没产出它）；真跑时由 `run_round`
+    # 显式报错 —— 别静默退回 teacher（那会把两种口径混进同一条曲线）。
+    use_prev = (cfg.eval_vs == "prev" and generation > 1)
+    b_net = net_in if use_prev else None
+    r.eval_label_a = f"net:{r.net_out}"
+    r.eval_label_b = f"net:{b_net}" if use_prev else "teacher"
     r.commands["eval"] = [
         str(producer.TRAINER), "selfplay", str(cfg.eval_games), "--workers", str(cfg.eval_workers),
-        "--rotate", "--policy", f"net:{r.net_out},net:{r.net_out},teacher,teacher",
+        "--rotate",
+        "--policy", (f"net:{r.net_out},net:{r.net_out},net:{b_net},net:{b_net}" if use_prev
+                     else f"net:{r.net_out},net:{r.net_out},teacher,teacher"),
         "--seed", str(cfg.seed + 5000 + generation), "--out", str(r.eval_dir),
     ]
     return r
@@ -429,6 +445,9 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
     """跑一轮（`--dry-run` 只打印）。返回台账行。"""
     r = plan_commands(cfg, generation, net_in, games)
     assert_no_java(cfg, [r])
+    if (not dry_run) and cfg.eval_vs == "prev" and generation > 1 and not net_in.is_file():
+        raise SystemExit(f"--eval-vs prev 需要**上一轮的 net.bin**，但找不到 {net_in}"
+                         f"（缺了它就只能对 teacher，那会把两种口径混进同一条曲线 —— 宁可报错）")
     if dry_run:
         print(f"\n== 第 {generation} 代（{r.label}）计划：{games} 场"
               f"；student={cfg.student_spec(net_in)}；producer={cfg.producer} ==")
@@ -465,7 +484,7 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
                 raise SystemExit(
                     f"第 {generation} 代（{r.label}）的值头闸门未过（--strict-gate）—— "
                     f"审计：{_audit_json_path(r.label)}；要么修值头口径，要么去掉 --strict-gate 只记账")
-    got = judge(r.eval_dir, f"net:{r.net_out}", "teacher")
+    got = judge(r.eval_dir, r.eval_label_a, r.eval_label_b)
     print("  判据：" + f"Δ={got['delta']:+.2f} 顺位点 [{got['lo']:+.2f}, {got['hi']:+.2f}] "
           f"p={got['p']:.3f}（n={got['n']}；按观测 sd 检出 Δ=2 需 {got['required_n_for_2']} 场）")
     row = {
@@ -494,6 +513,9 @@ def main(argv: list[str] | None = None) -> int:
                     help=">0 = 按台账实测反推场次（budget.plan_round + 资源闸门）")
     ap.add_argument("--workers", type=int, default=24)
     ap.add_argument("--eval-games", type=int, default=2000)
+    ap.add_argument("--eval-vs", choices=["teacher", "prev"], default="teacher",
+                    help="评测对手：teacher = 2+2 对 teacher（绝对锚）；prev = 2+2 对**上一轮的 net**"
+                         "（同牌山配对，直接量这一轮有没有长进；第 1 代自动退回 teacher）")
     ap.add_argument("--eval-workers", type=int, default=24)
     ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="ppo")
     ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
@@ -547,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
         value_target=args.value_target, epochs=args.epochs, batch=args.batch, lr=args.lr,
         stage_a=args.stage_a, stage_b=args.stage_b, workers=args.workers,
         eval_games=args.eval_games, eval_workers=args.eval_workers, seed=args.seed,
+        eval_vs=args.eval_vs,
         hands=args.hands, producer=chosen, no_java=args.no_java, sample=args.sample,
         max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
         baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,

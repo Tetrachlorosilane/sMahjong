@@ -2845,6 +2845,26 @@ $ python -m mahjong_ml.v4 value-audit --data compact/v4-sp-004 --ckpt ckpt/v4-ha
    （例如 `--max-steps 2000 --epochs 2`，并 `--kl-early-stop 0.15` 免得 60 步就被 KL 掐掉）。
 4. **判据**：`python/selfcheck.py` **641/0**（+5：两个阈值、四点判定、两轴说明分得清、步数估算）。
 
+**第三十三轮：多轮战役开跑 —— `--eval-vs prev`（同牌山配对量"这一轮有没有长进"）（2026-09-28）**
+
+用户点名"跑 5 轮，注意保持 S 盘存储阈值，可以轮换删除已用的大规模数据集与过时数据"。
+
+1. **评测口径**：多轮战役真正要问的是"**这一轮比上一轮强了吗**"，而不是"比 teacher 强了吗"
+   （后者是绝对锚，需要 ~5,000 场才检得出 Δ=2）。所以新增 `--eval-vs {teacher,prev}`：
+   `prev` 把**上一轮的 net.bin** 放对面 ⇒ 2+2 **同牌山配对**（`net:本轮 ×2 vs net:上一轮 ×2`），
+   直接量这一轮的增量。第 1 代没有"上一轮"（`--init` 就是起点）⇒ 退回 teacher；
+   真跑时若上一轮的 net 不存在**当场报错**（不静默退回 teacher —— 那会把两种口径混进同一条曲线）。
+   自检（+3）：`prev` 的标签与策略串、第 1 代退回 teacher、缺文件的语义。
+2. **轮换与存储**（用户点名）：一轮的大件是 `raw/<tag>`（≈3 GB）+ `compact/<tag>`（**≈15 GB**）
+   + `raw/eval-<tag>`（≈0.4 GB）；而**要留的是** `ckpt/<tag>`、`tools/build/<tag>/net.bin`、
+   `league/<tag>-v4.json`、`league/<tag>-audit.json`（台账与判据证据）。
+   战役脚本 `release/run-campaign.ps1` 每轮**成功之后**立刻删掉那一轮的三件大物，并在每步打印
+   S 盘余量 ⇒ 峰值占用 ≈ 一轮（~19 GB），5 轮总共也只滚动一轮的量。
+3. **配方**（上一轮量出来的两个轴）：`--games 1000`（数据量）+ `--max-steps 2000 --epochs 2`
+   （⇒ 4000 步 ≥ 3000）+ `--kl-early-stop 0.15`（否则 60 步就被 KL 掐掉）+ `--critic-steps 0`
+   （值头相实测更差）。评测 200 场/轮 + `--eval-vs prev`。
+4. **判据**：自检 **644/0**；战役台账 `S:\mahjong-training\league\v4-camp01-v4.json`（逐轮追加）。
+
 
 
 
