@@ -79,6 +79,11 @@ class LoopConfig:
     #: 评测的对手是谁：`teacher` = 2+2 对 teacher（强度锚，绝对口径）；
     #: `prev` = 2+2 对**上一轮的 net**（同牌山配对 ⇒ 直接量"这一轮有没有长进"，多轮战役该看这个）。
     eval_vs: str = "teacher"
+    #: **代号的偏移**：`run_round` 的 `generation` 从 1 起算（一次调用内的相对代），
+    #: 而"一轮一次调用、外面自己轮换大件"那种跑法要把第 i 次调用编成第 i 代 ——
+    #: 否则每次都编 `-g01`，**后一轮会覆盖前一轮的 raw/compact/ckpt/评测目录**
+    #: （第三十三轮实测：两轮都编 g01，台账里两行同名、第一轮的产物被第二轮盖掉）。
+    gen_offset: int = 0
     seed: int = 20261010
     hands: int = 0
     producer: str = "cpp"
@@ -152,6 +157,7 @@ def _py() -> str:
 
 def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) -> Round:
     """生成一轮的全部命令（**不执行、不建目录**）—— `--dry-run` 与执行共用同一份。"""
+    generation = generation + cfg.gen_offset          # 绝对代号（跨调用唯一）
     tag = f"{cfg.label}-g{generation:02d}"
     r = Round(
         generation=generation,
@@ -516,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-vs", choices=["teacher", "prev"], default="teacher",
                     help="评测对手：teacher = 2+2 对 teacher（绝对锚）；prev = 2+2 对**上一轮的 net**"
                          "（同牌山配对，直接量这一轮有没有长进；第 1 代自动退回 teacher）")
+    ap.add_argument("--gen-offset", type=int, default=0,
+                    help="代号的偏移：一次只跑一代、由外面轮换大件时，用它把第 i 次调用编成第 i 代"
+                         "（否则每轮都编 -g01，后一轮会覆盖前一轮的产物）")
     ap.add_argument("--eval-workers", type=int, default=24)
     ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="ppo")
     ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
@@ -569,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         value_target=args.value_target, epochs=args.epochs, batch=args.batch, lr=args.lr,
         stage_a=args.stage_a, stage_b=args.stage_b, workers=args.workers,
         eval_games=args.eval_games, eval_workers=args.eval_workers, seed=args.seed,
-        eval_vs=args.eval_vs,
+        eval_vs=args.eval_vs, gen_offset=args.gen_offset,
         hands=args.hands, producer=chosen, no_java=args.no_java, sample=args.sample,
         max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
         baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,

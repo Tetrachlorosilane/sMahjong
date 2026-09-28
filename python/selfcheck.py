@@ -2615,6 +2615,16 @@ ok(f"net:{_p4},net:{_p4}" in _flag(_lo4.commands["eval"], "--policy"),
    _flag(_lo4.commands["eval"], "--policy")[-48:])
 eq("v4 回路：第 1 代（没有上一轮）自动退回 teacher",
    v4_loop.plan_commands(_lo_cfg4, 1, _p4, 1000).eval_label_b, "teacher")
+# ⚠ 第三十三轮的**真事故**：一次只跑一代、由外面轮换大件那种跑法里，`--generations 1` 每轮都把
+#   代号编成 `-g01` ⇒ **后一轮覆盖前一轮的 raw/compact/ckpt/评测目录**（台账里两行同名）。
+#   修法：`--gen-offset` 把第 i 次调用编成第 i 代（绝对代号跨调用唯一）。
+_lo_cfg5 = v4_loop.LoopConfig(label="v4-sc5", init="X:/net.bin", no_java=True, gen_offset=2)
+_lo5 = v4_loop.plan_commands(_lo_cfg5, 1, _p4, 1000)
+eq("v4 回路：`--gen-offset` 让「一次一代」的跑法拿到**唯一的绝对代号**",
+   (_lo5.label, _lo5.ckpt_label, _lo5.raw.name), ("v4-sc5-g03", "v4-sc5-g03", "v4-sc5-g03"))
+ok(_lo5.eval_label_a.endswith("-g03\\net.bin"),
+   "v4 回路：偏移作用于**所有**按代号派生出来的路径（标签/ckpt/raw/compact/评测目录/台账）",
+   _lo5.eval_label_a[-22:])
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）
