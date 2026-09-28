@@ -15,7 +15,7 @@
 | 发布 | **v1.13.0 已上线**（release **#397762262** → <https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.13.0>，tag `v1.13.0` → 远端 `4d7cb9ec`，6 个资产）：**第一次随包发布 v4 的 3 代网络**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，格式 2 权重）+ 逐决策 reward-to-go 契约。上一版 v1.12.0（#397670321）只带 client + server（那时 v4 还不能导出）。逐资产 sha256 / asset id 见 `NOTES.md` §9.5 |
 | 数据盘 | `S:\mahjong-training` ≈ **17 GB**（`compact` 又多了 `v4-bc-003` 5.7 GB）；S 盘可用 ≈ **212 GB**。数据集：`raw\v4-bc-002` 1.19 GB → `compact\v4-bc-003`（**修好 `cand` 派生段后重建**，262,095 训练 / 14,965 验证）；checkpoint `ckpt\v4-bc-004`（教师一致率 **0.903**）与 `v4-bc-003`（0.165，阶段 c 塌掉的那份，留作对照） |
 | 训练进度 | **v3 谱系已到平台**；v4：teacher 预训练 0.608 → 0.619 → **0.903**（§2.12）；P3 开局 RWR（§2.14，−1.96 / −3.08 证不出）；**PPO 一轮**（§2.15：2,000 场 2+2 **−3.54 [−5.84,−1.24]** ⇒ 略低于 teacher）；**第六轮**（§2.16）修掉两处 NaN + 降到 `#0.5` + 逐决策 `rtg` 优势 ⇒ **−1.06 [−3.34,+1.29] / vs 起点 +0.39 [−1.93,+2.72]** ⇒ **退步消掉、但只是打平** |
-| v4 状态 | **P0 收口** + **P5 前向三端落地** + **§7.5 审计已做** + **PPO 回路已落地且数值上稳了**（§2.15/§2.16，四道闸门）+ **增量事件缓存已上（L2，§2.17）** + **价值头审计已做（§2.18）** + **critic 已有结论（§2.19：整场口径 EV 0.41 达标，`rtg` 口径判死）**。**下一件要紧事**：① **换奖励粒度**（小局级 RWR/AWR 跑在线多轮；critic 要做先过 EV ≥ 0.4 —— 见 §3 ①）；② 性能继续（L1 张量级缓存 / 并行 / int8 / C++ 镜像 —— 见 §3 ③）；③ 放量（2+2 下检出 Δ=2.0 要 ~5,400 场，贵在前向慢） |
+| v4 状态 | **P0 收口** + **P5 前向三端落地** + **§7.5 审计已做** + **PPO 回路已落地且数值上稳了**（§2.15/§2.16，四道闸门）+ **增量事件缓存已上（L2，§2.17）** + **价值头审计已做（§2.18）** + **critic 已有结论（§2.19）** + **训练端脱离 Java（§2.20：C++ 补 `--aux`，`v4 loop` 编排）**。**下一件要紧事**：① **换奖励粒度**（小局级 RWR/AWR 跑在线多轮；critic 要做先过 EV ≥ 0.4 —— 见 §3 ①），**现在可以用 `python -m mahjong_ml.v4 loop --no-java` 起轮次了**；② 性能继续（L1 张量级缓存 / 并行 / int8 —— 见 §3 ③）；③ 放量（2+2 下检出 Δ=2.0 要 ~5,400 场） |
 | 并行工作 | ⚠ **有另一个会话在同一仓库工作**（见 §5 第 1 条：推送要串行 + 比 tree sha）；本次推送前其改动已在基线里（§2.11） |
 
 ---
@@ -517,6 +517,31 @@
   改用**小局级**目标（仓库已有的 RWR/AWR 的奖励就是"本小局收支"）；真要 critic 就做两段分解
   （`本小局收支 + 其后的后缀`）并**先过 EV ≥ 0.4**（`value-audit --strict`）。
   细节见 `NOTES.md` §6.5 第十三轮、`docs/TRAINING-V4.md` §8.2。
+
+### 2.20 训练端脱离 Java：C++ 补标签侧 + v4 回路 Python 化（2026-09-28）
+
+- **卡点**：`--selfplay`/`--features`/v4 前向早就镜像完了，唯一剩的是**标签侧 `--aux`**（只有 Java 能产）
+  ⇒ v4 的信念/危险头监督逼着整轮起 JVM（慢十几倍）。
+- **做了四件事**：
+  ① **C++ 写真正的 npz**（`trainer/src/npzwriter.hpp`，镜像 Java `NpzWriter`：STORED + 固定时间戳 +
+     `.npy` v1.0 64 字节对齐）；
+  ② **标签侧行**（`trace.hpp/cpp`：`AuxRow` + 采集 + 小局/整场回填 + `writeAux()`），
+     决策钩子多带 `const Round&`（上帝视角，输入侧拿不到）；
+  ③ **v4 回路**（`python/mahjong_ml/v4/loop.py` + `python -m mahjong_ml.v4 loop`）：八相编排
+     （计划/采集 C++/派生特征 C++/校验/紧凑集/训练/导出/评测+判据+台账 `league/<label>-v4.json`），
+     `--dry-run` 与 `--no-java`；
+  ④ **守卫**：`MAHJONG_NO_JAVA=1` ⇒ 选到 java 生产者当场报错（防"又能跑了、只是慢十几倍"的静默回退）。
+- **判据（实测）**：
+  · `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` ⇒ `g*.aux.npz`
+    **连 zip 容器一起逐字节相同**（负向对照：翻一个字节必须报出是哪个成员）；
+    混合策略 `net:…,teacher,first,random` 3 场 × 3 小局同样逐字节；
+  · 端到端冒烟 `v4 loop --label v4-smoke --games 4 --hands 2 --epochs 1 --no-java` 一轮走通
+    （紧凑集里 `aux_opp_hand/opp_tenpai/win_flag/opp_dealin` 非空；PPO 口径闸门 `KL≈3e-06`）；
+  · `selfcheck` **528/0**（+9，含"命令里没有 JVM"与 `CPP_MISSING` 不再有 `--aux`）；
+    `trainer --selftest` PASS。
+- ⚠ **仍然只有 Java 能做的两件事**：`--teacher-label`（DAgger）、`net:` 的 `@α` 先验（C++ 显式报错）。
+- **细节与两个坑**（JDK zip 的 EFS 位 + 9 字节扩展时间戳 extra；`loop` 的 cwd 与 argparse 转参）
+  见 `NOTES.md` §6.5 第十四/十五轮、`docs/TRAINER-CPP.md` §6.23、`docs/TRAINING-V4.md` §7.2。
 
 ---
 

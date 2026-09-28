@@ -181,10 +181,26 @@ java -cp "server\build\mahjong-server.jar;tools\build" tools.V4Probe --bench too
 > 但**不设时间指标**（早年那对耗时预算不现实、已删除）：数字见
 > `docs/FEATURES-V4.md` §8，归因见 `docs/TRAINING-V4.md` §5.3。
 
-**P3 开局：自对弈 + 回报加权（RWR）一轮**（口径与实测见 `docs/TRAINING-V4.md`「第四轮」）：
+**v4 一轮的编排（**默认 C++ 生产者，训练端不依赖 Java**）** —— `python -m mahjong_ml.v4 loop`：
 
 ```powershell
-# ① 采集：学生 1 席（带温度探索）+ teacher 2 席 + random 1 席；**要标签侧就必须用 Java 生产者**
+# ⚠ 在 python/ 目录下跑（模块入口）。八相：计划→采集(C++)→派生特征(C++)→校验→紧凑集→训练→导出→评测+台账
+cd python
+.venv\Scripts\python.exe -m mahjong_ml.v4 loop --label v4-g01 `
+     --init ..\tools\build\v4-bc-004\net.bin --generations 3 --games 400 --workers 24 `
+     --objective ppo --value-target final --student-temp 0.5 --eval-games 2000 `
+     --no-java                       # 硬保证整轮不起 JVM（命令里出现 java 就报错）
+.venv\Scripts\python.exe -m mahjong_ml.v4 loop --label v4-g01 --init <net.bin> --dry-run   # 只打印命令
+# 台账（每代的场次/相耗时/2+2 配对 Δ 与 CI）写在 S:\mahjong-training\league\<label>-v4.json
+# ⚠ `MAHJONG_NO_JAVA=1` 时选到 java 生产者会**当场报错**（producer.guard_java_free）
+```
+
+
+**P3 开局：自对弈 + 回报加权（RWR）一轮**（口径与实测见 `docs/TRAINING-V4.md`「第四轮」）——
+下面的手工命令仍可用于**单步复现**（`loop` 就是把它们串起来）：
+
+```powershell
+# ① 采集：学生 1 席（带温度探索）+ teacher 2 席 + random 1 席；**训练端推荐 `MAHJONG_PRODUCER=cpp`**
 java -jar server\build\mahjong-server.jar --selfplay 200 --workers 12 --rotate --aux `
      --policy "net:tools/build/<上一代>\net.bin#1.0,teacher,teacher,random" --seed 20260929 --out S:\mahjong-training\raw\v4-sp-002
 java -jar server\build\mahjong-server.jar --features S:\mahjong-training\raw\v4-sp-002 --workers 12

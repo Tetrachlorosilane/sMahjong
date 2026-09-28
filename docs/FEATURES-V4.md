@@ -260,6 +260,10 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 
 自对弈时引擎是上帝视角 ⇒ 可以产出"看得见答案"的监督信号。落 `<trace>.aux.npz`（**新文件，训练专用**）：
 
+⚠ **两个生产者都产它**（Java `TraceRecorder.writeAux` / C++ `trainer selfplay --aux`），
+且**连 zip 容器一起逐字节相同** —— 判据 `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck`
+（`docs/TRAINER-CPP.md` §6.23）。所以"要标签就必须用 Java"这句话已经作废：训练端整轮可以只跑 C++。
+
 | 标签 | 形状/决策 | 来源 | 喂哪个头（设计文档 §6） |
 | --- | --- | --- | --- |
 | `own_shanten_after` | 1 | 引擎 | 牌效头 |

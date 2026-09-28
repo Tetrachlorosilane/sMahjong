@@ -71,9 +71,14 @@ public:
     int debugMaxHands = 0;
     /** 按座位注入的策略（每场一份实例，见 `PolicyFactory`）。 */
     std::array<Policy, 4> policy;
-    /** 唯一的决策漏斗（Java `Table.decideBot`）。 */
+    /**
+     * 唯一的决策漏斗（Java `Table.decideBot`）。
+     *
+     * ⚠ 第 5 个参数是**当前小局的上帝视角句柄**（`currentRound`）：只有标签侧记录器要它
+     * （三家对手的暗牌/听牌）。`currentRound == nullptr`（不该发生在决策点）时传哨兵。
+     */
     std::function<void(const Observation &, const std::string &kind, const Action &cmd,
-                       const std::string &roundKey)>
+                       const std::string &roundKey, const Round &round)>
         debugChoiceTap;
     /** 出站报文旁路（训练端只有 `round_end`）。 */
     std::function<void(const RoundEndEvent &)> debugEventTap;
@@ -180,8 +185,8 @@ public:
                         + " 条）—— 训练端没有内置 Bot 兜底";
             }
         }
-        if (debugChoiceTap) {
-            debugChoiceTap(obs, kind, cmd.action, roundKey);
+        if (debugChoiceTap && currentRound != nullptr) {
+            debugChoiceTap(obs, kind, cmd.action, roundKey, *currentRound);
         }
         return cmd;
     }

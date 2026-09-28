@@ -1339,7 +1339,7 @@ python/                        # 训练侧（本仓库内；torch 走本地 .ven
 ├─ README.md                   # 环境准备（uv + 3.12 + cu128）、跑法、复现命令、**§0.1 纪律怎么设**
 ├─ verify_env.py               # ★ 环境自检（✅ 已就绪）：GPU/torch/numpy、显存预算、训练吞吐、
 │                              #   GPU 利用率与**节流验证**、CPU 线程封顶、采集器与 S 盘闸门
-├─ selfcheck.py                # ★ Python 侧自检（✅ 519 项）：统计/配对/纪律/特征/数据集/网络/BC/DAgger/混合/P3/时间预算/缓存档/回收/跨代筛选/价值头审计
+├─ selfcheck.py                # ★ Python 侧自检（✅ 528 项）：统计/配对/纪律/特征/数据集/网络/BC/DAgger/混合/P3/时间预算/缓存档/回收/跨代筛选/价值头审计/脱离 Java 守卫
 ├─ inspect_trace.py            # 看一条真实轨迹的字段类型（核对 features.py 的 schema 假设）
 ├─ pyproject.toml              # ✅ 依赖 + PyTorch cu128 索引（uv sync 可复现环境）
 ├─ mahjong_ml/

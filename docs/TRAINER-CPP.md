@@ -116,7 +116,7 @@ node tools\trainer-parity-check.mjs 64        # 64 组种子 × 4 种 aka/dealer
 | **M1 向听/进张/和了**（**收益最大的一步**） | 查表式向听（花色分组 + 位并行合并）、`Agari`（和了形/听牌/进张/好形听）、`HandEval` 的派生特征 | ✅ **已完成**：① 与 Java `Shanten.min`/`HandEval.of`/`afterDiscard` **1,000,000 手向听 + 217,000 手派生评估（其中打牌后评估 523,413 行）逐字段相等**；② 向听路径 **31.5×**、进张 **19×**、听牌形 **44×**（同机同口径，见 §6.1） |
 | **M2 规则与牌局流程** | `Tiles/Meld/Rules`、`Evaluator`（役种/符数/点数）、`Payments`、`Round`（摸打/鸣牌仲裁/立直/杠/流局/连庄）、`Danger` | ✅ **已完成**：① 打点内核 ✅ 20 万行逐字段一致、61 个役种码全覆盖（§6.2）；② 种子链 + 精算/连庄判据 ✅ 21 万行逐位一致（§6.3）；③ 动作空间 ✅ 369 行逐字符一致（§6.4）；④ 鸣牌仲裁判据 ✅ 1.26 万行（§6.5）；⑤ 振听记账（三种振听）✅ 354 行（§6.6）；⑥ 可见牌统计 + 和了形纯判断 ✅ 1.37 万行（§6.8）；⑦ 配牌顺序的假阳性已修正并重验 512/512（§6.7）；⑧ `Round` 状态容器 + 配牌 ✅ 1.4 万行（含 260 行 `rinit`，§6.9）；⑨ 选项生成第一层 `RoundOptions`（可打牌/食替/立直后杠/吃搭子）✅ 320 行（§6.10）；⑩ 自家回合 `turnOptions`（选项顺序 + riichi/tsumo/kan 闸门）✅ 四种策略 24 局 × 40 场 = 9.77 万次（§6.11）；⑪ 鸣牌询问 `claimOptions`（ron/pon/kan/chi + 赤五取法 + 振听）✅ 1.85 万次（§6.12）—— ⑩+⑪ 合计 **116,166 次逐字符一致**；⑫ `Round` 摸打/鸣牌/立直/杠/流局循环 ✅ **完整半庄与 Java 逐字节相同**（官方闸门 300 场 × 2 小局 `--cpp-workers 8`、100 场 × 8 小局、150 场完整半庄；独立复算 **200 场完整半庄 200/200** = 155,464 决策 / 1,761 小局两侧相等；**soak 500 场 × {`first`,`random`} 各 500/500**；§6.13 / §6.14 / §6.15）。⚠ 判据里原来写的"先 100 场"**不够**：食替退化局面**跟策略走**（**实测** `first` **3/500 场 ≈ 1/167**、`random` **0/500**，且短局碰不到），完整半庄验收**至少 200 场** —— 见 §6.15 |
 | **M3 策略与网络** | `teacher`（五层取舍，与 Java 逐决策一致）、`first/pass/random`、`NeuralPolicy` 前向（float32 权重直读）、`PolicyFactory` 的每局实例化语义 | 🔄 **大部分完成**：① `first`/`pass`/`random` ✅ **与 Java 逐字节相同**（含 `random` 的 `java.util.Random` 逐位复刻；`random` 50 场 / `pass` 100 场完整半庄 100%）；② **`net:<权重文件>[@α][#T]` 前向 ✅ 已落地**（f32 直读 + `Features.state`/`candidate` 拼装，**v3 起 state 615**）：golden 夹具 **Java↔C++ maxΔ = 0**、真实权重 36,181 条决策 **maxΔ = 1e-6 且 argmax 全同**、端到端 **`net:` 100 场完整半庄逐字节 100/100（24w 同核数 20.1×）**、`@0#1.0` 采样 20 场逐字节 20/20（§6.16）；③ 轨迹 + 派生特征直接喂通现有 Python 管线 ✅（`takeover-check` PASS、`dataset build` 出 81 / 671 条、state 615 / cand 96 / float16）；④ `selfplay-check` ✅ DATASET PASS（含 200 场完整半庄）；⑤ **`teacher`（五层取舍）✅ 已移植**（§6.17）：**200 场完整半庄 0/200 不一致**、13 个取舍计数器与 Java 逐项相等、tenhou 预设 120/120（覆盖 `kyuushu` + `botRng`）、**24 核吞吐 94,998 决策/秒 ≈ Java 的 91×** ⇒ 含 teacher 席的 **P5 世代已能整条走 C++**（§6.18）；⑥ **obs v3（事件流 + 立直巡数）✅ 已镜像**（§6.20）：200 场完整半庄（四策略混桌 + `--rotate`）逐字节 200/200、五种副露与五类事件全覆盖、C++ 产出直接过 `selfplay-check`；⑦ **sidecar v3（逐家危险度/安全度四段）✅ 已镜像**（§6.21）：`trainer-features-parity` 3/3 逐字节、`takeover-check` 整链 PASS。⏳ 只剩 `net:` 的 **`@α` 先验**（P5b 混合臂）未接 —— 它要调 `Bot.decide`（现在有了），**显式报错**、不静默降级 |
-| **M4 性能与工程化** | 线程池（`--workers`）、AVX2 向听表、批量前向（同巡多候选一次 GEMM）、轨迹写入与 `summary.json`、CLI 与 `python/mahjong_ml/online.py` 对接 | ✅ **已完成（并行 + 对接）**：① `--workers` 真并行落地（`selfplay` + `features`），**产出逐字节不变**（300 场 × 2 小局 1 vs 8 逐字节、**200 场完整半庄 1 vs 24 逐字节 200/200**）；② **同等核数下决策/秒 = Java 的 16.7×（100 场）/ 18.7×（200 场）**（基线：24 核 1172 决策/秒、单核 88；目标 3× 超出 5 倍以上，§6.14）；③ 产出数据直接喂通 P3/P4 管线不改一行 Python（`MAHJONG_PRODUCER=cpp` + `trainer-takeover-check.mjs` PASS）；④ `-NoSelfTest` / `TRAINER_NO_SELFTEST=1` 供工作流省掉编后自检。⏳ AVX2 向听表、批量前向未做（§6.14 也说明了为什么 `-flto`/`-fno-rtti` 不留） |
+| **M5 标签侧与 v4 回路（脱离 Java）** | `--aux` 标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）、`v4.dataset` 的标签列、`python -m mahjong_ml.v4 loop` 的整轮编排 | ✅ **已完成**（2026-09-28，§6.23）：① C++ 写出**真正的 npz**（`npzwriter.hpp` 镜像 Java `NpzWriter`：STORED + 固定时间戳 + `.npy` v1.0），与 Java 侧**连 zip 容器一起逐字节相同**（`tools/trainer-aux-parity.mjs`，含 `--selfcheck` 负向对照）；② 采集/派生特征/评测三处都由 `trainer` 跑，**整轮不启动 JVM**（`v4 loop --no-java`，自检钉"命令里没有 java"）；③ `MAHJONG_NO_JAVA=1` 是硬守卫。⏳ `--teacher-label`（DAgger）仍未接（v4 PPO 不需要） |
 
 **非目标**（明确不做，避免范围失控）：网络对战（TCP/NDJSON）、房间/等待室/身份/投票、
 回放与牌谱导出、客户端相关的一切、以及**除 M.League 默认预设以外**的规则预设
@@ -1031,6 +1031,52 @@ v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个�
    **ties-to-even**（例 `-759.8515625f` → `-759.851563` vs `-759.851562`；两者 float32 位模式**相同**）。
    `v4net` 因此自带 `javaG9`（按 Java 的 dtoa 口径排版）⇒ 对拍是**整行逐字符**相同，
    而不是"数值接近"。
+
+---
+
+### 6.23 M5：标签侧 `g*.aux.npz` + v4 回路脱离 Java（2026-09-28，已完成）
+
+**为什么这是"训练端脱离 Java"的最后一块**：`--selfplay` / `--features` / `v4` 前向早就镜像完了，
+唯一卡住的是**标签侧** —— `--aux` 只有 Java 能产（`producer.py` 里对 C++ 显式报错），
+而 v4 的信念/危险头监督全在它里面 ⇒ 想带标签就必须起 JVM（慢十几倍）。
+
+**做了什么**：
+
+| 落点 | 内容 |
+| --- | --- |
+| `trainer/src/npzwriter.hpp`（新） | 极简 npz **写出**：`.npy` v1.0（magic + 头长 + 64 字节对齐 + 原始数据）+ zip（全部 **STORED**、时间戳钉成 DOS 1980-01-01、成员按插入序） |
+| `trainer/src/trace.{hpp,cpp}` | `AuxRow`（与 Java `TraceRecorder.AuxRow` 逐字段同口径）+ `onRoundEnd` 回填（放铳/和了/收支）+ `finish` 回填顺位 + `writeAux()`（九成员 + `meta`，键序与 Java 相同） |
+| `trainer/src/table.hpp` | 决策钩子多带一个 `const Round&`（**上帝视角**：三家对手暗牌/听牌只能从它读；输入侧永远拿不到） |
+| `trainer/src/selfplay.cpp` | `--aux` 落地（旧行为是显式拒绝），用法文本同步 |
+| `python/mahjong_ml/producer.py` | `CPP_MISSING` 里删掉 `--aux`；新增 `MAHJONG_NO_JAVA=1` 硬守卫 + `guard_java_free()` |
+| `python/mahjong_ml/v4/loop.py`（新） | v4 一轮八相编排（见 `TRAINING-V4.md` §7.2）：默认 C++、`--dry-run`、`--no-java`、台账 `league/<label>-v4.json` |
+| `tools/trainer-aux-parity.mjs`（新） | 两生产者的标签侧对拍（**逐字节**，含成员级定位与 `--selfcheck` 负向对照） |
+
+**口径要点（与 Java 逐条对齐，错了就是静默漂移）**：
+① **决策那一刻能算的**：`own_shanten_after` = `perCandidate(v, chosen)[0]` 夹到 ≥0（和了形记 −1 → 0）、
+   `own_tenpai` = **原始**向听 ≤ 0（候选分支用未夹的值，与 Java 一致）；非候选动作（和了/过）用当前
+   `shantenMin(hand, melds)`；
+② **上帝视角**：`opp_hand[j][34]` = `Round::concealCounts((seat+1+j)%4)`、`opp_tenpai[j]` =
+   `waitKinds(...)` 非空（相对方位 0=下家/1=対面/2=上家）；
+③ **事后回填**：`opp_dealin[j]` = 该家放铳给对手 j、`win_flag` = 该家自摸/荣和、`hand_delta`（点）、
+   `placement`；
+④ 标签行与决策行**同序同长**（采样与 `--no-claims` 之后才追加，与 Java 同一位置）。
+
+**判据（实测）**：
+· `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` ⇒ 五个 `g*.aux.npz`
+  **逐字节一致**（`--selfcheck`：同一对报"一致"、翻一个字节后报"不同"并**定位到成员**）；
+· 混合策略（`net:…,teacher,first,random`）3 场 × 3 小局同样逐字节一致；
+· **端到端**：`python -m mahjong_ml.v4 loop --label v4-smoke --games 4 --hands 2 --epochs 1 --no-java`
+  一轮走通（采集 → 特征 → 校验 → 紧凑集 → PPO → 导出 → 2+2 评测 → 台账），
+  紧凑集里 `aux_opp_hand/aux_opp_tenpai/aux_win_flag/aux_opp_dealin` 全部非空。
+
+⚠ **顺带踩到的两个坑**（都写进代码注释）：
+① `--aux` 的成员名冲突（`bool aux_` 与 `vector<AuxRow> aux_`）——编译期就炸，但这说明"照抄 Java 命名"
+   在 C++ 里要留神；
+② JDK `ZipOutputStream` 的两个**自带细节**：`flags=0x0800`（EFS）+ `version=10`，以及因为
+   `setTime(0)` 而**自动挂上的 9 字节"扩展时间戳" extra 字段（本地头与中央目录各一次）**——
+   不照抄这两处，容器就比 Java 少 18 字节/成员（实测 16734 vs 16572），
+   字节对拍永远差一点点（数组仍然相同，所以只有"逐字节"这条判据会红）。
 
 ---
 

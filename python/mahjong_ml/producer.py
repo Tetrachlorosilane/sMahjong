@@ -30,12 +30,13 @@ PRODUCERS = ("java", "cpp")
 #: （`trainer-selfplay-parity.mjs 50 0 first 20260101 --sample 7` PASS、
 #: `… 50 0 net:<ckpt> 20260101 --sample 7` PASS；见 docs/TRAINER-CPP.md §6.16）——
 #: 留在这里会**挡住** P5 世代采集（`online.py` 的阶梯/评测默认 `--sample 64`）。
+#: ⚠ `--aux` 曾在这里，已于 2026-09 删除：C++ 侧补了 `trainer/src/npzwriter.hpp` +
+#: `TraceRecorder` 的标签侧行，**连 npz 容器一起逐字节相同**
+#: （`node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate` PASS，
+#: 负向对照 `--selfcheck` 也在）。于是"v4 训练全流程脱离 Java"不再缺任何采集能力。
 CPP_MISSING = {
     "--teacher-label": "DAgger 的老师标注（P2 采集用）；teacher 本体已移植，"
                        "缺的是记录器的 `teacher`/`teacher_index` 两列",
-    "--aux": "标签侧文件 `g*.aux.npz`（P1/P2 的信念与危险头监督用）："
-             "C++ 记录器还没写 npz（Java 侧已落地，见 `docs/FEATURES-V4.md` §5.2）——"
-             " 要标签就用 `MAHJONG_PRODUCER=java` 采这一批",
 }
 
 
@@ -51,6 +52,23 @@ def label(name: str | None = None) -> str:
     """给日志用的一句话（写进"自对弈 …"那行，方便台账里认出这批数据是谁产的）。"""
     p = producer(name)
     return f"生产者 java（{JAR.name}）" if p == "java" else f"生产者 cpp（{TRAINER.name}）"
+
+
+def java_forbidden() -> bool:
+    """`MAHJONG_NO_JAVA=1` = **训练端脱离 Java** 的守卫（v4 回路默认它）。"""
+    return (os.environ.get("MAHJONG_NO_JAVA", "") or "").strip().lower() not in ("", "0", "false", "no")
+
+
+def guard_java_free(name: str | None = None) -> None:
+    """`MAHJONG_NO_JAVA=1` 时**禁止**选中 java 生产者 —— 报错，不静默回退。
+
+    为什么要它：`MAHJONG_PRODUCER` 缺省是 java（v3 谱系的兼容值），而"v4 训练全流程脱离 Java"
+    这个目标一旦被环境变量悄悄改回去，症状是"又能跑了、只是慢十几倍"，没有任何报错。
+    """
+    if java_forbidden() and producer(name) == "java":
+        raise SystemExit(
+            "MAHJONG_NO_JAVA=1 但当前生产者是 java —— 改成 `MAHJONG_PRODUCER=cpp`，"
+            "或去掉这个环境变量（见 docs/TRAINER-CPP.md §5）")
 
 
 def _guard(p: str, opts: dict[str, object]) -> None:
@@ -72,6 +90,7 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
     @param aux 额外落标签侧 `g*.aux.npz`（**只有 Java 生产者支持**；C++ 会显式报错）
     """
     p = producer(name)
+    guard_java_free(name)
     _guard(p, {"--sample": sample, "--teacher-label": teacher_label, "--aux": aux})
     if p == "java":
         cmd = ["java", "-jar", str(JAR), "--selfplay", str(games), "--workers", str(workers)]
@@ -94,6 +113,7 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
 def features_cmd(directory: Path, workers: int = 0, *, name: str | None = None) -> list[str]:
     """派生特征 sidecar（615/96 那些由服务端算的字段）。"""
     p = producer(name)
+    guard_java_free(name)
     if p == "java":
         cmd = ["java", "-jar", str(JAR), "--features", str(directory)]
     else:

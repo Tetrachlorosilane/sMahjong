@@ -15,10 +15,13 @@
 #include <string>
 #include <vector>
 
+#include "counts.hpp"
 #include "observation.hpp"
 #include "table.hpp"
 
 namespace trainer {
+
+class Round;
 
 /** 小局结算行（Java `TraceRecorder.onEvent` 里那条 `hand` 行的字段）。 */
 struct HandRow {
@@ -46,16 +49,21 @@ class TraceRecorder {
 public:
     TraceRecorder(int gameIndex, int64_t seed, std::string dir,
                   const std::array<std::string, 4> &labels, int startScore, int sampleEvery,
-                  bool recordClaims, bool keepDecisions)
+                  bool recordClaims, bool keepDecisions, bool aux = false)
         : gameIndex_(gameIndex), seed_(seed), dir_(std::move(dir)), labels_(labels),
           startScore_(startScore), sampleEvery_(sampleEvery < 1 ? 1 : sampleEvery),
-          recordClaims_(recordClaims), keepDecisions_(keepDecisions) {
+          recordClaims_(recordClaims), keepDecisions_(keepDecisions), auxEnabled_(aux) {
         runningScores_.fill(startScore);
     }
 
-    /** 一次决策（Java `TraceRecorder.onChoice`；挂在唯一的决策漏斗上）。 */
+    /**
+     * 一次决策（Java `TraceRecorder.onChoice`；挂在唯一的决策漏斗上）。
+     *
+     * @param round **上帝视角**的小局状态（Java 侧是 `Decision.round`）—— 标签侧的
+     *     "三家对手暗牌/听牌"只能从这里读；输入侧永远拿不到它（这就是标签与输入分离的理由）。
+     */
     void onChoice(const Observation &obs, const std::string &kind, const Action &cmd,
-                  const std::string &roundKey);
+                  const std::string &roundKey, const Round &round);
 
     /** 一条 `round_end`（Java `TraceRecorder.onEvent` 只认广播的那一条）。 */
     void onRoundEnd(const RoundEndEvent &ev);
@@ -72,6 +80,9 @@ public:
     /** 决策行数（= `game.decisions`，**采样之后**）。 */
     int rowCount() const { return static_cast<int>(decisions_.size()); }
 
+    /** 标签侧行数（`--aux` 才有；应与 `rowCount()` 相等）。 */
+    int auxRowCount() const { return static_cast<int>(aux_.size()); }
+
 private:
     struct DecisionRow {
         int handNo = 0;
@@ -87,7 +98,30 @@ private:
         int handIdx = -1;                  // 指向 `hands_`；-1 = 没被任何小局回填过
     };
 
+    /**
+     * 一条标签侧记录（`--aux`；Java `TraceRecorder.AuxRow`，逐字段同口径）。
+     *
+     * <p>两半来源不同，别混：**决策那一刻能算的**（自家"这一手做完"的向听/听牌 —— 自家手牌不是
+     * 隐藏信息）走 `perCandidate` / `shantenMin`，与 sidecar 的逐候选派生量**同一份引擎实现**；
+     * **真·上帝视角**（三家对手的暗牌与听牌）只能从 `Round` 读。放铳/和了/收支是小局结束才回填的。
+     */
+    struct AuxRow {
+        int seat = -1;
+        int ownShantenAfter = 0;
+        int ownTenpai = 0;
+        int winFlag = 0;
+        int handDelta = 0;
+        int placement = 0;
+        std::array<int, kSeatCount> oppTenpai{};
+        std::array<int, kSeatCount> oppDealin{};
+        std::array<uint8_t, kSeatCount * kKindCount> oppHand{};
+        int handIdx = -1;                  // 指向 `hands_`；-1 = 没被任何小局回填过
+    };
+
     void rollHand(const std::string &key);
+
+    /** 落盘 `g<n>.aux.npz`（Java `TraceRecorder.writeAux`；`--aux` 且要落盘时才调）。 */
+    void writeAux();
 
     int gameIndex_;
     int64_t seed_;
@@ -97,8 +131,10 @@ private:
     int sampleEvery_;
     bool recordClaims_;
     bool keepDecisions_;
+    bool auxEnabled_ = false;
 
     std::vector<DecisionRow> decisions_;
+    std::vector<AuxRow> aux_;
     std::vector<HandRow> hands_;
     /** 记录器自己维护的分数账（`Round.scores` 在局内会被立直扣点改动，不能当"局前分"用）。 */
     std::array<int, 4> runningScores_{};

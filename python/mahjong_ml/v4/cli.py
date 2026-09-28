@@ -274,7 +274,17 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
     ])
 
 
+def cmd_loop(argv: list[str]) -> int:
+    """v4 世代回路（`python -m mahjong_ml.v4 loop`）—— 编排在 `v4/loop.py`。"""
+    from . import loop
+    return loop.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `loop` 的参数集自成一套（见 `v4/loop.py`）：整段转走，别让 argparse 去猜
+    if argv and argv[0] == "loop":
+        return cmd_loop(argv[1:])
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="打印块清单与张量形状").set_defaults(fn=cmd_spec)
@@ -301,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     va.add_argument("--ceiling", action="store_true", help="另报引擎真值特征的线性参照")
     va.set_defaults(fn=cmd_value_audit)
+    # ⚠ `loop` 的参数集在 `v4/loop.py`（几十个开关），这里**不能用 `REMAINDER` 子解析器**：
+    #   argparse 会把 `--label` 这种选项当成父级的未知参数直接报错（实测）。所以 `main()` 在
+    #   进 argparse **之前**就把 `loop` 之后的参数整段转走；这里留一行是为了 `--help` 里能看到它。
+    sub.add_parser("loop", help="v4 世代回路：采集(C++)/紧凑集/训练/评测/台账（不依赖 Java）")
     args = ap.parse_args(argv)
     return args.fn(args)
 

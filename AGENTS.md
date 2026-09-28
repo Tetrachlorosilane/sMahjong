@@ -535,8 +535,9 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   *且* **真的命中**（只有"相等"是假绿：退回全量的结果当然等于全量）。回归：`SelfTest.v4CacheTests`
   + `tools\v4-cache-check.mjs`（同种子开/关缓存 ⇒ 轨迹逐字节）。细节见 NOTES §6.5 第十一轮。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
-  `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），
-  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、`net:` 的 `@α` 先验）**显式报错**，不悄悄降级；
+  `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-{selfplay,aux}-parity.mjs`），
+  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、
+  `net:` 的 `@α` 先验）**显式报错**，不悄悄降级；
   `net:<权重文件>[@0][#T]` 与 `teacher` 都已落地（§6.16/§6.17）。⚠ 完整半庄验收**≥200 场**；§6.15 是唯一"绕过内置 Bot"的例外。
 ### 6.6 teacher（内置机器人）的五层取舍
 

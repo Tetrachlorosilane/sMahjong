@@ -1176,7 +1176,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--out <dir>` | 轨迹输出（每场 `g<序号>.jsonl` + `summary.json`） |
 | `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
 | `--hands <n>` | 每场最多 n 个小局（0 = 完整半庄；冒烟测试用） |
-| `--aux` | **额外**落标签侧文件 `g<序号>.aux.npz`（`FEATURES-V4.md` §5.2：对手手牌/听牌、放铳、和了、顺位）。⚠ **不改轨迹**：同一颗种子开不开它，`g*.jsonl` 逐字节相同（自检钉着）。C++ 生产者**未实现** → 显式报错 |
+| `--aux` | **额外**落标签侧文件 `g<序号>.aux.npz`（`FEATURES-V4.md` §5.2：对手手牌/听牌、放铳、和了、顺位）。⚠ **不改轨迹**：同一颗种子开不开它，`g*.jsonl` 逐字节相同（自检钉着）。**两个生产者都支持**（C++ 侧 2026-09 补齐：`trainer/src/npzwriter.hpp`；连 npz 容器一起**逐字节相同**，对拍 = `node tools/trainer-aux-parity.mjs … --selfcheck`） |
 | `--preset <name>` | 规则预设：`mleague` / `tenhou` / `majsoul` / `custom` |
 | `--no-v4-cache` | 关掉 v4 网络的**增量事件缓存**（默认开）。⚠ 输出**逐位相同**、只影响耗时：判据见 `docs/TRAINING-V4.md` §5.3（`SelfTest.v4CacheTests` + `tools/v4-cache-check.mjs`）；对拍/排障时用它拿"全量重算"基准 |
 
@@ -1284,7 +1284,8 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 **v4 数据集与 P3 训练（自对弈改进，2026-09）**：
 
 ```bash
-# ① 采集（**要标签侧就必须用 Java 生产者**：C++ 的 --aux 显式报错）
+# ① 采集（**训练端推荐整条走 C++**：`MAHJONG_PRODUCER=cpp`；`--aux` 两侧都支持且对拍逐字节）
+#    ⚠ v4 的轮次已经 Python 化：`python -m mahjong_ml.v4 loop --no-java …`（见 TRAINING-V4 §7.2）
 java -jar mahjong-server.jar --selfplay 200 --workers 12 --rotate --aux \
      --policy "net:<上一代 net.bin>#1.0,teacher,teacher,random" --seed 20260929 --out <raw>
 java -jar mahjong-server.jar --features <raw> --workers 12

@@ -624,12 +624,13 @@ try:
     ok(False, "aux=True 但缺标签文件时必须报错")
 except FileNotFoundError as e:
     ok("--aux" in str(e), "aux：缺标签文件时报错并提示怎么生成", str(e)[:60])
-# ⑦ C++ 生产者不支持 `--aux` ⇒ 显式报错（不静默产出一份没有标签的数据集）
-try:
-    ml_producer.selfplay_cmd(2, 1, "teacher", 1, Path("x"), aux=True, name="cpp")
-    ok(False, "cpp 生产者 + --aux 必须报错")
-except SystemExit as e:
-    ok("--aux" in str(e), "aux：cpp 生产者不支持时报错（提示用 java 采这一批）", str(e)[:70])
+# ⑦ C++ 生产者**现在支持** `--aux`（2026-09：`npzwriter.hpp` + `TraceRecorder` 的标签侧行）
+#   ⇒ 判据反过来钉：命令里必须有 `--aux`，且**不能**再报错（老行为"cpp 拒绝 --aux"会让
+#   v4 回路被迫回 Java，整轮慢十几倍）。对拍见 `tools/trainer-aux-parity.mjs`。
+_cpp_aux = ml_producer.selfplay_cmd(2, 1, "teacher", 1, Path("x"), aux=True, name="cpp")
+ok("--aux" in _cpp_aux, "aux：cpp 生产者的采集命令里带 --aux（标签侧已移植）", " ".join(_cpp_aux))
+ok(ml_producer.selfplay_cmd(2, 1, "teacher", 1, Path("x"), aux=True, name="java")[0] == "java",
+   "aux：java 生产者仍然可用（对照不变）")
 same = ds.split_files(ds.trace_files(src), 0.5, 0)
 same2 = ds.split_files(ds.trace_files(src), 0.5, 0)
 eq("切分可复现（同种子同结果）", [f.name for f in same[0]], [f.name for f in same2[0]])
@@ -2468,6 +2469,45 @@ eq("价值头审计：真值特征矩阵 = 1（自家向听）+ 3（自家听牌
    _fx.shape[1], 5)
 ok(all("opp_hand" not in _n for _n in _fn),
    "价值头审计：`state` 参照里没有别家真手牌（那是作弊参照，另算一栏）")
+
+# ---- v4 世代回路（`v4/loop.py`）+ "训练端脱离 Java" 的守卫 ------------------------------------
+# 为什么钉它：v4 的轮次以前是**手敲命令**，开关只活在 shell 历史里；而"默认走哪个生产者"
+# 一旦被环境变量悄悄改回 java，症状是"又能跑了、只是慢十几倍"，**没有任何报错**。
+from mahjong_ml.v4 import loop as v4_loop                                   # noqa: E402
+from mahjong_ml import producer as ml_producer                              # noqa: E402
+
+_lo_cfg = v4_loop.LoopConfig(label="v4-sc", init="X:/net.bin", no_java=True, producer="cpp")
+_lo_net = Path("X:/net.bin")
+_lo = v4_loop.plan_commands(_lo_cfg, 1, _lo_net, 100)
+_lo_bins = [Path(str(c[0])).name.lower() for c in _lo.commands.values()]
+ok(not any(b.startswith("java") for b in _lo_bins),
+   "v4 回路：默认命令里没有 JVM（脱离 Java 的判据）", str(_lo_bins))
+ok("--aux" in _lo.commands["collect"] and "--aux" in _lo.commands["compact"],
+   "v4 回路：采集与紧凑集都带 `--aux`（信念/危险头的监督不能因为换生产者就没了）")
+eq("v4 回路：学生策略串逐字一致（`is_student` 靠字符串相等判定）",
+   _lo_cfg.student_spec(_lo_net), "net:X:\\net.bin@0#0.5")
+eq("v4 回路：默认 2+2 配席（2 学生 + 2 teacher）",
+   sum(1 for p in _lo_cfg.policy(_lo_net).split(",") if p == "teacher"), 2)
+ok("--behaviour" in _lo.commands["train"] and "--behaviour-temp" in _lo.commands["train"],
+   "v4 回路：PPO 轮带 `--behaviour`/`--behaviour-temp`（π_old 的来源，训练端还会与 meta 核对）")
+eq("v4 回路：`--target-minutes=0` ⇒ 场次就是 `--games`",
+   v4_loop.plan_games(_lo_cfg, [], 400, 0.0)[0], 400)
+_lo_env = os.environ.get("MAHJONG_NO_JAVA")
+os.environ["MAHJONG_NO_JAVA"] = "1"
+try:
+    ml_producer.selfplay_cmd(1, 1, "teacher", 0, Path("X:/x"), aux=True, name="java")
+    ok(False, "MAHJONG_NO_JAVA=1 时选 java 生产者必须报错")
+except SystemExit as _lo_e:
+    ok("MAHJONG_NO_JAVA" in str(_lo_e), "MAHJONG_NO_JAVA=1 时选 java 生产者**当场报错** ✓",
+       str(_lo_e)[:60])
+finally:
+    if _lo_env is None:
+        os.environ.pop("MAHJONG_NO_JAVA", None)
+    else:
+        os.environ["MAHJONG_NO_JAVA"] = _lo_env
+# C++ 生产者不该再被 `--aux` 挡住（过去 `CPP_MISSING` 里有它 ⇒ 采集只能回 Java）
+ok("--aux" not in ml_producer.CPP_MISSING,
+   "生产者：C++ 侧不再缺 `--aux`（标签侧 npz 已移植；对拍 = tools/trainer-aux-parity.mjs）")
 
 
 # ---------------------------------------------------------------- 汇总

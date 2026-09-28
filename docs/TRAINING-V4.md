@@ -297,22 +297,37 @@ compact/<label>/            紧凑数组（tile/evt/ctx/cand + 标签列）
 - ⚠ v4 的 sidecar 变大（~340 B/决策 → 一轮 6M 决策 ≈ 2 GB），紧凑集也更大：
   缓存档上限要**按 v4 的字节/场重标**（`budget.fit_cost/fit_disk` 本来就是从台账实测回填的，不用改代码）。
 
-### 7.2 编排（复用 `online`，新增阶段子命令）
+### 7.2 编排：`python -m mahjong_ml.v4 loop`（**默认 C++ 生产者，训练端不依赖 Java**）
+
+v4 的轮次**不再手敲命令**：一条命令跑完一轮的八个相（计划 → 采集 → 派生特征 → 校验 → 紧凑集 →
+训练 → 导出 → 评测+判据+台账），每轮从上一条产出的 `net.bin` 起步。
+
+| 相 | 谁跑 | 命令要点 |
+| --- | --- | --- |
+| 计划 | Python | `--target-minutes > 0` ⇒ `budget.plan_round`（台账实测反推 + 资源闸门，点名谁限制的）；否则 `--games` |
+| 采集 | **C++**（`trainer selfplay`） | `--rotate --aux`；策略串 = `net:<上一代 net.bin>@0#T` ×2 学生 + `teacher` ×2 |
+| 派生特征 | **C++**（`trainer features`） | sidecar `g*.feat.bin`（与 Java 逐字节） |
+| 校验 | node | `tools/selfplay-check.mjs`（含 `reward_to_go` 的独立重算） |
+| 紧凑集 | Python | `v4.dataset --aux --student "<与采集逐字相同的串>"`（`is_student` 靠字符串相等判定） |
+| 训练 | Python | `v4.pretrain --objective ppo --behaviour <上一代> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`） |
+| 导出 | Python | `v4.export weights` → 格式 2 `net.bin`（下一轮的 `--init`/`--behaviour` 就是它） |
+| 评测+判据 | **C++**（`trainer selfplay`）+ Python | 2+2 同牌山（`net,net,teacher,teacher`）→ `eval.paired_test`（按 seed 配对 + bootstrap + `required_n`）→ 台账 `league/<label>-v4.json` |
 
 ```powershell
-# P1 自监督预训练（不需要 teacher）
-python -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-pretrain --epochs 8
-# P2 teacher 冷启动（模仿头权重 0.3，20k 步退火到 0）
-python -m mahjong_ml.v4.finetune --init <pretrain.pt> --teacher-weight 0.3 --anneal-steps 20000
-# P3 自对抗（**复用现有世代循环**：时间预算 + 缓存档 + 配额回收）
-python -m mahjong_ml.online run --init <ckpt> --label v4-g01 --generations 8 --workers 24 `
-       --opponents "teacher,net:<历史最强>/net.bin" --student-seats 2
-# 判据（复用，不新写）
-python -m mahjong_ml.online pair  --a v4-g08 --b teacher --games 5200
-python -m mahjong_ml.online ladder --label v4-g01 --generations 8 --games 1200 --pair-games 800
-# 新增：消融矩阵（同种子、逐块关掉、配对 CI）
-python -m mahjong_ml.v4.ablate --ckpt <ckpt> --blocks evt.order,tile.per_opp,ctx.riichi_turn --games 2000
+python -m mahjong_ml.v4 loop --label v4-g01 --init tools\build\v4-bc-004\net.bin `
+       --generations 3 --games 400 --workers 24 --objective ppo --value-target final `
+       --student-temp 0.5 --eval-games 2000 --no-java
+python -m mahjong_ml.v4 loop --label v4-g01 --init <net.bin> --generations 3 --dry-run   # 只打印命令
 ```
+
+**判据（"训练端脱离 Java"）**：
+① `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` PASS —— 标签侧
+   `g*.aux.npz` **连 zip 容器一起逐字节相同**（负向对照：翻一个字节必须报出是哪个成员）；
+② `loop … --no-java --dry-run` 打出的命令里**一个 `java` 都没有**（自检 `v4 回路：默认命令里没有 JVM` 钉住）；
+③ 冒烟：4 场 × 2 小局、C++ 采集 + `--aux` + PPO 一轮走通（`ckpt/v4-smoke-g01`），
+   紧凑集里 `aux_opp_hand / aux_opp_tenpai / aux_win_flag / aux_opp_dealin` 都非空。
+⚠ `MAHJONG_NO_JAVA=1` 是**硬守卫**：选到 java 生产者**当场报错**（不是"能跑但慢十几倍"）。
+⚠ 仍然只有 Java 能做的两件事（与 v4 回路无关）：`--teacher-label`（DAgger）与 `net:` 的 `@α` 先验。
 
 ### 7.3 对手池与联赛
 

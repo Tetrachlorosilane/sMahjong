@@ -63,6 +63,8 @@ struct Config {
     bool recordClaims = true;
     int maxHands = 0;
     bool teacherLabel = false;
+    /** `--aux`：额外落标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）。 */
+    bool aux = false;
 };
 
 struct GameRow {
@@ -134,10 +136,10 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
     }
     const bool keepDecisions = !outDir.empty();
     TraceRecorder rec(g, seed, outDir, labels, rules.startScore, c.sampleEvery, c.recordClaims,
-                      keepDecisions);
+                      keepDecisions, c.aux);
     t.debugChoiceTap = [&rec](const Observation &obs, const std::string &kind, const Action &cmd,
-                              const std::string &roundKey) {
-        rec.onChoice(obs, kind, cmd, roundKey);
+                              const std::string &roundKey, const Round &round) {
+        rec.onChoice(obs, kind, cmd, roundKey, round);
     };
     t.debugEventTap = [&rec](const RoundEndEvent &ev) { rec.onRoundEnd(ev); };
     t.playGame();
@@ -421,8 +423,9 @@ void selfplayUsage(std::FILE *out) {
                  "  --rotate      按场轮转座位\n"
                  "  --sample K    每 K 次决策记 1 条（缺省 1 = 全记）\n"
                  "  --no-claims   不记录鸣牌决策\n"
-                 "  --aux         ⚠ **没接**：标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）\n"
-                 "                —— 显式报错，请用 `MAHJONG_PRODUCER=java` 采这一批\n"
+                 "  --aux         额外落**标签侧**文件 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位；\n"
+                 "                轨迹不动）—— 与 Java 侧同一份格式与口径（逐元素对拍见\n"
+                 "                `tools/trainer-aux-parity.mjs`）\n"
                  "  --preset X    规则预设（mleague|tenhou|majsoul|custom）；缺省 mleague\n"
                  "  --out DIR     轨迹输出目录（g<场号>.jsonl + summary.json）\n");
 }
@@ -480,7 +483,7 @@ int selfplayCli(int argc, char **argv) {
         } else if (a == "--teacher-label") {
             teacherLabel = true;
         } else if (a == "--aux") {
-            auxLabel = true;
+            c.aux = true;
         } else if (a == "--help" || a == "-h") {
             selfplayUsage(stdout);
             return 0;
@@ -499,13 +502,9 @@ int selfplayCli(int argc, char **argv) {
         return 2;
     }
     if (auxLabel) {
-        // `--aux` = 标签侧文件 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）。Java 侧已落地
-        // （`docs/FEATURES-V4.md` §5.2 / `trainer/src` 里还没有 npz 写出）。
-        // ⚠ **显式报错，不静默降级**：默默跑完只会得到一份"没有标签"的轨迹目录，
-        //   而 P1/P2 的信念/危险头监督要等到训练时才发现少了东西。
-        std::fprintf(stderr, "[trainer] --aux（标签侧 g*.aux.npz）训练端还没接："
-                             "npz 写出尚未移植（Java 侧已落地，见 docs/FEATURES-V4.md §5.2）——"
-                             " 这一批请用 MAHJONG_PRODUCER=java 采\n");
+        // 占位：`--aux` 已落地（`trainer/src/npzwriter.hpp` + `TraceRecorder` 的标签侧行），
+        // 这一支不该再被执行 —— 留着是为了让"旧拒绝分支被误改回来"当场可见。
+        std::fprintf(stderr, "[trainer] 内部错误：--aux 的旧拒绝分支不该被执行\n");
         return 2;
     }
     std::string fatal;

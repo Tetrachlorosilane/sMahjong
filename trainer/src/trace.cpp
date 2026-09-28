@@ -7,10 +7,23 @@
 #include <vector>
 
 #include "jsonw.hpp"
+#include "npzwriter.hpp"
+#include "obffeatures.hpp"
+#include "round.hpp"
 #include "seed.hpp"
+#include "shanten.hpp"
 
 namespace trainer {
 namespace {
+
+/** 标签侧文件格式版本（字段增删要 +1；Python 侧同一条判据在 `v4/dataset.py`）。 */
+constexpr int kAuxVersion = 1;
+
+/** 动作键的"类型"部分（`discard:1m` → `discard`；无冒号则整串）。 */
+std::string keyType(const std::string &key) {
+    const size_t pos = key.find(':');
+    return pos == std::string::npos ? key : key.substr(0, pos);
+}
 
 /** `round` 子对象（`round_end` 报文里的那一个；Java `TraceRecorder` 直接搬它）。 */
 std::string roundJson(int roundWind, int kyoku, int honba, int sticks) {
@@ -38,7 +51,7 @@ void TraceRecorder::rollHand(const std::string &key) {
 }
 
 void TraceRecorder::onChoice(const Observation &obs, const std::string &kind, const Action &cmd,
-                             const std::string &roundKey) {
+                             const std::string &roundKey, const Round &round) {
     observed_++;
     // 小局编号必须每次都推进（统计行也要用它），所以先 roll 再判是否记录
     rollHand(roundKey);
@@ -71,6 +84,36 @@ void TraceRecorder::onChoice(const Observation &obs, const std::string &kind, co
     row.obsJson = obs.toJson();
     // 将要写出的那一条 `hand` 行的下标（小局行是一条一条按 `round_end` 顺序追加的）
     row.handIdx = static_cast<int>(hands_.size());
+    if (auxEnabled_) {
+        // 标签侧与决策行**同序同长**（采样/`--no-claims` 之后才追加，与 Java 侧同一位置）
+        AuxRow ar;
+        ar.seat = obs.seat;
+        ar.handIdx = row.handIdx;
+        FeatureView v;
+        JVal obsJson;
+        if (jsonParse(row.obsJson, obsJson) && featureViewOfObs(obsJson, v)) {
+            const std::string type = keyType(chosen);
+            const bool usesCandidate = (type == "discard" || type == "riichi" || type == "chi"
+                                        || type == "pon" || type == "kan");
+            // ⚠ 与 Java 逐字同口径：候选分支用 perCandidate 的**原始**向听判听牌、只对落盘值夹到 0；
+            //   非候选分支（和了/过）手上没变，用当前向听。
+            const int sh = usesCandidate ? perCandidate(v, chosen)[0]
+                                         : shantenMin(v.hand, static_cast<int>(v.melds.size()));
+            ar.ownShantenAfter = std::max(0, sh);
+            ar.ownTenpai = sh <= 0 ? 1 : 0;
+        }
+        // 真·上帝视角：三家对手（相对方位 0=下家/1=対面/2=上家）的暗牌计数与听牌
+        for (int j = 0; j < kSeatCount; j++) {
+            const int s = (ar.seat + 1 + j) % 4;
+            const Counts c = round.concealCounts(s);
+            for (int k = 0; k < kKindCount; k++) {
+                ar.oppHand[static_cast<size_t>(j * kKindCount + k)]
+                        = static_cast<uint8_t>(c[static_cast<size_t>(k)]);
+            }
+            ar.oppTenpai[static_cast<size_t>(j)] = round.waitKinds(s).empty() ? 0 : 1;
+        }
+        aux_.push_back(ar);
+    }
     decisions_.push_back(std::move(row));
 }
 
@@ -108,12 +151,35 @@ void TraceRecorder::onRoundEnd(const RoundEndEvent &ev) {
         row.hasResult = false;             // Java：`res == null` → `tenpai` 是空数组
     }
     hands_.push_back(std::move(row));
+    // 标签侧回填（Java `TraceRecorder.onEvent` 同一件事）：放铳 / 和了 / 本小局收支
+    if (auxEnabled_) {
+        const HandRow &h = hands_.back();
+        for (AuxRow &ar : aux_) {
+            if (ar.handIdx != static_cast<int>(hands_.size()) - 1) {
+                continue;
+            }
+            for (int j = 0; j < kSeatCount; j++) {
+                const int opp = (ar.seat + 1 + j) % 4;
+                ar.oppDealin[static_cast<size_t>(j)] = (h.winner == opp && h.loser == ar.seat) ? 1 : 0;
+            }
+            ar.winFlag = (h.winner == ar.seat) ? 1 : 0;
+            ar.handDelta = (ar.seat >= 0 && ar.seat < 4) ? h.delta[static_cast<size_t>(ar.seat)] : 0;
+        }
+    }
 }
 
 void TraceRecorder::finish(const std::array<int, 4> &finalScores) {
     const std::array<int, 4> placement = placementOf(finalScores);
+    // 标签侧的顺位回填（Java `finish` 里那一段）：整场结束才知道
+    for (AuxRow &ar : aux_) {
+        ar.placement = (ar.seat >= 0 && ar.seat < 4)
+                ? placement[static_cast<size_t>(ar.seat)] : 0;
+    }
     if (dir_.empty()) {
         return;                            // 只统计不落盘（`--out` 缺省）
+    }
+    if (auxEnabled_) {
+        writeAux();
     }
     // 逐决策 reward-to-go（点）：`R(h,s) = Σ_{h' ≥ h} delta[h'][s] + 终局余棒[s]`。
     // 口径必须与 Java `TraceRecorder.rewardToGo` **逐字一致**（同种子两份轨迹逐字节相同）：
@@ -268,6 +334,76 @@ void TraceRecorder::finish(const std::array<int, 4> &finalScores) {
     }
     std::fwrite(out.data(), 1, out.size(), f);
     std::fclose(f);
+}
+
+/**
+ * 落盘 `g<n>.aux.npz`（Java `TraceRecorder.writeAux` 的镜像）。
+ *
+ * <p>形状与 trace 的决策行**一一对应**（同序同长）：`(n,)` / `(n,3)` / `(n,3,34)`。
+ * `meta` 里带版本与溯源（aux/obs 版本、种子、场号、策略串）—— 版本不符时读侧直接报错。
+ *
+ * <p>⚠ 标签与输入是两套文件：推理路径永不读它（`FEATURES-V4.md` §5.2 的硬闸门）。
+ */
+void TraceRecorder::writeAux() {
+    const size_t n = aux_.size();
+    std::string ownShanten(n, '\0');
+    std::string ownTenpai(n, '\0');
+    std::string winFlag(n, '\0');
+    std::string placement(n, '\0');
+    std::string oppTenpai(n * kSeatCount, '\0');
+    std::string oppDealin(n * kSeatCount, '\0');
+    std::string oppHand(n * kSeatCount * kKindCount, '\0');
+    std::vector<int> handDelta(n, 0);
+    for (size_t i = 0; i < n; i++) {
+        const AuxRow &r = aux_[i];
+        ownShanten[i] = static_cast<char>(r.ownShantenAfter);
+        ownTenpai[i] = static_cast<char>(r.ownTenpai);
+        winFlag[i] = static_cast<char>(r.winFlag);
+        placement[i] = static_cast<char>(r.placement);
+        handDelta[i] = r.handDelta;
+        for (int j = 0; j < kSeatCount; j++) {
+            oppTenpai[i * kSeatCount + static_cast<size_t>(j)]
+                    = static_cast<char>(r.oppTenpai[static_cast<size_t>(j)]);
+            oppDealin[i * kSeatCount + static_cast<size_t>(j)]
+                    = static_cast<char>(r.oppDealin[static_cast<size_t>(j)]);
+            for (int k = 0; k < kKindCount; k++) {
+                oppHand[(i * kSeatCount + static_cast<size_t>(j)) * kKindCount
+                        + static_cast<size_t>(k)]
+                        = static_cast<char>(r.oppHand[static_cast<size_t>(j * kKindCount + k)]);
+            }
+        }
+    }
+    std::string meta = "{\"aux_version\":";
+    meta += std::to_string(kAuxVersion);
+    meta += ",\"obs_version\":";
+    meta += std::to_string(kObservationVersion);
+    meta += ",\"game\":";
+    meta += std::to_string(gameIndex_);
+    meta += ",\"seed\":";
+    meta += std::to_string(seed_);
+    meta += ",\"n\":";
+    meta += std::to_string(n);
+    meta += ",\"policies\":[";
+    for (int i = 0; i < 4; i++) {
+        if (i > 0) {
+            meta.push_back(',');
+        }
+        jsonStr(meta, labels_[static_cast<size_t>(i)]);
+    }
+    meta += "],\"note\":";
+    jsonStr(meta, "labels only; inference must read g*.feat.bin, never this file");
+    meta.push_back('}');
+    NpzWriter npz;
+    npz.putBytes("own_shanten_after", "<i1", {static_cast<int>(n)}, ownShanten);
+    npz.putBytes("own_tenpai", "<u1", {static_cast<int>(n)}, ownTenpai);
+    npz.putBytes("opp_tenpai", "<u1", {static_cast<int>(n), kSeatCount}, oppTenpai);
+    npz.putBytes("opp_hand", "<u1", {static_cast<int>(n), kSeatCount, kKindCount}, oppHand);
+    npz.putBytes("opp_dealin", "<u1", {static_cast<int>(n), kSeatCount}, oppDealin);
+    npz.putBytes("win_flag", "<u1", {static_cast<int>(n)}, winFlag);
+    npz.putI32("hand_delta", handDelta, {static_cast<int>(n)});
+    npz.putBytes("placement", "<u1", {static_cast<int>(n)}, placement);
+    npz.putJson("meta", meta);
+    npz.write(dir_ + "/g" + std::to_string(gameIndex_) + ".aux.npz");
 }
 
 }  // namespace trainer

@@ -2250,6 +2250,62 @@ npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14 张、
 5. **判据**：`python/selfcheck.py` **519/0**（+4 只训头 + 4 参照：岭回归在"线性可解释"与
    "与特征无关"两侧分别 ≈1 / ≈0 —— 第一版把 train/val 混在一起量，噪声目标也报 0.886 的假绿，已改成分开）。
 
+**第十四轮：训练端脱离 Java —— C++ 补标签侧 + v4 回路 Python 化（2026-09-28）**
+
+**目标（用户点名）**：v4 训练全流程进 C++/Python，工作流脚本化；训练端不再依赖 Java（Java 太慢）。
+卡点只有一个：**标签侧 `--aux` 只有 Java 能产**（`producer.py` 的 `CPP_MISSING` 里显式拒绝），
+而 v4 的信念/危险头监督全在 `g*.aux.npz` 里 ⇒ 想带标签就必须起 JVM。
+
+1. **C++ 写出真正的 `.npz`**（`trainer/src/npzwriter.hpp`，镜像 Java `NpzWriter`）：
+   `.npy` v1.0（magic + 2 字节头长 + 64 字节对齐 + 原始数据）+ zip（**STORED**、时间戳钉成
+   DOS 1980-01-01、成员按插入序）。**没有引第三方库**（zip + npy 头就几十行）。
+2. **标签侧行**（`trace.hpp/cpp`）：`AuxRow` + `onChoice` 采集 + `onRoundEnd` 回填
+   （放铳/和了/本小局收支）+ `finish` 回填顺位 + `writeAux()`（九成员 + `meta`，键序同 Java）。
+   口径逐条对齐（错了就是**静默**漂移）：
+   - `own_shanten_after` = `perCandidate(v, chosen)[0]` **夹到 ≥0**（和了形 −1 → 0）；
+     `own_tenpai` 用**未夹**的向听 ≤ 0 判（候选分支），非候选动作（和了/过）用当前
+     `shantenMin(hand, melds)`；
+   - 上帝视角：`opp_hand[j][34]` = `Round::concealCounts((seat+1+j)%4)`、`opp_tenpai[j]` =
+     `waitKinds(...)` 非空 —— 为此把决策钩子（`table.hpp` 的 `debugChoiceTap`）**多带一个
+     `const Round&`**（输入侧永远拿不到它，这就是"标签与输入分离"）；
+   - 标签行与决策行**同序同长**（采样与 `--no-claims` 之后才追加，与 Java 同一位置）。
+3. **判据（对拍 + 端到端）**：
+   - `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` ⇒ 五个
+     `g*.aux.npz` **逐字节一致**（连 zip 容器一起；负向对照：翻一个字节必须报出**是哪个成员**）；
+     混合策略（`net:…,teacher,first,random`）3 场 × 3 小局同样逐字节一致；
+   - 端到端冒烟：`python -m mahjong_ml.v4 loop --label v4-smoke --games 4 --hands 2 --epochs 1 --no-java`
+     一轮走通（采集 → 派生特征 → `selfplay-check` → 紧凑集 → PPO → 导出 `net.bin` → 2+2 评测 →
+     `eval.paired_test` → 台账），紧凑集里 `aux_opp_hand/opp_tenpai/win_flag/opp_dealin` 全部非空。
+4. **v4 回路 Python 化**（`python/mahjong_ml/v4/loop.py` + `python -m mahjong_ml.v4 loop`）：
+   八相 = **计划**（`--target-minutes` ⇒ `budget.plan_round` 台账反推 + 资源闸门；否则 `--games`）→
+   **采集**（C++，`--rotate --aux`，`net:<上一代>@0#T` ×2 + teacher ×2）→ **派生特征**（C++）→
+   **校验**（`selfplay-check`）→ **紧凑集**（`v4.dataset --aux --student "<与采集逐字相同>"`）→
+   **训练**（`v4.pretrain --objective ppo --behaviour <上一代> --behaviour-temp T`）→ **导出** →
+   **评测+判据+台账**（2+2 同牌山 → 按 seed 配对 + bootstrap + `required_n` → `league/<label>-v4.json`）。
+   ⚠ 两个踩出来的实现细节：① `loop` 的参数集自成一套，**`cli.py` 必须在进 argparse 之前整段转走**
+   （用 `REMAINDER` 子解析器时 `--label` 会被父级当成未知参数直接报错）；② `python -m mahjong_ml.*`
+   的相**工作目录必须是 `python/`**（否则 `No module named 'mahjong_ml'`），所以编排里按相区分 cwd。
+5. **"脱离 Java"的守卫与反例**（这一条是**防回归**的关键）：`MAHJONG_NO_JAVA=1` ⇒
+   `producer.guard_java_free()` 在选到 java 生产者时**当场报错**；`loop --no-java --dry-run`
+   打出的命令里**一个 `java` 都没有**（自检 `v4 回路：默认命令里没有 JVM` 钉住）。
+   ⚠ 为什么必须报错：`MAHJONG_PRODUCER` 缺省是 java（v3 兼容值），一旦被环境变量悄悄改回去，
+   症状是"又能跑了、只是慢十几倍"，**没有任何信号**。
+6. **仍然只有 Java 能做的两件事**（与 v4 回路无关，别再被误报成"依赖 Java"）：
+   `--teacher-label`（DAgger 的老师标注）与 `net:` 的 `@α` 先验 —— C++ 侧都**显式报错**，不静默降级。
+7. **判据**：`python/selfcheck.py` **528/0**（+9：回路命令无 JVM、`--aux` 两侧都在、学生策略串逐字一致、
+   2+2 配席、PPO 轮带 `--behaviour`、`--target-minutes=0` 的场次、`MAHJONG_NO_JAVA` 报错、
+   `CPP_MISSING` 里不再有 `--aux`；并把老的那条"cpp + `--aux` 必须报错"**反过来钉**）；
+   `trainer --selftest` PASS；`doc-refs-check` PASS。
+
+**第十五轮（同一轮里顺手做的）：`--aux` 的字节对拍与 JDK zip 的两个细节**
+
+jar 与 C++ 的 npz 一开始**数组相同、容器差 162 字节**（9 成员 × 18）。逐字段比出来两处：
+① JDK 的本地头写 `version=10`、`flags=0x0800`（EFS），我第一版写 20/0；
+② 因为 `ZipEntry.setTime(0)` 设了 mtime，JDK 在**本地头与中央目录各挂一个 9 字节的"扩展时间戳"
+extra**（`55 54 05 00 01 00 00 00 00`）。照抄这两处之后**逐字节相同**。
+教训：**"数组一样"不等于"字节一样"**——判据写成逐字节时，容器细节也得照抄；而只写"数组一样"
+就会漏掉"python 读得进、别的工具读不进"这类问题。
+
 
 ---
 
