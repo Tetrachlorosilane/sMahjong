@@ -264,6 +264,25 @@ def phase_order(r: Round) -> list[str]:
     want = list(PHASES)
     want.insert(want.index("features") + 1, "check")
     return [p for p in want if p in r.commands]
+#: 值头闸门**需要的数据量**（第二十九/三十轮量出来的曲线；一行 ≈ 650 个决策）：
+#: · 120 场（79k 行）→ `EV(delta)` ≤ 0（−0.075 ~ −3.33），覆盖率差 14~29pp；
+#: · 400 场（263k 行）→ **+0.0157**（合法天花板的 0.26×），覆盖率三档全过、CE 也过 ⇒ 学得动但**信号不足**；
+#: · 1000 场（658k 行）→ **+0.0496**（0.72×）⇒ **闸门通过（退出码 0）**。
+#: ⇒ 拿三位数场次的轮去读闸门结论，读到的**不是**模型结论而是"数据不够"。
+VALUE_GATE_MIN_GAMES = 1000
+
+
+def value_gate_feasible(games: int) -> tuple[bool, str]:
+    """这一轮的场次够不够读**值头闸门**的结论（纯函数，自检直接喂上面那三个实测点）。"""
+    if games >= VALUE_GATE_MIN_GAMES:
+        return True, f"{games} 场 ≥ {VALUE_GATE_MIN_GAMES}（实测这一档闸门通过过）"
+    if games >= 400:
+        return False, (f"{games} 场：实测 ≈0.26× 天花板（学得动但信号不足，覆盖率可能已经全过）"
+                       f"—— 要读闸门结论请 ≥{VALUE_GATE_MIN_GAMES} 场")
+    return False, (f"{games} 场：实测 EV ≤ 0（120 场那档）⇒ 闸门的 FAIL **不是**模型结论，"
+                   f"是数据量不够；要读结论请 ≥{VALUE_GATE_MIN_GAMES} 场")
+
+
 def final_ckpt_label(cfg: LoopConfig, r: Round) -> str:
     """**这一轮最终会导出的那份权重**的 checkpoint 目录名。
 
@@ -400,6 +419,9 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
 
     seconds: dict[str, float] = {}
     print(f"\n===== 第 {generation} 代（{r.label}）：{games} 场 / producer={cfg.producer} =====")
+    gate_readable, gate_why = value_gate_feasible(games)
+    if not gate_readable:
+        print(f"  ⚠️ 值头闸门的**结论不可读**：{gate_why}")
     audit: dict[str, Any] = {}
     gate_ok = False
     for phase in phase_order(r):
@@ -433,6 +455,7 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
         "compact": str(r.compact), "eval_dir": str(r.eval_dir),
         "seconds": {k: round(v, 1) for k, v in seconds.items()},
         "seconds_total": round(sum(seconds.values()), 1),
+        "value_gate_readable": gate_readable, "value_gate_note": gate_why,
         "audit": audit,
         "eval": got,
     }

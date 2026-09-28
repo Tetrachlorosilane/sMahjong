@@ -2584,6 +2584,16 @@ eq("v4 回路：没开值头相时两者都看 `<tag>`（旧行为逐位不变�
    (v4_loop.final_ckpt_label(_lo_cfg2, _lo2),
     Path(_flag(_lo2.commands["audit"], "--ckpt")).name),
    ("v4-sc2-g03", "v4-sc2-g03"))
+# ⚠ 第二十九/三十轮量出来的**数据量曲线**：拿三位数场次的轮去读闸门结论，读到的是"数据不够"
+#   而不是模型结论。这条判据把它钉成可执行的守门函数（三个实测点 + 阈值）。
+eq("v4 回路：值头闸门的可读场次阈值 = 1000（实测 1000 场那轮通过过）",
+   v4_loop.VALUE_GATE_MIN_GAMES, 1000)
+eq("v4 回路：三个实测点的可读性判定（120 场 ❌ / 400 场 ❌ 但注明学得动 / 1000 场 ✅）",
+   [v4_loop.value_gate_feasible(g)[0] for g in (120, 400, 1000)], [False, False, True])
+ok("信号不足" in v4_loop.value_gate_feasible(400)[1]
+   and "不是" in v4_loop.value_gate_feasible(120)[1],
+   "v4 回路：不可读时**说明是哪种不可读**（400 场=学得动但信号不足；120 场=FAIL 不是模型结论）",
+   v4_loop.value_gate_feasible(120)[1][:36])
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）
