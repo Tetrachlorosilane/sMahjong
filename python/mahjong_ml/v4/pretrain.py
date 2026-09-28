@@ -212,6 +212,19 @@ def _clip_grad(opt, clip: float) -> float:
     return float(torch.nn.utils.clip_grad_norm_(params, float(clip)))
 
 
+def effective_kl_min_steps(max_steps: int, kl_min_steps: int) -> int:
+    """把 `--kl-min-steps` 钳到**一轮真的够得着**的位置（纯函数，自检直接喂数）。
+
+    ⚠ 第二十五轮实测的坑：`v4-mr01` 里 `--max-steps 100` 配 `--kl-min-steps 100`
+    ⇒ 早停只在 `step >= 100` 时判，而那一轮**最多只有 100 步** ⇒ **KL 早停永远不会触发**
+    （三代 `stop_reason` 全是 `None`，KL 从 0.079 掉到 0.0085 一路没人管）。
+    "每轮短"的配方必须让 `min_steps` 明显小于轮长：这里按 **1/5** 钳（至少 1 步）。
+    """
+    if max_steps and max_steps > 0:
+        return max(1, min(int(kl_min_steps), int(max_steps) // 5))
+    return int(kl_min_steps)
+
+
 def kl_stop_hit(kl: float, *, threshold: float, step: int, min_steps: int) -> bool:
     """**KL 早停**的判据（纯函数，自检直接喂数）。
 
@@ -826,6 +839,13 @@ def train(args) -> dict:
     n = int(train_data["nlegal"].shape[0])
     steps = max(1, min(args.max_steps or 10 ** 9, n // args.batch))
     total_steps = steps * args.epochs
+    # ⚠ **KL 早停必须够得着**（第二十五轮实测的坑）：`--max-steps 100` 配 `--kl-min-steps 100`
+    #   ⇒ 判据只在 step ≥100 时才看，而一轮最多 100 步 ⇒ 早停永不触发（三代 `stop_reason` 全 None）。
+    kl_min_eff = effective_kl_min_steps(steps, int(getattr(args, "kl_min_steps", 100) or 0))
+    if kl_min_eff != int(getattr(args, "kl_min_steps", 100) or 0):
+        print(f"⚠ `--kl-min-steps {int(getattr(args, 'kl_min_steps', 100) or 0)}` 对"
+              f"{steps} 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 {kl_min_eff}"
+              f"（轮长的 1/5）")
     # 学生掩码 + RWR 权重（P3 开局；见 `_row_weights`）。⚠ 掩码/权重**只在动作相关的头上生效**。
     # 学生掩码 + RWR 权重（P3 开局；见 `_row_weights`）。⚠ 掩码/权重**只在动作相关的头上生效**。
     # ⚠ `getattr` 取缺省：`rwr_beta` 是后加的可选开关，而 `train()` 也会被自检/脚本直接用
@@ -927,7 +947,7 @@ def train(args) -> dict:
         assert_ppo_excludes_rwr(objective, rwr_beta)
         print(f"PPO：grad-clip {float(getattr(args, 'grad_clip', 0.5) or 0.0):g}、"
               f"KL 早停阈值 {float(getattr(args, 'kl_early_stop', 0.03) or 0.0):g}"
-              f"（min_steps {int(getattr(args, 'kl_min_steps', 100) or 0)}）")
+              f"（min_steps {kl_min_eff}）")
         # ---- 口径闸门（2026-09-28 加；这条闸门就是为了不让 `#0.5` 那个 bug 再发生一次）----
         kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
                                            logp_tr, temp, device)
@@ -1064,7 +1084,7 @@ def train(args) -> dict:
             # 而"离行为策略太远"这件事跨 epoch 只会更严重）。
             if kl_stop_hit(float(parts.get("kl", float("nan"))),
                            threshold=float(getattr(args, "kl_early_stop", 0.03) or 0.0),
-                           step=gstep, min_steps=int(getattr(args, "kl_min_steps", 100) or 0)):
+                           step=gstep, min_steps=kl_min_eff):
                 stop_reason = (f"KL 早停：step {gstep} 的 KL(π_old‖π_new)="
                                f"{parts.get('kl', float('nan')):.4f} > "
                                f"{float(getattr(args, 'kl_early_stop', 0.03)):g}"

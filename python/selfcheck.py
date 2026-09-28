@@ -3013,6 +3013,15 @@ ok([v4_pt.kl_stop_hit(k, threshold=0.03, step=s, min_steps=100)
    "PPO 数值口径：KL 早停四条边界（min_steps 之前 / 越阈值 / 阈值内 / NaN 都不误停）")
 ok(not v4_pt.kl_stop_hit(0.9, threshold=0.0, step=999, min_steps=0),
    "PPO 数值口径：`--kl-early-stop 0` 关闭早停")
+# ⚠ 第二十五轮实测的坑：`--max-steps 100` 配 `--kl-min-steps 100` ⇒ 早停**永远够不着**
+#   （判据只在 step ≥100 时看，而一轮最多 100 步；三代战役 `stop_reason` 全是 None）
+eq("PPO 数值口径：`--kl-min-steps` 被钳到轮长的 1/5（否则早停够不着）",
+   (v4_pt.effective_kl_min_steps(100, 100), v4_pt.effective_kl_min_steps(100, 5),
+    v4_pt.effective_kl_min_steps(0, 100), v4_pt.effective_kl_min_steps(3, 100)),
+   (20, 5, 100, 1))
+ok(v4_pt.kl_stop_hit(0.9, threshold=0.03, step=v4_pt.effective_kl_min_steps(100, 100),
+                     min_steps=v4_pt.effective_kl_min_steps(100, 100)),
+   "PPO 数值口径：钳过之后 100 步一轮里早停**真的能触发**（修前是永假）")
 # ③ PPO + RWR 必须当场报错（二次加权是静默失真：clip_frac / kl / gate 全都正常）
 try:
     v4_pt.assert_ppo_excludes_rwr("ppo", 8.0)
