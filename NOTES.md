@@ -2306,6 +2306,38 @@ extra**（`55 54 05 00 01 00 00 00 00`）。照抄这两处之后**逐字节相�
 教训：**"数组一样"不等于"字节一样"**——判据写成逐字节时，容器细节也得照抄；而只写"数组一样"
 就会漏掉"python 读得进、别的工具读不进"这类问题。
 
+**第十六轮：PPO 与多头体系的重新规划（2026-09-28，分析轮，代码未改）**
+
+用户点名"重新规划 PPO 与多头、分析可改进的地方"。规划写在 `docs/TRAINING-V4.md` **§14**；
+这里只记**代码事实**（逐条可 grep 验证）与"为什么这么规划"，免得下一轮又靠直觉。
+
+1. **优势是移动基线**：`compute_loss` 里 `adv = _advantages(out, b, row_keep, key=value_key)`
+   （`pretrain.py` 的 `ppo` 分支）—— 用的是**当前**前向的 `out["value"]`，而 `logp_old` 是从文件读的**冻结**值。
+   ⇒ 一个 epoch 内策略梯度的基线一直在动（v3 是先把 `v_old` 算一次再冻结，`ppo.py`）。
+2. **优势是批内 z-score**：`_advantages` 用 `sel.mean()/sel.std()`（学生行、当前 batch）⇒ clip 的 ε 失去绝对尺度语义。
+3. **没有 `grad-clip` / KL 早停**：`grep clip_grad_norm_|max_kl python/mahjong_ml/v4/pretrain.py` → 空；
+   v3 的 `ppo.py` 两者都有（0.5 / 0.03）。v4 只有"非有限 loss 即停"。
+4. **推理端只消费策略头**：`server/.../ai/V4Policy.java` 的 `logits()` 用 `policy`；
+   `value/belief_tenpai/danger` 只在 `inferenceHeads()`/parity 里出现；
+   `trainer/src/v4policy.cpp` 同样（`outAll["value"]` 只有对拍读）。
+   ⇒ 头表里"上线必需"是**设计意图**，不是现状。
+5. **危险头只在实际打出的候选上算**：`rows = arange(B); d = out["danger"][rows, b["label"]]`
+   （`pretrain.py`）⇒ 每样本 L 个候选里只有 1 个拿到梯度；而推理要用的是**每个候选**的放铳概率。
+   可用 sidecar 的逐家逐张危险度做**稠密蒸馏**（`obffeatures` 的 `danger_per_seat[3][34]` 与候选的打后牌种一一对应）。
+6. **状态级头读的是候选均值**：`Heads.forward(u, state, ...)` 里 `state = u.mean(dim=1)`
+   （`V4Model.forward` 传的是 `u.mean(dim=1)`）⇒ value/placement/belief 的输入随候选集合构成变化，
+   而且 value 只是**单层 Linear(192→51)**（9,792 参数）。
+7. **`h_evt` 是死重**：`Fusion.forward(..., h_evt, ...)` 收了参数但函数体里只用 `e_tokens`
+   （`model.py`）⇒ GRU 隐状态既不进训练也不进推理；"长历史"实际只有 60 条事件窗口。
+   自检那条"**h 不同、七头相同**"正是这一事实的断言（第十三轮记过）。
+8. **训练回报与评测口径不同量纲**：数据集只有 `value`（点数差）/`rtg`/`delta`/`placement`，
+   没有 `rank_points`（`grep rank_weight python/mahjong_ml/v4/` → 只有 `loop.py` 评测用）；
+   而 `eval.py --metric` 默认 `rank_points`，`loop.py` 也用顺位点做判据。
+9. **规划的三层与优先级**：见 §14.3（P0 先量：消融矩阵 + 值头温度校准；P1 换回报与手级 GAE；
+   P2 补 PPO 口径；P3 多头分层/危险头稠密化；P4 三端架构（接 `h_evt`、专用 state token、Q 头）；
+   P5 小步多轮在线）。**纪律不变**：critic 没过 `value-audit --strict`（EV ≥ 0.4 + 覆盖率 ≤3pp）不进 PPO。
+
+
 
 ---
 
