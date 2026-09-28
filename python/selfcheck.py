@@ -2947,6 +2947,54 @@ ok(_ev_fail(dict(_vrow19, ev_delta=0.02), ev_ref=0.0693),
 ok(_ev_fail(dict(_vrow19, ev_delta=0.0), ev_ref=0.0),
    "判据参照：天花板为 0（该口径没有可学的合法信息）时退回绝对门槛 ⇒ **判 FAIL**，不放过")
 
+# ---- 第二十四轮：顺位点项只加在链末 ⇒ **基线必须按"含顺位点的奖励"拟合** ----------------------
+# 为什么钉：这是**采集战役当场抓出来的真 bug**（`v4-mr01` 第 1 代训练被守卫拦下：
+# `--rank-weight 0.2` 时 std 比 1.1604× > 1）。根因：基线拿 `delta` 拟合、优势却减
+# `delta + θ·顺位点` ⇒ 拟合的不是要减的那个量，最小二乘的最优性不成立。
+_n24 = 600
+_g24 = np.random.default_rng(24)
+_ah24 = {
+    "nlegal": np.full(_n24, 2, dtype=np.int16),
+    "game": np.zeros(_n24, dtype=np.int32),
+    "hand_no": (np.arange(_n24) // 30).astype(np.int16),          # 20 个小局 × 30 行
+    "seat": np.zeros(_n24, dtype=np.int8),
+    "delta": (_g24.normal(scale=5.0, size=_n24) * 1000).astype(np.int32),
+    "rank_points": _g24.normal(scale=12.0, size=_n24).astype(np.float32),
+    "is_student": np.ones(_n24, dtype=np.int8),
+    "rtg": np.zeros(_n24, dtype=np.float32),
+}
+_d24 = _ah24["delta"] / 1000.0
+# V 与 `delta` 相关（`β≈2` 那种量纲错）；`rank_points` **也与 V 相关**（顺位点与"这局打得好不好"
+# 本来就同源）—— 只有这样"到底拿哪个量拟合"才看得出差别。⚠ 第一版夹具里 rank 与 V 独立 ⇒
+# 两次拟合给出同一个 β，红证变成恒真（假绿）。
+_v24 = 2.0 * _d24 + _g24.normal(scale=3.0, size=_n24)
+_ah24["rank_points"] = (6.0 * _v24 + _g24.normal(scale=2.0, size=_n24)).astype(np.float32)
+_s24 = {rw: v4_pt._hand_advantage(_ah24, _v24, gamma=1.0, lam=0.9, rank_weight=rw,
+                                  is_student=_ah24["is_student"], mode="hand")["stats"]
+        for rw in (0.0, 0.2)}
+ok(_s24[0.2]["std_ratio_raw"] <= _s24[0.2]["std_ratio_flat"] + 1e-9
+   and _s24[0.2]["std_ratio_raw"] <= _s24[0.2]["std_ratio_unfit"] + 1e-9,
+   "基线重标定：`--rank-weight>0` 时 raw ≤ min(只减均值, 未重标定)（最小二乘最优性重新成立）",
+   f"rw=0.2 raw {_s24[0.2]['std_ratio_raw']:.4f}× · flat {_s24[0.2]['std_ratio_flat']:.4f}× · "
+   f"unfit {_s24[0.2]['std_ratio_unfit']:.4f}×")
+ok(_s24[0.2]["std_ratio_flat"] > 1.0,
+   "基线重标定：顺位点项让**目标本身**方差 > `delta` ⇒ 旧守卫的参照 `min(1, 未重标定)` **过严**"
+   "（它会把合法配置判死 —— 采集战役就是这么被拦下的）",
+   f"只减均值 rw=0 {_s24[0.0]['std_ratio_flat']:.4f}× → rw=0.2 {_s24[0.2]['std_ratio_flat']:.4f}×")
+# **红证**：按旧口径（拿 `delta` 拟合、却减 `delta + θ·顺位点`）量出来的比值必须**明显更差**
+_st24, _ho24, _nh24, _rr24 = v4_adv.hand_chain(_ah24["game"], _ah24["hand_no"], _ah24["seat"])
+_v24r = v4_adv.expand_hand(_v24[_st24], _ho24)
+_a24, _b24 = v4_pt._fit_baseline(_v24r, _d24, _ah24["is_student"] > 0, "scale")   # ← 旧口径：只对 delta
+_rank24 = 0.2 * np.where((_nh24 < 0)[_ho24], _ah24["rank_points"], 0.0)
+_old_ratio = float(np.std((_d24 + _rank24) - (_a24 + _b24 * _v24r)) / np.std(_d24))
+# ⚠ 诚实读数：拟合对象变了（斜率差 24%），但**残差上只有二阶**（1.2065 vs 1.2066 —— rank 项只占少数行、
+#   而 V 的噪声占主导）。**一阶的问题是守卫的参照**（上面那条 `flat>1` ⇒ `min(1, unfit)` 过严），
+#   所以这条只断言"解确实不同"，不夸大成"残差明显更差"。
+ok(abs(_s24[0.2]["baseline_beta"] - _b24) > 0.01 * abs(_b24),
+   "基线重标定：红证 —— 拿 `delta` 拟合与按**含顺位点的目标**拟合给出不同的斜率（拟合对象真的变了）",
+   f"β 新 {_s24[0.2]['baseline_beta']:+.4f} vs 旧 {_b24:+.4f}；残差 新 "
+   f"{_s24[0.2]['std_ratio_raw']:.4f}× vs 旧 {_old_ratio:.4f}×（二阶）")
+
 # ---- 第二十一轮：PPO 数值口径（grad-clip / KL 早停 / 双口径 KL / 优势只归一化一次 / 禁 RWR）----
 # ① 梯度裁剪：返回**裁剪前**范数（日志里要看得出"到底砍没砍"），裁完总范数 ≤ clip；0 = 关
 _gm = torch.nn.Linear(4, 1)

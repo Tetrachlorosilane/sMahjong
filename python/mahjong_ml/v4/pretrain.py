@@ -179,6 +179,10 @@ def _fit_baseline(v_row: np.ndarray, r_row: np.ndarray, keep: np.ndarray | None,
     ⚠ 基线只要是**状态（动作无关）的函数**，怎么线性变换都**不改变梯度的期望** —— 变的只是方差。
     所以"按最小二乘把尺度对齐"是同一族基线里**方差最小**的那一个（`β=0` 的常数基线是它的嵌套特例
     ⇒ 重标定后 `std(A)` **不可能**比"只减均值"更差；自检把这条钉成红证）。
+
+    ⚠⚠ **`r_row` 必须是"要减掉基线的那份奖励"本身**（含顺位点项！）。第二十四轮踩过：
+    基线拿 `delta` 拟合、优势却减 `delta + θ·顺位点` ⇒ 拟合的不是要减的量，最小二乘最优性不成立，
+    `--rank-weight 0.2` 实测 std 比 1.1604× > 1（守卫当场报错，没让它悄悄训完）。
     """
     if mode == "none":
         return 0.0, 1.0
@@ -256,16 +260,21 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     rp_row = np.asarray(rp[:n], dtype=np.float64) if rp is not None else None
     term_hand = next_hand < 0
     keep_m = None if is_student is None else (np.asarray(is_student[:n]) > 0)
-    # ★ 基线的尺度对齐（见 `_fit_baseline` 的推导）：在**学生行**上做最小二乘。
-    alpha, beta = _fit_baseline(v_row, d_row, keep_m, baseline_fit)
+    # ★ 奖励的**逐行分子**：小局收支 + 顺位点项（**只在链末小局**上，与 `hand_reward` 同一口径）。
+    # ⚠⚠ 第二十四轮修的真 bug：基线曾经是拿 `d_row`（只有收支）拟合的，而优势减的是
+    #   `d_row + 顺位点` ⇒ **最小二乘的最优性不成立**（拟合的不是要减的那个量），实测
+    #   `--rank-weight 0.2` 时 std 比 1.1604× > 1（守卫当场报错）。现在按**要预测的那个奖励**拟合：
+    #   最小二乘解 ≤ 常数基线 的结论才重新成立（自检把两条都钉住）。
+    rank_row = (rank_weight * np.where(term_hand[hand_of_row], rp_row, 0.0)
+                if (rank_weight and rp_row is not None) else None)
+    fit_target = d_row if rank_row is None else d_row + rank_row
+    alpha, beta = _fit_baseline(v_row, fit_target, keep_m, baseline_fit)
     v_used_h = alpha + beta * v_h
     v_used_row = alpha + beta * v_row
     if mode == "hand":
-        adv = d_row - v_used_row                          # 小局级 baseline，无跨小局 bootstrap
-        vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点）
+        adv = fit_target - v_used_row                     # 小局级 baseline，无跨小局 bootstrap
+        vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点；**不含**顺位点）
         r_h = d_row[reward_rows]
-        if rank_weight and rp_row is not None:
-            adv = adv + rank_weight * np.where(term_hand[hand_of_row], rp_row, 0.0)
         stat_extra = {"mode": "hand", "bootstrap": 0.0}
     else:
         r_h = v4adv.hand_reward(data["delta"][:n], rp_row, hand_of_row, next_hand, reward_rows,
@@ -299,22 +308,31 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
         if keep is not None and rtg is not None:
             base = base[keep]
         base_name = "rtg"
+    _fit_s = fit_target if keep is None else fit_target[keep]
+    _d_s = d_row if keep is None else d_row[keep]
+    _v_s = v_row if keep is None else v_row[keep]
     stats.update({
         "base_name": base_name, "base_std": float(np.std(base)),
         "adv_std_raw": float(ref.std()),
         "std_ratio_raw": float(ref.std() / np.std(base)) if np.std(base) > 0 else float("nan"),
-        "std_ratio_unfit": float(np.std((d_row - v_row)[keep] if keep is not None else d_row - v_row)
-                                 / np.std(base)) if np.std(base) > 0 else float("nan"),
+        # 未重标定（β=1,α=0）与"只减均值"（β=0）两条参照 —— **都对同一个 `fit_target` 算**：
+        # ⚠ 拿 `d_row` 去当参照是第二十四轮那个 bug 的同一条（顺位点项漏在外面）。
+        "std_ratio_unfit": float(np.std(_fit_s - _v_s) / np.std(base))
+        if np.std(base) > 0 else float("nan"),
+        "std_ratio_flat": float(np.std(_fit_s - _fit_s.mean()) / np.std(base))
+        if np.std(base) > 0 else float("nan"),
         "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
     })
-    # ★ 红证：重标定后**不可能**比"只减均值"更差（`β=0` 是它的嵌套特例；最小二乘的解就是最优）。
+    # ★ 红证：重标定后**不可能**比"只减均值"更差，也不该比"原样相减"更差
+    #   （`β=0` 与 `β=1,α=0` 都是最小二乘族的成员 ⇒ 解不会比它们差）。
     #   这条断言是"2.671× 那种量纲事故"的守卫：再出现同类接错，日志里先炸，而不是悄悄训完。
     if baseline_fit == "scale" and mode == "hand" and np.isfinite(stats["std_ratio_raw"]):
-        limit = stats["std_ratio_unfit"] if np.isfinite(stats["std_ratio_unfit"]) else 1.0
-        if stats["std_ratio_raw"] > min(1.0, limit) + 1e-6:
+        limit = min(v for v in (stats["std_ratio_flat"], stats["std_ratio_unfit"])
+                    if np.isfinite(v))
+        if stats["std_ratio_raw"] > limit + 1e-6:
             raise SystemExit(f"基线重标定后优势方差不降反升（{stats['std_ratio_raw']:.4f}× > "
-                             f"{min(1.0, limit):.4f}×）—— 最小二乘解不可能比常数基线差，"
-                             f"说明 `_fit_baseline` 或优势构造写错了")
+                             f"{limit:.4f}×）—— 最小二乘解不可能比常数基线/原样相减更差，"
+                             f"说明 `_fit_baseline`、`fit_target` 或优势构造写错了")
     return {"adv": adv.astype(np.float32), "vtarget": vtarg.astype(np.float32), "stats": stats}
 
 
@@ -955,9 +973,10 @@ def train(args) -> dict:
                   f"—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**")
         if "std_ratio_raw" in s:
             unfit = s.get("std_ratio_unfit")
-            extra = (f"（**未重标定**时 {unfit:.3f}× ⇒ 量纲接错的代价）"
-                     if unfit is not None and np.isfinite(unfit)
-                     and abs(unfit - s["std_ratio_raw"]) > 1e-6 else "")
+            flat = s.get("std_ratio_flat")
+            extra = (f"（参照：未重标定 {unfit:.3f}× · 只减均值 {flat:.3f}×"
+                     f"{' ⇐ 含顺位点项的目标方差更大' if flat and flat > 1.0 else ''}）"
+                     if unfit is not None and np.isfinite(unfit) else "")
             print(f"  优势体检（**归一化之前**）：std(A_raw) {s['adv_std_raw']:.3f} vs "
                   f"std({s['base_name']}) {s['base_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
                   f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）{extra}")
