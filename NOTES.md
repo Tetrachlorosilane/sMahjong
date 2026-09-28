@@ -2337,6 +2337,42 @@ extra**（`55 54 05 00 01 00 00 00 00`）。照抄这两处之后**逐字节相�
    P2 补 PPO 口径；P3 多头分层/危险头稠密化；P4 三端架构（接 `h_evt`、专用 state token、Q 头）；
    P5 小步多轮在线）。**纪律不变**：critic 没过 `value-audit --strict`（EV ≥ 0.4 + 覆盖率 ≤3pp）不进 PPO。
 
+**第十七轮：P0/P1 落地实测（2026-09-28）—— 工具全部就位，但手级 GAE 没过 critic 门槛**
+
+工具（Python-only，不动三端）：`v4 ablate`（消融矩阵）· `pretrain --drop-heads/--ablate-blocks/
+--advantage gae-hand [--gae-lambda/--gae-gamma/--rank-weight]`（优势**预计算并冻结**）·
+`dataset --backfill-rank`（老紧凑集补 `rank_points`，读 `summary.json` 的权威值）·
+`value-audit --calibrate/--gae-target`。自检 **553/0**（+25）。
+
+1. **消融矩阵**（`v4-abl-002`，250 步 × batch 128，init `v4-bc-004`）：**`cand.derived` 是策略的命脉**
+   （关掉它 top1 0.871 → **0.480**、policy CE 0.35 → 1.52）；**`ctx.points` 主要喂 critic**
+   （关掉它 policy 不动，value CE 3.459 → 3.783）；**五个辅助头**（effect/belief_hand/placement/danger/value）
+   的边际价值在 250 步点估计里**全在噪声内** ⇒ 要下结论必须 `--repeats ≥ 3` + 更长预算或直接 2+2。
+2. **温度缩放**（`v4-gae-001`，目标 value）：T = **1.628**；CRPS 10.295 → **10.153**；
+   覆盖率 0.367 → 0.447 / 0.674 → 0.763 / 0.853 → 0.872（标称差 5.3/3.7/7.9pp）。
+   ⇒ 一个标量**不够**（50%/95% 仍 >3pp）：下一步是 loc-scale 两参数或分段校准。
+3. ⚠⚠ **手级 GAE 的诚实结论**：`std(A_raw) 16.226` vs `std(rtg) 13.099` = **1.239×**
+   —— **方差没降反涨**（`A = λ-回报 − V_old`，而 `V_old` 是整场口径训练的，与 `rtg` 的相关只有 0.042）。
+   值头对 λ-回报的 **EV +0.0944 < 0.4（门槛未过）**；但 CE 3.6263 **低于**边缘基线 3.6969（`rtg` 口径时是高于的）、
+   CRPS 7.567 < 气候学 8.028、覆盖率 0.471/0.763/0.909（差 2.9/3.7/4.1pp，原来差 12–13pp）
+   ⇒ **从"完全没信号"变成"有信号但远不够当 baseline"**。
+   ⚠ `EV 0.094 ≈ 引擎真值 10 列线性对 rtg 的 0.090`（两把不同的尺子同一个数）⇒
+   **"多手后缀和"这一族目标的可解释上限就在 ~0.1**，换 λ / 换 bootstrap 救不出来。
+4. **下一轮第一件事（顺序再改）**：critic 的**时间尺度压到"一小局"** —— 预测"本小局我会赢多少"
+   （实测可解释方差 **0.632**），bootstrap 不跨小局；`--rank-weight` 作终局项单独加。
+   先量"本小局收支"口径的 EV 门槛该定多少（0.632 是**可解释上限**，不是可达上限）。
+5. **这一轮踩的坑**（三个都会再犯）：
+   - **局部变量遮蔽模块**：`train()` 里原本 `spec = str(meta["student"])`，而我新代码用 `spec.block_slices()`
+     ⇒ Python 作用域是静态的，整个函数里 `spec` 都成了局部 ⇒ `UnboundLocalError`
+     （且只在 `--ablate-blocks` 路径暴露）。**改法**：局部改名 `student_str`，注释里写死这条。
+   - ⚠ **`std(A)` 的假象**：优势是学生行 z-score ⇒ 归一化后 std 恒 ≈1、非学生行 0 ⇒ 整列 std ≈0.5，
+     拿它比 `std(rtg)` 会得到"砍掉 95%"的假结论（第一版就是这么报的 0.054×）。
+     **方差削减必须在归一化之前量**（`adv_std_raw`/`std_ratio_raw`）。
+   - **Windows：同名文件还开着可写 memmap 时再 `open(...,'wb')` ⇒ `OSError: [Errno 22]`**
+     （自检里 `build()` 刚建完列就回填，连着红两次）。回填改成 `np.save`（小列，4 B/行）+
+     测试里**先拷一份夹具**再回填；读侧 `np.load()` 不要 `mmap_mode="r"`。
+
+
 
 
 ---
