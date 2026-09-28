@@ -2588,12 +2588,21 @@ eq("v4 回路：没开值头相时两者都看 `<tag>`（旧行为逐位不变�
 #   而不是模型结论。这条判据把它钉成可执行的守门函数（三个实测点 + 阈值）。
 eq("v4 回路：值头闸门的可读场次阈值 = 1000（实测 1000 场那轮通过过）",
    v4_loop.VALUE_GATE_MIN_GAMES, 1000)
-eq("v4 回路：三个实测点的可读性判定（120 场 ❌ / 400 场 ❌ 但注明学得动 / 1000 场 ✅）",
-   [v4_loop.value_gate_feasible(g)[0] for g in (120, 400, 1000)], [False, False, True])
-ok("信号不足" in v4_loop.value_gate_feasible(400)[1]
-   and "不是" in v4_loop.value_gate_feasible(120)[1],
-   "v4 回路：不可读时**说明是哪种不可读**（400 场=学得动但信号不足；120 场=FAIL 不是模型结论）",
-   v4_loop.value_gate_feasible(120)[1][:36])
+# ⚠ 第三十二轮更正：**光有场次不够** —— 1000 场 / 1200 步实测只到 0.44×（线 0.0541）⇒ 还要步数。
+eq("v4 回路：可读步数阈值 = 3000（1000 场/1200 步只到 0.44×；1000 场/5144 步才通过）",
+   v4_loop.VALUE_GATE_MIN_STEPS, 3000)
+eq("v4 回路：四个实测点的可读性判定（120/~100 ❌ · 400/1200 ❌ · 1000/1200 ❌ · 1000/5144 ✅）",
+   [v4_loop.value_gate_feasible(g, s)[0]
+    for g, s in ((120, 100), (400, 1200), (1000, 1200), (1000, 5144))],
+   [False, False, False, True])
+ok("步数不够" in v4_loop.value_gate_feasible(1000, 1200)[1]
+   and "步数不够" not in v4_loop.value_gate_feasible(400, 1200)[1].split("；")[0]
+   and "场次不够" in v4_loop.value_gate_feasible(400, 1200)[1],
+   "v4 回路：不可读时**说清是哪一轴不够**（1000 场/1200 步只提步数；400 场/1200 步两轴都提）",
+   v4_loop.value_gate_feasible(400, 1200)[1][:52])
+eq("v4 回路：规划期步数估算 = min(max_steps, 行数/batch) × epochs（行数 ≈ 场次×650）",
+   (v4_loop.planned_steps(1000, 256, 600, 2), v4_loop.planned_steps(120, 256, 600, 2)),
+   (1200, 608))
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）

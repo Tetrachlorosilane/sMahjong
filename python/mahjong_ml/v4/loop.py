@@ -264,23 +264,43 @@ def phase_order(r: Round) -> list[str]:
     want = list(PHASES)
     want.insert(want.index("features") + 1, "check")
     return [p for p in want if p in r.commands]
-#: 值头闸门**需要的数据量**（第二十九/三十轮量出来的曲线；一行 ≈ 650 个决策）：
-#: · 120 场（79k 行）→ `EV(delta)` ≤ 0（−0.075 ~ −3.33），覆盖率差 14~29pp；
-#: · 400 场（263k 行）→ **+0.0157**（合法天花板的 0.26×），覆盖率三档全过、CE 也过 ⇒ 学得动但**信号不足**；
-#: · 1000 场（658k 行）→ **+0.0496**（0.72×）⇒ **闸门通过（退出码 0）**。
-#: ⇒ 拿三位数场次的轮去读闸门结论，读到的**不是**模型结论而是"数据不够"。
+#: 值头闸门**需要的数据量 × 步数**（第三十/三十二轮量出来的四点；一行 ≈ 650 个决策、batch 256）：
+#: · 120 场 / ~100 步 → `EV(delta)` ≤ 0（−0.075 ~ −3.33）；
+#: · 400 场 / 1200 步 → **+0.0157**（合法天花板 0.26×）；
+#: · 1000 场 / 1200 步 → **+0.0338**（0.44×）⇒ 数据够了、**步数不够**照样过不了（线 0.0541）；
+#: · 1000 场 / 5144 步 → **+0.0496**（0.72×）⇒ **闸门通过（退出码 0）**。
+#: ⇒ 读闸门结论要同时满足**两个**轴；只看场次会把"步数不够"读成"模型不行"。
 VALUE_GATE_MIN_GAMES = 1000
+VALUE_GATE_MIN_STEPS = 3000
+#: 一行决策 ≈ 多少个（场次 → 决策行的换算，用于**规划期**估步数；实测 120 场 ≈ 79k 行）
+ROWS_PER_GAME = 650
 
 
-def value_gate_feasible(games: int) -> tuple[bool, str]:
-    """这一轮的场次够不够读**值头闸门**的结论（纯函数，自检直接喂上面那三个实测点）。"""
-    if games >= VALUE_GATE_MIN_GAMES:
-        return True, f"{games} 场 ≥ {VALUE_GATE_MIN_GAMES}（实测这一档闸门通过过）"
-    if games >= 400:
-        return False, (f"{games} 场：实测 ≈0.26× 天花板（学得动但信号不足，覆盖率可能已经全过）"
-                       f"—— 要读闸门结论请 ≥{VALUE_GATE_MIN_GAMES} 场")
-    return False, (f"{games} 场：实测 EV ≤ 0（120 场那档）⇒ 闸门的 FAIL **不是**模型结论，"
-                   f"是数据量不够；要读结论请 ≥{VALUE_GATE_MIN_GAMES} 场")
+def planned_steps(games: int, batch: int = 256, max_steps: int = 0, epochs: int = 1) -> int:
+    """规划期的**步数估算**：`min(max_steps, 行数/batch) × epochs`（行数 ≈ `games × 650`）。"""
+    per_epoch = max(1, min(max_steps or 10 ** 9, max(1, games * ROWS_PER_GAME) // max(1, batch)))
+    return int(per_epoch * max(1, epochs))
+
+
+def value_gate_feasible(games: int, steps: int = 0) -> tuple[bool, str]:
+    """这一轮的**场次 × 步数**够不够读值头闸门的结论（纯函数，自检直接喂上面那四个实测点）。
+
+    ⚠ 两个轴**各自**都要够，而且不可读时必须**说清是哪一轴**（否则读者会把"步数不够"
+    当成"模型不行" —— 第三十二轮就是这么被自己坑了一次：1000 场看着够，实际只到 0.44×）。
+    """
+    g_ok = games >= VALUE_GATE_MIN_GAMES
+    s_ok = bool(steps) and steps >= VALUE_GATE_MIN_STEPS
+    if g_ok and s_ok:
+        return True, f"{games} 场 × {steps} 步（两个轴都够；实测这一档通过过）"
+    parts = []
+    if not g_ok:
+        parts.append(f"场次不够（{games} < {VALUE_GATE_MIN_GAMES}；实测 400 场 ≈0.26× 天花板、"
+                     f"120 场 EV ≤ 0）")
+    if not s_ok:
+        parts.append(f"步数不够（{steps or '未知'} < {VALUE_GATE_MIN_STEPS}；"
+                     f"实测 1000 场/1200 步只到 0.44×）")
+    return False, ("；".join(parts) +
+                   f" —— 要读闸门结论请 ≥{VALUE_GATE_MIN_GAMES} 场 **且** ≥{VALUE_GATE_MIN_STEPS} 步")
 
 
 def final_ckpt_label(cfg: LoopConfig, r: Round) -> str:
@@ -419,7 +439,8 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
 
     seconds: dict[str, float] = {}
     print(f"\n===== 第 {generation} 代（{r.label}）：{games} 场 / producer={cfg.producer} =====")
-    gate_readable, gate_why = value_gate_feasible(games)
+    gate_readable, gate_why = value_gate_feasible(
+        games, planned_steps(games, cfg.batch, cfg.max_steps, cfg.epochs))
     if not gate_readable:
         print(f"  ⚠️ 值头闸门的**结论不可读**：{gate_why}")
     audit: dict[str, Any] = {}
