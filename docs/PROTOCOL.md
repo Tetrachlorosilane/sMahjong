@@ -1277,8 +1277,9 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 - **判据**：`SelfTest.v4ForwardTests`（特征 + 四个推理头逐元素 ≤1e-4、argmax 全同、红证 +
   消融/版本/指纹负向对照）；三端逐行对拍 `node tools/trainer-v4-parity.mjs <net.bin> <轨迹目录>`
   （Java↔C++，实测 1,885 条决策 maxΔ=0）。
-- ⚠ **性能**（实测 1.36M 参数、单线程）：特征 ≈4.6 ms + 前向 ≈40 ms / 决策 —— 远高于设计里的
-  "≤2 ms + ≤1.5 ms"预算，**增量缓存（事件塔复用）与稠密循环优化是下一轮的事**（`docs/TRAINING-V4.md` §P5）。
+- ⚠ **性能（实测 1.36M 参数、单线程）**：特征 3.55 ms + 前向 34.69 ms / 决策；上了 L2 增量事件缓存
+  之后 **22.50 ms/决策（1.70×）** —— **不设单决策时间指标**（早年那对耗时预算不现实、已删，见
+  `docs/FEATURES-V4.md` §8），落地归因见 `docs/TRAINING-V4.md` §5.3。
 
 **v4 数据集与 P3 训练（自对弈改进，2026-09）**：
 

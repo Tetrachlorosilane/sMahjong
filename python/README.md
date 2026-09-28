@@ -176,9 +176,10 @@ node tools\trainer-v4-parity.mjs tools\build\v4-bc-004\net.bin <轨迹目录>   
 java -cp "server\build\mahjong-server.jar;tools\build" tools.V4Probe --bench tools\build\v4-bc-004\net.bin <轨迹.jsonl> 200
 ```
 
-> ⚠ **性能实测（单线程 Java，1.36M 参数）**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策 ——
-> 远高于设计预算（≤2 + ≤1.5 ms）。**当 bot 可以，当自对弈采集主力太慢**；下一轮做增量事件缓存
-> （`docs/TRAINING-V4.md` §P5）。
+> ⚠ **性能实测（单线程 Java，1.36M 参数）**：特征 3.55 ms + 前向 34.69 ms / 决策；
+> 上了 L2 增量事件缓存后 **22.50 ms/决策（1.70×）**。**当 bot 可以，当自对弈采集主力还是太慢** ——
+> 但**不设时间指标**（早年那对耗时预算不现实、已删除）：数字见
+> `docs/FEATURES-V4.md` §8，归因见 `docs/TRAINING-V4.md` §5.3。
 
 **P3 开局：自对弈 + 回报加权（RWR）一轮**（口径与实测见 `docs/TRAINING-V4.md`「第四轮」）：
 
