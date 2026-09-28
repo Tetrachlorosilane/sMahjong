@@ -2631,8 +2631,10 @@ _ah = {
     "rtg": np.zeros(6, dtype=np.float32),
 }
 _v_old = np.array([0.1, -0.2, 0.4, 0.2, -0.1, 0.3], dtype=np.float64)
+# ⚠ 这一段钉的是**老口径**（`--baseline-fit none`：原样相减）—— 第十九轮把缺省换成了 `scale`
+#   （线性重标定），所以这里必须显式点名，否则测的就不是它想测的那件事了。
 _res_h = v4_pt._hand_advantage(_ah, _v_old, gamma=1.0, lam=0.9, rank_weight=0.0,
-                               is_student=_ah["is_student"], mode="hand")
+                               is_student=_ah["is_student"], mode="hand", baseline_fit="none")
 eq("小局级 baseline：值头目标 = 本小局收支（千点，逐行）",
    [round(float(x), 6) for x in _res_h["vtarget"]], [1.0, -0.5, 0.2, 3.0, -1.5, 0.7])
 _st_h = _res_h["stats"]
@@ -2640,7 +2642,7 @@ ok(abs(_st_h["base_std"] - float(np.std(_ah["delta"] / 1000.0))) < 1e-9
    and _st_h["base_name"] == "delta",
    "小局级 baseline：方差参照是**本小局收支**（不是 rtg）", f"base={_st_h['base_name']}")
 _res_h2 = v4_pt._hand_advantage(_ah, _v_old, gamma=1.0, lam=0.9, rank_weight=2.0,
-                                is_student=None, mode="hand")
+                                is_student=None, mode="hand", baseline_fit="none")
 # 顺位点只加在**链末尾那一小局**（hand_no=1 的三行）上；且**不进取值头目标**
 eq("小局级 baseline：顺位点项只加在链末尾小局（hand_no=1）",
    [round(float(a - d / 1000.0 + v), 3) for a, d, v in zip(
@@ -2649,6 +2651,146 @@ eq("小局级 baseline：顺位点项只加在链末尾小局（hand_no=1）",
 eq("小局级 baseline：顺位点项**只进优势**，值头目标仍是本小局收支",
    [round(float(x), 6) for x in _res_h2["vtarget"]], [1.0, -0.5, 0.2, 3.0, -1.5, 0.7])
 
+# ---- 第十九轮：基线的**尺度对齐**（`--baseline-fit`）与"合法天花板"的合法性分组 ----------------
+# 为什么必须钉：P1b 报出的 `std(A_raw)/std(delta)=2.671×` 曾被读成"critic 没用"，真因是
+#   **行为策略的值头学的是整场收支**（`V_old` 实测 std 12.392 千点）而奖励只有 5.047 千点 ——
+#   量纲接错。基线只要是**状态函数**，线性重标定不改梯度期望、只改方差 ⇒ 必须按最小二乘对齐。
+_r_ah = _ah["delta"] / 1000.0
+_vf = 3.0 * _r_ah                                                 # 与 delta 严格同向、尺度 3×
+_alpha, _beta = v4_pt._fit_baseline(_vf, _r_ah, None, "scale")
+ok(abs(_beta - 1.0 / 3.0) < 1e-9 and abs(_alpha) < 1e-9,
+   "基线重标定：`V = 3·r` ⇒ β=1/3、α=0（把尺度对齐，而不是照抄）", f"α={_alpha:.3g} β={_beta:.4f}")
+eq("基线重标定：`none` 模式必须原样返回（β=1、α=0）",
+   list(v4_pt._fit_baseline(_vf, _r_ah, None, "none")), [0.0, 1.0])
+eq("基线重标定：`mean` 模式只减均值（β=0、α=mean(r)）",
+   round(v4_pt._fit_baseline(_vf, _r_ah, None, "mean")[1], 9), 0.0)
+# 真夹具：**整场尺度**的 V（std ≈ 12）配**小局尺度**的 reward（std ≈ 5）—— 复现 P1b 的量纲事故
+_n19 = 4000
+_g19 = np.random.default_rng(19)
+_r19 = _g19.normal(scale=5.0, size=_n19)
+_v19 = 12.0 * _g19.normal(size=_n19) + 0.5 * _r19                  # 量纲错 + 弱信号
+_a19, _b19 = v4_pt._fit_baseline(_v19, _r19, None, "scale")
+# 拟合出来的斜率必须**接近真信号的比例**（0.5·Var(r)/Var(V) ≈ 0.083），而不是把 V 原样当基线；
+#   把它压成 0 也是错的（那就退化成"只减均值"，丢掉那一点点信号）。
+_rho19 = float(np.corrcoef(_v19, _r19)[0, 1])
+ok(abs(_b19 - 0.5 * _r19.var() / _v19.var()) < 0.01,
+   "基线重标定：拟合出的斜率 = 该特征上的最优线性系数（不是 1，也不是 0）",
+   f"β={_b19:+.4f}（理论 {0.5 * _r19.var() / _v19.var():.4f}）")
+_rs19 = v4_pt._fit_baseline(_v19, _r19, None, "none")
+_unfit = float(np.std(_r19 - (_rs19[0] + _rs19[1] * _v19)) / np.std(_r19))
+_fit = float(np.std(_r19 - (_a19 + _b19 * _v19)) / np.std(_r19))
+ok(_unfit > 2.0 and _fit < 1.0,
+   "基线重标定：未对齐时优势 std 被放大 >2×，对齐后 <1×（这就是 P1b 那个 2.671× 的复现与修复）",
+   f"未对齐 {_unfit:.3f}× → 对齐 {_fit:.3f}×")
+ok(abs(_fit - float(np.sqrt(1.0 - _rho19 ** 2))) < 0.02,
+   "基线重标定：对齐后的 std 比 ≈ √(1−ρ²)（最优线性基线的理论值，不是拍脑袋）",
+   f"实测 {_fit:.4f} vs √(1−ρ²) {np.sqrt(1 - _rho19 ** 2):.4f}")
+_ah19 = dict(_ah, nlegal=np.full(_n19, 2, dtype=np.int16),
+             game=np.zeros(_n19, dtype=np.int32),
+             hand_no=np.arange(_n19, dtype=np.int16) // 3,
+             seat=np.zeros(_n19, dtype=np.int8),
+             rank_points=np.zeros(_n19, dtype=np.float32),
+             is_student=np.ones(_n19, dtype=np.int8),
+             rtg=np.zeros(_n19, dtype=np.float32),
+             delta=(_r19 * 1000.0).astype(np.int32))
+_r19h = v4_pt._hand_advantage(_ah19, _v19, gamma=1.0, lam=0.9, rank_weight=0.0,
+                              is_student=None, mode="hand", baseline_fit="scale")
+ok(_r19h["stats"]["std_ratio_raw"] < 1.0
+   and _r19h["stats"]["std_ratio_raw"] <= _r19h["stats"]["std_ratio_unfit"] + 1e-9,
+   "基线重标定：`_hand_advantage` 走 scale 路径后方差**必不劣于**未对齐（红证守卫同时成立）",
+   f"scale {_r19h['stats']['std_ratio_raw']:.3f}× ≤ none "
+   f"{_r19h['stats']['std_ratio_unfit']:.3f}×")
+try:                                                              # 负向对照：守卫要能抓到接错
+    _bad19 = dict(_ah19)
+    _bad19["delta"] = np.zeros(_n19, dtype=np.int32)
+    v4_pt._hand_advantage(_bad19, np.zeros(_n19), gamma=1.0, lam=0.9, rank_weight=0.0,
+                          is_student=None, mode="hand", baseline_fit="scale")
+    ok(True, "基线重标定：全零奖励（Var=0）不炸、退化成只有截距")
+except SystemExit as _e19:                                        # pragma: no cover
+    ok(False, "基线重标定：全零奖励不该触发守卫", str(_e19)[:60])
+
+# 合法天花板的分组：`win_flag`（本小局结局）与 `opp_*`（别家隐藏真值）**绝不许**混进 `legit*`
+_legit_keys = {k for tag, ks in v4_va.CEIL_GROUPS.items() if tag.startswith("legit") for k in ks}
+ok(not (_legit_keys & {"aux_win_flag", "aux_opp_tenpai", "aux_opp_dealin", "aux_opp_hand"}),
+   "天花板分组：`legit*` 里没有任何结局列/别家隐藏真值（0.632 那个数是作弊上界，不是天花板）",
+   f"legit 列 = {sorted(_legit_keys)}")
+ok("aux_win_flag" in v4_va.CEIL_GROUPS["label_all"]
+   and "aux_opp_hand" in v4_va.CEIL_GROUPS["label_all"],
+   "天花板分组：结局列与隐藏真值都归到 `label_*`（另算一栏，标注作弊）")
+ok(v4_va.CEIL_REF_KEY in v4_va.CEIL_GROUPS,
+   "天花板分组：判据参照组 `CEIL_REF_KEY` 真的存在于 `CEIL_GROUPS`（改组名别忘了改常量）",
+   v4_va.CEIL_REF_KEY)
+# 逐候选列（`effect`：`[n,L,3]`）必须先取 label 那一行 —— 否则 train/val 的 L 不同会拼出两个宽度
+_fx19 = v4_va._cols_of({"effect": np.zeros((5, 29, 3)), "label": np.zeros(5, np.int64)}, ("effect",), 5)
+_fy19 = v4_va._cols_of({"effect": np.zeros((5, 21, 3)), "label": np.zeros(5, np.int64)}, ("effect",), 5)
+eq("天花板分组：逐候选列按 `label` 取行 ⇒ train(L=29)/val(L=21) 拼出**同一宽度**",
+   (_fx19.shape[1], _fy19.shape[1]), (4, 4))
+_eff19 = np.zeros((4, 3, 3))
+_eff19[0, 1] = [7.0, 8.0, 9.0]                                    # 只有"实际打出的那张"该被读到
+_x19 = v4_va._cols_of({"effect": _eff19, "label": np.array([1, 0, 2, 0], np.int64)}, ("effect",), 4)
+eq("天花板分组：取的是 `label` 下标那一行（不是第 0 行）",
+   [round(float(v), 3) for v in _x19[0, :3]], [7.0, 8.0, 9.0])
+# 逐候选聚合必须**按合法候选**（填充槽是常数垃圾，混进去就是"状态随候选数漂移"）
+_cand19 = np.zeros((2, 4, 128), dtype=np.float16)
+_cand19[0, :2, 88:99] = 5.0                                       # 合法 2 个
+_cand19[0, 2:, 88:99] = 999.0                                     # 填充槽垃圾
+_cand19[1, :4, 88:99] = -3.0
+_agg19 = v4_va._cand_agg({"cand": _cand19, "nlegal": np.array([2, 4], np.int16)}, 2)
+eq("天花板分组：逐候选聚合按合法候选掩码（填充槽 999 不进 mean/max）",
+   [round(float(_agg19[0, 0]), 6), round(float(_agg19[0, 11]), 6)],
+   [5.0, 5.0])
+
+# 读出头探针必须是**有刻度的仪器**：池化方式真的不同时，探针要能分辨出来。
+#   构造：目标 = 合法候选里 z 的最大值（所有行合法数相同 ⇒ 与"有几个候选"无关）。
+#   否则"各池化的 EV 都差不多"只是仪器没刻度，不能拿去判"瓶颈不在池化"。
+_np19 = 3000
+_gp19 = np.random.default_rng(23)
+_L19 = 6
+_z19 = _gp19.normal(size=(_np19, _L19)).astype(np.float32)
+_u19 = np.zeros((_np19, _L19, 2), dtype=np.float32)
+_u19[:, :, 0] = _z19
+_y19 = _z19.max(axis=1).astype(np.float64)
+_mask19 = torch.ones(_np19, _L19, dtype=torch.bool)
+_pool19 = {k: v.numpy().astype(np.float64)
+           for k, v in v4_va.pool_features(torch.from_numpy(_u19), _mask19).items()}
+_ev19 = {k: v4_va._std_ridge_ev(v[:_np19 // 2], _y19[:_np19 // 2],
+                                v[_np19 // 2:], _y19[_np19 // 2:]) for k, v in _pool19.items()}
+ok(_ev19["max"] > 0.9 and _ev19["max"] > _ev19["mean"] + 0.3,
+   "读出头探针：池化有真差别时仪器能分辨（目标 = 合法候选的最大值时，max 池化 ≫ mean 池化）",
+   "  ".join(f"{k} {v:+.3f}" for k, v in _ev19.items()))
+# ⚠ 但**别**把"掩码 mean 一定优于 `mean_all`"写成判据：那样测的是"合法候选数 n 有没有信息"，
+#   不是池化本身的好坏（实测在真数据上 mean 0.068 vs mean_all 0.051，在玩具里反过来）。
+#   钉住的是**机制**：`mean_all − mean = ((L−n)/L)·(填充常数 b − 合法均值 a)`。
+_ub19 = torch.tensor([[[3.0, 0.0], [7.0, 0.0], [7.0, 0.0]]])      # 合法 1 个，填充常数 b=7
+_pb19 = v4_va.pool_features(_ub19, torch.tensor([[True, False, False]]))
+eq("读出头探针：`mean_all` 里混进的填充项 = ((L−n)/L)·(b−a)（现行读法为什么随候选数漂移）",
+   round(float(_pb19["mean_all"][0, 0] - _pb19["mean"][0, 0]), 6), round((3 - 1) / 3 * (7.0 - 3.0), 6))
+_ev_mlp19 = v4_va._mlp_probe(_pool19["mean_all"][:_np19 // 2], _y19[:_np19 // 2],
+                             _pool19["mean_all"][_np19 // 2:], _y19[_np19 // 2:],
+                             hidden=64, steps=400, device="cpu")
+ok(np.isfinite(_ev_mlp19),
+   "读出头探针：非线性探针能在同一份特征上跑完并给出 EV（不是空转）", f"EV={_ev_mlp19:+.3f}")
+
+# 判据的**参照**：绝对门槛（0.1）对"实现值"类目标不可达 ⇒ `--ev-ref legit` 用 `EV ≥ 0.7 × 天花板`
+eq("判据参照：合法天花板比例 = 0.7", v4_va.EV_CEILING_FRAC, 0.7)
+_vrow19 = {"ev_delta": 0.055, "ce_delta": 1.0, "ce_marginal_delta": 2.0, "crps": 1.0,
+           "crps_climatology": 2.0, "cov0.5": 0.5, "cov0.8": 0.8, "cov0.95": 0.95}
+
+
+def _ev_fail(row, **kw):
+    """只挑出 EV 那一条判据（其余判据与它无关，混起来会写成"全部都要 FAIL"的错断言）。"""
+    return any((not p) and "解释方差" in t for p, t in v4_va.verdicts(row, "delta", **kw))
+
+
+ok(_ev_fail(_vrow19), "判据参照：`floor` 口径下 EV 0.055 < 0.1 ⇒ EV 判据 FAIL（老口径）")
+ok(not _ev_fail(_vrow19, ev_ref=0.0693),
+   "判据参照：`legit` 口径下 EV 0.055 ≥ 0.7×0.0693 ⇒ EV 判据 PASS（同一条数、换了参照）")
+ok(_ev_fail(_vrow19, ev_ref=0.20),
+   "判据参照：天花板高时同一条数必须 FAIL（参照真的在起作用，不是恒真）")
+ok(_ev_fail(dict(_vrow19, ev_delta=0.02), ev_ref=0.0693),
+   "判据参照：**塌成均值**的值头（EV 0.02 ≈ 0.3 × 天花板）必须 FAIL —— 这才是这条闸门要抓的")
+ok(_ev_fail(dict(_vrow19, ev_delta=0.0), ev_ref=0.0),
+   "判据参照：天花板为 0（该口径没有可学的合法信息）时退回绝对门槛 ⇒ **判 FAIL**，不放过")
 
 # `rank_points` 的**回填**（`v4.dataset … --backfill-rank`）：老紧凑集补列，且三条不变式必须成立
 #   —— 顺位点只依赖 (game, seat) + 采集目录的 summary.json，不必重算 15 GB 张量。

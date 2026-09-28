@@ -534,6 +534,16 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 - **v4 前向的增量事件缓存**（默认开，`--no-v4-cache` 关）：判据必须**成对** —— **增量 == 全量（逐位）**
   *且* **真的命中**（只有"相等"是假绿：退回全量的结果当然等于全量）。回归：`SelfTest.v4CacheTests`
   + `tools\v4-cache-check.mjs`（同种子开/关缓存 ⇒ 轨迹逐字节）。细节见 NOTES §6.5 第十一轮。
+- ⛔ **critic 的 EV 判据别用绝对门槛、也别拿标签侧真值当参照**（`value-audit --ev-ref legit`）：
+  `win_flag` 是**本小局结局本身**、`opp_*` 是别家隐藏真值 ⇒ 那样量出来的 `EV(delta)=0.632` 是
+  **作弊上界**；**合法**天花板（公开状态+牌效+自家向听/听牌）只有 **0.069**，
+  闸门 = **`EV ≥ 0.7 × 合法天花板`** + 覆盖率 ≤3pp。
+- **基线必须与奖励同尺度**（`--baseline-fit scale`，缺省）：在学生行上对奖励回归 `[1, V]` 取 `α+β·V`；
+  基线是**状态函数** ⇒ 线性重标定不改梯度期望、只降方差（`β=0` 的常数基线是嵌套特例 ⇒ **不可能更差**，
+  红证 + `SystemExit` 守卫）。P1b 的 `std(A)/std(delta)=2.671×` 就是量纲事故（对齐后 **1.000×**）。
+- ⛔ **别靠"加宽/加深读出头"救值头**（`value-audit --readout` 实测）：池化全换只值 **+0.019**、
+  2×256 MLP **反而过拟合**、`h_evt`/`tile_pool` 几乎没信息；合法天花板 0.069 ≈ 躯干最好池化 0.070
+  ⇒ 值头已在合法天花板的 72–80%，`pred_std` 收缩是**最优解**。详见 NOTES §6.5 第十九轮 / §14.8。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-{selfplay,aux}-parity.mjs`），
   不是"能跑"。C++ 侧还没实现的（`--teacher-label`、

@@ -269,9 +269,21 @@ python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
 # 判据（§8.2）：CE < 边缘基线、EV ≥ 0.1、CRPS < 气候学基线、50/80/95% 覆盖率与标称差 ≤ 3pp
 # 实测（2026-09-28）：整场口径 EV 0.44–0.57 但覆盖率不达标；`rtg` 口径（v4-ppo-002）EV 0.006 = 塌了
 # `--ceiling`：引擎真值特征的**线性参照**（判"是训练不行还是目标本身没信号"）
+#   ⚠ 按**合法性**分组：`legit*` = 决策那一刻自家能算的，`label_*` = 结局列/别家隐藏真值（作弊上界）。
+#   **判据只读 `legit` / `legit_full` 那一行。**
 python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
      --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-ppo-002 --ceiling
-#   实测：本小局收支 EV 0.632 · rtg 0.090 · 整场 0.059 ⇒ **可学的粒度是"这一小局"**
+#   实测（第十九轮更正）：**合法**天花板 = 小局收支 delta **0.0693**（92 列）/ rtg 0.0138 / value 0.4490
+#   （value 那 0.45 大半是 ctx.points 的恒等式）；旧文档的 delta 0.632 是 `label_all`（含 `win_flag`）。
+# 读出头探针（P4-lite 的"要不要动三端"判据）：冻结躯干换池化/换读出深度，看 EV 能到多少
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
+     --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-hand-001 `
+     --readout --readout-rows 40000 --readout-mlp-steps 1500 --target delta
+#   实测：mean_all（现行）0.0513 · mean 0.0675 · max 0.0681 · tile_pool 0.0071 · h_evt 0.0142 ·
+#   五块拼起来 0.0701；2×256 MLP 反而 0.0143（960 维上 −0.40）⇒ **读出头不是瓶颈，P4-lite 取消**
+# 小局级信用分配（P1/P1b）：`--advantage hand` = A = 本小局收支 − V(s)（不跨小局 bootstrap）
+#   ⚠ `--baseline-fit`（缺省 `scale`）把行为策略的 V **线性重标定**到奖励尺度（最小二乘 `α+β·V`）：
+#     基线是状态函数 ⇒ 不改梯度期望、只降方差；P1b 的 2.671× 就是"整场口径 V 减小局口径奖励"的量纲事故
 # 修 critic 的两个开关（`--only-heads` **绕过阶段权重**：阶段 a 里 value 的注册权重就是 0）：
 #   冻主干只训值头 ⇒ 整场口径 EV 0.4115 ✅ / rtg 口径 0.002 ⛔（放开主干也只到 0.010，且打坏策略头）
 python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 `
