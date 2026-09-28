@@ -329,8 +329,18 @@ v4 的轮次**不再手敲命令**：一条命令跑完一轮的八个相（计�
 python -m mahjong_ml.v4 loop --label v4-g01 --init tools\build\v4-bc-004\net.bin `
        --generations 3 --games 400 --workers 24 --objective ppo --value-target final `
        --student-temp 0.5 --eval-games 2000 --no-java
+# **多轮 × 每轮短**（§14.10 的实测口径：一轮 ~100 步 + 每轮重新采一批）：
+python -m mahjong_ml.v4 loop --label v4-mr01 --init <net.bin> --generations 8 --games 400 `
+       --objective ppo --value-target delta --advantage hand --rank-weight 0.2 `
+       --max-steps 100 --epochs 1 --eval-games 2000 --no-java
 python -m mahjong_ml.v4 loop --label v4-g01 --init <net.bin> --generations 3 --dry-run   # 只打印命令
 ```
+
+⚠ **训练口径的开关必须走回路**（第二十一轮补的）：`--value-target {final,rtg,delta}`、
+`--advantage {auto,gae-hand,hand}`、`--rank-weight`、`--baseline-fit`、`--grad-clip`、
+`--kl-early-stop`、`--kl-min-steps`、`--max-steps`（=「每轮短」那条杠杆）。
+以前这些**只活在 shell 历史里** ⇒ 一轮的实际训练口径不可复现；现在它们显式进 `train` 命令
+（`--dry-run` 与台账都看得见），自检钉住"命令里真的带上了"。
 
 **判据（"训练端脱离 Java"）**：
 ① `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` PASS —— 标签侧
