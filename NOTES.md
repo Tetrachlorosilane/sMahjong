@@ -2587,6 +2587,35 @@ extra**（`55 54 05 00 01 00 00 00 00`）。照抄这两处之后**逐字节相�
 4. **判据**：`python/selfcheck.py` **606/0**（+6：回路的 `delta` 口径 / `hand`+`rank-weight` /
    `--max-steps` / 数值口径显式进命令 / 默认不限步数 / 加了开关后仍无 JVM）。
 
+**第二十三轮：值头闸门进回路（目标里那条判据以前断在回路之外）（2026-09-28）**
+
+目标写的是"判据 = `value-audit` EV/覆盖率"，而回路**只看 2+2 顺位点** ⇒ 那条判据等于没接上
+（一轮跑完没人验值头）。这一轮把它接成 `audit` 相。
+
+1. **`v4/loop.py`**：新增相 `audit`（排在 `export` 与 `eval` 之间，`PY_PHASES` 里）：
+   `python -m mahjong_ml.v4 value-audit --data <这一轮的紧凑集> --ckpt <这一轮的 ckpt>
+   --target <映射后的主口径> --strict --ev-ref legit --out league/<label>-audit.json`。
+   - **口径映射**是常量表 `AUDIT_TARGET = {final→value, rtg→rtg, delta→delta}`（⚠ 漏了映射就会
+     拿错列去量：`final` 在审计里叫 `value`）；
+   - `_read_audit` 从 JSON 里抽 **EV 与覆盖率两条**（`ev_ok` / `cov_ok` / `ok`）写进台账；
+     `--strict-gate` 时不过就 `SystemExit` 停整条回路（缺省只记账）；
+   - `_run` 加了 `allow_fail`（**只给判据相用**）：`value-audit --strict` 用退出码 2 表示"判据没过"，
+     那种失败要记台账而不是抛异常。
+2. **实测（`smoke-gate`，1 代 × 8 场 / `--max-steps 3`）**：七个相全跑通
+   （collect 14.7s · features 0.1s · compact 7.4s · train 21.9s · export 3.0s · **audit 18.8s** ·
+   eval 31.9s），审计**如实判 FAIL**（这个玩具量级下 `EV −5.82`、覆盖率 0.45/0.58/0.74 ——
+   200 行训 3 步的值头本来就该是垃圾），台账里 `audit.ok=false / ev_ok=false / cov_ok=false`
+   ⇒ **闸门不会因为"数据太小/模型太烂"而静默放行**（这正是它存在的意义）。
+3. **判据**：`python/selfcheck.py` **614/0**（+8：口径映射、`audit` 在相列表里、
+   `--strict --ev-ref legit`、主口径跟着 `--value-target`、读的是本轮紧凑集/ckpt、
+   审计落 `league/`、闸门正反两面（过 / EV 不够 / 覆盖率超 3pp）、**读不到文件按未过**）。
+4. **`--strict-gate` 的负向对照**（`smoke-gate2`）：同样 1 代 × 8 场，加了 `--strict-gate` ⇒
+   审计判 FAIL 后**回路当场停在 `audit` 相**（退出码 1、`eval` 没跑、审计 JSON 已落盘）。
+   ⚠ 顺带观察到一个**预期内的分支**：这一轮的 `legit_full` 岭回归退化（≈200 行 / 92 列 ⇒
+   `ev_ref` 为 NaN 或 ≤0），判据就**退回绝对门槛**（日志那行显示 `≥ 0.1` 而不是 `≥ 0.7×天花板`）——
+   这是 `verdicts` 里写死并自检过的行为（"天花板没有可学的合法信息时退回绝对门槛 ⇒ 判 FAIL"），
+   玩具数据上出现它是对的，别当成 bug；真数据（3.5 万行 val）上 `ev_ref=0.0693`，走比例那条。
+
 
 
 

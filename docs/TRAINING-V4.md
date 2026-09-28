@@ -321,9 +321,15 @@ v4 的轮次**不再手敲命令**：一条命令跑完一轮的八个相（计�
 | 派生特征 | **C++**（`trainer features`） | sidecar `g*.feat.bin`（与 Java 逐字节） |
 | 校验 | node | `tools/selfplay-check.mjs`（含 `reward_to_go` 的独立重算） |
 | 紧凑集 | Python | `v4.dataset --aux --student "<与采集逐字相同的串>"`（`is_student` 靠字符串相等判定） |
-| 训练 | Python | `v4.pretrain --objective ppo --behaviour <上一代> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`） |
+| 训练 | Python | `v4.pretrain --objective ppo --behaviour <上一代> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`）+ 数值口径（grad-clip / KL 早停 / 双口径 KL） |
 | 导出 | Python | `v4.export weights` → 格式 2 `net.bin`（下一轮的 `--init`/`--behaviour` 就是它） |
+| **判据** | Python | `v4 value-audit --strict --ev-ref legit`（**EV ≥ 0.7 × 合法天花板 + 覆盖率 ≤3pp**）→ `league/<label>-audit.json`；`--strict-gate` 时不过就**停整条回路** |
 | 评测+判据 | **C++**（`trainer selfplay`）+ Python | 2+2 同牌山（`net,net,teacher,teacher`）→ `eval.paired_test`（按 seed 配对 + bootstrap + `required_n`）→ 台账 `league/<label>-v4.json` |
+
+⚠ **值头那条判据以前断在回路之外**（回路只看 2+2 顺位点 ⇒ 目标里"覆盖率 ≤3pp"没人判）。
+现在它是 `audit` 相，每轮出口跑一次并把 `ev / ev_ref / ev_need / cov0.5·0.8·0.95 / ok`
+写进台账；**读不到审计文件按"未过"处理**（不默认放行），`--strict-gate` 才真的拦住回路
+（缺省只记账 —— 先看几轮分布再决定要不要拦）。
 
 ```powershell
 python -m mahjong_ml.v4 loop --label v4-g01 --init tools\build\v4-bc-004\net.bin `
