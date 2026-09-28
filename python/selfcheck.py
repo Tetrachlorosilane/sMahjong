@@ -2771,6 +2771,87 @@ _ev_mlp19 = v4_va._mlp_probe(_pool19["mean_all"][:_np19 // 2], _y19[:_np19 // 2]
 ok(np.isfinite(_ev_mlp19),
    "读出头探针：非线性探针能在同一份特征上跑完并给出 EV（不是空转）", f"EV={_ev_mlp19:+.3f}")
 
+# ---- 第二十轮：逐决策 shaping（route A）—— 先证明"PBRS 不可能降优势方差" ----------------------
+# ① 逐决策链：同一 (game, hand_no, seat) 的行序就是时间序 ⇒ next_row 是"下一条同小局决策"
+#    夹具：(0,0,0) 占行 0/2、(0,0,1) 行 1、(0,0,2) 行 3、(1,0,0) 行 4/5 —— 两个小局各有多条决策
+_dc_n, _dc_s, _dc_e = v4_adv.decision_chain(
+    np.array([0, 0, 0, 0, 1, 1], dtype=np.int32),
+    np.zeros(6, dtype=np.int16),
+    np.array([0, 1, 0, 2, 0, 0], dtype=np.int8))
+eq("逐决策链：同小局内 next_row 指下一条决策（跨小局/跨座位断开）",
+   _dc_n.tolist(), [2, -1, -1, -1, 5, -1])
+eq("逐决策链：首/末决策行号按 (game,hand_no,seat) 回填",
+   (_dc_s.tolist(), _dc_e.tolist()), ([0, 1, 0, 3, 4, 4], [2, 1, 2, 3, 5, 5]))
+# ② **望远镜相消**（PBRS 不改变最优策略的根据）：Σ_t γ^t(γΦ_{t+1} − Φ_t) == γ^n Φ_end − Φ_start
+_dc_phi = np.array([3.0, 1.0, -2.0, 0.5, 5.0, 2.0])
+_dc_r = np.zeros(6)
+_dc_pb = v4_adv.pbrs_return(_dc_r, _dc_phi, _dc_n, _dc_e, 0.0)
+eq("PBRS：θ=0 时精确退化成原始回报", _dc_pb.tolist(), _dc_r.tolist())
+_dc_y = v4_adv.pbrs_return(_dc_r, _dc_phi, _dc_n, _dc_e, 2.0)
+_dc_y1 = v4_adv.pbrs_return(_dc_r, _dc_phi, _dc_n, _dc_e, 1.0, gamma=0.9)
+_dc_tel = _dc_y[0] + _dc_y[2]                         # 小局 (g0,h0,s0) 的两条决策，γ=1
+ok(abs(_dc_tel - 2.0 * (_dc_phi[2] - _dc_phi[0])) < 1e-12,
+   "PBRS：逐决策 shaping 之和 = θ·(Φ_末 − Φ_首)（**望远镜相消**，所以最优策略不变）",
+   f"Σ={_dc_tel:.6f} vs θ(Φ_end−Φ_start)={2.0 * (_dc_phi[2] - _dc_phi[0]):.6f}")
+_dc_yg = v4_adv.pbrs_return(_dc_r, _dc_phi, _dc_n, _dc_e, 2.0, gamma=0.9)
+_dc_ratio = ((_dc_yg[4] - _dc_r[4]) / (_dc_y1[4] - _dc_r[4])
+             if abs(float(_dc_y1[4] - _dc_r[4])) > 1e-12 else float("nan"))
+ok(abs(float(_dc_ratio) - 2.0) < 1e-9,
+   "PBRS：shaping 项对 θ 严格线性（θ=2 的项是 θ=1 的两倍；γ<1 时也成立）",
+   f"比值={float(_dc_ratio):.6f}")
+# ③ **优势不变性**（PBRS 不能降 Var(A) 的真正原因，Ng 1999）：`Q' − V' == Q − V`
+#    用小 MDP 数值验证：shaping 后的 Q'/V' 与原来的 Q/V 逐项差同一个 Φ(s)。
+def _q_of(trans: np.ndarray, rew: np.ndarray, n_state: int, n_act: int) -> tuple:
+    """值迭代求 Q/V（到收敛），返回 `(Q[n,a], V[n])`。"""
+    q = np.zeros((n_state, n_act))
+    for _ in range(2000):
+        v = q.max(axis=1)
+        q_new = rew + 0.95 * (trans @ v)
+        if np.max(np.abs(q_new - q)) < 1e-12:
+            q = q_new
+            break
+        q = q_new
+    return q, q.max(axis=1)
+
+
+_rng20 = np.random.default_rng(20260928)
+_ns, _na = 5, 3
+_trans = _rng20.random((_ns, _na, _ns))
+_trans /= _trans.sum(axis=2, keepdims=True)
+_rew = np.round(_rng20.normal(size=(_ns, _na)), 3)
+_phi20 = np.round(_rng20.normal(size=_ns), 3)
+_q0, _v0 = _q_of(_trans, _rew, _ns, _na)
+_rew_shaped = _rew + 0.95 * (_trans @ _phi20)[:, :, None].squeeze(-1) - _phi20[:, None]
+_q1, _v1 = _q_of(_trans, _rew_shaped, _ns, _na)
+_a0, _a1 = _q0 - _v0[:, None], _q1 - _v1[:, None]
+ok(float(np.max(np.abs(_a0 - _a1))) < 1e-9,
+   "PBRS 优势不变性（Ng 1999）：Q′−V′ == Q−V ⇒ **shaping 不改变优势，也就不能降它的方差**",
+   f"max|ΔA|={float(np.max(np.abs(_a0 - _a1))):.2e}")
+ok(float(np.max(np.abs((_q1 - _q0) + _phi20[:, None]))) < 1e-9,
+   "PBRS：Q′ == Q − Φ(s)（值函数按势函数平移，这就是「状态已知成分可被 critic 精确减掉」的来源）",
+   f"max|Q′−Q+Φ|={float(np.max(np.abs((_q1 - _q0) + _phi20[:, None]))):.2e}")
+# ④ 探针的 θ 轴不能凭空造差别：Φ 为常数时所有 θ 的残差比必须相同；Φ_末 是纯未来噪声时随 |θ| 变差
+_sh_phi = np.zeros(4000)
+_sh_next = np.full(4000, -1, dtype=np.int64)
+_sh_end = np.arange(4000, dtype=np.int64)
+_sh_r = _rng20.normal(size=4000)
+_base = v4_adv.pbrs_return(_sh_r, _sh_phi, _sh_next, _sh_end, 7.0)
+ok(float(np.max(np.abs(_base - _sh_r))) < 1e-12,
+   "shaping 探针：势函数恒 0 时 θ 再大也不改变回报（θ 轴不是凭空造差别）")
+# ⚠ 夹具要**真的有小局内多条决策**：否则 `Φ_末 == Φ_t`、shaping 项恒 0（第一版就是这么写成假绿的）
+_sh_nh, _sh_len = 1000, 4
+_sh_rows = _sh_nh * _sh_len
+_sh_next2 = np.where(np.arange(_sh_rows) % _sh_len == _sh_len - 1, -1,
+                     np.arange(_sh_rows) + 1).astype(np.int64)
+_sh_end2 = (np.arange(_sh_rows) // _sh_len * _sh_len + (_sh_len - 1)).astype(np.int64)
+_sh_phi2 = _rng20.normal(size=_sh_rows)                 # 势函数逐行独立 ⇒ 末值是查不到的未来量
+_sh_r2 = _rng20.normal(size=_sh_rows)
+_a = np.std(v4_adv.pbrs_return(_sh_r2, _sh_phi2, _sh_next2, _sh_end2, 0.0))
+_b = np.std(v4_adv.pbrs_return(_sh_r2, _sh_phi2, _sh_next2, _sh_end2, 4.0))
+ok(_b > _a * 1.5,
+   "shaping 探针：势函数的**末值**是查不到的未来量 ⇒ |θ| 越大回报方差越大（实测方向一致）",
+   f"θ=0 std={_a:.3f} → θ=4 std={_b:.3f}")
+
 # 判据的**参照**：绝对门槛（0.1）对"实现值"类目标不可达 ⇒ `--ev-ref legit` 用 `EV ≥ 0.7 × 天花板`
 eq("判据参照：合法天花板比例 = 0.7", v4_va.EV_CEILING_FRAC, 0.7)
 _vrow19 = {"ev_delta": 0.055, "ce_delta": 1.0, "ce_marginal_delta": 2.0, "crps": 1.0,

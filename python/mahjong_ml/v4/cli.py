@@ -277,6 +277,12 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
         *(["--readout"] if getattr(args, "readout", False) else []),
         "--readout-rows", str(args.readout_rows),
         "--readout-mlp-steps", str(args.readout_mlp_steps),
+        *(["--shaping"] if getattr(args, "shaping", False) else []),
+        "--phi", getattr(args, "phi", "shanten"),
+        # ⚠ 必须用 `--k=v` 单 token 形式：θ 网格可能以 `-` 开头（负 shaping 才是降方差那一边），
+        #   而 argparse 见到"-8,..."会当成选项名（实测报 "expected one argument"）。
+        f"--shaping-thetas={getattr(args, 'shaping_thetas', '0,0.5,1,2,4,8')}",
+        "--shaping-rows", str(getattr(args, "shaping_rows", 40000)),
         *(["--gae-target", args.gae_target] if getattr(args, "gae_target", None) else []),
         "--gae-lambda", f"{args.gae_lambda:g}", "--gae-gamma", f"{args.gae_gamma:g}",
         "--rank-weight", f"{args.rank_weight:g}",
@@ -336,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="读出头探针：冻结躯干换池化/换读出深度，看 EV 能到多少")
     va.add_argument("--readout-rows", type=int, default=40000)
     va.add_argument("--readout-mlp-steps", type=int, default=1500)
+    va.add_argument("--shaping", action="store_true",
+                    help="逐决策 potential-based shaping 探针（残差比 <1 才值得进训练）")
+    va.add_argument("--phi", default="shanten", choices=["shanten", "tenpai"])
+    va.add_argument("--shaping-thetas", default="0,0.5,1,2,4,8")
+    va.add_argument("--shaping-rows", type=int, default=40000)
     va.add_argument("--gae-target", default=None, help="另报手级 GAE 的 λ-回报口径（值是行为策略权重）")
     va.add_argument("--gae-lambda", type=float, default=0.9)
     va.add_argument("--gae-gamma", type=float, default=1.0)

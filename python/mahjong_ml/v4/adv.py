@@ -85,6 +85,83 @@ def hand_chain(game: np.ndarray, hand_no: np.ndarray, seat: np.ndarray
             np.asarray(next_hand, dtype=np.int64), np.asarray(reward_rows, dtype=np.int64))
 
 
+def decision_chain(game: np.ndarray, hand_no: np.ndarray, seat: np.ndarray
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """把**决策**（而不是小局）串成链 —— 逐决策 shaping 的时间步（§14.9）。
+
+    判据：同一 `(game, hand_no, seat)` 的行**行序就是时间序**（采集按文件顺序追加），
+    所以"下一条决策" = 同一 key 里**下一个出现的行号**。
+
+    @return `(next_row, hand_start_row, hand_end_row)`
+        · `next_row[i]`：同一小局里第 i 行的下一条决策行号，`-1` = 本小局最后一条；
+        · `hand_start_row[i]` / `hand_end_row[i]`：第 i 行所属小局的**首/末**决策行号
+          （PBRS 的势函数要在这两端取值：`Σ_t γ^t(γΦ_{t+1} − Φ_t) = γ^n Φ_end − Φ_start`）。
+    """
+    g = np.asarray(game).reshape(-1)
+    h = np.asarray(hand_no).reshape(-1)
+    s = np.asarray(seat).reshape(-1)
+    if not (g.size == h.size == s.size):
+        raise ValueError(f"game/hand_no/seat 长度不一致：{g.size}/{h.size}/{s.size}")
+    n = int(g.size)
+    first: dict[tuple[int, int, int], int] = {}
+    last: dict[tuple[int, int, int], int] = {}
+    nxt = np.full(n, -1, dtype=np.int64)
+    prev: dict[tuple[int, int, int], int] = {}
+    for i in range(n):
+        k = (int(g[i]), int(h[i]), int(s[i]))
+        first.setdefault(k, i)
+        last[k] = i
+        if k in prev:
+            nxt[prev[k]] = i
+        prev[k] = i
+    start = np.empty(n, dtype=np.int64)
+    end = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        k = (int(g[i]), int(h[i]), int(s[i]))
+        start[i] = first[k]
+        end[i] = last[k]
+    return nxt, start, end
+
+
+def pbrs_return(reward_row: np.ndarray, phi: np.ndarray, next_row: np.ndarray,
+                end: np.ndarray, theta: float,
+                gamma: float = 1.0) -> np.ndarray:
+    """**potential-based shaping**（Ng 1999）的逐决策回报：`R'_t = R_t + θ·(γ^{n_t}Φ_end − Φ_t)`。
+
+    为什么是这个形状：`Σ_{t=0}^{n−1} γ^t (γΦ_{t+1} − Φ_t)` **望远镜式相消**成
+    `γ^n Φ(s_n) − Φ(s_0)`（自检把这条钉成红证）⇒ 加上 shaping **不改变最优策略**，
+    但让"逐决策回报"里出现一个**状态已知**的成分 `−θ·Φ_t`，critic 能把它精确减掉
+    —— 这正是在"小局收支在小局内是常数"这个死局里唯一还能降方差的抓手（§14.9）。
+
+    @param reward_row 逐决策奖励（千点；同一小局内通常相等）
+    @param phi 势函数 `Φ(s)`（千点量纲，只用公开信息）
+    @param end 每条决策所属小局的**末决策行号**（`decision_chain` 的第三个返回值）
+    @param theta shaping 权重（θ=0 ⇒ 精确退化成原始回报）
+    """
+    r = np.asarray(reward_row, dtype=np.float64).reshape(-1)
+    p = np.asarray(phi, dtype=np.float64).reshape(-1)
+    nr = np.asarray(next_row, dtype=np.int64).reshape(-1)
+    if not (r.size == p.size == nr.size):
+        raise ValueError(f"reward/phi/next_row 长度不一致：{r.size}/{p.size}/{nr.size}")
+    return r + theta * (_discount_to_end(nr, gamma) * p[np.asarray(end, dtype=np.int64)] - p)
+
+
+def _discount_to_end(next_row: np.ndarray, gamma: float) -> np.ndarray:
+    """`γ^{n_t}`：从第 t 条决策到本小局末决策还剩几步（γ=1 时恒为 1）。"""
+    n = int(next_row.shape[0])
+    if gamma == 1.0:
+        return np.ones(n, dtype=np.float64)
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        steps = 0
+        j = int(next_row[i])
+        while j >= 0:
+            steps += 1
+            j = int(next_row[j])
+        out[i] = gamma ** steps
+    return out
+
+
 def hand_reward(delta: np.ndarray, rank_points: np.ndarray | None, hand_of_row: np.ndarray,
                 next_hand: np.ndarray, reward_rows: np.ndarray, *,
                 rank_weight: float = 0.0, unit: float = 1000.0) -> np.ndarray:

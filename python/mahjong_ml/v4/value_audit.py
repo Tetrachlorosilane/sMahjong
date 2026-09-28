@@ -39,6 +39,7 @@ import torch
 
 from . import dataset as ds
 from . import model as M
+from . import adv as v4adv
 from .pretrain import _batch
 
 #: 分箱中心（千点）与两两距离矩阵 —— CRPS 的离散形式要用
@@ -645,6 +646,89 @@ def readout_report(data_dir: str | Path, split: str, ckpt: str, *,
     return out
 
 
+#: 逐决策 shaping 探针的**势函数**候选（`--shaping`）：名字 → (数据集列, 每单位千点, 方向)
+#: ⚠ 只用**决策那一刻公开且自家能算**的量（引擎 `HandEval` 口径）—— 势函数一旦含隐藏信息，
+#: shaping 的"不改变最优策略"就不成立了（那等于给策略喂答案）。
+PHI_DEFS: dict[str, tuple[str, float, float]] = {
+    "shanten": ("aux_own_shanten_after", 1.0, -1.0),   # 向听越小越好 ⇒ Φ = −向听
+    "tenpai": ("aux_own_tenpai", 1.0, +1.0),           # 听牌 ⇒ Φ = +1
+}
+
+
+def _phi_of(data: dict, kind: str, n: int, unit: float) -> np.ndarray:
+    """按 `PHI_DEFS` 取势函数（**千点量纲**）：`Φ = dir · col · unit`。"""
+    key, scale, direction = PHI_DEFS[kind]
+    if data.get(key) is None:
+        raise SystemExit(f"数据集没有 `{key}` 列（`--phi {kind}` 需要它）")
+    col = np.asarray(data[key][:n], dtype=np.float64)
+    if col.ndim != 1:
+        raise SystemExit(f"势函数列 `{key}` 应当是一维（实际 {col.shape}）")
+    return direction * col * scale * unit
+
+
+def shaping_report(data_dir: str | Path, split: str = "val", *,
+                   phi_kind: str = "shanten", thetas: tuple[float, ...] = (0.0,),
+                   train_rows: int = 40000, val_rows: int = 20000,
+                   lam: float = 1.0) -> dict:
+    """**逐决策 shaping 探针**（§14.9）：势函数 shaping 能不能真的把优势噪声降下来。
+
+    判据不是"shaping 目标的 EV 有多高"（那会被**状态已知**的成分刷高—— `ctx.points` 那次的教训），
+    而是**绝对量纲**下的残差：`std(y − ŷ) / std(R_centered)`，其中 `ŷ` = 用**合法特征**
+    （`legit_full`）在 train 上闭式拟合、val 上预测的最优线性 critic。
+
+    - `θ=0` 那一行就是现状（`y = R`）：实测 ≈0.97（`EV(delta)=0.069` ⇒ √(1−0.069)）；
+    - 若某个 `θ>0` 把它压到 0.8 以下 ⇒ **shaping 值得进训练回路**；
+    - 若所有 θ 都 ≥0.97 ⇒ 这条路也到顶，别再动 critic。
+
+    注：θ 也可以理解成"每降一向听值多少千点"（`Φ = −θ·向听`）；PBRS 的望远镜相消保证
+    θ 取任何值都**不改变最优策略**（自检红证），所以选 θ 就是在选方差。
+    """
+    tr = ds.load_split(data_dir, "train")
+    va = ds.load_split(data_dir, split)
+    n_tr_all = int(tr["nlegal"].shape[0])
+    n_va_all = int(va["nlegal"].shape[0])
+    i_tr = (np.linspace(0, n_tr_all - 1, min(train_rows, n_tr_all)).astype(np.int64))
+    i_va = (np.linspace(0, n_va_all - 1, min(val_rows, n_va_all)).astype(np.int64))
+
+    def _slice(data: dict, idx: np.ndarray) -> dict:
+        return {k: (None if v is None else np.asarray(v[:int(data["nlegal"].shape[0])])[idx])
+                for k, v in data.items() if k not in ("meta", "split")}
+
+    trs, vas = _slice(tr, i_tr), _slice(va, i_va)
+    x_tr = _cols_of(trs, CEIL_GROUPS[CEIL_REF_KEY], i_tr.size)
+    x_va = _cols_of(vas, CEIL_GROUPS[CEIL_REF_KEY], i_va.size)
+    r_tr = np.asarray(trs["delta"], dtype=np.float64) / 1000.0
+    r_va = np.asarray(vas["delta"], dtype=np.float64) / 1000.0
+    nxt_tr, _, end_tr = v4adv.decision_chain(trs["game"], trs["hand_no"], trs["seat"])
+    nxt_va, _, end_va = v4adv.decision_chain(vas["game"], vas["hand_no"], vas["seat"])
+    base = float(np.std(r_va - r_va.mean()))
+    out: dict = {"phi": phi_kind, "split": split, "rows": [int(i_tr.size), int(i_va.size)],
+                 "unit": "千点", "std_R_centered": base, "targets": {}}
+    for theta in thetas:
+        if theta == 0.0:
+            y_tr, y_va = r_tr.copy(), r_va.copy()          # 现状：θ=0 = 原始小局收支
+        else:
+            # ⚠ 势函数按"千点/向听"取，θ 就是"每降一向听值多少千点"
+            p_tr = _phi_of(trs, phi_kind, i_tr.size, 1.0)
+            p_va = _phi_of(vas, phi_kind, i_va.size, 1.0)
+            y_tr = v4adv.pbrs_return(r_tr, p_tr, nxt_tr, end_tr, theta)
+            y_va = v4adv.pbrs_return(r_va, p_va, nxt_va, end_va, theta)
+        mu = x_tr.mean(axis=0)
+        sd = np.where(x_tr.std(axis=0) < 1e-8, 1.0, x_tr.std(axis=0))
+        a = np.concatenate([(x_tr - mu) / sd, np.ones((x_tr.shape[0], 1))], axis=1)
+        b = np.concatenate([(x_va - mu) / sd, np.ones((x_va.shape[0], 1))], axis=1)
+        w = np.linalg.solve(a.T @ a + lam * np.eye(a.shape[1]), a.T @ y_tr)
+        pred = b @ w
+        resid = y_va - pred
+        out["targets"][f"{theta:g}"] = {
+            "theta": float(theta), "std_y": float(np.std(y_va)),
+            "legit_ev": float(explained_variance(pred, y_va)),
+            "resid_std": float(np.std(resid)),
+            "ratio_vs_R": float(np.std(resid) / base) if base > 0 else float("nan"),
+        }
+    return out
+
+
 def fit_temperature(prob: np.ndarray, target: np.ndarray | None = None,
                     y: np.ndarray | None = None, *, lo: float = 0.05, hi: float = 20.0,
                     steps: int = 60) -> float:
@@ -866,6 +950,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--readout-rows", type=int, default=40000,
                     help="读出头探针在 train 上抽多少行（val 抽它的 1/2）")
     ap.add_argument("--readout-mlp-steps", type=int, default=1500)
+    ap.add_argument("--shaping", action="store_true",
+                    help="另报**逐决策 shaping 探针**（§14.9）：势函数（引擎 HandEval）的 "
+                         "potential-based shaping 能不能把优势噪声降下来 —— 判据是**绝对量纲**下的"
+                         "残差比 `std(y−ŷ)/std(R)`（<1 才值得进训练回路）")
+    ap.add_argument("--phi", default="shanten", choices=sorted(PHI_DEFS),
+                    help="势函数：shanten（−向听）/ tenpai（是否听牌）")
+    ap.add_argument("--shaping-thetas", default="0,0.5,1,2,4,8",
+                    help="shaping 权重扫描（千点/每单位势函数；逗号分隔。θ=0 = 现状对照）")
+    ap.add_argument("--shaping-rows", type=int, default=40000,
+                    help="shaping 探针在 train 上抽多少行（val 抽它的一半）")
     ap.add_argument("--gae-target", default=None, metavar="BEHAVIOUR",
                     help="另报**手级 GAE 的 λ-回报**口径（P1 的判据口径）：值是行为策略 ckpt/net.bin；"
                          "配合 `--gae-lambda` / `--rank-weight` / `--gae-gamma`")
@@ -906,6 +1000,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {tag:<20}features={int(row.get('features', 0)):>3}  "
                   + "  ".join(f"EV({k[3:]})={v:+.4f}" for k, v in row.items()
                               if k.startswith("ev_")) + note)
+
+    if args.shaping:
+        thetas = tuple(float(x) for x in str(args.shaping_thetas).split(",") if x.strip())
+        rep = shaping_report(args.data, args.split, phi_kind=args.phi, thetas=thetas,
+                             train_rows=args.shaping_rows,
+                             val_rows=max(1000, args.shaping_rows // 2))
+        print(f"\n逐决策 shaping 探针（势函数 `{args.phi}`，train {rep['rows'][0]} 行 / "
+              f"{args.split} {rep['rows'][1]} 行；`std(R_c)` = {rep['std_R_centered']:.3f} 千点）")
+        print(f"  {'θ':>6}  {'std(y)':>8}  {'合法EV':>8}  {'残差 std':>9}  {'残差/现状':>9}   判据")
+        for k, row in rep["targets"].items():
+            tag = "现状（θ=0）" if row["theta"] == 0.0 else (
+                "✅ 值得进训练回路" if row["ratio_vs_R"] < 0.8 else
+                ("≈ 没差别" if row["ratio_vs_R"] >= 0.97 else "略有改善"))
+            print(f"  {row['theta']:>6g}  {row['std_y']:>8.3f}  {row['legit_ev']:>+8.4f}  "
+                  f"{row['resid_std']:>9.3f}  {row['ratio_vs_R']:>9.3f}   {tag}")
+        if args.out:
+            p = Path(args.out)
+            p.with_name(p.stem + ".shaping" + p.suffix).write_text(
+                json.dumps({"shaping": rep}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.readout:
         for ck in args.ckpt:
