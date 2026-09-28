@@ -255,6 +255,69 @@ def verdicts(row: dict, value_key: str = "value") -> list[tuple[bool, str]]:
     return out
 
 
+def ridge_ev(x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray,
+             y_val: np.ndarray, lam: float = 1e-3) -> float:
+    """岭回归的**解释方差**（在训练切分上闭式求解、在 val 上量 EV）。
+
+    用途：给"值头最多能做到多少"一个**不依赖训练**的参照 —— 把引擎真值特征线性喂进去，
+    看这些目标还剩多少可解释的方差。⚠ 它是**参照**不是上界（非线性模型可能更好），
+    但"连线性真值特征都解释不了"足以判死一条路。
+    """
+    xtx = x_train.T @ x_train + lam * np.eye(x_train.shape[1])
+    w = np.linalg.solve(xtx, x_train.T @ y_train)
+    return explained_variance(x_val @ w, y_val)
+
+
+def _flat_aux(data: dict, n: int, *, with_opp_hand: bool) -> tuple[np.ndarray, list[str]]:
+    """把标签侧的引擎真值压成一个特征矩阵（列名带出来，便于读结论）。"""
+    cols: list[np.ndarray] = []
+    names: list[str] = []
+    src = [("own_shanten", "aux_own_shanten_after"), ("own_tenpai", "aux_own_tenpai"),
+           ("win_flag", "aux_win_flag"), ("opp_tenpai", "aux_opp_tenpai"),
+           ("opp_dealin", "aux_opp_dealin")]
+    if with_opp_hand:
+        src.append(("opp_hand", "aux_opp_hand"))
+    for name, key in src:
+        arr = data.get(key)
+        if arr is None:
+            continue
+        a = np.asarray(arr[:n], dtype=np.float64)
+        a = a[:, None] if a.ndim == 1 else a.reshape(n, -1)
+        cols.append(a)
+        names += [f"{name}[{i}]" for i in range(a.shape[1])]
+    x = np.concatenate(cols, axis=1) if cols else np.zeros((n, 0))
+    return np.concatenate([x, np.ones((n, 1))], axis=1), names
+
+
+def ceiling_report(data_dir: str | Path, split: str = "val", *,
+                   lam: float = 1e-3) -> dict[str, dict[str, float]]:
+    """**引擎真值特征的线性参照**：`value` / `rtg` / 小局收支 `delta` 各能解释多少。
+
+    为什么要它：`rtg` 值头训不出来时，必须分清"是我们的训练/架构不行"还是"这个目标本身
+    就没有可解释的方差"。这里把标签侧的引擎真值（自家向听/听牌/和了 + 对手听牌/放铳）线性喂进去，
+    再看它能不能排 rtg —— 排不动，就不是训练的问题。
+    ⚠ `with_opp_hand=True` 那一栏用了**别家的真手牌**（推理端拿不到），只作"作弊参照"。
+    """
+    tr = ds.load_split(data_dir, "train")
+    va = ds.load_split(data_dir, split)
+    out: dict[str, dict[str, float]] = {}
+    for tag, with_hand in (("state", False), ("oracle_hand", True)):
+        n_tr = int(tr["nlegal"].shape[0])
+        n_va = int(va["nlegal"].shape[0])
+        x_tr, names = _flat_aux(tr, n_tr, with_opp_hand=with_hand)
+        x_va, _ = _flat_aux(va, n_va, with_opp_hand=with_hand)
+        row: dict[str, float] = {"features": float(x_tr.shape[1])}
+        for key, scale in (("value", 1.0), ("rtg", 1.0), ("delta", 1000.0)):
+            y_tr = np.asarray(tr[key][:n_tr], dtype=np.float64) / scale
+            y_va = np.asarray(va[key][:n_va], dtype=np.float64) / scale
+            if not np.isfinite(y_tr).all() or not np.isfinite(y_va).all():
+                continue
+            row[f"ev_{key}"] = ridge_ev(x_tr, y_tr, x_va, y_va, lam)
+        out[tag] = row
+    out["state"]["columns"] = float(len(names))            # type: ignore[assignment]
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4 value-audit",
                                  description="价值头分布判据审计（§8.2）")
@@ -267,7 +330,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="判据按哪一列的目标算（auto = 该 ckpt 训练时的口径看不出来时用 value）")
     ap.add_argument("--out", default=None)
     ap.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
+    ap.add_argument("--ceiling", action="store_true",
+                    help="另报**引擎真值特征的线性参照**（value / rtg / delta 各能解释多少方差）")
     args = ap.parse_args(argv)
+
+    if args.ceiling:
+        ceil = ceiling_report(args.data, args.split)
+        print(f"引擎真值特征的线性参照（在 train 上闭式拟合、在 {args.split} 上量 EV；"
+              f"features = 用了几列）：")
+        for tag, row in ceil.items():
+            if tag not in ("state", "oracle_hand"):
+                continue
+            note = "（含别家**真手牌**，推理端拿不到 ⇒ 只作作弊参照）" if tag == "oracle_hand" else ""
+            print(f"  {tag:<12}{note}features={int(row.get('features', 0))}  "
+                  + "  ".join(f"EV({k[3:]})={v:+.4f}" for k, v in row.items() if k.startswith("ev_")))
 
     report = audit(args.data, args.split, args.ckpt, device=args.device, batch=args.batch)
     bad = False

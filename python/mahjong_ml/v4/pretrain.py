@@ -545,9 +545,30 @@ def train(args) -> dict:
         print(f"初始化：从 {init_spec} 载入权重")
     weights = dict(M.loss_weights())
     weights["ssl"] = args.ssl_weight
+    # `--only-heads`：只训点名的头（其余头的损失权重清零 + 参数冻住）。"修 critic"那一轮用它
+    # （`--only-heads value --freeze-trunk`，见 `NOTES.md` §6.5 第十三轮）。
+    # ⚠ 点名之后**必须绕过 `STAGE_WEIGHTS`**：阶段 a 的注册权重里 `value` 就是 0（那会让这一轮
+    #   静默什么都不学，正是"跑了但没训"的典型翻车）。
+    only = [h.strip() for h in str(getattr(args, "only_heads", "") or "").split(",") if h.strip()]
+    if only:
+        unknown = [h for h in only if h not in M.loss_weights()]
+        if unknown:
+            raise SystemExit(f"--only-heads 里有未知的头 {unknown}；可选 {sorted(M.loss_weights())}")
+        for k in list(weights):
+            if k not in only:
+                weights[k] = 0.0
+        weights["ssl"] = 0.0
+        print(f"只训头：{only}（其余头的损失权重置 0；阶段权重被绕过）")
+    freeze_trunk = bool(getattr(args, "freeze_trunk", False))
+    if freeze_trunk:
+        print("冻结主干：整轮只更新头参数（trunk.requires_grad=False）")
     trunk = [p for m in (model.tile, model.event, model.ctx, model.cand, model.fusion)
              for p in m.parameters()]
     heads = list(model.heads.parameters()) + list(ssl_head.parameters())
+    if only:
+        for name, p in model.heads.named_parameters():
+            if name.split(".")[0] not in only:
+                p.requires_grad = False
     opt = torch.optim.Adam([{"params": trunk, "lr": args.lr},
                             {"params": heads, "lr": args.lr * args.head_lr_mult}])
     mon = guard.GpuMonitor() if device == "cuda" else None
@@ -655,8 +676,9 @@ def train(args) -> dict:
             if stage != cur_stage:
                 cur_stage = stage
                 # b 段冻结主干（头是新的，先在固定表示上收敛）；a/c 段解冻
+                # ⚠ `--freeze-trunk` 时**全程**冻结（阶段 b 的语义被推广到整轮）
                 for p in trunk:
-                    p.requires_grad = stage != "b"
+                    p.requires_grad = (not freeze_trunk) and stage != "b"
                 print(f"  -- 进入阶段 {stage}（step {gstep}/{total_steps}）")
             # c 段余弦降 lr（a/b 段保持常数）；`--stage-c-lr-mult` 再整体缩一档
             if stage == "c":
@@ -680,8 +702,8 @@ def train(args) -> dict:
             ppo = None
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
-            loss, parts = compute_loss(out, b, STAGE_WEIGHTS.get(stage) or weights, ssl,
-                                       row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
+            loss, parts = compute_loss(out, b, weights if only else (STAGE_WEIGHTS.get(stage) or weights),
+                                       ssl, row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
                                        policy_temp=p_temp)
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
@@ -769,6 +791,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stage-a", type=float, default=0.25, help="阶段 a（策略+牌效）占总步数比例")
     ap.add_argument("--stage-b", type=float, default=0.35, help="阶段 b（冻主干只训头）占比")
     ap.add_argument("--head-lr-mult", type=float, default=3.0, help="头的学习率倍数（主干 = --lr）")
+    # 只训若干头 / 全程冻主干（"修 critic"那一轮：`--only-heads value --freeze-trunk`）
+    ap.add_argument("--freeze-trunk", action="store_true",
+                    help="整轮冻结主干（等价于把阶段 b 的语义推广到全程；只更新头参数）")
+    ap.add_argument("--only-heads", default=None, metavar="H1,H2",
+                    help="只训点名的头（其余头损失权重置 0 并冻结；绕过阶段权重）")
     # ⚠ 2026-09-27 实测：把 `cand` 的派生段真正喂进来之后（此前是整块 0），a/b 段的教师一致率
     #   从 0.619 涨到 **0.837**，但 c 段（联合微调、主干 lr = `--lr`）**当场把策略头练塌**
     #   （top1 掉回首合法基线 0.165，策略 CE 恒定 ⇒ 融合输出 ReLU 全死、logits 变成常数）。

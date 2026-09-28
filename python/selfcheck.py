@@ -2419,6 +2419,56 @@ _gm = v4_va.group_metrics(np.array([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
 eq("价值头审计：小局内预测正确 ⇒ round_mae = 0", round(_gm["round_mae"], 9), 0.0)
 eq("价值头审计：小局级 ρ = 1（3 个互不相同的小局）", round(_gm["round_pearson"], 9), 1.0)
 
+# ---- "只训值头"（`--only-heads value --freeze-trunk`；修 critic 那一轮的开关）------------------
+# 为什么钉它：这一轮全靠这两个开关。若 `--only-heads` 被 `STAGE_WEIGHTS["a"]`（那里 `value` 权重 = 0）
+# 悄悄绕过，就会跑满一整轮而**什么都没学**（"跑了但没训"的典型翻车）。判据只能落在
+# "**权重有没有真的动**"上，而且必须**成对**：主干逐位不变 **且** 值头真的变了。
+_voargs = dict(data=str(_rt_src / "ds"), epochs=1, batch=2, eval_batch=2, lr=1e-2, max_steps=2,
+               seed=21, threads=1, device="cpu", stage_a=0.25, stage_b=0.5, head_lr_mult=1.0,
+               mask_frac=0.0, ssl_weight=0.0, stage_c_lr_mult=1.0, rwr_beta=0.0,
+               objective="bc", value_target="rtg", only_heads="value", freeze_trunk=True)
+v4_pt.train(argparse.Namespace(**_voargs, label="v4-selfcheck-value-only"))
+_ref21 = v4_model.build(seed=21).state_dict()
+_after21 = torch.load(paths.DATA_ROOT / "ckpt" / "v4-selfcheck-value-only" / "model.pt",
+                      map_location="cpu", weights_only=False)["model"]
+_changed_trunk = [k for k in _ref21 if not k.startswith("heads.") and not _ref21[k].equal(_after21[k])]
+ok(not _changed_trunk, "只训头：主干逐位不变（`--freeze-trunk` 全程有效）",
+   f"变了 {len(_changed_trunk)} 个张量")
+ok(any(not _ref21[k].equal(_after21[k]) for k in _ref21 if k.startswith("heads.value.")),
+   "只训头：`heads.value.*` **真的被更新**了（阶段 a 的 0 权重没有把它吃掉）")
+ok(all(_ref21[k].equal(_after21[k]) for k in _ref21
+       if k.startswith("heads.") and not k.startswith("heads.value.")),
+   "只训头：其余头（policy/belief/danger/effect…）逐位不变")
+try:
+    v4_pt.train(argparse.Namespace(**{**_voargs, "only_heads": "bogus",
+                                      "label": "v4-selfcheck-value-only-bad"}))
+    ok(False, "只训头：未知头名必须报错")
+except SystemExit as _e:
+    ok("bogus" in str(_e), "只训头：未知头名当场报错（不静默训成 0 权重）", str(_e)[:60])
+
+# ⑨ 引擎真值特征的线性参照（`ridge_ev` / `_flat_aux`）：要能分得开"可解释"与"不可解释"，
+#    否则"rtg 排不动"就分不清是训练问题还是目标本身没信号（第十三轮的判据全靠它）。
+_rng9 = np.random.default_rng(7)
+_n9 = 240
+_x9 = _rng9.normal(size=(_n9, 2))
+_x9 = np.concatenate([_x9, np.ones((_n9, 1))], axis=1)          # 末列 = 截距
+_y9 = 2.0 * _x9[:, 0] - _x9[:, 1] + 0.5
+_ntr9 = 160
+ok(v4_va.ridge_ev(_x9[:_ntr9], _y9[:_ntr9], _x9[_ntr9:], _y9[_ntr9:]) > 0.999,
+   "价值头审计：线性可解释的目标 ⇒ 岭回归 EV ≈ 1（train/val 分开）",
+   f"EV={v4_va.ridge_ev(_x9[:_ntr9], _y9[:_ntr9], _x9[_ntr9:], _y9[_ntr9:]):.4f}")
+_noise9 = _rng9.normal(size=_n9)
+ok(v4_va.ridge_ev(_x9[:_ntr9], _noise9[:_ntr9], _x9[_ntr9:], _noise9[_ntr9:]) < 0.1,
+   "价值头审计：与特征无关的目标 ⇒ EV ≈ 0（参照不是空转）",
+   f"EV={v4_va.ridge_ev(_x9[:_ntr9], _noise9[:_ntr9], _x9[_ntr9:], _noise9[_ntr9:]):+.4f}")
+_fx, _fn = v4_va._flat_aux({"aux_own_shanten_after": np.zeros(6),
+                            "aux_own_tenpai": np.ones((6, 3)),
+                            "aux_opp_hand": np.zeros((6, 3, 34))}, 6, with_opp_hand=False)
+eq("价值头审计：真值特征矩阵 = 1（自家向听）+ 3（自家听牌）+ 1（截距），**不含**别家手牌",
+   _fx.shape[1], 5)
+ok(all("opp_hand" not in _n for _n in _fn),
+   "价值头审计：`state` 参照里没有别家真手牌（那是作弊参照，另算一栏）")
+
 
 # ---------------------------------------------------------------- 汇总
 

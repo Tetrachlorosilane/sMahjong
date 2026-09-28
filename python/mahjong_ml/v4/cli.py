@@ -269,6 +269,7 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
         *(["--device", args.device] if args.device else []),
         *(["--out", args.out] if args.out else []),
         *(["--strict"] if args.strict else []),
+        *(["--ceiling"] if getattr(args, "ceiling", False) else []),
         *[x for c in args.ckpt for x in ("--ckpt", c)],
     ])
 
@@ -298,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg"])
     va.add_argument("--out", default=None)
     va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
+    va.add_argument("--ceiling", action="store_true", help="另报引擎真值特征的线性参照")
     va.set_defaults(fn=cmd_value_audit)
     args = ap.parse_args(argv)
     return args.fn(args)

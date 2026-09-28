@@ -252,6 +252,18 @@ python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
      --ckpt S:\mahjong-training\ckpt\v4-bc-004 [--value-key auto] [--strict] [--out audit.json]
 # 判据（§8.2）：CE < 边缘基线、EV ≥ 0.1、CRPS < 气候学基线、50/80/95% 覆盖率与标称差 ≤ 3pp
 # 实测（2026-09-28）：整场口径 EV 0.44–0.57 但覆盖率不达标；`rtg` 口径（v4-ppo-002）EV 0.006 = 塌了
+# `--ceiling`：引擎真值特征的**线性参照**（判"是训练不行还是目标本身没信号"）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
+     --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-ppo-002 --ceiling
+#   实测：本小局收支 EV 0.632 · rtg 0.090 · 整场 0.059 ⇒ **可学的粒度是"这一小局"**
+# 修 critic 的两个开关（`--only-heads` **绕过阶段权重**：阶段 a 里 value 的注册权重就是 0）：
+#   冻主干只训值头 ⇒ 整场口径 EV 0.4115 ✅ / rtg 口径 0.002 ⛔（放开主干也只到 0.010，且打坏策略头）
+python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 `
+     --label v4-critic-final-001 --objective bc --value-target final `
+     --init tools\build\v4-p3-001\net.bin --freeze-trunk --only-heads value `
+     --epochs 6 --batch 512 --lr 1e-3 --head-lr-mult 1 --stage-a 0 --stage-b 1 --mask-frac 0 --ssl-weight 0
+python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
+     --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-critic-final-001 --strict
 python\.venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --data S:\mahjong-training\compact\v4-sp-004 `
      --label v4-ppo-002 --epochs 4 --batch 256 --objective ppo --value-target rtg `
      --behaviour "tools\build\<上一代>\net.bin" --behaviour-temp 0.5 --init "tools\build\<上一代>\net.bin" `

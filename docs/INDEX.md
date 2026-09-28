@@ -71,7 +71,7 @@
 | 训练端引擎（C++） | `docs/TRAINER-CPP.md`（与 Java 逐字节同源）· `trainer/README.md` |
 | 机器人 AI 包 | `docs/BOT-AI.md`（包格式/清单/α 口径）· `AGENTS.md` §6.6 |
 | 判据锚点 | `AGENTS.md` §6.5（红线：唯一漏斗/可复现/观测白名单/`is_student` 掩码…）· §6.6（teacher 五层取舍） |
-| 回归 | `tools/selfplay-check.mjs` · `tools/trainer-*-parity.mjs` · `python/selfcheck.py`（当前 **511** 项） |
+| 回归 | `tools/selfplay-check.mjs` · `tools/trainer-*-parity.mjs` · `python/selfcheck.py`（当前 **519** 项） |
 | 数据与配额 | `NOTES.md` §6.5（时间预算/缓存档/配额回收 `S:\mahjong-training`） |
 
 ### 板块 ⑤ 运维与发布
