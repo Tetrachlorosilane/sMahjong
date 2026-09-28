@@ -318,6 +318,125 @@ def ceiling_report(data_dir: str | Path, split: str = "val", *,
     return out
 
 
+def fit_temperature(prob: np.ndarray, target: np.ndarray | None = None,
+                    y: np.ndarray | None = None, *, lo: float = 0.05, hi: float = 20.0,
+                    steps: int = 60) -> float:
+    """**温度缩放**：`q ∝ p^(1/T)` 上拟合一个标量 T（在 train 切分上拟合、val 上量效果）。
+
+    为什么能修覆盖率：HL-Gauss 训出来的分布**欠覆盖**（95% 区间只盖到 82–87%）说明它太自信；
+    T>1 把分布摊平（区间变宽）。只用一个标量，所以过拟合风险极小。
+
+    @param target 软标签（有它就用 CE 当目标）；不给就用 `y` 的 NLL（把真值当成点质量）
+    """
+    p = np.asarray(prob, dtype=np.float64)
+    p = np.clip(p, 1e-12, None)
+    lp = np.log(p)
+
+    def loss_at(t: float) -> float:
+        z = lp / t
+        z -= z.max(axis=1, keepdims=True)
+        logq = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+        if target is not None:
+            return float(-(np.asarray(target, dtype=np.float64) * logq).sum(-1).mean())
+        idx = np.clip(np.searchsorted(CENTERS, np.asarray(y, dtype=np.float64)),
+                      0, CENTERS.size - 1)
+        return float(-logq[np.arange(logq.shape[0]), idx].mean())
+
+    # 一维凸问题：先粗网格再二分细化（不引 scipy）
+    grid = np.geomspace(lo, hi, steps)
+    vals = [loss_at(float(t)) for t in grid]
+    best = float(grid[int(np.argmin(vals))])
+    a, b = best / 1.3, best * 1.3
+    for _ in range(40):
+        m1, m2 = a + (b - a) / 3, b - (b - a) / 3
+        if loss_at(m1) < loss_at(m2):
+            b = m2
+        else:
+            a = m1
+    return float((a + b) / 2)
+
+
+def apply_temperature(prob: np.ndarray, temp: float) -> np.ndarray:
+    """`q ∝ p^(1/T)`（与 `softmax(logits/T)` 等价 —— 概率取幂再归一化即可恢复 logits 的缩放）。"""
+    if abs(float(temp) - 1.0) < 1e-12:
+        return np.asarray(prob, dtype=np.float64)
+    p = np.clip(np.asarray(prob, dtype=np.float64), 1e-12, None) ** (1.0 / float(temp))
+    return p / p.sum(axis=1, keepdims=True)
+
+
+def gae_target_report(data_dir: str | Path, split: str, ckpt: str, *, behaviour: str,
+                      lam: float = 0.9, rank_weight: float = 0.0, gamma: float = 1.0,
+                      device: str | None = None, batch: int = 2048) -> dict[str, Any]:
+    """按**手级 GAE 的 λ-回报**给这份值头打分（P1 的判据口径）。
+
+    为什么不能只看 `value`/`rtg`：`--advantage gae-hand` 之后值头学的是 TD(λ) 回报，
+    用别的列量 EV 是"拿另一把尺子量"（§14 P1 的判据①必须是它自己的目标）。
+    这里用**同一份** `v4/adv.py` + 行为策略的 `V_old` 复算 val 切分的 λ-回报，
+    再量值头对它的 EV / 覆盖率 / CRPS。
+    """
+    from . import pretrain as v4pt                       # 循环导入在这里解（只在调用时用）
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    va = ds.load_split(data_dir, split)
+    n = int(va["nlegal"].shape[0])
+    beh = v4pt._load_behaviour(behaviour, dev)
+    v_old = v4pt._behaviour_values(beh, va, dev, batch)
+    del beh
+    res = v4pt._hand_advantage(va, v_old, gamma=gamma, lam=lam, rank_weight=rank_weight,
+                               is_student=None)
+    y = np.asarray(res["vtarget"][:n], dtype=np.float64)
+    model = load_model(ckpt, dev)
+    prob = forward_value(model, va, n, dev, batch)
+    t = M.hl_gauss_targets(torch.from_numpy(y).float().to(dev)).cpu().numpy()
+    met = metrics(prob, y)
+    met["ce_value"] = hl_gauss_ce(prob, t)                 # 与 `audit()` 同口径：CE + 边缘基线
+    met["ce_marginal_value"] = marginal_ce(t)
+    return {"target": "gae-hand", "lam": lam, "gamma": gamma, "rank_weight": rank_weight,
+            "behaviour": str(behaviour), "behavior_stats": res["stats"], "metrics": met}
+
+
+def calibration_report(data_dir: str | Path, split: str, ckpt: str, *, target: str = "value",
+                       rows: int = 20000, device: str | None = None,
+                       batch: int = 2048) -> dict[str, Any]:
+    """温度缩放的**前后对照**：温度在**训练切分**上拟合（避免"在 val 上拟合再报 val"的乐观偏差），
+    覆盖率/CRPS/EV 在 val 上报。返回 `{temp, before, after}`。
+    """
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    tr = ds.load_split(data_dir, "train")
+    va = ds.load_split(data_dir, split)
+    n_tr = min(int(rows), int(tr["nlegal"].shape[0]))
+    n_va = int(va["nlegal"].shape[0])
+    model = load_model(ckpt, dev)
+    p_tr = forward_value(model, tr, n_tr, dev, batch)
+    y_tr = _target_of(tr, target, n_tr)[0]
+    temp = fit_temperature(p_tr, y=y_tr)
+    p_va = forward_value(model, va, n_va, dev, batch)
+    y_va = _target_of(va, target, n_va)[0]
+    return {"target": target, "temp": temp,
+            "before": metrics(p_va, y_va),
+            "after": metrics(apply_temperature(p_va, temp), y_va)}
+
+
+def _native_target(ckpt: str) -> str:
+    """这份权重当初按哪个目标训的值头（读旁边的 `metrics.json`；缺了按整场口径）。"""
+    try:
+        meta = json.loads((Path(ckpt) / "metrics.json").read_text(encoding="utf-8"))
+        vt = str((meta.get("args") or {}).get("value_target", "final"))
+    except (OSError, ValueError):
+        return "value"
+    return "rtg" if vt == "rtg" else ("delta" if vt == "delta" else "value")
+
+
+def _target_of(data: dict, target: str, n: int) -> tuple[np.ndarray, str]:
+    """取某个目标列（千点）。`delta` 是点数 ⇒ 除 1000。"""
+    if target == "delta":
+        if data.get("delta") is None:
+            raise SystemExit("数据集没有 `delta` 列")
+        return np.asarray(data["delta"][:n], dtype=np.float64) / 1000.0, "delta"
+    if data.get(target) is None:
+        raise SystemExit(f"数据集没有 `{target}` 列")
+    return np.asarray(data[target][:n], dtype=np.float64), target
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4 value-audit",
                                  description="价值头分布判据审计（§8.2）")
@@ -332,7 +451,36 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     ap.add_argument("--ceiling", action="store_true",
                     help="另报**引擎真值特征的线性参照**（value / rtg / delta 各能解释多少方差）")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="另报**温度缩放**前后的覆盖率/CRPS（一个标量，修欠覆盖最便宜的一招）")
+    ap.add_argument("--calib-rows", type=int, default=20000,
+                    help="拟合温度用训练切分的前多少行（一个标量，两万行足够）")
+    ap.add_argument("--gae-target", default=None, metavar="BEHAVIOUR",
+                    help="另报**手级 GAE 的 λ-回报**口径（P1 的判据口径）：值是行为策略 ckpt/net.bin；"
+                         "配合 `--gae-lambda` / `--rank-weight` / `--gae-gamma`")
+    ap.add_argument("--gae-lambda", type=float, default=0.9)
+    ap.add_argument("--gae-gamma", type=float, default=1.0)
+    ap.add_argument("--rank-weight", type=float, default=0.0)
     args = ap.parse_args(argv)
+
+    if args.gae_target:
+        for ck in args.ckpt:
+            rep = gae_target_report(args.data, args.split, ck, behaviour=args.gae_target,
+                                    lam=args.gae_lambda, rank_weight=args.rank_weight,
+                                    gamma=args.gae_gamma, device=args.device, batch=args.batch)
+            m = rep["metrics"]
+            st = rep["behavior_stats"]
+            print(f"\n手级 GAE 口径（{Path(ck).name}）λ={rep['lam']:g} γ={rep['gamma']:g} "
+                  f"rank_weight={rep['rank_weight']:g}；行为策略 {Path(rep['behaviour']).name}")
+            print(f"  小局 {int(st['hands'])} 个；模板回报 std {st['reward_std']:.3f} 千点")
+            print(f"  EV {m['ev']:+.4f} · CE/边缘 {m.get('ce_value', float('nan')):.4f} · "
+                  f"CRPS/气候学 {m['crps']:.4f}/{m['crps_climatology']:.4f} · "
+                  f"MAE/常数 {m['mae']:.3f}/{m['mae_const']:.3f}")
+            print(f"  覆盖率 50/80/95% = {m['cov0.5']:.3f}/{m['cov0.8']:.3f}/{m['cov0.95']:.3f}"
+                  f"（标称差 {abs(m['cov0.5'] - 0.5) * 100:.1f}/{abs(m['cov0.8'] - 0.8) * 100:.1f}/"
+                  f"{abs(m['cov0.95'] - 0.95) * 100:.1f}pp；判据 ≤3pp）")
+            for passed, text in verdicts({**m, "ev": m["ev"]}, "value"):
+                print(f"   [{'ok  ' if passed else 'FAIL'}] {text}")
 
     if args.ceiling:
         ceil = ceiling_report(args.data, args.split)
@@ -344,6 +492,19 @@ def main(argv: list[str] | None = None) -> int:
             note = "（含别家**真手牌**，推理端拿不到 ⇒ 只作作弊参照）" if tag == "oracle_hand" else ""
             print(f"  {tag:<12}{note}features={int(row.get('features', 0))}  "
                   + "  ".join(f"EV({k[3:]})={v:+.4f}" for k, v in row.items() if k.startswith("ev_")))
+
+    if args.calibrate:
+        for ck in args.ckpt:
+            rep = calibration_report(args.data, args.split, ck, target=_native_target(ck),
+                                     rows=args.calib_rows, device=args.device, batch=args.batch)
+            b, a = rep["before"], rep["after"]
+            print(f"\n温度缩放（{Path(ck).name}，目标 {rep['target']}，"
+                  f"温度在 train 前 {args.calib_rows} 行上拟合）：T = {rep['temp']:.3f}")
+            for k in ("crps", "cov0.5", "cov0.8", "cov0.95", "wid0.5", "wid0.8", "wid0.95", "ev"):
+                mark = ""
+                if k.startswith("cov") and abs(a[k] - float(k[3:])) <= COVERAGE_TOL:
+                    mark = "   ← 覆盖率达标（≤3pp）"
+                print(f"   {k:<10}前 {b[k]:+.4f} → 后 {a[k]:+.4f}{mark}")
 
     report = audit(args.data, args.split, args.ckpt, device=args.device, batch=args.batch)
     bad = False

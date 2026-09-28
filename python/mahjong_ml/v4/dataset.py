@@ -145,6 +145,12 @@ _COLUMNS: dict[str, tuple] = {
     #   ⚠ 老轨迹没有 `reward_to_go` ⇒ 这里写 **NaN**（显式缺席）：`--value-target rtg` 会当场报错，
     #   而 `final` 口径照常能跑老数据集 —— 不静默填 0（那会把优势变成 `0 − V(s)`）。
     "rtg": (np.float32, ()),
+    # `rank_points`：该行所属**整场**的顺位点（`summary.json` 的 `per_game[g].rank_points[seat]`）。
+    #   2026-09-28 加（§14 P1）：训练回报要与**评测口径**同量纲 —— 评测读的是 `rank_points`，
+    #   而原来只有点数差（`value`/`rtg`）。
+    #   ⚠ **不在 Python 里重算 uma/oka**（那是 `Payments`/`Settlement` 的活，重写必然漂移）：
+    #   直接读生产者登记的 `summary.json`；缺它就写 NaN，`--rank-weight > 0` 会当场报错。
+    "rank_points": (np.float32, ()),
     "aux_opp_hand": (np.uint8, (3, 34)),
     "aux_opp_tenpai": (np.uint8, (3,)),
     "aux_opp_dealin": (np.uint8, (3,)),
@@ -165,6 +171,27 @@ def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
     return out
 
 
+def _rank_points_of(f: Path) -> dict[int, list[float]]:
+    """`<run>/summary.json` → `{game: rank_points[4]}`（**生产者登记的权威值**）。
+
+    为什么读 summary 而不是自己算：uma/oka 在 `Payments`/`Settlement`（Java/C++）里，
+    Python 重写一份必然漂移（v3 `rewards.py` 的同一条纪律）。缺文件就返回空表 ⇒ 列写 NaN。
+    """
+    p = f.parent / "summary.json"
+    if not p.is_file():
+        return {}
+    try:
+        s = json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    out: dict[int, list[float]] = {}
+    for g in s.get("per_game") or []:
+        rp = g.get("rank_points")
+        if isinstance(g.get("game"), int) and isinstance(rp, list) and len(rp) == 4:
+            out[int(g["game"])] = [float(x) for x in rp]
+    return out
+
+
 def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
                 student: str | None = None) -> None:
     """把一个文件的**前 `take` 条**决策写进 `mm` 的 `[i0, i0+take)` 行。
@@ -173,6 +200,7 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
     ⇒ "并行产物 == 串行产物"是构造出来的，不是大概一样。
     """
     start = _game_start_score(f)
+    rp_of_game = _rank_points_of(f)
     ax = _aux.load_aux(_aux.aux_path(f)) if aux else None
     axcols = _aux_arrays(ax, int(ax["n"]) if ax else 0)
     sc = traces.load_sidecar(_v3.sidecar_path(f))
@@ -252,6 +280,9 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
             #    ⚠ 缺席写 NaN 而不是 0：0 会让优势变成 `0 − V(s)`（看着能跑，其实回报没了）。
             rtg = row.get("reward_to_go")
             mm["rtg"][i] = float(rtg) / 1000.0 if isinstance(rtg, (int, float)) else np.nan
+            # ④ `rank_points`：整场顺位点（**生产者登记的** `summary.json`；缺就 NaN）
+            rp = rp_of_game.get(int(row.get("game", -1)))
+            mm["rank_points"][i] = rp[seat] if (rp is not None and 0 <= seat < 4) else np.nan
             if ax is not None:
                 mm["aux_opp_hand"][i] = axcols["opp_hand"][j]
                 mm["aux_opp_tenpai"][i] = axcols["opp_tenpai"][j]
@@ -368,8 +399,12 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         rtg_frac = float(np.isfinite(
             np.asarray(np.load(out_dir / f"{tag}.rtg.npy", mmap_mode="r")[:n],
                        dtype=np.float32)).mean())
+        # 顺位点覆盖率（NaN = 没有 `summary.json` ⇒ `--rank-weight > 0` 会在入口硬拒）
+        rank_frac = float(np.isfinite(
+            np.asarray(np.load(out_dir / f"{tag}.rank_points.npy", mmap_mode="r")[:n],
+                       dtype=np.float32)).mean())
         return {"files": [f.name for f in part], "decisions": n, "lmax": lmax,
-                "rtg_frac": rtg_frac}
+                "rtg_frac": rtg_frac, "rank_frac": rank_frac}
 
     train = one_split(train_files, "train")
     val = one_split(val_files, "val")
@@ -391,6 +426,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "val_frac": val_frac, "split_seed": split_seed,
         "student": student,
         "rtg_frac": {"train": train["rtg_frac"], "val": val["rtg_frac"]},
+        "rank_frac": {"train": train["rank_frac"], "val": val["rank_frac"]},
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -405,7 +441,86 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
               f"derived v{meta['derived_version']}")
         print(f"  逐决策 reward-to-go 覆盖：train {train['rtg_frac']:.1%} / val {val['rtg_frac']:.1%}"
               f"（0% = 老采集器；`--value-target rtg` 会在入口报错）")
+        print(f"  顺位点覆盖：train {train['rank_frac']:.1%} / val {val['rank_frac']:.1%}"
+              f"（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）")
     return meta
+
+
+def backfill_rank_points(out_dir: str | Path, src_dir: str | Path, *,
+                         quiet: bool = False) -> dict:
+    """给**已存在**的紧凑集补 `rank_points` 列（**不重算任何张量**）—— 老数据集升级用。
+
+    为什么需要它：`rank_points` 是 2026-09-28（§14 P1）才加的列，而 `compact/v4-sp-004` 那种
+    15 GB 的老数据集重算一遍纯属浪费 —— 这一列只依赖 `(game, seat)` 与采集目录的 `summary.json`，
+    而 `game`/`seat` 本来就在紧凑集里。
+
+    判据（不满足就报错，不静默写坏数据）：
+    ① 覆盖率：每一行都要能查到（`game`/`seat` 越界或 summary 缺那一场 = 报错）；
+    ② **同一 `(game, seat)` 上恒定**（顺位点是整场属性）；
+    ③ 每场四家之和 ≈ 0（顺位点零和 —— 这是精算的硬性质，能抓住"取错座位"这类错位）。
+    """
+    out_dir, src_dir = Path(out_dir), Path(src_dir)
+    meta_p = out_dir / "meta.json"
+    meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    rp_of = _rank_points_of(src_dir / "g0.jsonl")
+    if not rp_of:
+        raise SystemExit(f"{src_dir} 下没有 summary.json（或没有 per_game.rank_points）—— "
+                         f"没有权威顺位点可补；要么把 summary.json 放回去，要么重采")
+    gmax = max(rp_of) + 1
+    table = np.full((gmax, 4), np.nan, dtype=np.float64)
+    for g, vals in rp_of.items():
+        table[g] = vals
+    out: dict = {}
+    for split in ("train", "val"):
+        gp, sp = out_dir / f"{split}.game.npy", out_dir / f"{split}.seat.npy"
+        if not gp.is_file() or not sp.is_file():
+            continue
+        game = np.asarray(np.load(gp, mmap_mode="r"), dtype=np.int64)
+        seat = np.asarray(np.load(sp, mmap_mode="r"), dtype=np.int64)
+        bad = (game < 0) | (game >= gmax) | (seat < 0) | (seat > 3)
+        if bool(bad.any()):
+            raise SystemExit(f"{split}：有 {int(bad.sum())} 行的 (game, seat) 越界 —— 不猜，先查数据")
+        vals = table[game, seat]
+        if not np.isfinite(vals).all():
+            miss = sorted({int(g) for g in game[~np.isfinite(vals)]})[:5]
+            raise SystemExit(f"{split}：有 {int((~np.isfinite(vals)).sum())} 行查不到顺位点"
+                             f"（缺的场号示例 {miss}）—— summary.json 与紧凑集不是同一批")
+        # ② 同一 (game, seat) 恒定
+        key = game * 4 + seat
+        order = np.argsort(key, kind="stable")
+        ks, vs = key[order], vals[order]
+        first = np.ones(ks.size, dtype=bool)
+        first[1:] = ks[1:] != ks[:-1]
+        uniq_k, uniq_v = ks[first], vs[first]
+        spread = 0.0
+        for k, v in zip(uniq_k, uniq_v):
+            sel = vals[key == k]
+            spread = max(spread, float(np.abs(sel - v).max()))
+        if spread > 1e-6:
+            raise SystemExit(f"{split}：顺位点在同一个 (game, seat) 上不恒定（最大偏差 {spread:g}）")
+        # ③ 零和
+        smax = 0.0
+        for g in np.unique(game):
+            smax = max(smax, abs(float(np.nansum(table[g]))))
+        if smax > 1e-3:
+            raise SystemExit(f"{split}：顺位点四家之和不为 0（最大 |Σ| = {smax:g}）—— 座位错位了")
+        # ⚠ 用 `np.save` 写**普通文件**，不走可写 memmap：这一列只有 4 B/行（658k 行 ≈ 2.6 MB），
+        #   而"建 w+ memmap 再被别人 mmap_mode='r' 读"在 Windows 上踩过
+        #   `OSError: [Errno 22] Invalid argument`（自检里当场红）。读侧仍然是 `np.load(mmap_mode="r")`。
+        np.save(out_dir / f"{split}.rank_points.npy", vals.astype(np.float32))
+        out[split] = {"decisions": int(game.size), "rank_frac": 1.0,
+                      "per_game": int(np.unique(game).size)}
+    meta.setdefault("rank_frac", {})["backfilled_from"] = str(src_dir)
+    for split, info in out.items():
+        meta["rank_frac"][split] = info["rank_frac"]
+    meta["source"] = str(meta.get("source", "")) + "（rank_points 由 summary.json 回填）"
+    meta_p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not quiet:
+        print(f"已回填 `rank_points`：{out_dir}")
+        for split, info in out.items():
+            print(f"  {split}：{info['decisions']} 行 / {info['per_game']} 场 / 覆盖率 100%，"
+                  f"恒定性与零和都通过")
+    return out
 
 
 def load_split(out_dir: str | Path, split: str) -> dict:
@@ -421,6 +536,7 @@ def load_split(out_dir: str | Path, split: str) -> dict:
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
                  "placement", "seat", "game", "hand_no", "is_student", "delta", "rtg",
+                 "rank_points",
                  "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"
@@ -446,6 +562,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="本轮要训练的那一代的**确切策略串**（写 `is_student` 列；缺省 = 全部算学生）")
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数（0 = 自动，≤75%% 的核、上限 12）；产物与串行逐字节相同")
+    ap.add_argument("--backfill-rank", action="store_true",
+                    help="**只回填 `rank_points` 列**（src = 采集目录（含 summary.json），"
+                         "out = 已存在的紧凑集；不重算张量）—— 老数据集升级用")
     args = ap.parse_args(argv)
     if args.cmd == "_chunk":
         # 内部子命令（并行用；见 `_spawn`）：把 req.json 里第 k 组任务写进（父进程已建好的）列
@@ -461,6 +580,11 @@ def main(argv: list[str] | None = None) -> int:
                         student=req.get("student"))
         for m in mm.values():
             m.flush()
+        return 0
+    if args.backfill_rank:
+        if not args.out:
+            raise SystemExit("--backfill-rank 需要两个位置参数：<采集目录> <已存在的紧凑集>")
+        backfill_rank_points(args.out, args.src)
         return 0
     build(args.src, args.out, val_frac=args.val_frac, split_seed=args.split_seed, aux=args.aux,
           limit_files=args.limit_files, workers=args.workers, student=args.student)

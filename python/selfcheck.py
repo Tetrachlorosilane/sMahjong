@@ -2509,6 +2509,141 @@ finally:
 ok("--aux" not in ml_producer.CPP_MISSING,
    "生产者：C++ 侧不再缺 `--aux`（标签侧 npz 已移植；对拍 = tools/trainer-aux-parity.mjs）")
 
+# ---- §14 P0/P1：手级 GAE（`v4/adv.py`）、块消融偏移、值头温度缩放 -----------------------------
+# 为什么钉这一组：P1 换了"优势怎么算"（从 λ=1 的多手后缀和 → 手级 GAE），这是训练口径的**根**
+# —— 链错了、rank 项加错位置、bootstrap 漏了，都不会报错，只会让优势静默变成另一个量。
+from mahjong_ml.v4 import adv as v4_adv                                        # noqa: E402
+
+_bs = v4_spec.block_slices()
+eq("消融：块偏移表覆盖全部块", len(_bs), len(v4_spec.BLOCKS))
+eq("消融：`tile.own` = tile 的 0..3 通道", _bs["tile.own"], ("tile", 0, 3))
+eq("消融：`cand.derived` 从 88 起 11 列", _bs["cand.derived"], ("cand", 88, 11))
+eq("消融：`evt.stream` 铺满 evt", _bs["evt.stream"], ("evt", 0, v4_spec.C_EVT))
+# 块消融必须真的把整段置 0（而且**只**动那一段）—— 用 `_batch` 直接验
+_lmax2 = 3
+_fake = {
+    "tile": np.ones((2, 34, v4_spec.C_TILE), dtype=np.float16),
+    "evt": np.ones((2, v4_spec.K_EVT, v4_spec.C_EVT), dtype=np.float16),
+    "ctx": np.ones((2, v4_spec.C_CTX), dtype=np.float16),
+    "cand": np.ones((2, _lmax2, v4_spec.C_CAND), dtype=np.float16),
+    "nlegal": np.array([_lmax2, _lmax2], dtype=np.int16),
+    "label": np.zeros(2, dtype=np.int16),
+    "value": np.zeros(2, dtype=np.float32),
+    "placement": np.zeros(2, dtype=np.int64),
+    "effect": np.zeros((2, _lmax2, 3), dtype=np.float16),
+}
+_b1 = v4_pt._batch(_fake, np.arange(2), "cpu", ablate={"cand": [(88, 11)]})
+ok(float(_b1["cand"][..., 88:99].abs().sum()) == 0.0,
+   "消融：`cand.derived` 那 11 列被整段置 0")
+ok(float(_b1["cand"][..., :88].min()) == 1.0 and float(_b1["cand"][..., 99:].min()) == 1.0,
+   "消融：**只**动那一段（其余通道原样）")
+
+# 手级链：2 场 × 2 小局 × 2 座（行序故意交错，检验"不假设同一小局行号连续"）
+_g2 = np.array([0, 0, 0, 0, 0, 0, 0, 1, 0, 1])
+_h2 = np.array([0, 0, 0, 1, 1, 0, 1, 0, 1, 0])
+_s2 = np.array([0, 1, 0, 0, 1, 1, 0, 0, 1, 1])
+_d2 = np.array([1000, -1000, 1000, 2000, 500, -1000, 2000, -3000, 500, 3000])
+_st2, _ho2, _nh2, _rr2 = v4_adv.hand_chain(_g2, _h2, _s2)
+eq("手级链：6 个小局（2 场 × 2 小局 × 2 座里出现过的组合）", int(_st2.size), 6)
+eq("手级链：小局 0 的下一小局 = 1（同场同座）", int(_nh2[0]), 1)
+eq("手级链：小局 1 是链末尾（bootstrap 0）", int(_nh2[1]), -1)
+ok(int(_ho2[0]) == int(_ho2[2]) and int(_ho2[0]) != int(_ho2[3]),
+   "手级链：同一小局的行映射到同一个 hand id（且与邻行不同）")
+_r2 = v4_adv.hand_reward(_d2, None, _ho2, _nh2, _rr2, rank_weight=0.0)
+eq("手级奖励：小局收支 /1000（千点）", [round(float(x), 3) for x in _r2],
+   [1.0, 2.0, -1.0, 0.5, -3.0, 3.0])
+_rp2 = np.zeros(_g2.size)
+for _i in range(_g2.size):
+    _rp2[_i] = {0: 15.0, 1: -5.0}[int(_g2[_i])]            # 每场一个顺位点（示意）
+_r2b = v4_adv.hand_reward(_d2, _rp2, _ho2, _nh2, _rr2, rank_weight=2.0)
+ok(all(abs(_r2b[_i] - _r2[_i]) < 1e-9 for _i in range(6) if _nh2[_i] >= 0),
+   "手级奖励：rank 项**只加在链末尾**那一小局（加在每个小局上等于乘了小局数）")
+ok(any(abs(_r2b[_i] - _r2[_i]) > 1.0 for _i in range(6) if _nh2[_i] < 0),
+   "手级奖励：链末尾那一小局真的加上了 `rank_weight · 顺位点`")
+_v2 = np.array([1.0, 2.0, -1.0, 0.5, 3.0, -2.0])
+_a2, _vt2 = v4_adv.gae_hand(_r2, _v2, _nh2, lam=1.0)
+ok(abs(_vt2[0] - (_r2[0] + _r2[1])) < 1e-9,
+   "手级 GAE：λ=1 且末端 bootstrap 0 时，值目标 = 链上实际回报（1+2）",
+   f"vt={_vt2[0]:.3f}")
+ok(abs(_a2[0] - (_vt2[0] - _v2[0])) < 1e-9, "手级 GAE：A = 值目标 − V（定义自洽）")
+_a0, _ = v4_adv.gae_hand(_r2, _v2, _nh2, lam=0.0)
+# λ=0 的定义：`A_h = r_h + γV_{h+1} − V_h`（**不含**任何后续 δ）—— 在测试里独立重算一遍。
+# ⚠ 第一版我把它写成 "r_h + 0 − V_h"（漏了 bootstrap 项）⇒ 假红；只有链末尾才是 bootstrap 0。
+_exp0 = np.array([_r2[_i] + (0.0 if _nh2[_i] < 0 else _v2[_nh2[_i]]) - _v2[_i]
+                  for _i in range(6)])
+eq("手级 GAE：λ=0 = 1 步 TD（A_h = r_h + γV_{h+1} − V_h）",
+   [round(float(x), 9) for x in _a0], [round(float(x), 9) for x in _exp0])
+# λ=1 的定义：`A_0 = 链上实际回报 − V_0`（链 0→1 且 1 是末尾 ⇒ r0 + r1）
+ok(abs(_a2[0] - ((_r2[0] + _r2[1]) - _v2[0])) < 1e-9,
+   "手级 GAE：λ=1 的 A_0 = 链上回报 − V_0（λ<1 只是少吸收一部分后继 δ）",
+   f"λ=1 A_0={_a2[0]:.3f} / λ=0 A_0={_a0[0]:.3f}")
+_ex2 = v4_adv.expand_hand(_a2, _ho2)
+ok(abs(_ex2[0] - _ex2[2]) < 1e-12 and abs(_ex2[0] - _a2[0]) < 1e-12,
+   "手级 GAE：逐决策展开后同一小局共享同一个优势（与 rtg 的小局内常量口径一致）")
+
+# 值头温度缩放：过窄分布 ⇒ T > 1，且 80% 覆盖率被修好
+_c2 = v4_va.CENTERS
+_rng2 = np.random.default_rng(0)
+_y2 = _rng2.normal(0, 6, size=400)
+_p2 = np.zeros((_y2.size, _c2.size))
+_ix2 = np.argmin(np.abs(_c2[None, :] - _y2[:, None]), axis=1)
+_p2[np.arange(_y2.size), _ix2] = 0.9
+for _off in (-1, 1):
+    _p2[np.arange(_y2.size), np.clip(_ix2 + _off, 0, _c2.size - 1)] = 0.05
+_p2 /= _p2.sum(1, keepdims=True)
+_t2 = v4_va.fit_temperature(_p2, y=_y2)
+ok(_t2 > 1.0, "温度缩放：欠覆盖（过窄）的分布应拟合出 T > 1（摊平）", f"T={_t2:.2f}")
+_cov_before = v4_va.metrics(_p2, _y2)["cov0.8"]
+_cov_after = v4_va.metrics(v4_va.apply_temperature(_p2, _t2), _y2)["cov0.8"]
+ok(_cov_after > _cov_before, "温度缩放：80% 覆盖率被修好（前 → 后）",
+   f"{_cov_before:.2f} → {_cov_after:.2f}")
+eq("温度缩放：T=1 时恒等（不改变任何一格）",
+   float(np.abs(v4_va.apply_temperature(_p2, 1.0) - _p2).max()), 0.0)
+
+# `rank_points` 的**回填**（`v4.dataset … --backfill-rank`）：老紧凑集补列，且三条不变式必须成立
+#   —— 顺位点只依赖 (game, seat) + 采集目录的 summary.json，不必重算 15 GB 张量。
+_bf_src = _rt_src                                        # 复用上面的小轨迹目录
+# ⚠ **必须拷一份再回填**：`build()` 在同一个进程里刚用 `open_columns` 建过这些 `.npy`
+#   （可写 memmap，句柄可能还活着），而 Windows 下"同一路径还开着可写映射时再 `open(...,'wb')`
+#   覆盖它"会报 `OSError: [Errno 22] Invalid argument`（自检里连着踩了两次）。
+_bf_ds = scratch("v4-rank-bf")
+shutil.copytree(_rt_src / "ds", _bf_ds, dirs_exist_ok=True)
+# 夹具里每场 4 行（`_rt_src` 的 g0/g1 各 4 条决策：seat 0..3 各一条）
+_bf_games = np.asarray(np.load(_bf_ds / "train.game.npy", mmap_mode="r")[:]).astype(int).tolist() \
+    + np.asarray(np.load(_bf_ds / "val.game.npy", mmap_mode="r")[:]).astype(int).tolist()
+_bf_summary = {"games": 2, "per_game": [
+    {"game": 0, "rank_points": [15.0, 5.0, -5.0, -15.0]},
+    {"game": 1, "rank_points": [-15.0, -5.0, 5.0, 15.0]},
+]}
+(_bf_src / "summary.json").write_text(json.dumps(_bf_summary, ensure_ascii=False), encoding="utf-8")
+_bf = v4_ds.backfill_rank_points(_bf_ds, _bf_src, quiet=True)
+ok(_bf["train"]["rank_frac"] == 1.0 and _bf["val"]["rank_frac"] == 1.0,
+   "rank_points 回填：两个切分覆盖率都是 100%", f"{_bf}")
+_bf_g = np.load(_bf_ds / "train.game.npy")               # ⚠ **不**用 mmap_mode：见下面负向对照的注释
+_bf_s = np.load(_bf_ds / "train.seat.npy")
+_bf_r = np.load(_bf_ds / "train.rank_points.npy")
+_bf_ok = all(abs(float(_bf_r[i]) - _bf_summary["per_game"][int(_bf_g[i])]
+                 ["rank_points"][int(_bf_s[i])]) < 1e-6 for i in range(len(_bf_g)))
+ok(_bf_ok, "rank_points 回填：每一行都等于 summary.json 里那一场的对应座位值")
+ok(bool(np.isfinite(np.load(_bf_ds / "val.rank_points.npy")).all()),
+   "rank_points 回填：val 切分同样补上（两半都要补，漏一半就等于验证集没有目标）")
+del _bf_g, _bf_s, _bf_r
+# 负向对照：非零和的顺位点必须报错（这条抓住"座位错位"）
+# ⚠ 上面若用 `mmap_mode="r"` 读这些 `.npy`，**映射还开着**的时候再让回填去 `open(..., "wb")`
+#   覆盖同名文件，Windows 会报 `OSError: [Errno 22] Invalid argument`（不是权限、也不是路径问题；
+#   `np.load()` 不带 mmap 就没这回事）。
+_bf_summary["per_game"][0]["rank_points"] = [15.0, 5.0, -5.0, -14.0]
+(_bf_src / "summary.json").write_text(json.dumps(_bf_summary, ensure_ascii=False), encoding="utf-8")
+try:
+    v4_ds.backfill_rank_points(_bf_ds, _bf_src, quiet=True)
+    ok(False, "rank_points 回填：四家之和不为 0 必须报错")
+except SystemExit as _bf_e:
+    ok("和不为 0" in str(_bf_e) or "零和" in str(_bf_e) or "sum" in str(_bf_e),
+       "rank_points 回填：非零和当场报错（不静默写坏数据）", str(_bf_e)[:70])
+(_bf_src / "summary.json").unlink(missing_ok=True)
+
+
+
 
 # ---------------------------------------------------------------- 汇总
 

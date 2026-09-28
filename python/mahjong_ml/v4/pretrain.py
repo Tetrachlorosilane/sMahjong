@@ -40,6 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .. import guard, paths
+from . import adv as v4adv
 from . import dataset as v4ds
 from . import model as M
 from . import spec
@@ -96,12 +97,16 @@ def _device(pref: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _batch(data: dict, idx: np.ndarray, device: str) -> dict[str, torch.Tensor]:
+def _batch(data: dict, idx: np.ndarray, device: str,
+           ablate: dict[str, list[tuple[int, int]]] | None = None) -> dict[str, torch.Tensor]:
     """按行号取一个 batch（memmap → torch）。`idx` **升序**（与 v3 的 `bc._batch` 同规矩）。
 
     ⚠ 候选宽度取**这一份切分自己的** `cand.shape[1]`，不是 `meta["lmax"]`：
     train/val 两份的 lmax 可能不同（`build` 里按切分各自定宽），拿全局 lmax 去做掩码
     会与 logits 的长度对不上（实测报 `size of tensor a (27) must match b (15)`）。
+
+    @param ablate **块消融**：`{张量名: [(起点, 宽度), …]}` ⇒ 那些通道整段置 0
+        （`docs/TRAINING-V4.md` §8.3 的消融矩阵；只改输入，不动权重，也不碰标签）
     """
     lmax = int(data["cand"].shape[1])
     nleg = np.asarray(data["nlegal"][idx], dtype=np.int64)
@@ -130,7 +135,89 @@ def _batch(data: dict, idx: np.ndarray, device: str) -> dict[str, torch.Tensor]:
                      ("aux_own_shanten_after", "own_shanten")):
         if data.get(src) is not None:
             b[dst] = torch.from_numpy(np.asarray(data[src][idx], dtype=np.float32)).to(device)
+    if ablate:
+        for tensor, spans in ablate.items():
+            if tensor not in b:
+                continue
+            for start, width in spans:
+                b[tensor][..., start:start + width] = 0.0
     return b
+
+
+def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> np.ndarray:
+    """**行为策略的价值期望**（千点；`softmax(value) · 分箱中心`）—— 手级 GAE 的 `V_old`。
+
+    为什么要"行为策略的 V"而不是"当前 V"：优势必须相对**采样时的那个策略/评价**才算得对
+    （`logp_old` 同一道理）；而且算一次就**冻结**，否则一个 epoch 内 baseline 一直在动
+    （`docs/TRAINING-V4.md` §14 P2-①）。
+    """
+    center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS).to(device)
+    n = int(data["nlegal"].shape[0])
+    out = np.zeros(n, dtype=np.float64)
+    model.eval()
+    with torch.no_grad():
+        for i0 in range(0, n, batch):
+            idx = np.arange(i0, min(i0 + batch, n))
+            b = _batch(data, idx, device)
+            v = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])["value"]
+            out[i0:i0 + idx.size] = (torch.softmax(v.float(), dim=-1) * center).sum(-1).cpu().numpy()
+    return out
+
+
+def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
+                    rank_weight: float, is_student: np.ndarray | None) -> dict:
+    """手级 GAE（`v4/adv.py`）→ 逐决策的 `(adv, vtarget)` + 体检数字。
+
+    ⚠ 归一化**在这里一次算完**（学生行上的全局 mean/std）：放进每个 batch 里做 z-score 的话
+    优势的绝对尺度会随 batch 变，PPO 的 clip ε 就失去语义（§14 P2-②）。
+    """
+    n = int(data["nlegal"].shape[0])
+    rp = data.get("rank_points")
+    if rank_weight and rp is None:
+        raise SystemExit("--rank-weight > 0 但数据集没有 `rank_points` 列 —— 用新版 `v4.dataset build` "
+                         "重建（它从采集目录的 summary.json 读生产者登记的顺位点）")
+    if rank_weight:
+        finite = bool(np.isfinite(np.asarray(rp[:n], dtype=np.float32)).all())
+        if not finite:
+            raise SystemExit("--rank-weight > 0 但 `rank_points` 列有 NaN（采集目录缺 summary.json）"
+                             "—— 要么补齐 summary.json 重建数据集，要么把 --rank-weight 设 0")
+    starts, hand_of_row, next_hand, reward_rows = v4adv.hand_chain(
+        data["game"][:n], data["hand_no"][:n], data["seat"][:n])
+    r_h = v4adv.hand_reward(data["delta"][:n], rp[:n] if rp is not None else None,
+                            hand_of_row, next_hand, reward_rows,
+                            rank_weight=rank_weight)
+    v_h = np.asarray(v_old, dtype=np.float64)[starts]
+    adv_h, vt_h = v4adv.gae_hand(r_h, v_h, next_hand, gamma=gamma, lam=lam)
+    adv = v4adv.expand_hand(adv_h, hand_of_row)
+    vtarg = v4adv.expand_hand(vt_h, hand_of_row)
+    keep = None if is_student is None else (np.asarray(is_student[:n]) > 0)
+    raw = adv.copy()                       # 归一化**之前**的优势：方差削减要在它上面量
+    if keep is not None and keep.any():
+        mu = float(adv[keep].mean())
+        sd = float(adv[keep].std())
+        adv = np.where(keep, (adv - mu) / (sd + 1e-6), 0.0)
+    stats = {"hands": float(starts.size), "gamma": float(gamma), "lam": float(lam),
+             "rank_weight": float(rank_weight), "reward_mean": float(r_h.mean()),
+             "reward_std": float(r_h.std()), "v_old_mean": float(v_h.mean()),
+             "v_old_std": float(v_h.std())}
+    rtg = data.get("rtg")
+    if rtg is not None:
+        r = np.asarray(rtg[:n], dtype=np.float64)
+        ref = raw if keep is None else raw[keep]
+        stats.update({
+            # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
+            #   整列 std ≈0.5 ⇒ 拿着它去比 `std(rtg)` 会得到一个"看起来砍掉 95%"的假象
+            #   （第一版就是这么报的：0.054×）。真正该看的是 `raw` 对 `rtg`。
+            "adv_std_raw": float(ref.std()), "rtg_std": float(r.std()),
+            "std_ratio_raw": float(ref.std() / r.std()) if r.std() > 0 else float("nan"),
+            "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
+        })
+    else:
+        ref = raw if keep is None else raw[keep]
+        stats.update({"adv_std_raw": float(ref.std()),
+                      "adv_std_norm_student": float(adv[keep].std()) if keep is not None
+                      else float(adv.std())})
+    return {"adv": adv.astype(np.float32), "vtarget": vtarg.astype(np.float32), "stats": stats}
 
 
 def _row_weights(data: dict, idx, beta: float, device: str):
@@ -273,7 +360,8 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  row_w: torch.Tensor | None = None,
                  ppo: tuple | None = None,
                  value_key: str = "value",
-                 policy_temp: float = 1.0) -> tuple[torch.Tensor, dict[str, float]]:
+                 policy_temp: float = 1.0,
+                 adv_fixed: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -314,7 +402,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         logits_t = _policy_logits(out, policy_temp)
         logp_new = torch.log_softmax(logits_t, dim=-1).gather(
             1, b["label"][:, None]).squeeze(1)
-        adv = _advantages(out, b, row_keep, key=value_key)
+        # `adv_fixed`（手级 GAE 的预计算优势，**已按学生行全局归一化**）优先：
+        #   一条样本的优势在整轮里是常量 ⇒ baseline 不再"跟着 critic 动"（§14 P2-①）。
+        adv = adv_fixed if adv_fixed is not None else _advantages(out, b, row_keep, key=value_key)
         # ⚠⚠ **两道数值保险**（2026-09-28 实测：不加就是"训练跑到第 757 步整批 NaN"）。
         # 机制：**非学生行**（teacher / 随机 的动作）在**学生网**下几乎必然是零概率 ——
         # 实测 `logp_new` 能到 −1000 量级（网的 logits 幅度到 563，`#0.5` 再翻倍）⇒
@@ -418,11 +508,16 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
 @torch.no_grad()
 def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
              ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0,
-             row_keep=None, value_key: str = "value") -> dict:
+             row_keep=None, value_key: str = "value",
+             ablate: dict[str, list[tuple[int, int]]] | None = None,
+             extra: dict[str, np.ndarray] | None = None) -> dict:
     """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率。
 
     @param row_keep 只在**这些行**上统计一致率（自对弈数据里 = 学生那一代的行；
         不给就统计全部行）。⚠ 损失仍在全部行上算（那是"这一局的局面"的损失，与谁动的手无关）。
+    @param ablate **块消融**（消融矩阵）：val 必须与 train 用同一份消融输入，否则表读不出来
+    @param extra 额外逐行数组（键名 = batch 键）：`gae-hand` 的 `vtarget` 走它 —— 否则 val 的
+        `compute_loss` 会因为取不到 `vtarget` 直接 KeyError
     """
     model.eval()
     n = int(data["nlegal"].shape[0])
@@ -436,7 +531,10 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
     gen = torch.Generator(device="cpu").manual_seed(12345)          # val 掩码固定 ⇒ 同种子可比
     for i0 in range(0, n, batch):
         idx = np.arange(i0, min(i0 + batch, n))
-        b = _batch(data, idx, device)
+        b = _batch(data, idx, device, ablate=ablate)
+        if extra:
+            for k, arr in extra.items():
+                b[k] = torch.from_numpy(np.asarray(arr[idx], dtype=np.float32)).to(device)
         ssl = None
         if ssl_head is not None and mask_frac > 0:
             evt_masked, mask_rows, target = mask_events(b["evt"], mask_frac, gen)
@@ -550,6 +648,14 @@ def train(args) -> dict:
     # ⚠ 点名之后**必须绕过 `STAGE_WEIGHTS`**：阶段 a 的注册权重里 `value` 就是 0（那会让这一轮
     #   静默什么都不学，正是"跑了但没训"的典型翻车）。
     only = [h.strip() for h in str(getattr(args, "only_heads", "") or "").split(",") if h.strip()]
+    # `--drop-heads X,Y`：**补集**写法（消融矩阵用）——"除了这些，其余照常训"。
+    drop = [h.strip() for h in str(getattr(args, "drop_heads", "") or "").split(",") if h.strip()]
+    if drop:
+        unknown = [h for h in drop if h not in M.loss_weights()]
+        if unknown:
+            raise SystemExit(f"--drop-heads 里有未知的头 {unknown}；可选 {sorted(M.loss_weights())}")
+        only = [h for h in M.loss_weights() if h not in drop]
+        print(f"消融头：丢掉 {drop} ⇒ 只训 {only}")
     if only:
         unknown = [h for h in only if h not in M.loss_weights()]
         if unknown:
@@ -586,6 +692,24 @@ def train(args) -> dict:
     # 值头目标 / 优势回报的来源（第六轮）：`rtg` = 逐决策 reward-to-go（λ=1 的 GAE 目标）。
     # ⚠ 两处**必须同源**，所以只有一个开关；老数据集里 `rtg` 是 NaN ⇒ 选了就当场报错（不静默）。
     value_key = "rtg" if str(getattr(args, "value_target", "final") or "final") == "rtg" else "value"
+    # `--advantage`（§14 P1）：`auto` = 与 `--value-target` 同源（老行为）；`gae-hand` = 手级 GAE，
+    # 值头目标同时换成 TD(λ) 回报（`vtarget`，见 `_hand_advantage`）。
+    advantage = str(getattr(args, "advantage", "auto") or "auto")
+    if advantage == "gae-hand":
+        if value_key == "rtg":
+            raise SystemExit("--advantage gae-hand 与 `--value-target rtg` 互斥："
+                             "手级 GAE 自带值头目标（TD(λ) 回报），请去掉 `--value-target rtg`")
+        value_key = "vtarget"
+    ablate_blocks = [b.strip() for b in str(getattr(args, "ablate_blocks", "") or "").split(",")
+                     if b.strip()]
+    ablate: dict[str, list[tuple[int, int]]] = {}
+    if ablate_blocks:
+        slices = spec.block_slices()
+        for bid in ablate_blocks:
+            spec.block(bid)                                  # 未注册的块 id ⇒ 当场报错
+            tensor, start, width = slices[bid]
+            ablate.setdefault(tensor, []).append((start, width))
+        print(f"消融块：{ablate_blocks}（输入张量对应通道整段置 0；权重与标签不动）")
     if value_key == "rtg":
         ok = all(d.get("rtg") is not None
                  and bool(np.isfinite(np.asarray(d["rtg"], dtype=np.float32)).all())
@@ -595,6 +719,8 @@ def train(args) -> dict:
                              "—— 那是**老轨迹**（采集器还没有逐决策回报）。请用新版采集器重采，"
                              "或改用 `--value-target final`。")
         print("值头/优势口径：**逐决策 reward-to-go**（rtg，千点；λ=1 的 GAE 目标）")
+    elif value_key == "vtarget":
+        print("值头/优势口径：**手级 GAE**（TD(λ) 回报；`--advantage gae-hand`）")
     else:
         print("值头/优势口径：整场结果（value = final_scores − 起点；旧口径）")
     keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
@@ -620,16 +746,19 @@ def train(args) -> dict:
         if not beh:
             raise SystemExit("--objective ppo 需要 --behaviour <采集用的 ckpt/net.bin>"
                              "（要重算 log π_old，否则 PPO 的重要性比无从谈起）")
-        spec = str(meta.get("student") or "")
+        # ⚠ **别把这个局部变量叫 `spec`**：那会把模块级的 `v4.spec` 在整个函数里遮蔽掉
+        #   （Python 的作用域是静态的）⇒ 上面 `--ablate-blocks` 用的 `spec.block_slices()`
+        #   会报 `UnboundLocalError: cannot access local variable 'spec'`（2026-09-28 实测踩到）。
+        student_str = str(meta.get("student") or "")
         # ⚠ 温度的**权威来源是数据集 meta 里的 `student` 串**（它逐字记录了采集时的策略串）。
         #   `--behaviour-temp` 只在 meta 没写 `#T` 时才允许兜底；**与 meta 冲突就报错** ——
         #   温度错了不会让训练崩，只会让 `logp_old` 是"另一个分布"，静默把重要性比带偏。
-        parsed = float(spec.rsplit("#", 1)[1]) if "#" in spec else None
+        parsed = float(student_str.rsplit("#", 1)[1]) if "#" in student_str else None
         explicit = float(getattr(args, "behaviour_temp", 0.0) or 0.0)
         if explicit > 0 and parsed is not None and abs(explicit - parsed) > 1e-9:
             raise SystemExit(
                 f"--behaviour-temp {explicit:g} 与数据集 student 串里的 `#T` {parsed:g} 不一致"
-                f"（{spec}）—— 温度的权威来源是采集时的策略串，别手填；要改就重采")
+                f"（{student_str}）—— 温度的权威来源是采集时的策略串，别手填；要改就重采")
         temp = explicit if explicit > 0 else (parsed if parsed is not None else 1.0)
         if keep_tr is None:
             raise SystemExit("--objective ppo 需要学生掩码：数据集要用 `--student <策略串>` 构建"
@@ -647,6 +776,45 @@ def train(args) -> dict:
         kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
                                            logp_tr, temp, device)
         print(f"PPO：口径自检 KL(π_old‖π_new)={kl0:+.2e}（≈0 = 权重与温度都对上了）")
+    # ---- 手级 GAE（§14 P1）：`--advantage gae-hand` 的预计算（行为策略的 V ⇒ GAE ⇒ 冻结）----
+    adv_tr = None
+    val_extra: dict[str, np.ndarray] | None = None
+    if advantage == "gae-hand":
+        beh = getattr(args, "behaviour", None)
+        if not beh:
+            raise SystemExit("--advantage gae-hand 需要 --behaviour <采集用的 ckpt/net.bin>："
+                             "V_old 必须来自**行为策略**（与 logp_old 同一份权重）")
+        beh_model = _load_behaviour(beh, device)
+        t_v = time.perf_counter()
+        print(f"手级 GAE：用行为策略 {beh} 重算 V_old（train {n} / val {nv} 条）…")
+        v_old = _behaviour_values(beh_model, train_data, device, args.eval_batch)
+        v_old_va = _behaviour_values(beh_model, val_data, device, args.eval_batch)
+        del beh_model
+        res = _hand_advantage(train_data, v_old, gamma=float(getattr(args, "gae_gamma", 1.0) or 1.0),
+                              lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
+                              rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
+                              is_student=np.asarray(train_data["is_student"]) if keep_tr is not None
+                              else None)
+        adv_tr = res["adv"]
+        vtar_tr = res["vtarget"]
+        res_va = _hand_advantage(val_data, v_old_va,
+                                 gamma=float(getattr(args, "gae_gamma", 1.0) or 1.0),
+                                 lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
+                                 rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
+                                 is_student=None)          # val 的 vtarget 不进损失统计的尺度，不归一
+        val_extra = {"vtarget": res_va["vtarget"]}
+        s = res["stats"]
+        print(f"  小局 {int(s['hands'])} 个 / γ={s['gamma']:g} λ={s['lam']:g} "
+              f"rank_weight={s['rank_weight']:g}")
+        print(f"  小局奖励：mean {s['reward_mean']:+.3f} std {s['reward_std']:.3f} 千点；"
+              f"V_old：mean {s['v_old_mean']:+.3f} std {s['v_old_std']:.3f}")
+        if "std_ratio_raw" in s:
+            print(f"  优势体检（**归一化之前**）：std(A_raw) {s['adv_std_raw']:.3f} vs "
+                  f"std(rtg) {s['rtg_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
+                  f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）")
+            print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
+                  f"（⚠ 别拿它比 rtg：归一化本身就把尺度钉成 1）")
+        print(f"  （用时 {time.perf_counter() - t_v:.1f}s；优势已冻结、不再随 critic 变动）")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
           f"标签侧 {'有' if meta['has_aux'] else '无'}；"
@@ -690,7 +858,9 @@ def train(args) -> dict:
             idx = np.sort(perm[step * args.batch:(step + 1) * args.batch])
             if idx.size == 0:
                 break
-            b = _batch(train_data, idx, device)
+            b = _batch(train_data, idx, device, ablate=ablate or None)
+            if adv_tr is not None:
+                b["vtarget"] = torch.from_numpy(vtar_tr[idx]).to(device)
             ssl = None
             if stage in ("a", "c") and args.mask_frac > 0:
                 evt_masked, mask_rows, target = mask_events(b["evt"], args.mask_frac, rng_gen)
@@ -702,9 +872,10 @@ def train(args) -> dict:
             ppo = None
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
+            adv_b = None if adv_tr is None else torch.from_numpy(adv_tr[idx]).to(device)
             loss, parts = compute_loss(out, b, weights if only else (STAGE_WEIGHTS.get(stage) or weights),
                                        ssl, row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
-                                       policy_temp=p_temp)
+                                       policy_temp=p_temp, adv_fixed=adv_b)
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -722,9 +893,10 @@ def train(args) -> dict:
                 run_parts[k] = run_parts.get(k, 0.0) + v * idx.size
             gstep += 1
         ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
-                      mask_frac=args.mask_frac, value_key=value_key)
+                      mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
+                      extra=val_extra)
         ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
-                           value_key=value_key)
+                           value_key=value_key, ablate=ablate or None, extra=val_extra)
                   if keep_va is not None else None)
         row = {"epoch": epoch, "stage_at_end": cur_stage, "train_loss": run / max(1, seen),
                "train_parts": {k: v / max(1, seen) for k, v in run_parts.items()},
@@ -818,6 +990,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--value-target", choices=["final", "rtg"], default="final",
                     help="值头目标 / 优势回报的来源：final = 整场结果（旧口径）/ "
                          "rtg = **逐决策 reward-to-go**（λ=1 的 GAE 目标；需要新版采集器的轨迹）")
+    # §14 P1：手级 GAE（把小局当时间步、λ<1 + bootstrap）+ 与评测口径对齐的顺位点奖励
+    ap.add_argument("--advantage", choices=["auto", "gae-hand"], default="auto",
+                    help="优势怎么算：auto = 与 --value-target 同源（老行为）/ gae-hand = **手级 GAE**"
+                         "（需要 --behaviour；值头目标自动换成 TD(λ) 回报）")
+    ap.add_argument("--gae-lambda", type=float, default=0.9, help="手级 GAE 的 λ（1.0 = 退化成 rtg）")
+    ap.add_argument("--gae-gamma", type=float, default=1.0, help="手级 GAE 的 γ（半庄只有 8~12 小局）")
+    ap.add_argument("--rank-weight", type=float, default=0.0,
+                    help="整场**顺位点**项的权重（与评测口径 `rank_points` 同量纲；0 = 只用小局收支）")
+    # 消融矩阵（§8.3 / §14 P0）
+    ap.add_argument("--drop-heads", default=None, metavar="H1,H2",
+                    help="**丢掉**点名的头（补集写法：其余头照常训）—— 消融矩阵用")
+    ap.add_argument("--ablate-blocks", default=None, metavar="B1,B2",
+                    help="把点名的输入块整段置 0（`v4 spec` 里登记的块 id）—— 消融矩阵用")
     ap.add_argument("--init", default=None,
                     help="从这份权重起步（ckpt 或 net.bin）—— 缺省随机初始化（纯模仿那几轮的口径）")
     # P1 自监督：掩码事件重建
