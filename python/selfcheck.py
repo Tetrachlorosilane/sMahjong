@@ -2873,6 +2873,43 @@ ok(_ev_fail(dict(_vrow19, ev_delta=0.02), ev_ref=0.0693),
 ok(_ev_fail(dict(_vrow19, ev_delta=0.0), ev_ref=0.0),
    "判据参照：天花板为 0（该口径没有可学的合法信息）时退回绝对门槛 ⇒ **判 FAIL**，不放过")
 
+# ---- 第二十一轮：PPO 数值口径（grad-clip / KL 早停 / 双口径 KL / 优势只归一化一次 / 禁 RWR）----
+# ① 梯度裁剪：返回**裁剪前**范数（日志里要看得出"到底砍没砍"），裁完总范数 ≤ clip；0 = 关
+_gm = torch.nn.Linear(4, 1)
+_gopt = torch.optim.SGD(_gm.parameters(), lr=1.0)
+(_gm(torch.ones(1, 4)) * 100.0).sum().backward()
+_pre = v4_pt._clip_grad(_gopt, 0.5)
+_post = float(torch.sqrt(sum((p.grad ** 2).sum() for p in _gm.parameters())))
+ok(abs(_post - 0.5) < 1e-6 and _pre > 10.0,
+   "PPO 数值口径：grad-clip 把总范数裁到 ε 之内，且**返回裁剪前的范数**（日志要看得出砍没砍）",
+   f"裁剪前 {_pre:.2f} → 裁剪后 {_post:.6f}")
+ok(v4_pt._clip_grad(_gopt, 0.0) != v4_pt._clip_grad(_gopt, 0.0),
+   "PPO 数值口径：`--grad-clip 0` 关闭裁剪（返回 NaN 而不是 0 —— 0 会被读成「范数真的是 0」）")
+# ② KL 早停判据：阈值内不停、越阈值停、`min_steps` 之前不停、NaN 不停
+ok([v4_pt.kl_stop_hit(k, threshold=0.03, step=s, min_steps=100)
+    for k, s in ((0.05, 50), (0.05, 100), (0.01, 200), (float("nan"), 999))] == [False, True, False, False],
+   "PPO 数值口径：KL 早停四条边界（min_steps 之前 / 越阈值 / 阈值内 / NaN 都不误停）")
+ok(not v4_pt.kl_stop_hit(0.9, threshold=0.0, step=999, min_steps=0),
+   "PPO 数值口径：`--kl-early-stop 0` 关闭早停")
+# ③ PPO + RWR 必须当场报错（二次加权是静默失真：clip_frac / kl / gate 全都正常）
+try:
+    v4_pt.assert_ppo_excludes_rwr("ppo", 8.0)
+    ok(False, "PPO 数值口径：PPO + RWR 应当报错")
+except SystemExit as _e21:
+    ok("二次加权" in str(_e21), "PPO 数值口径：PPO + RWR 当场报错（不做二次加权）", str(_e21)[:48])
+v4_pt.assert_ppo_excludes_rwr("ppo", 0.0)                  # 不抛 = 放行
+v4_pt.assert_ppo_excludes_rwr("rwr", 8.0)
+ok(True, "PPO 数值口径：`--rwr-beta 0` 与 `--objective rwr` 都放行（只挡组合）")
+# ④ 优势**只归一化一次**：`norm="none"` 必须逐位等于 `R − E[V]`，`norm="batch"` 才钉成 std≈1
+_av21 = {"value": torch.tensor([1.0, 2.0, 3.0, 4.0])}
+_keep21 = torch.ones(4)
+_out21 = {"value": torch.zeros(4, v4_va.CENTERS.size)}
+_adv_none = v4_pt._advantages(_out21, _av21, _keep21, norm="none")
+_adv_batch = v4_pt._advantages(_out21, _av21, _keep21, norm="batch")
+ok(float(_adv_none.std(unbiased=False)) > 1.0 and abs(float(_adv_batch.std(unbiased=False)) - 1.0) < 1e-5,
+   "PPO 数值口径：`norm=\"none\"` 原样（手级路径已全局归一化过）、`norm=\"batch\"` 才钉成 std≈1",
+   f"none std={float(_adv_none.std(unbiased=False)):.3f} · batch std={float(_adv_batch.std(unbiased=False)):.3f}")
+
 # `rank_points` 的**回填**（`v4.dataset … --backfill-rank`）：老紧凑集补列，且三条不变式必须成立
 #   —— 顺位点只依赖 (game, seat) + 采集目录的 summary.json，不必重算 15 GB 张量。
 _bf_src = _rt_src                                        # 复用上面的小轨迹目录
