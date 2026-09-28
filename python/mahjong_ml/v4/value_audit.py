@@ -190,14 +190,20 @@ def load_model(ckpt: str | Path, device: str) -> M.V4Model:
 
 def audit(data_dir: str | Path, split: str, ckpts: list[str],
           device: str | None = None, batch: int = 2048,
-          value_key: str = "auto") -> dict[str, dict]:
-    """对每个 ckpt 报一份判据表。`value_key="auto"` = 用数据集里可用的一列（优先 `value`）。"""
+          value_key: str = "auto", target: str = "auto") -> dict[str, dict]:
+    """对每个 ckpt 报一份判据表。
+
+    @param value_key 判据按哪一列的目标算（`auto` = 从 ckpt 的 `metrics.json` 读 `value_target`）
+    @param target **主口径**：`auto`（同上）/ `value` / `rtg` / `delta` —— P1b 之后值头可能学的是
+        "本小局收支"（`delta`），拿 `value` 去量它是"用另一把尺子量"（§14.6）
+    """
     data = ds.load_split(data_dir, split)
     lens = {k: (int(data[k].shape[0]) if data.get(k) is not None else -1)
             for k in ("tile", "evt", "ctx", "cand", "nlegal", "value", "label")}
     n = min(v for v in lens.values() if v > 0)
     y = np.asarray(data["value"][:n], dtype=np.float64)
     rtg = np.asarray(data["rtg"][:n], dtype=np.float64) if data.get("rtg") is not None else None
+    value_audit_target = target
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
     groups = round_groups(data["game"][:n], data["hand_no"][:n])
     struct: dict[str, float] = {}
@@ -208,25 +214,32 @@ def audit(data_dir: str | Path, split: str, ckpts: list[str],
     for ck in ckpts:
         model = load_model(ck, dev)
         prob = forward_value(model, data, n, dev, batch)
+        # 这份权重当初按哪个目标训的值头？读 ckpt 旁边的 `metrics.json`（缺了就按整场口径）
+        target = "value"
+        try:
+            meta = json.loads((Path(ck) / "metrics.json").read_text(encoding="utf-8"))
+            vt = str((meta.get("args") or {}).get("value_target", "final"))
+            target = {"rtg": "rtg", "delta": "delta"}.get(vt, "value")
+        except (OSError, ValueError):
+            pass
+        want = target if value_audit_target in ("auto", None) else value_audit_target
+        y = _target_of(data, want, n)[0]           # ★ 主口径：可以不是 `value`（delta / gae 的 vtarget）
         m = metrics(prob, y)
-        m.update(group_metrics(prob @ CENTERS, y, groups))        # CE 与边缘基线（对 value 与 rtg 两个目标各算一次 —— 两者不是同一个量，别混着读）
-        for key, tgt in (("value", y), ("rtg", rtg)):
+        m.update(group_metrics(prob @ CENTERS, y, groups))
+        # CE 与边缘基线（主口径 + `value`/`rtg` 两个副口径 —— 它们不是同一个量，别混着读）
+        for key, tgt in (("value", np.asarray(data["value"][:n], dtype=np.float64)),
+                         ("rtg", rtg),
+                         ("delta", np.asarray(data["delta"][:n], dtype=np.float64) / 1000.0
+                          if data.get("delta") is not None else None)):
             if tgt is None or bool(np.isnan(tgt).all()):
                 continue
             t = M.hl_gauss_targets(torch.from_numpy(tgt).float().to(dev)).cpu().numpy()
             m[f"ce_{key}"] = hl_gauss_ce(prob, t)
             m[f"ce_marginal_{key}"] = marginal_ce(t)
             m[f"ev_{key}"] = explained_variance(prob @ CENTERS, tgt)
+        m["ev"] = m[f"ev_{want}"] if f"ev_{want}" in m else explained_variance(prob @ CENTERS, y)
         name = Path(ck).name
-        # 这份权重当初按哪个目标训的值头？读 ckpt 旁边的 `metrics.json`（缺了就按整场口径）
-        target = "value"
-        try:
-            meta = json.loads((Path(ck) / "metrics.json").read_text(encoding="utf-8"))
-            if str((meta.get("args") or {}).get("value_target", "final")) == "rtg":
-                target = "rtg"
-        except (OSError, ValueError):
-            pass
-        report[name] = {"path": str(ck), "value_target": target, **struct, **m}
+        report[name] = {"path": str(ck), "value_target": target, "target": want, **struct, **m}
     return report
 
 
@@ -247,7 +260,9 @@ def verdicts(row: dict, value_key: str = "value") -> list[tuple[bool, str]]:
     for lvl in (0.5, 0.8, 0.95):
         cov = row.get(f"cov{lvl:g}")
         if cov is not None:
-            out.append((abs(cov - lvl) <= COVERAGE_TOL,
+            # ⚠ 容差要带一点点浮点余量：`0.53 - 0.5 == 0.030000000000000027 > 0.03`
+            #   ⇒ 恰好卡在边界上的覆盖会被判 FAIL（实测 `v4-hand-001` 就这么假红了一次）
+            out.append((abs(cov - lvl) <= COVERAGE_TOL + 1e-9,
                         f"{lvl * 100:g}% 区间覆盖率 {cov:.4f}（标称差 {abs(cov - lvl) * 100:.1f}pp ≤ 3pp）"))
     if row.get("crps") is not None and row.get("crps_climatology") is not None:
         out.append((row["crps"] < row["crps_climatology"],
@@ -364,6 +379,73 @@ def apply_temperature(prob: np.ndarray, temp: float) -> np.ndarray:
     return p / p.sum(axis=1, keepdims=True)
 
 
+def shift_distribution(prob: np.ndarray, shift: float) -> np.ndarray:
+    """把整个分布沿分箱轴**平移** `shift` 格（线性插值后重新归一化）。
+
+    为什么需要它（不只是温度）：温度只改"宽窄"，改不了"系统性偏高/偏低"。实测温度缩放把 95%
+    覆盖率从 0.853 拉到 0.872，但 50%/95% 仍差 5.3/7.9pp —— 剩下那段是**位置**偏差，得靠平移。
+    """
+    if abs(float(shift)) < 1e-12:
+        return np.asarray(prob, dtype=np.float64)
+    p = np.asarray(prob, dtype=np.float64)
+    idx = np.arange(p.shape[1], dtype=np.float64)
+    src = idx - float(shift)                     # 目标格 i 取原分布 src(i) 处（线性插值）
+    lo = np.floor(src).astype(np.int64)
+    frac = (src - lo)[None, :]
+    valid_lo = (lo >= 0) & (lo < p.shape[1])
+    valid_hi = (lo + 1 >= 0) & (lo + 1 < p.shape[1])
+    lo_c = np.clip(lo, 0, p.shape[1] - 1)
+    hi_c = np.clip(lo + 1, 0, p.shape[1] - 1)
+    q = p[:, lo_c] * (1.0 - frac) * valid_lo[None, :] + p[:, hi_c] * frac * valid_hi[None, :]
+    return q / q.sum(axis=1, keepdims=True)
+
+
+def fit_calibration(prob: np.ndarray, *, y: np.ndarray | None = None,
+                    target: np.ndarray | None = None, lo: float = 0.2, hi: float = 8.0,
+                    max_shift: float = 6.0) -> tuple[float, float]:
+    """**loc-scale 两参数校准** `(T, b)`：先用温度定宽窄，再平移定位置。
+
+    两维都很便宜（一维网格 × 一维坐标下降），在**训练切分**上拟合、val 上量效果。
+    @return `(temp, shift)`（`shift` 单位 = 分箱格；分箱宽 = 60/51 ≈ 1.18 千点）
+    """
+    p = np.asarray(prob, dtype=np.float64)
+    yv = None if y is None else np.asarray(y, dtype=np.float64)
+    tg = None if target is None else np.asarray(target, dtype=np.float64)
+
+    def nll(t: float, b: float) -> float:
+        q = shift_distribution(apply_temperature(p, t), b)
+        lq = np.log(np.clip(q, 1e-12, None))
+        if tg is not None:
+            return float(-(tg * lq).sum(-1).mean())
+        idx = np.clip(np.searchsorted(CENTERS, yv), 0, CENTERS.size - 1)
+        return float(-lq[np.arange(lq.shape[0]), idx].mean())
+
+    best = (1.0, 0.0)
+    best_v = nll(1.0, 0.0)
+    for t in np.linspace(lo, hi, 9):
+        for b in np.linspace(-max_shift, max_shift, 13):
+            v = nll(float(t), float(b))
+            if v < best_v:
+                best, best_v = (float(t), float(b)), v
+    # 坐标下降细化
+    t, b = best
+    for _ in range(3):
+        for cand in np.linspace(max(lo, t - 0.2), min(hi, t + 0.2), 9):
+            v = nll(float(cand), b)
+            if v < best_v:
+                t, best_v = float(cand), v
+        for cand in np.linspace(b - 0.3, b + 0.3, 13):
+            v = nll(t, float(cand))
+            if v < best_v:
+                b, best_v = float(cand), v
+    return float(t), float(b)
+
+
+def apply_calibration(prob: np.ndarray, temp: float, shift: float) -> np.ndarray:
+    """`(T, b)` 两参数一起用（顺序：先温度、再平移）。"""
+    return shift_distribution(apply_temperature(prob, temp), shift)
+
+
 def gae_target_report(data_dir: str | Path, split: str, ckpt: str, *, behaviour: str,
                       lam: float = 0.9, rank_weight: float = 0.0, gamma: float = 1.0,
                       device: str | None = None, batch: int = 2048) -> dict[str, Any]:
@@ -397,8 +479,10 @@ def gae_target_report(data_dir: str | Path, split: str, ckpt: str, *, behaviour:
 def calibration_report(data_dir: str | Path, split: str, ckpt: str, *, target: str = "value",
                        rows: int = 20000, device: str | None = None,
                        batch: int = 2048) -> dict[str, Any]:
-    """温度缩放的**前后对照**：温度在**训练切分**上拟合（避免"在 val 上拟合再报 val"的乐观偏差），
-    覆盖率/CRPS/EV 在 val 上报。返回 `{temp, before, after}`。
+    """校准的**前后对照**：参数在**训练切分**上拟合（避免"在 val 上拟合再报 val"的乐观偏差），
+    覆盖率/CRPS/EV 在 val 上报。返回 `{target, temp, shift, before, after_temp, after}`。
+
+    两档都报：**温度**（一个标量，只改宽窄）与 **loc-scale**（温度 + 平移，位置偏差也能修）。
     """
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
     tr = ds.load_split(data_dir, "train")
@@ -409,11 +493,13 @@ def calibration_report(data_dir: str | Path, split: str, ckpt: str, *, target: s
     p_tr = forward_value(model, tr, n_tr, dev, batch)
     y_tr = _target_of(tr, target, n_tr)[0]
     temp = fit_temperature(p_tr, y=y_tr)
+    temp2, shift = fit_calibration(p_tr, y=y_tr)
     p_va = forward_value(model, va, n_va, dev, batch)
     y_va = _target_of(va, target, n_va)[0]
-    return {"target": target, "temp": temp,
+    return {"target": target, "temp": temp, "temp_locscale": temp2, "shift": shift,
             "before": metrics(p_va, y_va),
-            "after": metrics(apply_temperature(p_va, temp), y_va)}
+            "after_temp": metrics(apply_temperature(p_va, temp), y_va),
+            "after": metrics(apply_calibration(p_va, temp2, shift), y_va)}
 
 
 def _native_target(ckpt: str) -> str:
@@ -445,8 +531,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ckpt", action="append", required=True, help="checkpoint 目录（可重复）")
     ap.add_argument("--device", default=None, help="cuda / cpu（缺省自动）")
     ap.add_argument("--batch", type=int, default=2048)
-    ap.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg"],
+    ap.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg", "delta"],
                     help="判据按哪一列的目标算（auto = 该 ckpt 训练时的口径看不出来时用 value）")
+    ap.add_argument("--target", default="auto", choices=["auto", "value", "rtg", "delta"],
+                    help="**主口径**：auto = 与 ckpt 的 `value_target` 同源；"
+                         "P1b 的小局级值头（`--value-target delta`）要用它才量得对")
     ap.add_argument("--out", default=None)
     ap.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     ap.add_argument("--ceiling", action="store_true",
@@ -497,16 +586,17 @@ def main(argv: list[str] | None = None) -> int:
         for ck in args.ckpt:
             rep = calibration_report(args.data, args.split, ck, target=_native_target(ck),
                                      rows=args.calib_rows, device=args.device, batch=args.batch)
-            b, a = rep["before"], rep["after"]
-            print(f"\n温度缩放（{Path(ck).name}，目标 {rep['target']}，"
-                  f"温度在 train 前 {args.calib_rows} 行上拟合）：T = {rep['temp']:.3f}")
-            for k in ("crps", "cov0.5", "cov0.8", "cov0.95", "wid0.5", "wid0.8", "wid0.95", "ev"):
-                mark = ""
-                if k.startswith("cov") and abs(a[k] - float(k[3:])) <= COVERAGE_TOL:
-                    mark = "   ← 覆盖率达标（≤3pp）"
-                print(f"   {k:<10}前 {b[k]:+.4f} → 后 {a[k]:+.4f}{mark}")
+            b, at, a = rep["before"], rep["after_temp"], rep["after"]
+            print(f"\n值头校准（{Path(ck).name}，目标 {rep['target']}，参数在 train 前 "
+                  f"{args.calib_rows} 行上拟合）：温度 T = {rep['temp']:.3f}；"
+                  f"loc-scale T = {rep['temp_locscale']:.3f} + 平移 {rep['shift']:+.2f} 格")
+            for k in ("crps", "cov0.5", "cov0.8", "cov0.95", "wid0.95", "ev"):
+                mark = "   ← 覆盖率达标（≤3pp）" if k.startswith("cov") \
+                    and abs(a[k] - float(k[3:])) <= COVERAGE_TOL else ""
+                print(f"   {k:<9}前 {b[k]:+.4f} → 温度 {at[k]:+.4f} → loc-scale {a[k]:+.4f}{mark}")
 
-    report = audit(args.data, args.split, args.ckpt, device=args.device, batch=args.batch)
+    report = audit(args.data, args.split, args.ckpt, device=args.device, batch=args.batch,
+                   target=args.target)
     bad = False
     for name, row in report.items():
         print(f"\n== {name} （n={int(row['n'])}，训练时的值头目标 {row.get('value_target')}）==")
@@ -521,7 +611,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"   {k:<20}{row[k]:+.4f}")
         key = args.value_key
         if key == "auto":
-            key = str(row.get("value_target", "value"))
+            # 主口径优先（`--target delta` 时判据就该按 delta 读，而不是 ckpt 的 value_target）
+            key = str(row.get("target") or row.get("value_target", "value"))
         print(f"   ---- 判据（口径：{key}）----")
         for passed, text in verdicts(row, key):
             print(f"   [{'ok  ' if passed else 'FAIL'}] {text}")

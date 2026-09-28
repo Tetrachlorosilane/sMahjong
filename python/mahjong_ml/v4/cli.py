@@ -266,6 +266,7 @@ def cmd_value_audit(args: argparse.Namespace) -> int:
     return value_audit.main([
         "--data", args.data, "--split", args.split, "--batch", str(args.batch),
         "--value-key", args.value_key,
+        "--target", getattr(args, "target", "auto"),
         *(["--device", args.device] if args.device else []),
         *(["--out", args.out] if args.out else []),
         *(["--strict"] if args.strict else []),
@@ -317,7 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--ckpt", action="append", required=True, help="checkpoint 目录（可重复）")
     va.add_argument("--device", default=None)
     va.add_argument("--batch", type=int, default=2048)
-    va.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg"])
+    va.add_argument("--value-key", default="auto", choices=["auto", "value", "rtg", "delta"])
+    va.add_argument("--target", default="auto", choices=["auto", "value", "rtg", "delta"],
+                    help="主口径（P1b 的小局级值头用 `--target delta` 量）")
     va.add_argument("--out", default=None)
     va.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     va.add_argument("--ceiling", action="store_true", help="另报引擎真值特征的线性参照")

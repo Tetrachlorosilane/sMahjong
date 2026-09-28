@@ -126,6 +126,10 @@ def _batch(data: dict, idx: np.ndarray, device: str,
         if data.get("rtg") is not None else None,
         "placement": torch.from_numpy(
             np.asarray(data["placement"][idx], dtype=np.int64)).to(device),
+        # `delta`（本小局收支，**点 → 千点**）：P1b 的小局级值头目标（`--value-target delta`）。
+        #   `rtg` 是小局内的常量、`delta` 也是 ⇒ 两者在"同一小局共享一个目标"这点上一致。
+        "delta": torch.from_numpy(np.asarray(data["delta"][idx], dtype=np.float32) / 1000.0).to(device)
+        if data.get("delta") is not None else None,
         "effect": torch.from_numpy(
             np.asarray(data["effect"][idx], dtype=np.float32)).to(device),
         "nlegal": torch.from_numpy(nleg).to(device),
@@ -165,8 +169,19 @@ def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> 
 
 
 def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
-                    rank_weight: float, is_student: np.ndarray | None) -> dict:
-    """手级 GAE（`v4/adv.py`）→ 逐决策的 `(adv, vtarget)` + 体检数字。
+                    rank_weight: float, is_student: np.ndarray | None,
+                    mode: str = "gae") -> dict:
+    """小局级信用分配 → 逐决策的 `(adv, vtarget)` + 体检数字。
+
+    两种模式（`docs/TRAINING-V4.md` §14.6）：
+
+    · **`gae`**（P1 第一版）：奖励 = 本小局收支（+ 终局顺位点），**TD(λ) + bootstrap**（跨小局）。
+      实测：λ-回报的 EV 只到 0.094（`std(A_raw)` 反而 1.24×）—— 因为 λ=0.9 的 λ-回报
+      仍然主要是"未来若干小局的和"，而那一族的可解释上限 ≈0.1（引擎真值线性参照）。
+    · **`hand`**（P1b，证据指向的那一步）：**把时间尺度压到一小局** ——
+      `A = 本小局收支 − V(s)`（**不跨小局 bootstrap**），值头目标就是**本小局收支**本身。
+      依据：本小局收支的可解释方差实测 **0.632**（引擎真值 10 列线性），而多手后缀和只有 0.090。
+      终局的顺位点项**只加在优势上**（不进取值头目标）：顺位点四家零和 ⇒ 期望 0 就是它的基线。
 
     ⚠ 归一化**在这里一次算完**（学生行上的全局 mean/std）：放进每个 batch 里做 z-score 的话
     优势的绝对尺度会随 batch 变，PPO 的 clip ε 就失去语义（§14 P2-②）。
@@ -183,13 +198,25 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
                              "—— 要么补齐 summary.json 重建数据集，要么把 --rank-weight 设 0")
     starts, hand_of_row, next_hand, reward_rows = v4adv.hand_chain(
         data["game"][:n], data["hand_no"][:n], data["seat"][:n])
-    r_h = v4adv.hand_reward(data["delta"][:n], rp[:n] if rp is not None else None,
-                            hand_of_row, next_hand, reward_rows,
-                            rank_weight=rank_weight)
     v_h = np.asarray(v_old, dtype=np.float64)[starts]
-    adv_h, vt_h = v4adv.gae_hand(r_h, v_h, next_hand, gamma=gamma, lam=lam)
-    adv = v4adv.expand_hand(adv_h, hand_of_row)
-    vtarg = v4adv.expand_hand(vt_h, hand_of_row)
+    v_row = v4adv.expand_hand(v_h, hand_of_row)          # 同一小局共享一个 V（小局级 baseline）
+    d_row = np.asarray(data["delta"][:n], dtype=np.float64) / 1000.0
+    rp_row = np.asarray(rp[:n], dtype=np.float64) if rp is not None else None
+    term_hand = next_hand < 0
+    if mode == "hand":
+        adv = d_row - v_row                              # 小局级 baseline，无跨小局 bootstrap
+        vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点）
+        r_h = d_row[reward_rows]
+        if rank_weight and rp_row is not None:
+            adv = adv + rank_weight * np.where(term_hand[hand_of_row], rp_row, 0.0)
+        stat_extra = {"mode": "hand", "bootstrap": 0.0}
+    else:
+        r_h = v4adv.hand_reward(data["delta"][:n], rp_row, hand_of_row, next_hand, reward_rows,
+                                rank_weight=rank_weight)
+        adv_h, vt_h = v4adv.gae_hand(r_h, v_h, next_hand, gamma=gamma, lam=lam)
+        adv = v4adv.expand_hand(adv_h, hand_of_row)
+        vtarg = v4adv.expand_hand(vt_h, hand_of_row)
+        stat_extra = {"mode": "gae", "bootstrap": 1.0}
     keep = None if is_student is None else (np.asarray(is_student[:n]) > 0)
     raw = adv.copy()                       # 归一化**之前**的优势：方差削减要在它上面量
     if keep is not None and keep.any():
@@ -199,24 +226,26 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     stats = {"hands": float(starts.size), "gamma": float(gamma), "lam": float(lam),
              "rank_weight": float(rank_weight), "reward_mean": float(r_h.mean()),
              "reward_std": float(r_h.std()), "v_old_mean": float(v_h.mean()),
-             "v_old_std": float(v_h.std())}
-    rtg = data.get("rtg")
-    if rtg is not None:
-        r = np.asarray(rtg[:n], dtype=np.float64)
-        ref = raw if keep is None else raw[keep]
-        stats.update({
-            # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
-            #   整列 std ≈0.5 ⇒ 拿着它去比 `std(rtg)` 会得到一个"看起来砍掉 95%"的假象
-            #   （第一版就是这么报的：0.054×）。真正该看的是 `raw` 对 `rtg`。
-            "adv_std_raw": float(ref.std()), "rtg_std": float(r.std()),
-            "std_ratio_raw": float(ref.std() / r.std()) if r.std() > 0 else float("nan"),
-            "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
-        })
+             "v_old_std": float(v_h.std()), **stat_extra}
+    ref = raw if keep is None else raw[keep]
+    # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
+    #   整列 std ≈0.5 ⇒ 拿它比参考量会得到"看起来砍掉 95%"的假象（第一版报的 0.054×）。
+    # 参考量按模式选：`hand` 模式的自然参照是**本小局收支**（不是 `rtg`）。
+    if mode == "hand":
+        base = d_row if keep is None else d_row[keep]
+        base_name = "delta"
     else:
-        ref = raw if keep is None else raw[keep]
-        stats.update({"adv_std_raw": float(ref.std()),
-                      "adv_std_norm_student": float(adv[keep].std()) if keep is not None
-                      else float(adv.std())})
+        rtg = data.get("rtg")
+        base = (np.asarray(rtg[:n], dtype=np.float64) if rtg is not None else r_h)
+        if keep is not None and rtg is not None:
+            base = base[keep]
+        base_name = "rtg"
+    stats.update({
+        "base_name": base_name, "base_std": float(np.std(base)),
+        "adv_std_raw": float(ref.std()),
+        "std_ratio_raw": float(ref.std() / np.std(base)) if np.std(base) > 0 else float("nan"),
+        "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
+    })
     return {"adv": adv.astype(np.float32), "vtarget": vtarg.astype(np.float32), "stats": stats}
 
 
@@ -700,6 +729,12 @@ def train(args) -> dict:
             raise SystemExit("--advantage gae-hand 与 `--value-target rtg` 互斥："
                              "手级 GAE 自带值头目标（TD(λ) 回报），请去掉 `--value-target rtg`")
         value_key = "vtarget"
+    elif advantage == "hand":
+        # P1b：时间尺度压到一小局 —— 值头目标 = **本小局收支**（`delta`，千点）
+        if value_key == "rtg":
+            raise SystemExit("--advantage hand 与 `--value-target rtg` 互斥："
+                             "小局级 baseline 的值头目标就是本小局收支，请用 `--value-target delta`")
+        value_key = "delta"
     ablate_blocks = [b.strip() for b in str(getattr(args, "ablate_blocks", "") or "").split(",")
                      if b.strip()]
     ablate: dict[str, list[tuple[int, int]]] = {}
@@ -721,6 +756,8 @@ def train(args) -> dict:
         print("值头/优势口径：**逐决策 reward-to-go**（rtg，千点；λ=1 的 GAE 目标）")
     elif value_key == "vtarget":
         print("值头/优势口径：**手级 GAE**（TD(λ) 回报；`--advantage gae-hand`）")
+    elif value_key == "delta":
+        print("值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）")
     else:
         print("值头/优势口径：整场结果（value = final_scores − 起点；旧口径）")
     keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
@@ -779,14 +816,15 @@ def train(args) -> dict:
     # ---- 手级 GAE（§14 P1）：`--advantage gae-hand` 的预计算（行为策略的 V ⇒ GAE ⇒ 冻结）----
     adv_tr = None
     val_extra: dict[str, np.ndarray] | None = None
-    if advantage == "gae-hand":
+    if advantage in ("gae-hand", "hand"):
+        mode = "gae" if advantage == "gae-hand" else "hand"
         beh = getattr(args, "behaviour", None)
         if not beh:
-            raise SystemExit("--advantage gae-hand 需要 --behaviour <采集用的 ckpt/net.bin>："
+            raise SystemExit(f"--advantage {advantage} 需要 --behaviour <采集用的 ckpt/net.bin>："
                              "V_old 必须来自**行为策略**（与 logp_old 同一份权重）")
         beh_model = _load_behaviour(beh, device)
         t_v = time.perf_counter()
-        print(f"手级 GAE：用行为策略 {beh} 重算 V_old（train {n} / val {nv} 条）…")
+        print(f"小局级优势（{mode}）：用行为策略 {beh} 重算 V_old（train {n} / val {nv} 条）…")
         v_old = _behaviour_values(beh_model, train_data, device, args.eval_batch)
         v_old_va = _behaviour_values(beh_model, val_data, device, args.eval_batch)
         del beh_model
@@ -794,26 +832,26 @@ def train(args) -> dict:
                               lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
                               rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
                               is_student=np.asarray(train_data["is_student"]) if keep_tr is not None
-                              else None)
+                              else None, mode=mode)
         adv_tr = res["adv"]
         vtar_tr = res["vtarget"]
         res_va = _hand_advantage(val_data, v_old_va,
                                  gamma=float(getattr(args, "gae_gamma", 1.0) or 1.0),
                                  lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
                                  rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
-                                 is_student=None)          # val 的 vtarget 不进损失统计的尺度，不归一
+                                 is_student=None, mode=mode)
         val_extra = {"vtarget": res_va["vtarget"]}
         s = res["stats"]
-        print(f"  小局 {int(s['hands'])} 个 / γ={s['gamma']:g} λ={s['lam']:g} "
+        print(f"  小局 {int(s['hands'])} 个 / 模式 {s['mode']} / γ={s['gamma']:g} λ={s['lam']:g} "
               f"rank_weight={s['rank_weight']:g}")
         print(f"  小局奖励：mean {s['reward_mean']:+.3f} std {s['reward_std']:.3f} 千点；"
               f"V_old：mean {s['v_old_mean']:+.3f} std {s['v_old_std']:.3f}")
         if "std_ratio_raw" in s:
             print(f"  优势体检（**归一化之前**）：std(A_raw) {s['adv_std_raw']:.3f} vs "
-                  f"std(rtg) {s['rtg_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
+                  f"std({s['base_name']}) {s['base_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
                   f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）")
             print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
-                  f"（⚠ 别拿它比 rtg：归一化本身就把尺度钉成 1）")
+                  f"（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）")
         print(f"  （用时 {time.perf_counter() - t_v:.1f}s；优势已冻结、不再随 critic 变动）")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
@@ -987,13 +1025,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="行为策略的采样温度（缺省从数据集 meta 的 `student` 串里解析 `#T`，再缺省 1.0）")
     ap.add_argument("--ppo-clip", type=float, default=0.2, help="PPO 截断 ε")
     ap.add_argument("--ppo-entropy", type=float, default=0.01, help="熵奖励系数（学生行上）")
-    ap.add_argument("--value-target", choices=["final", "rtg"], default="final",
+    ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
                     help="值头目标 / 优势回报的来源：final = 整场结果（旧口径）/ "
-                         "rtg = **逐决策 reward-to-go**（λ=1 的 GAE 目标；需要新版采集器的轨迹）")
-    # §14 P1：手级 GAE（把小局当时间步、λ<1 + bootstrap）+ 与评测口径对齐的顺位点奖励
-    ap.add_argument("--advantage", choices=["auto", "gae-hand"], default="auto",
-                    help="优势怎么算：auto = 与 --value-target 同源（老行为）/ gae-hand = **手级 GAE**"
-                         "（需要 --behaviour；值头目标自动换成 TD(λ) 回报）")
+                         "rtg = **逐决策 reward-to-go**（λ=1 的 GAE 目标；需要新版采集器的轨迹）/ "
+                         "delta = **本小局收支**（千点；`--advantage hand` 用它）")
+    # §14 P1/P1b：小局级信用分配（时间步 = 一小局）
+    ap.add_argument("--advantage", choices=["auto", "gae-hand", "hand"], default="auto",
+                    help="优势怎么算：auto = 与 --value-target 同源（老行为）/ gae-hand = 手级 **GAE**"
+                         "（TD(λ)+bootstrap，值头目标自动换成 TD(λ) 回报）/ hand = **小局级 baseline**"
+                         "（A = 本小局收支 − V(s)，不跨小局 bootstrap；值头目标 = 本小局收支）")
     ap.add_argument("--gae-lambda", type=float, default=0.9, help="手级 GAE 的 λ（1.0 = 退化成 rtg）")
     ap.add_argument("--gae-gamma", type=float, default=1.0, help="手级 GAE 的 γ（半庄只有 8~12 小局）")
     ap.add_argument("--rank-weight", type=float, default=0.0,

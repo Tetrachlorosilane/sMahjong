@@ -2599,6 +2599,56 @@ ok(_cov_after > _cov_before, "温度缩放：80% 覆盖率被修好（前 → �
    f"{_cov_before:.2f} → {_cov_after:.2f}")
 eq("温度缩放：T=1 时恒等（不改变任何一格）",
    float(np.abs(v4_va.apply_temperature(_p2, 1.0) - _p2).max()), 0.0)
+# loc-scale（温度 + 平移）：**位置偏差**温度修不了，必须能移
+_p3 = np.zeros((400, v4_va.CENTERS.size))
+_rng3 = np.random.default_rng(1)
+_y3 = _rng3.normal(3.0, 6.0, size=400)                    # 真值均值 +3 千点
+_ix3 = np.argmin(np.abs(v4_va.CENTERS[None, :] - (_y3 - 2.0)[:, None]), axis=1)   # 预测偏 -2
+_p3[np.arange(400), _ix3] = 0.9
+for _off in (-1, 1):
+    _p3[np.arange(400), np.clip(_ix3 + _off, 0, v4_va.CENTERS.size - 1)] = 0.05
+_p3 /= _p3.sum(1, keepdims=True)
+eq("loc-scale：平移 0、温度 1 时恒等",
+   float(np.abs(v4_va.apply_calibration(_p3, 1.0, 0.0) - _p3).max()), 0.0)
+ok(float(np.abs(v4_va.shift_distribution(_p3, 2.0).sum(1) - 1.0).max()) < 1e-9,
+   "loc-scale：平移后每一行仍然归一（概率守恒）")
+_t3, _b3 = v4_va.fit_calibration(_p3, y=_y3)
+ok(_b3 > 0.5, "loc-scale：系统性偏低时拟合出**正的平移**（把分布往上挪）", f"shift={_b3:+.2f}")
+_cr0 = v4_va.metrics(_p3, _y3)["crps"]
+_cr1 = v4_va.metrics(v4_va.apply_calibration(_p3, _t3, _b3), _y3)["crps"]
+ok(_cr1 < _cr0 * 0.6, "loc-scale：位置偏差被修掉后 CRPS 大幅下降（温度单用的对照见上一条）",
+   f"{_cr0:.3f} → {_cr1:.3f}")
+
+# `--advantage hand`（P1b）：A = 本小局收支 − V(s)，值头目标 = 本小局收支（+ 终局顺位点只进优势）
+_ah = {
+    "nlegal": np.full(6, 2, dtype=np.int16),
+    "game": np.array([0, 0, 0, 0, 0, 0], dtype=np.int32),
+    "hand_no": np.array([0, 0, 0, 1, 1, 1], dtype=np.int16),
+    "seat": np.array([0, 1, 2, 0, 1, 2], dtype=np.int8),
+    "delta": np.array([1000, -500, 200, 3000, -1500, 700], dtype=np.int32),
+    "rank_points": np.array([15.0, 5.0, -20.0, 15.0, 5.0, -20.0], dtype=np.float32),
+    "is_student": np.ones(6, dtype=np.int8),
+    "rtg": np.zeros(6, dtype=np.float32),
+}
+_v_old = np.array([0.1, -0.2, 0.4, 0.2, -0.1, 0.3], dtype=np.float64)
+_res_h = v4_pt._hand_advantage(_ah, _v_old, gamma=1.0, lam=0.9, rank_weight=0.0,
+                               is_student=_ah["is_student"], mode="hand")
+eq("小局级 baseline：值头目标 = 本小局收支（千点，逐行）",
+   [round(float(x), 6) for x in _res_h["vtarget"]], [1.0, -0.5, 0.2, 3.0, -1.5, 0.7])
+_st_h = _res_h["stats"]
+ok(abs(_st_h["base_std"] - float(np.std(_ah["delta"] / 1000.0))) < 1e-9
+   and _st_h["base_name"] == "delta",
+   "小局级 baseline：方差参照是**本小局收支**（不是 rtg）", f"base={_st_h['base_name']}")
+_res_h2 = v4_pt._hand_advantage(_ah, _v_old, gamma=1.0, lam=0.9, rank_weight=2.0,
+                                is_student=None, mode="hand")
+# 顺位点只加在**链末尾那一小局**（hand_no=1 的三行）上；且**不进取值头目标**
+eq("小局级 baseline：顺位点项只加在链末尾小局（hand_no=1）",
+   [round(float(a - d / 1000.0 + v), 3) for a, d, v in zip(
+       _res_h2["adv"][3:], _ah["delta"][3:], _v_old[3:])],
+   [round(float(2.0 * rp), 3) for rp in _ah["rank_points"][3:]])
+eq("小局级 baseline：顺位点项**只进优势**，值头目标仍是本小局收支",
+   [round(float(x), 6) for x in _res_h2["vtarget"]], [1.0, -0.5, 0.2, 3.0, -1.5, 0.7])
+
 
 # `rank_points` 的**回填**（`v4.dataset … --backfill-rank`）：老紧凑集补列，且三条不变式必须成立
 #   —— 顺位点只依赖 (game, seat) + 采集目录的 summary.json，不必重算 15 GB 张量。
