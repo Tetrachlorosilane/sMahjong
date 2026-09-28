@@ -69,6 +69,24 @@ public final class V4Policy implements LogitPolicy {
     private final Set<String> allNames = new HashSet<>();
     private final Set<String> used = new HashSet<>();
 
+    /** 增量事件缓存（L2；每份权重一份，按座位分槽）。关掉时走全量路径（判据的基准）。 */
+    private final V4Cache cache = new V4Cache(V4Features.K_EVT);
+    /** 新装的策略实例默认开不开缓存（`--no-v4-cache` 置 false；判据的基准路径）。 */
+    private static boolean cacheDefault = true;
+    private boolean cacheEnabled = cacheDefault;
+    /**
+     * 缓存**深度**（只用于归因与自检，四档的输出必须逐位相同）：
+     * `1` = 只把隐状态改成增量（事件行与 `in_proj` 照旧全算）；`2` = 再复用事件编码行；
+     * `3` = 再复用注意力 `in_proj`（最全）。0 = 等于关缓存（走全量路径）。
+     */
+    private int cacheLevel = 3;
+    /** 全量路径最近一次的冷启动 `h`（自检钩子；见 {@link #cachedHidden}）。 */
+    private float[] lastFullHidden;
+    /** padding 行的常量（零 token 的编码 / 注意力 `in_proj`）——多行共享同一份引用。 */
+    private float[] padTokRow;
+    private float[] padEncRow;
+    private float[] padQkvRow;
+
     // ---------------------------------------------------------------- 加载
     private V4Policy(int dModel, int tileD, int nHeads, int valueBins, String fingerprint,
                      List<String> blocks, Set<String> missingBlocks,
@@ -350,13 +368,216 @@ public final class V4Policy implements LogitPolicy {
     }
 
     /**
-     * 全部七个头，**输入已经拼好的四张量**。
+     * 全部七个头，**输入已经拼好的四张量**（无缓存路径 = 判据④的基准）。
      *
      * <p>分开这一层是为了两件事：① 性能基准要能把"特征"与"网络"分开计时
-     * （P5 验收就是两个数：≤2 ms 特征 + ≤1.5 ms 网络）；② 将来的**增量缓存**
-     * 要复用上一决策的张量（`v4/cache.py` 的 `EventStream`）—— 那时调用方自己拼。
+     * （P5 验收就是两个数：≤2 ms 特征 + ≤1.5 ms 网络）；② **增量缓存**
+     * （{@link #forwardCached}）要把"事件塔"换成只算新行的版本、其余原样复用 ——
+     * 所以这里把事件塔的输出当参数传下去（{@link #forwardWith}）。
      */
     public Map<String, float[]> forwardAll(V4Features.Tensors t) throws IOException {
+        return forwardWith(t, eventTowerFull(t.evt));
+    }
+
+    // ---------------------------------------------------------------- 增量事件缓存
+    /**
+     * 全部七个头，走**增量事件缓存**（`docs/FEATURES-V4.md` §5.3）。
+     *
+     * <p>与 {@link #forwardAll(V4Features.Tensors)} 的关系：**只有事件塔的前半段不同**
+     * （逐行编码 + 注意力 `in_proj` 复用），从 Transformer 的注意力往后是**同一份代码**、
+     * 同一批浮点值 ⇒ 七个头应当**逐位相同**（自检按 `floatToIntBits` 比）。
+     *
+     * <p>三条纪律（设计文档 §5.3）：① 隐状态每小局清零（小局键变了就丢槽）；
+     * ② 缓存必须能从当前 obs 完整重建（{@link V4Cache#overlapOk} 逐行校验，不信"应该是它"）；
+     * ③ 自检/对拍永远拿无缓存路径当基准（{@link #setCacheEnabled}）。
+     */
+    public Map<String, float[]> forwardCached(Map<String, Object> obs) throws IOException {
+        V4Features.Tensors t = V4Features.assemble(obs, missingBlocks);
+        if (!cacheEnabled || !missingBlocks.isEmpty()) {
+            return forwardAll(t);                                // 关掉缓存 / 消融实验：走基准路径
+        }
+        return forwardWith(t, eventTowerCached(obs, t));
+    }
+
+    /**
+     * 增量路径的事件塔：只编码**新事件**的行，并复用上一决策的注意力 `in_proj`。
+     *
+     * <p>复用什么、为什么安全（`v4/cache.py` 的 `EventStream` 同语义）：
+     * 一条事件的 token 行只依赖 `(事件, 自己座位)`，它的 MLP 输出与 `in_proj` 也只依赖这一行
+     * ⇒ 窗口整体左移（新事件在尾部）时，**幸存行可以按引用平移**，只有新增的 `delta` 行要算。
+     * 代价从"每决策 60 行"降到"每决策 delta 行"（实测 delta 的中位数是 1–2）。
+     */
+    private float[][] eventTowerCached(Map<String, Object> obs, V4Features.Tensors t)
+            throws IOException {
+        final int k = cache.window();
+        int seat = V4Features.i(obs.get("seat"), 0);
+        List<Map<String, Object>> ev = V4Features.eventsOf(obs);
+        int events = ev.size();
+        String key = V4Features.handKey(obs);
+        if (key == null) {
+            return eventTowerFull(t.evt);                         // 没有 round 信息 ⇒ 不缓存
+        }
+        V4Cache.Slot s = cache.slot(seat);
+        boolean rebuild = !s.valid || !key.equals(s.handKey);
+        if (!rebuild && (events < s.seen || !cache.overlapOk(s, t.evt, events))) {
+            cache.stale++;
+            rebuild = true;                                       // 前缀对不上：丢掉整个槽
+        }
+        if (rebuild) {
+            cache.cold++;
+            s.clear();
+            s.handKey = key;
+            s.tok = new float[k][];
+            s.enc = new float[k][];
+            s.qkv = new float[k][];
+            s.h = new float[dModel];                              // 冷启动 h=0（每小局清零）
+            s.len = 0;
+            s.seen = 0;
+        } else {
+            cache.hits++;
+        }
+        int delta = events - s.seen;
+        int len = Math.min(events, k);
+        int pad = k - len;                                        // 前部 padding 行数
+        boolean reuseRows = cacheLevel >= 2;
+        boolean reuseQkv = cacheLevel >= 3;
+        if (!rebuild) {
+            int shift = reuseRows ? delta : k;                     // 不复用行 ⇒ 视作整窗失效
+            V4Cache.shiftRows(s.tok, shift);
+            V4Cache.shiftRows(s.enc, shift);
+            V4Cache.shiftRows(s.qkv, shift);
+        }
+        // ① 前部 padding 行：共享常量行（零 token 的编码；值必须与基准路径逐位相同）
+        for (int p = 0; p < pad; p++) {
+            s.tok[p] = padTok();
+            s.enc[p] = padEnc();
+            s.qkv[p] = padQkv();
+        }
+        // ② 真实事件行 [pad, k)：复用时只有新增的 delta 行要算，幸存行按引用平移
+        int first = k - Math.min(delta, k);
+        for (int p = pad; p < k; p++) {
+            if (reuseRows && p < first) {
+                cache.rowsReused++;
+                continue;                                          // 幸存的编码行原位复用
+            }
+            float[] tok = reuseRows ? eventRowOf(ev.get(events - k + p), seat) : t.evt[p];
+            s.tok[p] = tok;
+            s.enc[p] = eventMlpRow(tok);
+            cache.rowsEncoded++;
+        }
+        // ③ 注意力 in_proj：level ≥ 3 复用（幸存行保留平移过来的 `qkv`），否则**逐行重算**
+        if (reuseQkv) {
+            for (int p = Math.max(pad, first); p < k; p++) {
+                s.qkv[p] = eventQkvRow(s.enc[p]);
+            }
+        } else {
+            for (int p = pad; p < k; p++) {
+                s.qkv[p] = eventQkvRow(s.enc[p]);
+            }
+        }
+        // ④ 隐状态：建槽时重放**全部**事件（`EventStream.recompute()` 语义），否则只推进新行
+        float[][] gih = mat("event.cell.weight_ih", 3 * dModel, dModel);
+        float[][] ghh = mat("event.cell.weight_hh", 3 * dModel, dModel);
+        float[] gbi = vec("event.cell.bias_ih", 3 * dModel);
+        float[] gbh = vec("event.cell.bias_hh", 3 * dModel);
+        if (rebuild) {
+            float[] tok = new float[V4Features.C_EVT];
+            for (int i = 0; i < events; i++) {
+                V4Features.eventRow(ev.get(i), seat, tok);
+                s.h = gruStep(eventMlpRow(tok), s.h, gih, ghh, gbi, gbh);
+            }
+        } else {
+            for (int i = s.seen; i < events; i++) {
+                float[] row = (reuseRows && i >= events - k) ? s.enc[k - (events - i)]
+                        : eventMlpRow(eventRowOf(ev.get(i), seat));
+                s.h = gruStep(row, s.h, gih, ghh, gbi, gbh);
+            }
+        }
+        s.seen = events;
+        s.len = len;
+        s.valid = true;
+        return transformerFromQkv(s.enc, s.qkv, "event.tr.layers.0");
+    }
+
+    private float[] eventRowOf(Map<String, Object> event, int seat) {
+        float[] tok = new float[V4Features.C_EVT];
+        V4Features.eventRow(event, seat, tok);
+        return tok;
+    }
+
+    /** 零 token 行（padding 的 token）。 */
+    private float[] padTok() {
+        if (padTokRow == null) {
+            padTokRow = new float[V4Features.C_EVT];
+        }
+        return padTokRow;
+    }
+
+    /** 零 token 行的编码（padding 行常量；`linear(0) == b`）。 */
+    private float[] padEnc() throws IOException {
+        if (padEncRow == null) {
+            padEncRow = eventMlpRow(padTok());
+        }
+        return padEncRow;
+    }
+
+    private float[] padQkv() throws IOException {
+        if (padQkvRow == null) {
+            padQkvRow = eventQkvRow(padEnc());
+        }
+        return padQkvRow;
+    }
+
+    /** 一条事件 token 行 → 事件编码器输出（`event.enc` 两层，**末尾没有 ReLU**）。 */
+    private float[] eventMlpRow(float[] tok) throws IOException {
+        float[] e = new float[dModel];
+        linear(e, tok, mat("event.enc.0.weight", dModel, V4Features.C_EVT),
+                vec("event.enc.0.bias", dModel));
+        relu(e);
+        linear(e, e, mat("event.enc.2.weight", dModel, dModel),
+                vec("event.enc.2.bias", dModel));
+        return e;
+    }
+
+    /** 一行事件表示的注意力 `in_proj`（在 `LayerNorm1` 之后；逐行可缓存的那一块）。 */
+    private float[] eventQkvRow(float[] enc) throws IOException {
+        float[] xn = Arrays.copyOf(enc, dModel);
+        layerNorm(xn, vec("event.tr.layers.0.norm1.weight", dModel),
+                vec("event.tr.layers.0.norm1.bias", dModel));
+        float[] qkv = new float[3 * dModel];
+        float[][] inW = mat("event.tr.layers.0.self_attn.in_proj_weight", 3 * dModel, dModel);
+        float[] inB = vec("event.tr.layers.0.self_attn.in_proj_bias", 3 * dModel);
+        projRows(qkv, xn, inW, inB, 0, 3 * dModel);
+        return qkv;
+    }
+
+    /** 事件塔（全量路径）：喂满 K 个 token 的冷启动 —— 判据④的基准。 */
+    private float[][] eventTowerFull(float[][] evt) throws IOException {
+        float[][] e = new float[evt.length][];
+        for (int i = 0; i < e.length; i++) {
+            e[i] = eventMlpRow(evt[i]);
+        }
+        float[][] gih = mat("event.cell.weight_ih", 3 * dModel, dModel);
+        float[][] ghh = mat("event.cell.weight_hh", 3 * dModel, dModel);
+        float[] gbi = vec("event.cell.bias_ih", 3 * dModel);
+        float[] gbh = vec("event.cell.bias_hh", 3 * dModel);
+        float[] h = new float[dModel];                            // 冷启动 h=0，喂满 K 个 token
+        for (int i = 0; i < e.length; i++) {
+            h = gruStep(e[i], h, gih, ghh, gbi, gbh);
+        }
+        lastFullHidden = h;
+        return transformerLayer(e, "event.tr.layers.0");
+    }
+
+    /**
+     * 七个头的主体：**事件塔的输出从参数进来**（`eTokens[K][dm]`），其余全量共用。
+     *
+     * <p>这就是"增量 == 全量"的判据能成立的原因：两条路径从 Transformer 的注意力往后
+     * 是**同一份代码、同一批浮点值**（`eTokens` 逐位相同）⇒ 七个头逐位相同，
+     * 不是"差一点点"。⚠ 别把这里的顺序改成"看起来等价"的样子（浮点加法不满足结合律）。
+     */
+    private Map<String, float[]> forwardWith(V4Features.Tensors t, float[][] eTokens)
+            throws IOException {
         int n = t.cand.length;
         int dm = dModel;
 
@@ -387,28 +608,6 @@ public final class V4Policy implements LogitPolicy {
         }
         float[] hTilePool = new float[dm];
         linear(hTilePool, pool, mat("tile.proj.weight", dm, tileD), vec("tile.proj.bias", dm));
-
-        // ---- 事件塔
-        float[][] e = new float[V4Features.K_EVT][dm];
-        float[][] ew1 = mat("event.enc.0.weight", dm, V4Features.C_EVT);
-        float[] eb1 = vec("event.enc.0.bias", dm);
-        float[][] ew2 = mat("event.enc.2.weight", dm, dm);
-        float[] eb2 = vec("event.enc.2.bias", dm);
-        for (int i = 0; i < e.length; i++) {
-            linear(e[i], t.evt[i], ew1, eb1);
-            relu(e[i]);
-            linear(e[i], e[i], ew2, eb2);                        // ⚠ 这里**没有** ReLU（与训练一致）
-        }
-        float[][] gih = mat("event.cell.weight_ih", 3 * dm, dm);
-        float[][] ghh = mat("event.cell.weight_hh", 3 * dm, dm);
-        float[] gbi = vec("event.cell.bias_ih", 3 * dm);
-        float[] gbh = vec("event.cell.bias_hh", 3 * dm);
-        float[] h = new float[dm];                               // 冷启动 h=0，喂满 K 个 token
-        for (int i = 0; i < e.length; i++) {
-            h = gruStep(e[i], h, gih, ghh, gbi, gbh);
-        }
-        float[][] x2 = transformerLayer(e, "event.tr.layers.0");
-        float[][] eTokens = x2;
 
         // ---- ctx / cand 编码器
         float[] ctxEmb = mlp(t.ctx, "ctx.net", V4Features.C_CTX, dm);
@@ -511,7 +710,96 @@ public final class V4Policy implements LogitPolicy {
 
     /** 策略头 logits（逐候选，顺序 = `obs.legal`）。 */
     public float[] logits(Map<String, Object> json) throws IOException {
-        return forward(json).get("policy");
+        return (cacheEnabled ? forwardCached(json) : forward(json)).get("policy");
+    }
+
+    // ---------------------------------------------------------------- 缓存的开关与自检钩子
+    /**
+     * 开/关增量事件缓存（**默认开**）。
+     *
+     * <p>设计文档 §5.3 纪律③：自检与对拍**永远用无缓存路径当基准** —— 所以这个开关是判据的一部分，
+     * 不是"调试用的旋钮"。关掉之后 `logits` 走 {@link #forwardAll(Map)}（全量重算）。
+     */
+    public void setCacheEnabled(boolean on) {
+        cacheEnabled = on;
+        if (!on) {
+            cache.clearAll();
+        }
+    }
+
+    /**
+     * 新实例的默认档（`Main --no-v4-cache` 用）。
+     *
+     * <p>只影响**之后**创建的实例 —— 已经在跑的对局不受影响（换档不该悄悄改一份正在用的权重）。
+     */
+    public static void setCacheDefault(boolean on) {
+        cacheDefault = on;
+    }
+
+    public boolean cacheEnabled() {
+        return cacheEnabled;
+    }
+
+    /** 缓存深度（1/2/3；见 {@link #cacheLevel}）。关缓存时无意义。 */
+    public void setCacheLevel(int level) {
+        this.cacheLevel = Math.max(1, Math.min(3, level));
+        cache.clearAll();
+    }
+
+    public int cacheLevel() {
+        return cacheLevel;
+    }
+
+    /** 缓存计数（自检/基准要看"到底命中没有"——全 miss 的缓存等于没写）。 */
+    public String cacheStats() {
+        return cache.stats();
+    }
+
+    public long cacheHits() {
+        return cache.hits;
+    }
+
+    public long cacheCold() {
+        return cache.cold;
+    }
+
+    public long cacheStale() {
+        return cache.stale;
+    }
+
+    public long cacheRowsEncoded() {
+        return cache.rowsEncoded;
+    }
+
+    public long cacheRowsReused() {
+        return cache.rowsReused;
+    }
+
+    public void resetCacheStats() {
+        cache.resetStats();
+    }
+
+    /**
+     * 增量路径的隐状态（该座位当前小局的 carry）。
+     *
+     * <p>⚠ 它与**全量路径**的 `h`（{@link #debugFullHidden()}，窗口 60 个 token 的冷启动）
+     * 是两个不同的量 —— 见 {@code docs/FEATURES-V4.md} §5.3 的口径说明。当前模型里
+     * `h` **不被任何头消费**（融合只读 `eTokens`），所以两者不同不影响任何输出；
+     * 自检把"h 不同但七头逐位相同"钉成一条判据，将来谁把 `h` 接进融合，这条就会红。
+     */
+    public float[] cachedHidden(Map<String, Object> obs) throws IOException {
+        forwardCached(obs);
+        return cache.slot(V4Features.i(obs.get("seat"), 0)).h;
+    }
+
+    /** 全量路径最后一次前向里的冷启动 `h`（自检对比用；见 {@link #cachedHidden}）。 */
+    public float[] debugFullHidden() {
+        return lastFullHidden;
+    }
+
+    /** 缓存槽当前的窗口 token 行（自检用：必须与 `V4Features.eventMatrix` 逐位相同）。 */
+    public float[][] debugCachedWindow(int seat) {
+        return cache.slot(seat).tok;
     }
 
     @Override
@@ -797,21 +1085,39 @@ public final class V4Policy implements LogitPolicy {
     }
 
     /**
-     * `nn.TransformerEncoderLayer(d, nhead, dim_feedforward=2d, dropout=0, norm_first=True)` 一层。
+     * 逐行算 `in_proj(LayerNorm1(x))`（`[len][3d]`）—— **可跨决策缓存**的那一块。
      *
-     * <p>norm_first 的顺序：`x = x + attn(norm1(x))`，再 `x = x + linear2(relu(linear1(norm2(x))))`。
+     * <p>`norm1` 与 `in_proj` 都是逐行运算（不跨行混合）⇒ 只要那一行的输入没变，结果逐位不变。
+     * 事件窗口整体左移时，幸存事件的行按引用平移即可（`V4Cache.shiftRows`）。
      */
-    private float[][] transformerLayer(float[][] x, String prefix) throws IOException {
+    private float[][] attentionQkv(float[][] x, String prefix) throws IOException {
         int len = x.length;
         int d = dModel;
         float[] n1g = vec(prefix + ".norm1.weight", d);
         float[] n1b = vec(prefix + ".norm1.bias", d);
-        float[][] xn = new float[len][d];
+        float[][] inW = mat(prefix + ".self_attn.in_proj_weight", 3 * d, d);
+        float[] inB = vec(prefix + ".self_attn.in_proj_bias", 3 * d);
+        float[][] qkv = new float[len][3 * d];
+        float[] xn = new float[d];
         for (int i = 0; i < len; i++) {
-            xn[i] = Arrays.copyOf(x[i], d);
-            layerNorm(xn[i], n1g, n1b);
+            System.arraycopy(x[i], 0, xn, 0, d);
+            layerNorm(xn, n1g, n1b);
+            projRows(qkv[i], xn, inW, inB, 0, 3 * d);
         }
-        float[][] att = mha(xn, xn, d, prefix + ".self_attn");
+        return qkv;
+    }
+
+    /**
+     * `in_proj` 已算好的那一层（增量缓存路径）：注意力 + `out_proj` + `norm2` + FFN。
+     *
+     * @param x   这一层的输入行（`enc`；必须与 `qkv` 的 `norm1` 输入**逐位对应**）
+     * @param qkv 逐行 `[q|k|v]`（长度 3d）
+     */
+    private float[][] transformerFromQkv(float[][] x, float[][] qkv, String prefix)
+            throws IOException {
+        int len = x.length;
+        int d = dModel;
+        float[][] att = attentionFromQkv(qkv, d, prefix + ".self_attn");
         float[] n2g = vec(prefix + ".norm2.weight", d);
         float[] n2b = vec(prefix + ".norm2.bias", d);
         float[][] f1W = mat(prefix + ".linear1.weight", 2 * d, d);
@@ -836,6 +1142,60 @@ public final class V4Policy implements LogitPolicy {
             }
         }
         return out;
+    }
+
+    /** 注意力 + `out_proj`（`qkv[i]` = 第 i 行的 `[q|k|v]`，三段都是 d）。 */
+    private float[][] attentionFromQkv(float[][] qkv, int d, String prefix) throws IOException {
+        int len = qkv.length;
+        int hd = d / nHeads;
+        float scale = (float) (1.0 / Math.sqrt(hd));
+        float[][] outW = mat(prefix + ".out_proj.weight", d, d);
+        float[] outB = vec(prefix + ".out_proj.bias", d);
+        float[] scores = new float[len];
+        float[][] ctx = new float[len][d];
+        for (int t = 0; t < len; t++) {
+            for (int hh = 0; hh < nHeads; hh++) {
+                int base = hh * hd;
+                for (int s = 0; s < len; s++) {
+                    float sum = 0f;
+                    for (int i = 0; i < hd; i++) {
+                        sum += qkv[t][base + i] * qkv[s][d + base + i];
+                    }
+                    scores[s] = sum * scale;
+                }
+                softmax(scores);
+                for (int i = 0; i < hd; i++) {
+                    float sum = 0f;
+                    for (int s = 0; s < len; s++) {
+                        sum += scores[s] * qkv[s][2 * d + base + i];
+                    }
+                    ctx[t][base + i] = sum;
+                }
+            }
+        }
+        float[][] out = new float[len][d];
+        for (int t = 0; t < len; t++) {
+            linear(out[t], ctx[t], outW, outB);
+        }
+        return out;
+    }
+
+    /**
+     * `nn.TransformerEncoderLayer(d, nhead, dim_feedforward=2d, dropout=0, norm_first=True)` 一层。
+     *
+     * <p>norm_first 的顺序：`x = x + attn(norm1(x))`，再 `x = x + linear2(relu(linear1(norm2(x))))`。
+     */
+    private float[][] transformerLayer(float[][] x, String prefix) throws IOException {
+        return transformerFromQkv(x, attentionQkv(x, prefix), prefix);
+    }
+
+    /** 小局身份与座位（自检/基准要按同一把尺子分组；实现见 `V4Features.handKey`）。 */
+    public static String handKeyOf(Map<String, Object> obs) {
+        return V4Features.handKey(obs);
+    }
+
+    public static int seatOf(Map<String, Object> obs) {
+        return V4Features.i(obs.get("seat"), 0);
     }
 
     /** 头部里那个 `valueBins` 与推理头的宽度（自检读夹具时要用）。 */

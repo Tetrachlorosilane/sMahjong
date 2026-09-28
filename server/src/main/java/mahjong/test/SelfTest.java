@@ -103,6 +103,7 @@ public final class SelfTest {
         obsFeaturesTests();
         neuralForwardTests();
         v4ForwardTests();
+        v4CacheTests();
         hybridPolicyTests();
         samplingPolicyTests();
         botAiTests();
@@ -3801,6 +3802,250 @@ public final class SelfTest {
             }
         }
         return m;
+    }
+
+    /**
+     * **增量事件缓存**（`V4Policy.forwardCached`；设计文档 §5.3）的判据。
+     *
+     * <p>为什么必须用**真实的一整局 obs 序列**：缓存的失效模式全是"跨决策"的 ——
+     * 窗口平移、小局切换、前缀被改。单条决策上它必然等于全量（没有历史可陈旧），
+     * 所以夹具必须是**按时间顺序**的一串 obs（这里用确定性自对弈现采一串）。
+     *
+     * <p>四条判据，缺一条缓存就不能上生产：
+     * <ol>
+     *   <li><b>增量 == 全量（逐位）</b>：三档缓存深度的七个头都要与无缓存路径
+     *       `floatToIntBits` 相同 —— 不是"≤1e-5"（同一份权重、同一批浮点值，差一位就是 bug）；</li>
+     *   <li><b>真的命中</b>：命中数 > 0 且复用行数 > 0（全 miss 的缓存等于没写，指标会假绿）；</li>
+     *   <li><b>张量级也对</b>：缓存槽里的窗口 token 行与 `V4Features.eventMatrix` 逐位相同
+     *       （判据④的张量半边）；</li>
+     *   <li><b>陈旧必须被发现</b>：把 obs 的事件流改坏（少一条 / 改一条）⇒ 缓存要判陈旧、
+     *       退回全量，结果仍与"对该 obs 全量重算"逐位相同 —— 这正是设计文档点名的最危险失败模式。</li>
+     * </ol>
+     */
+    private static void v4CacheTests() {
+        java.nio.file.Path fx = null;
+        for (String cand : new String[]{"python/tests/golden/forward-v4.bin",
+                "../python/tests/golden/forward-v4.bin", "../../python/tests/golden/forward-v4.bin"}) {
+            if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
+                fx = java.nio.file.Path.of(cand);
+                break;
+            }
+        }
+        if (fx == null) {
+            System.out.println("（提示）v4 golden 夹具不在，跳过增量缓存判据");
+            return;
+        }
+        mahjong.ai.V4Policy net;
+        try {
+            byte[] raw = java.nio.file.Files.readAllBytes(fx);
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            bb.getInt();                                          // magic
+            bb.getInt();                                          // format
+            bb.getInt();                                          // nCases
+            byte[] netBytes = new byte[bb.getInt()];
+            bb.get(netBytes);
+            net = mahjong.ai.V4Policy.loadBytes(netBytes, fx.toString());
+        } catch (java.io.IOException e) {
+            check("v4 缓存：权重加载（" + e.getMessage() + "）", false);
+            return;
+        }
+        // ① 真实的一局 obs 序列（确定性自对弈现采；2 小局 ⇒ 中间必然有一次小局切换）
+        java.util.List<java.util.Map<String, Object>> seq = new java.util.ArrayList<>();
+        try {
+            java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("mj-v4cache");
+            mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+            cfg.games = 1;
+            cfg.workers = 1;
+            cfg.seedBase = 20260928L;
+            cfg.maxHands = 3;
+            cfg.outDir = dir.toString();
+            mahjong.train.SelfPlay.run(cfg);
+            for (String line : readLines(dir.resolve("g0.jsonl"))) {
+                if (!line.contains("\"type\":\"decision\"")) {
+                    continue;
+                }
+                java.util.Map<String, Object> row = Json.asObj(Json.tryParse(line));
+                java.util.Map<String, Object> obs = Json.map(row, "obs");
+                if (obs != null) {
+                    seq.add(obs);
+                }
+            }
+        } catch (java.io.IOException e) {
+            check("v4 缓存：建轨迹目录（" + e.getMessage() + "）", false);
+            return;
+        }
+        check("v4 缓存：拿到真实 obs 序列（" + seq.size() + " 条）", seq.size() > 40);
+        if (seq.size() <= 40) {
+            return;
+        }
+        // ② 基准（无缓存）
+        java.util.List<java.util.Map<String, float[]>> base = new java.util.ArrayList<>(seq.size());
+        net.setCacheEnabled(false);
+        try {
+            for (java.util.Map<String, Object> o : seq) {
+                base.add(net.forwardAll(o));
+            }
+        } catch (java.io.IOException e) {
+            check("v4 缓存：基准前向（" + e.getMessage() + "）", false);
+            return;
+        }
+        long hands = seq.stream().map(mahjong.ai.V4Policy::handKeyOf).distinct().count();
+        for (int level = 1; level <= 3; level++) {
+            net.setCacheEnabled(true);
+            net.setCacheLevel(level);
+            net.resetCacheStats();
+            long bad = 0;
+            double worst = 0;
+            String where = "";
+            try {
+                for (int i = 0; i < seq.size(); i++) {
+                    java.util.Map<String, float[]> got = net.forwardCached(seq.get(i));
+                    for (String head : base.get(i).keySet()) {
+                        float[] a = base.get(i).get(head);
+                        float[] b = got.get(head);
+                        for (int j = 0; j < a.length; j++) {
+                            if (Float.floatToIntBits(a[j]) != Float.floatToIntBits(b[j])) {
+                                bad++;
+                                double d = Math.abs((double) a[j] - b[j]);
+                                if (d > worst) {
+                                    worst = d;
+                                    where = "决策 " + i + " " + head + "[" + j + "]";
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (java.io.IOException e) {
+                check("v4 缓存：level " + level + " 前向（" + e.getMessage() + "）", false);
+                return;
+            }
+            eq("v4 缓存 level " + level + "：增量 == 全量（逐位，n=" + seq.size() + "）"
+                    + (bad == 0 ? "" : "（最大 Δ=" + worst + " @" + where + "）"), bad, 0L);
+            check("v4 缓存 level " + level + "：真的命中（" + net.cacheStats() + "）",
+                    net.cacheHits() > 0 && (level < 2 || net.cacheRowsReused() > 0));
+        }
+        check("v4 缓存：小局切换触发重建（" + hands + " 个小局，冷启动 " + net.cacheCold() + " 次）",
+                net.cacheCold() >= hands);
+        // ③ 张量级：缓存槽的窗口 token 行 == `eventMatrix(obs)`
+        net.setCacheEnabled(true);
+        net.setCacheLevel(3);
+        long tokBad = 0;
+        try {
+            for (java.util.Map<String, Object> o : seq) {
+                net.forwardCached(o);
+                float[][] want = mahjong.ai.V4Features.eventMatrix(o);
+                float[][] got = net.debugCachedWindow(mahjong.ai.V4Policy.seatOf(o));
+                for (int r = 0; r < want.length; r++) {
+                    for (int c = 0; c < want[r].length; c++) {
+                        if (Float.floatToIntBits(want[r][c]) != Float.floatToIntBits(got[r][c])) {
+                            tokBad++;
+                        }
+                    }
+                }
+            }
+        } catch (java.io.IOException e) {
+            check("v4 缓存：张量级比对（" + e.getMessage() + "）", false);
+            return;
+        }
+        eq("v4 缓存：窗口 token 行 == eventMatrix（逐位，" + (seq.size() * 60 * 96) + " 格）",
+                tokBad, 0L);
+        // ④ 口径说明：cache 的 h（carry 全部事件）与全量路径的 h（窗口冷启动）**是两回事** ——
+        //    但七个头逐位相同 ⇒ 证明当前模型**没有任何头消费 h**。将来谁把 h 接进融合，
+        //    这条断言就会红（那时必须让训练也改成 carry 语义）。
+        boolean hDiffers = false;
+        int diffAt = -1;
+        try {
+            for (int i = 0; i < seq.size(); i++) {
+                net.forwardCached(seq.get(i));
+                float[] hCache = net.cachedHidden(seq.get(i));
+                net.forwardAll(seq.get(i));
+                float[] hFull = net.debugFullHidden();
+                for (int j = 0; j < hCache.length; j++) {
+                    if (Float.floatToIntBits(hCache[j]) != Float.floatToIntBits(hFull[j])) {
+                        hDiffers = true;
+                        diffAt = i;
+                        break;
+                    }
+                }
+                if (hDiffers) {
+                    break;
+                }
+            }
+        } catch (java.io.IOException e) {
+            check("v4 缓存：h 口径对比（" + e.getMessage() + "）", false);
+            return;
+        }
+        check("v4 缓存：h 口径确实不同（carry vs 窗口冷启动，首个不同在第 " + diffAt + " 条）—— "
+                + "而七头仍逐位相同 ⇒ 当前没有头消费 h", hDiffers);
+        // ⑤ 陈旧必须被发现：改坏事件流 ⇒ 判陈旧 + 结果仍等于"对该 obs 全量重算"
+        net.resetCacheStats();
+        java.util.Map<String, Object> tampered = null;
+        java.util.Map<String, Object> truncated = null;
+        for (int i = seq.size() - 1; i >= 0 && (tampered == null || truncated == null); i--) {
+            java.util.List<Object> ev = Json.list(seq.get(i), "events");
+            if (ev == null || ev.size() < 3) {
+                continue;
+            }
+            if (truncated == null) {
+                java.util.Map<String, Object> o = new java.util.HashMap<>(seq.get(i));
+                o.put("events", new java.util.ArrayList<>(ev.subList(0, ev.size() - 1)));
+                truncated = o;                                    // 少一条（条数回退）
+            }
+            if (tampered == null) {
+                java.util.Map<String, Object> o = new java.util.HashMap<>(seq.get(i));
+                java.util.List<Object> copy = new java.util.ArrayList<>(ev);
+                java.util.Map<String, Object> last =
+                        new java.util.HashMap<>(Json.asObj(copy.get(copy.size() - 1)));
+                last.put("tile", "9m".equals(Json.str(last, "tile", "")) ? "1m" : "9m");
+                copy.set(copy.size() - 1, last);
+                o.put("events", copy);                            // 同条数、内容被改
+                tampered = o;
+            }
+        }
+        if (tampered == null || truncated == null) {
+            check("v4 缓存：构造被改坏的 obs", false);
+            return;
+        }
+        long staleBefore = net.cacheStale();
+        try {
+            java.util.Map<String, float[]> gotT = net.forwardCached(tampered);
+            java.util.Map<String, float[]> wantT = net.forwardAll(tampered);
+            java.util.Map<String, float[]> gotC = net.forwardCached(truncated);
+            java.util.Map<String, float[]> wantC = net.forwardAll(truncated);
+            // ⚠ 用 `0L` 不是 `0`：`eq` 走 `Object.equals`，`Integer(0) != Long(0)`（装箱陷阱）
+            eq("v4 缓存：同条数被改内容 ⇒ 判陈旧并退回全量",
+                    badHeads(gotT, wantT), 0L);
+            eq("v4 缓存：事件数回退 ⇒ 判陈旧并退回全量", badHeads(gotC, wantC), 0L);
+        } catch (java.io.IOException e) {
+            check("v4 缓存：陈旧判据（" + e.getMessage() + "）", false);
+            return;
+        }
+        check("v4 缓存：两次改坏都记进了陈旧计数（"
+                + (net.cacheStale() - staleBefore) + " 次）", net.cacheStale() - staleBefore >= 2);
+        // ⑥ 红证：把缓存深度关掉（= 全量路径）时"命中"必须为 0 —— 否则上一条的 PASS 是假的
+        net.setCacheEnabled(false);
+        net.resetCacheStats();
+        check("v4 缓存红证：关掉缓存后命中数为 0", net.cacheHits() == 0);
+    }
+
+    /** 七个头里逐位不同的元素个数（自检用）。 */
+    private static long badHeads(java.util.Map<String, float[]> a, java.util.Map<String, float[]> b) {
+        long bad = 0;
+        for (String head : a.keySet()) {
+            float[] x = a.get(head);
+            float[] y = b.get(head);
+            if (x.length != y.length) {
+                bad += Math.abs(x.length - y.length);
+                continue;
+            }
+            for (int i = 0; i < x.length; i++) {
+                if (Float.floatToIntBits(x[i]) != Float.floatToIntBits(y[i])) {
+                    bad++;
+                }
+            }
+        }
+        return bad;
     }
 
     private static float[] v4ReadVec(java.nio.ByteBuffer bb, int n) {

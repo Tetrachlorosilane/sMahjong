@@ -408,51 +408,75 @@ public final class V4Features {
 
     // ---------------------------------------------------------------- evt
     /** [60][96]：最近 K 条公开事件，**新的在尾部**（与增量缓存同序）。 */
-    static float[][] eventMatrix(Map<String, Object> obs) {
+    public static float[][] eventMatrix(Map<String, Object> obs) {
         float[][] out = new float[K_EVT][C_EVT];
         List<Map<String, Object>> events = eventsOf(obs);
         int seat = i(obs.get("seat"), 0);
         int m = Math.min(events.size(), K_EVT);
         for (int x = 0; x < m; x++) {
-            Map<String, Object> e = events.get(events.size() - m + x);
-            float[] row = out[K_EVT - m + x];
-            String t = str(e.get("type"));
-            for (int i = 0; i < EVT_TYPES.length; i++) {
-                if (EVT_TYPES[i].equals(t)) {
-                    row[evtOff("type") + i] = 1f;
-                }
-            }
-            int tk = Tiles.parseKind(str(e.get("tile")));
-            if (tk >= 0) {
-                row[evtOff("tile_kind") + tk] = 1f;
-            }
-            int ck = Tiles.parseKind(str(e.get("called_tile")));
-            if (ck >= 0) {
-                row[evtOff("called_kind") + ck] = 1f;
-            }
-            Object actor = e.get("actor");
-            if (actor != null) {
-                row[evtOff("actor") + Math.floorMod(i(actor, 0) - seat, N_PLAYERS)] = 1f;
-            }
-            Object src = e.get("from");
-            if (src != null) {
-                row[evtOff("from") + Math.floorMod(i(src, 0) - seat, N_PLAYERS)] = 1f;
-            }
-            String mk = str(e.get("meld_kind"));
-            for (int i = 0; i < MELD_KINDS.length; i++) {
-                if (MELD_KINDS[i].equals(mk)) {
-                    row[evtOff("meld_kind") + i] = 1f;
-                }
-            }
-            row[evtOff("tile_aka")] = str(e.get("tile")).startsWith("0") ? 1f : 0f;
-            row[evtOff("called_aka")] = str(e.get("called_tile")).startsWith("0") ? 1f : 0f;
-            row[evtOff("turn")] = i(e.get("turn"), 0) / 18f;
-            row[evtOff("tsumogiri")] = bool(e.get("tsumogiri")) ? 1f : 0f;
-            row[evtOff("sideways")] = bool(e.get("sideways")) ? 1f : 0f;
-            row[evtOff("rip_phase")] = bool(e.get("rip_phase")) ? 1f : 0f;
-            row[evtOff("seq_delta")] = (float) (Math.min(d(e.get("seq_delta"), 1.0), 8.0) / 8.0);
+            eventRow(events.get(events.size() - m + x), seat, out[K_EVT - m + x]);
         }
         return out;
+    }
+
+    /**
+     * **一条事件**的 token 行（`eventMatrix` 的逐行版本）。
+     *
+     * <p>为什么要单独一份：增量事件缓存（`V4Cache` / `docs/FEATURES-V4.md` §5.3）每决策只编码
+     * **新增**的那几条事件 —— 逐行函数是"同一份实现、两种调用"的前提（另写一份必然漂移，
+     * 而漂移的症状是"缓存看起来正常、结果差一点点"）。⚠ 行内容只依赖 `(事件, seat)`，
+     * **不依赖窗口位置或其它事件** ⇒ 前缀可以安全复用（这是缓存成立的唯一前提）。
+     */
+    static void eventRow(Map<String, Object> e, int seat, float[] row) {
+        String t = str(e.get("type"));
+        for (int i = 0; i < EVT_TYPES.length; i++) {
+            if (EVT_TYPES[i].equals(t)) {
+                row[evtOff("type") + i] = 1f;
+            }
+        }
+        int tk = Tiles.parseKind(str(e.get("tile")));
+        if (tk >= 0) {
+            row[evtOff("tile_kind") + tk] = 1f;
+        }
+        int ck = Tiles.parseKind(str(e.get("called_tile")));
+        if (ck >= 0) {
+            row[evtOff("called_kind") + ck] = 1f;
+        }
+        Object actor = e.get("actor");
+        if (actor != null) {
+            row[evtOff("actor") + Math.floorMod(i(actor, 0) - seat, N_PLAYERS)] = 1f;
+        }
+        Object src = e.get("from");
+        if (src != null) {
+            row[evtOff("from") + Math.floorMod(i(src, 0) - seat, N_PLAYERS)] = 1f;
+        }
+        String mk = str(e.get("meld_kind"));
+        for (int i = 0; i < MELD_KINDS.length; i++) {
+            if (MELD_KINDS[i].equals(mk)) {
+                row[evtOff("meld_kind") + i] = 1f;
+            }
+        }
+        row[evtOff("tile_aka")] = str(e.get("tile")).startsWith("0") ? 1f : 0f;
+        row[evtOff("called_aka")] = str(e.get("called_tile")).startsWith("0") ? 1f : 0f;
+        row[evtOff("turn")] = i(e.get("turn"), 0) / 18f;
+        row[evtOff("tsumogiri")] = bool(e.get("tsumogiri")) ? 1f : 0f;
+        row[evtOff("sideways")] = bool(e.get("sideways")) ? 1f : 0f;
+        row[evtOff("rip_phase")] = bool(e.get("rip_phase")) ? 1f : 0f;
+        row[evtOff("seq_delta")] = (float) (Math.min(d(e.get("seq_delta"), 1.0), 8.0) / 8.0);
+    }
+
+    /**
+     * 小局身份（增量缓存的失效键）：`场风-几局-本场@座位`。
+     *
+     * <p>`round` 缺失时返回 `null` ⇒ **不使用缓存**（宁可不省，也不能拿上一局的窗口当这一局的）。
+     */
+    static String handKey(Map<String, Object> obs) {        // 包内（自检经 V4Policy 钩子读）
+        Map<String, Object> rnd = map(obs.get("round"));
+        if (rnd == null) {
+            return null;
+        }
+        return str(rnd.get("bakaze")) + "-" + i(rnd.get("kyoku"), 0) + "-" + i(rnd.get("honba"), 0)
+                + "@" + i(obs.get("seat"), 0);
     }
 
     static int evtOff(String field) {

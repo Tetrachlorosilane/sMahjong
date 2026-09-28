@@ -67,6 +67,9 @@ public final class V4Probe {
         if ("--bench".equals(args[0])) {
             System.exit(bench(args));
         }
+        if ("--cache".equals(args[0])) {
+            System.exit(cache(args));
+        }
         System.exit(payload(args));
     }
 
@@ -126,6 +129,110 @@ public final class V4Probe {
                         + "（P5 验收：特征 ≤2 ms + 网络 ≤1.5 ms）",
                 n, feat, fwd, 1000.0 / (feat + fwd)));
         return 0;
+    }
+
+    // ---------------------------------------------------------------- ② 增量事件缓存
+    /**
+     * `--cache <net.bin> <corpus.jsonl> [n]`：**增量 == 全量**的判据 + 三档缓存的耗时（P5 性能项）。
+     *
+     * <p>判据分两半，缺一不可：
+     * <ul>
+     *   <li>**正确性**：按**决策顺序**喂同一份语料，缓存路径的七个头与无缓存路径**逐位**相同
+     *       （用 `Float.floatToIntBits` 比，不是"≤1e-5"—— 同一份权重、同一批浮点值，差一位就是有 bug）；</li>
+     *   <li>**有效性**：`ms/决策` 要有可比的下降，且缓存计数要**真的命中**（全 miss 的缓存等于没写）。</li>
+     * </ul>
+     * 三档（`V4Policy.setCacheLevel`）用来归因：1 = 只增量隐状态、2 = 再复用事件编码行、
+     * 3 = 再复用注意力 `in_proj`。三档的输出都必须与基准逐位相同。
+     */
+    private static int cache(String[] args) throws IOException {
+        if (args.length < 3) {
+            System.err.println("用法：tools.V4Probe --cache <net.bin> <corpus.jsonl> [条数上限]");
+            return EXIT_USAGE;
+        }
+        int limit = args.length > 3 ? Integer.parseInt(args[3]) : 2000;
+        V4Policy net = V4Policy.load(Path.of(args[1]));
+        java.util.List<Map<String, Object>> obs = new ArrayList<>();
+        try (BufferedReader r = Files.newBufferedReader(Path.of(args[2]), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = r.readLine()) != null && obs.size() < limit) {
+                Map<String, Object> row = Json.asObj(Json.tryParse(line.trim()));
+                if (row == null || !"decision".equals(Json.str(row, "type", ""))) {
+                    continue;
+                }
+                Map<String, Object> o = Json.map(row, "obs");
+                if (o != null) {
+                    obs.add(o);
+                }
+            }
+        }
+        if (obs.isEmpty()) {
+            System.err.println("[V4Probe] 语料里没有 decision 行");
+            return EXIT_ERROR;
+        }
+        // 基准：无缓存路径（判据④的左半边）
+        net.setCacheEnabled(false);
+        for (int i = 0; i < Math.min(20, obs.size()); i++) {
+            net.forwardAll(obs.get(i));                          // 预热（JIT + 类加载）
+        }
+        java.util.List<Map<String, float[]>> base = new ArrayList<>(obs.size());
+        long t0 = System.nanoTime();
+        for (Map<String, Object> o : obs) {
+            base.add(net.forwardAll(o));
+        }
+        long t1 = System.nanoTime();
+        double baseMs = (t1 - t0) / 1e6 / obs.size();
+        System.out.println(String.format(Locale.ROOT,
+                "基准（无缓存）%.2f ms/决策（n=%d），七头逐位比较如下：", baseMs, obs.size()));
+        boolean allOk = true;
+        for (int level = 1; level <= 3; level++) {
+            net.setCacheEnabled(true);
+            net.setCacheLevel(level);
+            net.resetCacheStats();
+            for (int i = 0; i < Math.min(20, obs.size()); i++) {
+                net.forwardCached(obs.get(i));
+            }
+            net.resetCacheStats();
+            long bad = 0;
+            double worst = 0;
+            String where = "";
+            long t2 = System.nanoTime();
+            for (int i = 0; i < obs.size(); i++) {
+                Map<String, float[]> got = net.forwardCached(obs.get(i));
+                Map<String, float[]> want = base.get(i);
+                for (String head : want.keySet()) {
+                    float[] a = want.get(head);
+                    float[] b = got.get(head);
+                    if (a.length != b.length) {
+                        bad++;
+                        where = head + " 长度 " + b.length + " != " + a.length;
+                        continue;
+                    }
+                    for (int j = 0; j < a.length; j++) {
+                        if (Float.floatToIntBits(a[j]) != Float.floatToIntBits(b[j])) {
+                            bad++;
+                            double d = Math.abs((double) a[j] - b[j]);
+                            if (d > worst) {
+                                worst = d;
+                                where = head + "[" + j + "]";
+                            }
+                        }
+                    }
+                }
+            }
+            long t3 = System.nanoTime();
+            double ms = (t3 - t2) / 1e6 / obs.size();
+            boolean ok = bad == 0;
+            allOk = allOk && ok;
+            System.out.println(String.format(Locale.ROOT,
+                    "  level %d：%.2f ms/决策（%.1f×）| 逐位不一致 %d 处%s | %s",
+                    level, ms, baseMs / ms, bad,
+                    bad == 0 ? "" : "（最大 Δ=" + String.format(Locale.ROOT, "%.3g", worst)
+                            + " @" + where + "）",
+                    net.cacheStats()));
+        }
+        System.out.println(allOk ? "[V4Probe] 增量 == 全量（逐位）PASS"
+                : "[V4Probe] 增量 == 全量 FAIL");
+        return allOk ? 0 : EXIT_ERROR;
     }
 
     // ---------------------------------------------------------------- ① 对拍载荷

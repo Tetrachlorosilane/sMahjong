@@ -256,8 +256,8 @@ python -m mahjong_ml.packbot --out bot-ai `
 > `NetWeights` 按 `format` 分派到 `V4Policy`，`python -m mahjong_ml.packbot --from-ckpt <v4 ckpt 目录>`
 > 会自动走 `v4/export.py`。⚠ 三条限制：
 > ① **v4 的 `--alpha auto` 未实现**（让位曲线是 v3 的 state/cand 口径）—— 传了直接报错，请用 `--alpha <数值>`；
-> ② v4 前向实测 ≈35–40 ms/决策（单线程 Java，见 `docs/TRAINING-V4.md` §P5），
-> **当 bot 可以、当自对弈主力还太慢**（v4 采集仍然用 C++/Java 的 teacher 或 v3 网当对手）；
+> ② v4 前向实测 ≈**26 ms/决策（含特征；上了增量事件缓存之后，2026-09-28：38.1 → 22.5 ms，
+> 见 `docs/TRAINING-V4.md` §5.3）**—— **当 bot 可以、当自对弈主力还是太慢**（v3 约 1 ms）；
 > ③ 权重文件 5.2 MB/个（v3 是 1.0 MB），所以 v4 的包与"一包全给"都比 v1.11.0 大一个量级。
 > ⚠ **v4 三个包与 teacher 的实测强弱**：`v4-p3-001` 与 teacher **证不出差别**，`v4-ppo-001`
 > **略低于** teacher（Δ=−3.54 顺位点，CI 排除 0）—— 也就是说 **v4 谱系目前还没有一代打出

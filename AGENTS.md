@@ -199,7 +199,7 @@ Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 
 
 ```powershell
 java -jar server\build\mahjong-server.jar --selftest
-# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1429 项）
+# 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1443 项）
 ```
 
 覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
@@ -253,7 +253,7 @@ node tools\bot-ai-test.mjs 127.0.0.1 10086       # 机器人 AI：清单/建房 
 node tools\check-i18n.mjs        # 服务端每个码都有客户端译文（词表哨兵）
 node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
-node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4 前向对拍 = trainer-v4-parity.mjs
+node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4：前向 = trainer-v4-parity.mjs、增量缓存 = v4-cache-check.mjs
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
 node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受
@@ -510,25 +510,19 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   `1..4` 的排列（同点按座次拆开）。
 - **不给服务端加 ML 依赖**（Maven/ONNX/PyTorch）：外面训练、导出权重、**纯 Java 手写前向**。
 - **改产出格式就三处一起改**：`TraceRecorder` / PROTOCOL §8.4 / `tools/selfplay-check.mjs`。
-- **P2 DAgger 轮的对比口径**（判据）：`--teacher-label`（学生座位额外记 `teacher` / `teacher_index`）
-  + `python -m mahjong_ml.dagger` 编排一轮。⚠ 三条不许省：① **对比只能在"两个模型都没训过"的
-  场次上做**（受控切分与硬闸门见 NOTES）；② 显著性**按场聚类**；③ 必须带**同数据量的 BC-only 对照臂**。
-  细节见 NOTES §6.5。
-- **P5b 混合（teacher 先验）**：策略串 `net:<权重文件>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`。
-  ① **先验只能加在 logit 上**（α 极大 ⇒ argmax 必是老师那条 ⇒ "不会比老师差"是**构造出来的**）；
-  ② 混合必须是 **`Policy` 级组合**（与 `TEACHER` 同级）而**不是 `ActionPolicy`** ——
-  先验要调 `Bot.decide(Round, …)`，而 `ActionPolicy` 是故意拿不到 `Round` 的；
-  ③ α 随**训练过的网**的 logit 尺度走，别照抄常数（未训练的网 α=0.25 就 100% 让位）——
-  用 `python -m mahjong_ml.hybrid` 量"让位曲线"再选。回归：`SelfTest.hybridPolicyTests`。
+- **P2 DAgger 轮**：`--teacher-label`（学生座位另记 `teacher`/`teacher_index`）+ `python -m mahjong_ml.dagger`。
+  ⚠ 三条不许省：① 对比只用"两个模型都没训过"的场次；② 显著性**按场聚类**；③ 带同数据量的 BC-only 对照臂。
+- **P5b 混合（teacher 先验）**：`net:<权重文件>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`。
+  ① 先验**只加在 logit 上**（α 极大 ⇒ 必是老师那条 ⇒ "不会比老师差"是构造出来的）；
+  ② 必须是 **`Policy` 级组合**（`ActionPolicy` 拿不到 `Round`）；③ α 随**训练过的网**的 logit 尺度走
+  （别照抄常数）。回归：`SelfTest.hybridPolicyTests` + NOTES §6.5。
 - **P4 探索口**：策略串 `net:<权重文件>[@<α>][#<T>]` = 按温度从 `softmax(logits/T)` 采样
   （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
   （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另三条硬口径：**λ=1**、
   **优势只在 `is_student==1` 的行上归一化**、**两边同一个 `softmax(logits/T)`**
   （温度只作用一侧 ⇒ 整网 NaN；`inf×0` 与四道闸门见 NOTES §6.5 第十轮）。
-  ⚠ **跨代对局（对手也是网络）必须让紧凑集只把"这一轮
-  被训练的策略"算作学生**（`dataset build --student <学生的确切策略串>`；`online run` 自动传）——
-  缺省口径是"任何 `net:`"，会把**对手网的决策算进策略损失**（实测学生行占比 0.75 而非 0.25，静默）。
-  回归：`SelfTest.samplingPolicyTests` + `python/selfcheck.py` 的 P4 组。
+  ⚠ **跨代对局**：`dataset build --student <这一轮学生的确切策略串>`（缺省"任何 `net:`"会把对手网的决策
+  算进策略损失；实测学生行 0.75 而非 0.25，静默）。回归：`SelfTest.samplingPolicyTests` + `selfcheck` P4 组。
 - **特征 v3（2026-09）**：state **615** = 544 + 71（`VERSION=3`）。三条硬判据：① 四家块**旋转到自己为
   下标 0**（不旋转就没有"哪一格是我"的锚）；② 状态段只放**便宜且别处没有**的派生量（完整
   `HandEval.of` ≈0.94 ms/决策 ⇒ **进张留在逐候选段**）；③ sidecar 逐决策段 **int16**，老 607 维
@@ -537,6 +531,9 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   越档直接掉进 45 分钟那档）：场次由 `budget.py` 从**台账实测回填**反推 + 闸门夹逼（**点名谁限制的**）；
   跨代选人与续训见 NOTES §6.5（`online screen` / `--opponents` / `--student-seats`）。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
+- **v4 前向的增量事件缓存**（默认开，`--no-v4-cache` 关）：判据必须**成对** —— **增量 == 全量（逐位）**
+  *且* **真的命中**（只有"相等"是假绿：退回全量的结果当然等于全量）。回归：`SelfTest.v4CacheTests`
+  + `tools\v4-cache-check.mjs`（同种子开/关缓存 ⇒ 轨迹逐字节）。细节见 NOTES §6.5 第十一轮。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-selfplay-parity.mjs`），
   不是"能跑"。C++ 侧还没实现的（`--teacher-label`、`net:` 的 `@α` 先验）**显式报错**，不悄悄降级；

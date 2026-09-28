@@ -1178,6 +1178,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--hands <n>` | 每场最多 n 个小局（0 = 完整半庄；冒烟测试用） |
 | `--aux` | **额外**落标签侧文件 `g<序号>.aux.npz`（`FEATURES-V4.md` §5.2：对手手牌/听牌、放铳、和了、顺位）。⚠ **不改轨迹**：同一颗种子开不开它，`g*.jsonl` 逐字节相同（自检钉着）。C++ 生产者**未实现** → 显式报错 |
 | `--preset <name>` | 规则预设：`mleague` / `tenhou` / `majsoul` / `custom` |
+| `--no-v4-cache` | 关掉 v4 网络的**增量事件缓存**（默认开）。⚠ 输出**逐位相同**、只影响耗时：判据见 `docs/TRAINING-V4.md` §5.3（`SelfTest.v4CacheTests` + `tools/v4-cache-check.mjs`）；对拍/排障时用它拿"全量重算"基准 |
 
 **三条硬性质**（结果可信的前提）：① 同种子逐事件可复现（`debugDeterministicSeed` + 每局一份策略实例）；
 ② `--rotate` 消掉座位运气；③ 桌面 `botDelay=0`/`roundDelay=0`，与生产节奏解耦。

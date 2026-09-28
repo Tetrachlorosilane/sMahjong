@@ -186,6 +186,11 @@ public final class Main {
                         botAiDirs.add(args[++i]);
                     }
                     break;
+                case "--no-v4-cache":
+                    // v4 网络的**增量事件缓存**默认开（同种子、逐位相同的输出，只是更快）；
+                    // 这一档是设计文档 §5.3 纪律③要的"基准开关"：对拍/排障时关掉它
+                    mahjong.ai.V4Policy.setCacheDefault(false);
+                    break;
                 case "--help":
                 case "-h":
                     printHelp();
@@ -336,6 +341,7 @@ public final class Main {
         System.out.println("  --uuid-ttl-days <n> 多久没登录就清理档案（默认 60 = 2 个月）");
         System.out.println("  --no-player-store  不落盘玩家档案（uuid 握手照常，只是服务端不记得人）");
         System.out.println("  --fast             机器人不思考、局间不停顿（自动化测试用）");
+        System.out.println("  --no-v4-cache      关掉 v4 网络的增量事件缓存（默认开；输出逐位相同，只是慢）");
         System.out.println("  --selftest         运行规则引擎自测后退出");
         System.out.println("  --help             显示帮助");
         System.out.println();
