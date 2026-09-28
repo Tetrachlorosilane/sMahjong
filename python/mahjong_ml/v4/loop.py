@@ -76,6 +76,17 @@ class LoopConfig:
     no_java: bool = False
     sample: int = 1
     value_key: str = "value"
+    # ---- 第二十一轮（路线 B）之后：一轮的训练口径 -------------------------------------------
+    #: 每轮最多多少步（0 = 不限，用 `epochs`）。**"多轮 × 每轮短"就靠它**：实测 KL 早停会在
+    #: 第 ~100 步触发（单批 KL 0.0707 > 0.03），而跑满 5144 步的 top1 只比 102 步高 0.004
+    #: ⇒ 一轮的价值在"重新采一批"（新轨迹 = 新行为策略的分布），不在 epoch 数（§14.10）。
+    max_steps: int = 0
+    advantage: str = "auto"
+    rank_weight: float = 0.0
+    baseline_fit: str = "scale"
+    grad_clip: float = 0.5
+    kl_early_stop: float = 0.03
+    kl_min_steps: int = 100
 
     def student_spec(self, net: Path) -> str:
         """采集/数据集共用的学生策略串：**逐字同一个字符串**（`is_student` 靠字符串相等判定）。"""
@@ -145,6 +156,18 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     if cfg.objective == "ppo":
         # π_old 必须来自**采集那份权重**与**采集那个温度**；数据集 meta 里记着学生串，训练端会核对
         train += ["--behaviour", str(net_in), "--behaviour-temp", f"{cfg.student_temp:g}"]
+    # 数值口径（缺省与 `pretrain` 一致：grad-clip 0.5 / KL 早停 0.03）—— 显式写出来，
+    # 这样台账里那一轮的"实际训练开关"是自解释的（`--dry-run` 也看得见）。
+    train += ["--grad-clip", f"{cfg.grad_clip:g}",
+              "--kl-early-stop", f"{cfg.kl_early_stop:g}",
+              "--kl-min-steps", str(cfg.kl_min_steps)]
+    if cfg.max_steps > 0:                      # "每轮短"：一轮的步数上限
+        train += ["--max-steps", str(cfg.max_steps)]
+    if cfg.advantage != "auto":
+        train += ["--advantage", cfg.advantage]
+    if cfg.rank_weight:
+        train += ["--rank-weight", f"{cfg.rank_weight:g}"]
+    train += ["--baseline-fit", cfg.baseline_fit]
     r.commands["train"] = train
     r.commands["export"] = [
         _py(), "-m", "mahjong_ml.v4.export", "weights",
@@ -290,7 +313,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-games", type=int, default=2000)
     ap.add_argument("--eval-workers", type=int, default=24)
     ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="ppo")
-    ap.add_argument("--value-target", choices=["final", "rtg"], default="final")
+    ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
+                    help="值头/优势的目标：`delta` = 本小局收支（P1b 的小局口径）")
+    ap.add_argument("--advantage", choices=["auto", "gae-hand", "hand"], default="auto",
+                    help="优势怎么算（`hand` = 小局级 baseline；`gae-hand` = 手级 GAE）")
+    ap.add_argument("--rank-weight", type=float, default=0.0,
+                    help="终局顺位点项的权重（只进优势；需数据集有 `rank_points` 列）")
+    ap.add_argument("--baseline-fit", choices=["scale", "mean", "none"], default="scale",
+                    help="基线尺度对齐（缺省 `scale`：最小二乘 `α+β·V`）")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help="每轮训练步数上限（0 = 不限）。**多轮 × 每轮短**就靠它："
+                         "实测 KL 早停在第 ~100 步触发，跑满 5000 步只多 0.004 top1（§14.10）")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -300,6 +333,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--student-temp", type=float, default=0.5)
     ap.add_argument("--hands", type=int, default=0, help="每场最多几小局（0 = 完整半庄）")
     ap.add_argument("--sample", type=int, default=1, help="每 K 次决策记 1 条（冒烟用）")
+    ap.add_argument("--grad-clip", type=float, default=0.5, help="梯度总范数裁剪（0 = 关）")
+    ap.add_argument("--kl-early-stop", type=float, default=0.03,
+                    help="KL(π_old‖π_new) 早停阈值（0 = 关；v3 同口径 0.03）")
+    ap.add_argument("--kl-min-steps", type=int, default=100, help="KL 早停生效前至少跑多少步")
     ap.add_argument("--seed", type=int, default=20261010)
     ap.add_argument("--producer", choices=producer.PRODUCERS, default=None,
                     help="缺省读 MAHJONG_PRODUCER，再缺省 **cpp**（v4 回路就是为脱离 Java 建的）")
@@ -321,6 +358,9 @@ def main(argv: list[str] | None = None) -> int:
         stage_a=args.stage_a, stage_b=args.stage_b, workers=args.workers,
         eval_games=args.eval_games, eval_workers=args.eval_workers, seed=args.seed,
         hands=args.hands, producer=chosen, no_java=args.no_java, sample=args.sample,
+        max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
+        baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,
+        kl_early_stop=args.kl_early_stop, kl_min_steps=args.kl_min_steps,
     )
     net_in = Path(args.init)
     if not net_in.is_file() and not args.dry_run:

@@ -2492,6 +2492,33 @@ ok("--behaviour" in _lo.commands["train"] and "--behaviour-temp" in _lo.commands
    "v4 回路：PPO 轮带 `--behaviour`/`--behaviour-temp`（π_old 的来源，训练端还会与 meta 核对）")
 eq("v4 回路：`--target-minutes=0` ⇒ 场次就是 `--games`",
    v4_loop.plan_games(_lo_cfg, [], 400, 0.0)[0], 400)
+# ---- 第二十一轮：**多轮 × 每轮短**（一轮的步数上限 + 小局口径 + 数值口径都要能进回路）----
+# 为什么要钉：这些开关以前**只活在 shell 历史里**（回路不转发 ⇒ 一轮的实际训练口径不可复现）。
+_lo_cfg2 = v4_loop.LoopConfig(label="v4-sc2", init="X:/net.bin", no_java=True, producer="cpp",
+                              objective="ppo", value_target="delta", advantage="hand",
+                              rank_weight=0.2, max_steps=100, epochs=1,
+                              grad_clip=0.5, kl_early_stop=0.03, kl_min_steps=100)
+_lo2 = v4_loop.plan_commands(_lo_cfg2, 3, _lo_net, 50)
+_lo2t = _lo2.commands["train"]
+
+
+def _flag(cmd, name):
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+eq("v4 回路：`--value-target delta` 能进训练命令（P1b 的小局口径）",
+   _flag(_lo2t, "--value-target"), "delta")
+eq("v4 回路：`--advantage hand` 与 `--rank-weight` 都转发", 
+   (_flag(_lo2t, "--advantage"), _flag(_lo2t, "--rank-weight")), ("hand", "0.2"))
+eq("v4 回路：`--max-steps` 就是「每轮短」那条杠杆", _flag(_lo2t, "--max-steps"), "100")
+ok(_flag(_lo2t, "--grad-clip") == "0.5" and _flag(_lo2t, "--kl-early-stop") == "0.03"
+   and _flag(_lo2t, "--baseline-fit") == "scale",
+   "v4 回路：数值口径（grad-clip / KL 早停 / 基线对齐）**显式进命令**（台账自解释）")
+eq("v4 回路：默认不限步数（`--max-steps 0` ⇒ 命令里不出现它，保持旧行为）",
+   _flag(v4_loop.plan_commands(_lo_cfg, 1, _lo_net, 100).commands["train"], "--max-steps"), None)
+ok(not any(Path(str(c[0])).name.lower().startswith("java")
+           for c in _lo2.commands.values()),
+   "v4 回路：加了这些开关之后**仍然没有 JVM**（`--no-java` 的判据不因新开关失效）")
 _lo_env = os.environ.get("MAHJONG_NO_JAVA")
 os.environ["MAHJONG_NO_JAVA"] = "1"
 try:
