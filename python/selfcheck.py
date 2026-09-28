@@ -2536,6 +2536,32 @@ eq("v4 回路：审计相的主口径跟着 `--value-target`（不是写死 valu
 eq("v4 回路：审计相读的是**这一轮的紧凑集与 checkpoint**",
    (_flag(_loa, "--data").endswith("compact\\v4-sc2-g03"),
     _flag(_loa, "--ckpt").endswith("ckpt\\v4-sc2-g03")), (True, True))
+# ---- 第二十六轮：**值头先行**（`critic` 相）—— KL 预算是被阶段 a 吃掉的，critic 得先学 --------
+_lo_cfg3 = v4_loop.LoopConfig(label="v4-sc3", init="X:/net.bin", no_java=True, producer="cpp",
+                              objective="ppo", value_target="delta", advantage="hand",
+                              max_steps=600, epochs=2, stage_a=0.2, stage_b=0.3, critic_steps=400)
+_lo3 = v4_loop.plan_commands(_lo_cfg3, 1, _lo_net, 50)
+_lo3t = _lo3.commands["train"]
+ok("critic" in _lo3.phases() and _lo3.phases().index("critic") > _lo3.phases().index("train"),
+   "v4 回路：`critic` 相排在 `train` **之后**（值头在**最终表示**上练：先练会被 PPO 推动主干而失效）",
+   str(_lo3.phases()))
+_lc3 = _lo3.commands["critic"]
+ok(_flag(_lc3, "--only-heads") == "value" and "--freeze-trunk" in _lc3
+   and _flag(_lc3, "--objective") == "bc",
+   "v4 回路：值头相 = `--only-heads value --freeze-trunk --objective bc`"
+   "（主干与**策略头都不动** ⇒ KL 恒 0、不占 KL 预算）")
+eq("v4 回路：值头相用 `--max-steps`（不是 epochs），且步数来自 `--critic-steps`",
+   _flag(_lc3, "--max-steps"), "400")
+eq("v4 回路：值头相的 `--init` 是 **PPO 那一步的 ckpt 目录**（目录按 `<dir>/model.pt` 解）",
+   _flag(_lc3, "--init"), str(Path("S:/mahjong-training/ckpt/v4-sc3-g01")))
+eq("v4 回路：PPO 的 `--init` 仍是**采集那份权重**（不再链到 critic）",
+   _flag(_lo3t, "--init"), str(_lo_net))
+eq("v4 回路：PPO 的 `--behaviour` 是采集那份权重（`log π_old` 与采集同源）",
+   _flag(_lo3t, "--behaviour"), str(_lo_net))
+eq("v4 回路：开了值头相 ⇒ **导出 critic 那份权重**（最终 net.bin 里带新练的值头）",
+   Path(_flag(_lo3.commands["export"], "--ckpt")).parent, _lo3.critic_ckpt)
+ok("critic" not in v4_loop.plan_commands(_lo_cfg2, 3, _lo_net, 50).phases(),
+   "v4 回路：`--critic-steps 0`（缺省）**不加**这个相 —— 旧行为逐位不变")
 ok(_flag(_loa, "--out").endswith("v4-sc2-g03-audit.json"),
    "v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）")
 # 闸门判据本身：`_read_audit` 读一份合成的审计 JSON 就能测正反两面（不必真跑一轮）
@@ -3022,6 +3048,25 @@ eq("PPO 数值口径：`--kl-min-steps` 被钳到轮长的 1/5（否则早停够
 ok(v4_pt.kl_stop_hit(0.9, threshold=0.03, step=v4_pt.effective_kl_min_steps(100, 100),
                      min_steps=v4_pt.effective_kl_min_steps(100, 100)),
    "PPO 数值口径：钳过之后 100 步一轮里早停**真的能触发**（修前是永假）")
+# ⚠ 第二十六轮实测的 bug：`--init` 的 help 写着"ckpt 目录或 net.bin"，底层却只收**文件**
+#   ⇒ 给 ckpt 目录会报 `--behaviour 找不到文件：<目录>`（消息里的参数名还是错的）。
+#   "值头先行"相（`critic`）正是把 ckpt 目录交给 `--init` 的用法。
+_w26 = scratch("v4-weight-src")
+(_w26 / "ckpt-a").mkdir(parents=True, exist_ok=True)
+(_w26 / "ckpt-a" / "model.pt").write_bytes(b"x")
+(_w26 / "net.bin").write_bytes(b"x")
+(_w26 / "ckpt-bad").mkdir(parents=True, exist_ok=True)
+eq("权重来源：ckpt **目录**按其 `model.pt` 解（`--init` 的 help 一直是这么承诺的）",
+   v4_pt.resolve_weight_path(str(_w26 / "ckpt-a")), _w26 / "ckpt-a" / "model.pt")
+eq("权重来源：`net.bin` 文件原样返回", v4_pt.resolve_weight_path(str(_w26 / "net.bin")),
+   _w26 / "net.bin")
+for _bad26, _what in ((str(_w26 / "nope"), "不存在的路径"), (str(_w26 / "ckpt-bad"), "没有 model.pt 的目录")):
+    try:
+        v4_pt.resolve_weight_path(_bad26)
+        ok(False, f"权重来源：{_what} 应当报错")
+    except SystemExit as _e26:
+        ok("找不到" in str(_e26) or "没有 model.pt" in str(_e26),
+           f"权重来源：{_what} 当场报错 ✓", str(_e26)[:48])
 # ③ PPO + RWR 必须当场报错（二次加权是静默失真：clip_frac / kl / gate 全都正常）
 try:
     v4_pt.assert_ppo_excludes_rwr("ppo", 8.0)

@@ -440,11 +440,27 @@ def _behaviour_logprobs(model: M.V4Model, data: dict, device: str, batch: int,
     return out
 
 
-def _load_behaviour(spec: str, device: str) -> M.V4Model:
-    """采集用的那份权重：`*.pt`（checkpoint）或 `net.bin`（格式 2）都收。"""
+def resolve_weight_path(spec: str) -> Path:
+    """`--behaviour` / `--init` 的权重来源：`*.bin` / `*.pt` 文件，**或含 `model.pt` 的 ckpt 目录**。
+
+    ⚠ 第二十六轮实测的 bug：`--init` 的 help 一直写着"ckpt 目录或 net.bin"，但底层只收**文件**
+    ⇒ 给 ckpt 目录会报 `--behaviour 找不到文件：<目录>`（**消息里的参数名还是错的**）。
+    "值头先行"相正是把 ckpt 目录交给 `--init` 的那种用法，所以这个洞必须补。
+    """
     p = Path(spec)
+    if p.is_dir():
+        cand = p / "model.pt"
+        if not cand.is_file():
+            raise SystemExit(f"权重目录里没有 model.pt：{p}")
+        return cand
     if not p.is_file():
-        raise SystemExit(f"--behaviour 找不到文件：{p}")
+        raise SystemExit(f"权重来源找不到：{p}（给 net.bin / model.pt 文件，或含 model.pt 的目录）")
+    return p
+
+
+def _load_behaviour(spec: str, device: str) -> M.V4Model:
+    """采集用的那份权重：`*.pt`（checkpoint）或 `net.bin`（格式 2）都收；目录按其 `model.pt` 解。"""
+    p = resolve_weight_path(spec)
     if p.suffix == ".bin":
         from . import export as v4export
         parsed = v4export.read_net(p)

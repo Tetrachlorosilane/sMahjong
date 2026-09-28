@@ -46,10 +46,13 @@ from .. import paths, producer
 ROOT = Path(__file__).resolve().parents[3]
 
 #: 一轮里要跑的相（与 `budget.PHASES` 同集合 —— 那个模型算时长用的就是这几个名字）。
-PHASES = ("collect", "features", "compact", "train", "export", "audit", "eval")
+#: ⚠ `critic` 排在 `train` **之后**（第二十六/二十七轮的实测）：值头在**冻住的表示**上学出来之后，
+#: 一旦主干被 PPO 阶段推动，它就**失效**（实测 val CE 3.62 → 5.30、audit EV −3.33）。
+#: 所以顺序是"先动策略、再练 critic"，`export` 导的也是 critic 那份权重。
+PHASES = ("collect", "features", "compact", "train", "critic", "export", "audit", "eval")
 #: 哪些相是 `python -m …`（**工作目录必须是 `python/`**，否则 `mahjong_ml` 不在 sys.path 上 ——
 #: 实测报 `No module named 'mahjong_ml'`）。node / 训练端可执行仍从仓库根跑。
-PY_PHASES = frozenset({"compact", "train", "export", "audit"})
+PY_PHASES = frozenset({"compact", "train", "critic", "export", "audit"})
 #: 值头目标（训练口径）→ `value-audit --target` 的**主口径**名字。
 #: ⚠ 这两处必须同一把尺子：`final` 是"整场 − 起点"，审计里叫 `value`；漏了映射就会拿错列去量。
 AUDIT_TARGET = {"final": "value", "rtg": "rtg", "delta": "delta"}
@@ -92,6 +95,16 @@ class LoopConfig:
     kl_min_steps: int = 100
     #: `--strict-gate`：值头闸门（`audit` 相）不过就**停整条回路**（缺省只记账，不停）。
     strict_gate: bool = False
+    #: **值头先行**（`critic` 相）的步数：`>0` 时在 PPO 之前先跑一段
+    #: `--only-heads value --freeze-trunk`（主干与策略头都不动 ⇒ **KL 恒 0**，不占 KL 预算），
+    #: 再把这步的 checkpoint 当作 PPO 的 `--init`（`--behaviour` 仍是采集那份权重）。
+    #:
+    #: 为什么必须有这一段（第二十五/二十六轮实测）：KL 早停的预算是被**阶段 a（策略+牌效）**
+    #: 吃掉的 —— `v4-mr02` 在第 60 步就 `KL=0.0338 > 0.03` 收工，而那 60 步全在阶段 a，
+    #: 值头**一步都没轮到**（EV 仍 ≈0、闸门 FAIL）。"先让策略动"与"把 critic 学出来"在
+    #: 一个 KL 预算里是**互斥**的；分开跑就没有这个矛盾。
+    critic_steps: int = 0
+    critic_lr: float = 1e-3
 
     def student_spec(self, net: Path) -> str:
         """采集/数据集共用的学生策略串：**逐字同一个字符串**（`is_student` 靠字符串相等判定）。"""
@@ -116,6 +129,11 @@ class Round:
     compact: Path
     eval_dir: Path
     commands: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def critic_ckpt(self) -> Path:
+        """`critic` 相的 checkpoint 目录（`--label <tag>-critic`）。"""
+        return paths.DATA_ROOT / "ckpt" / f"{self.ckpt_label}-critic"
 
     def phases(self) -> list[str]:
         return [p for p in PHASES if p in self.commands]
@@ -158,6 +176,21 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
         "--stage-a", f"{cfg.stage_a:g}", "--stage-b", f"{cfg.stage_b:g}",
         "--seed", str(cfg.seed + generation), "--init", str(net_in),
     ]
+    if cfg.critic_steps > 0:
+        # 值头**最后**练（冻主干 + 只训 value）：**策略头逐位不变** ⇒ `KL ≡ 0`、不占 KL 预算，
+        # 而且是在**最终那份表示**上练的（先练会被 PPO 阶段推动主干而失效）。
+        # `--init` 给 PPO 那一步的 ckpt **目录**（`resolve_weight_path` 按 `<dir>/model.pt` 解）。
+        r.commands["critic"] = [
+            _py(), "-m", "mahjong_ml.v4.pretrain", "--data", str(r.compact),
+            "--label", f"{r.ckpt_label}-critic", "--objective", "bc",
+            "--value-target", cfg.value_target,
+            "--init", str(paths.DATA_ROOT / "ckpt" / r.ckpt_label),
+            "--only-heads", "value", "--freeze-trunk",
+            "--max-steps", str(cfg.critic_steps), "--epochs", "1",
+            "--batch", str(cfg.batch), "--lr", f"{cfg.critic_lr:g}", "--head-lr-mult", "1",
+            "--stage-a", "0", "--stage-b", "1", "--mask-frac", "0", "--ssl-weight", "0",
+            "--seed", str(cfg.seed + generation),
+        ]
     if cfg.objective == "ppo":
         # π_old 必须来自**采集那份权重**与**采集那个温度**；数据集 meta 里记着学生串，训练端会核对
         train += ["--behaviour", str(net_in), "--behaviour-temp", f"{cfg.student_temp:g}"]
@@ -174,9 +207,11 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
         train += ["--rank-weight", f"{cfg.rank_weight:g}"]
     train += ["--baseline-fit", cfg.baseline_fit]
     r.commands["train"] = train
+    # ⚠ 导出的是**最终那份权重**：开了值头相就导 critic 那份（含新练的值头），否则导 PPO 那份。
     r.commands["export"] = [
         _py(), "-m", "mahjong_ml.v4.export", "weights",
-        "--ckpt", str(paths.DATA_ROOT / "ckpt" / r.ckpt_label / "model.pt"),
+        "--ckpt", str((r.critic_ckpt if cfg.critic_steps > 0
+                       else paths.DATA_ROOT / "ckpt" / r.ckpt_label) / "model.pt"),
         "--out", str(r.net_out), "--label", r.ckpt_label,
     ]
     # **值头/优势的判据（目标里那条闸门）在每一轮出口上跑一遍** —— 以前回路只看 2+2 顺位点，
@@ -340,9 +375,11 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
                               cwd=ROOT / "python" if phase in PY_PHASES else ROOT)
     _run(r.commands["check"], "轨迹校验（selfplay-check）", cwd=ROOT)
     for phase, what in (("compact", "紧凑集（四张量 + 标签）"),
+                        ("critic", "值头先行（冻主干 + 只训 value，KL 恒 0）"),
                         ("train", f"训练（{cfg.objective}）"),
                         ("export", "导出 net.bin")):
-        seconds[phase] = _run(r.commands[phase], what, cwd=ROOT / "python")
+        if phase in r.commands:
+            seconds[phase] = _run(r.commands[phase], what, cwd=ROOT / "python")
     # 判据相：`value-audit --strict --ev-ref legit`（EV ≥ 0.7×合法天花板 + 覆盖率 ≤3pp + CE/CRPS）
     seconds["audit"] = _run(r.commands["audit"], "值头判据（value-audit --strict）",
                             cwd=ROOT / "python", allow_fail=True)
@@ -412,6 +449,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strict-gate", action="store_true",
                     help="值头闸门（`value-audit --strict --ev-ref legit`：EV ≥ 0.7×合法天花板 + "
                          "覆盖率 ≤3pp）不过就**停整条回路**；缺省只记账不停（先看几轮再决定）")
+    ap.add_argument("--critic-steps", type=int, default=0,
+                    help="**值头先行**的步数（>0 时在 PPO 之前跑 `--only-heads value --freeze-trunk`："
+                         "主干与策略头都不动 ⇒ KL 恒 0、不占 KL 预算；产物当 PPO 的 `--init`）")
+    ap.add_argument("--critic-lr", type=float, default=1e-3, help="值头先行的学习率")
     ap.add_argument("--seed", type=int, default=20261010)
     ap.add_argument("--producer", choices=producer.PRODUCERS, default=None,
                     help="缺省读 MAHJONG_PRODUCER，再缺省 **cpp**（v4 回路就是为脱离 Java 建的）")
@@ -436,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
         baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,
         kl_early_stop=args.kl_early_stop, kl_min_steps=args.kl_min_steps,
-        strict_gate=args.strict_gate,
+        strict_gate=args.strict_gate, critic_steps=args.critic_steps, critic_lr=args.critic_lr,
     )
     net_in = Path(args.init)
     if not net_in.is_file() and not args.dry_run:
