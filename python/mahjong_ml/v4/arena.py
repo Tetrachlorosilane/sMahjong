@@ -109,11 +109,15 @@ def _label_of(policy: str) -> str:
 
 
 def run_pair(dir_out: Path, a: str, b: str, games: int, seed: int, *,
-             workers: int = 16, hands: int = 0) -> None:
-    """跑一对：`--rotate` + `a,a,b,b`（同牌山配对的唯一正确跑法）。"""
-    cmd = [str(producer.TRAINER), "selfplay", str(games), "--workers", str(workers),
-           "--rotate", "--policy", f"{a},{a},{b},{b}",
-           "--seed", str(seed), "--hands", str(hands), "--out", str(dir_out)]
+             workers: int = 16, hands: int = 0, prod: str | None = None) -> None:
+    """跑一对：`--rotate` + `a,a,b,b`（同牌山配对的唯一正确跑法）。
+
+    ⚠ `prod` 走 `producer.selfplay_cmd`（java / cpp **参数口径相同**）：C++ trainer 快，
+    但它只认识 `teacher` / `net:` / `first`… 这几个名字；**Java 侧独有的策略（如 `search`）**
+    必须用 `--producer java`（慢，但能跑）。
+    """
+    cmd = producer.selfplay_cmd(games, workers, f"{a},{a},{b},{b}", seed, dir_out,
+                                hands=hands, name=prod)
     dir_out.mkdir(parents=True, exist_ok=True)
     print("  $ " + " ".join(cmd), flush=True)
     rc = subprocess.run(cmd, cwd=str(producer.ROOT)).returncode
@@ -143,7 +147,8 @@ def judge_pair(sa: dict[int, float], sb: dict[int, float], a: str, b: str,
 
 
 def arena(policies: list[str], games: int, block: int, seed: int, out_root: Path, *,
-          workers: int = 16, metric: str = "rank_points", tag: str = "arena") -> dict:
+          workers: int = 16, metric: str = "rank_points", tag: str = "arena",
+          prod: str | None = None) -> dict:
     """跑完整竞技场：每一对分块跑、块间看 CI、排除 0 就提前收工。"""
     root = out_root / tag
     plan = pair_plan(policies)
@@ -159,7 +164,7 @@ def arena(policies: list[str], games: int, block: int, seed: int, out_root: Path
         while done < games:
             this = min(block, games - done)
             d = root / f"{tag}-{len(history) + 1:02d}-{abs(hash((a, b, seed, done))) % 10**6:06d}"
-            run_pair(d, a, b, this, seed + done, workers=workers)
+            run_pair(d, a, b, this, seed + done, workers=workers, prod=prod)
             sa, sb = judge_series(d, a, b, metric)
             cum_a.update(sa)          # 逐场值并起来（seed 唯一 ⇒ update 即合并）
             cum_b.update(sb)
@@ -214,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--block", type=int, default=500, help="分块大小（每块之后看一次 CI 决定是否收工）")
     ap.add_argument("--seed", type=int, default=20260930)
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--producer", choices=["cpp", "java"], default="cpp",
+                    help="谁跑自对弈：cpp（快，只认 teacher/net/first…）或 java（慢，但认 search）")
     ap.add_argument("--metric", default="rank_points", choices=["rank_points", "place", "score"])
     ap.add_argument("--out", default=None, help="输出根（缺省 `S:<数据根>/arena`）")
     ap.add_argument("--tag", default="arena")
@@ -229,10 +236,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_check:
         print("== 工具自证①：已知更强的一对必须判出来（teacher vs first）==")
         arena(["teacher", "first"], min(args.games, 400), min(args.block, 200), args.seed,
-              out_root, workers=args.workers, metric=args.metric, tag=f"{args.tag}-ctrl-strong")
+              out_root, workers=args.workers, metric=args.metric, tag=f"{args.tag}-ctrl-strong", prod=args.producer)
         print("== 工具自证②：同策略对同策略必须判「分不出」（退化空对照：证明管线通）==")
         arena([policies[0], policies[0]], min(args.games, 400), min(args.block, 200), args.seed,
-              out_root, workers=args.workers, metric=args.metric, tag=f"{args.tag}-ctrl-null")
+              out_root, workers=args.workers, metric=args.metric, tag=f"{args.tag}-ctrl-null", prod=args.producer)
         print("== 工具自证③：**校准**空对照（把真实读数逐场随机换标签，真值 Δ=0）==")
         d = out_root / f"{args.tag}-ctrl-strong"
         runs = sorted(p for p in d.glob("*") if (p / "summary.json").is_file())
@@ -244,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     got = arena(policies, args.games, args.block, args.seed, out_root,
-                workers=args.workers, metric=args.metric, tag=args.tag)
+                workers=args.workers, metric=args.metric, tag=args.tag, prod=args.producer)
     f = out_root / f"{args.tag}.json"
     f.write_text(json.dumps(got, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n台账：{f}")

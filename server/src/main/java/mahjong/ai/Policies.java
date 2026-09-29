@@ -83,6 +83,21 @@ public final class Policies {
         return (seat, gameSeed) -> TEACHER;
     }
 
+    /**
+     * 一层前瞻策略（`search`）：**teacher 当先验 + 显式效用做否决** —— 见 {@link SearchPolicy}。
+     *
+     * <p>为什么它可能是"比 teacher 强的老师"：teacher 的取舍里"这条听牌的质量"是隐式的
+     * （牌效 + 危险度 + 打点各自加权），而搜索会把**打完这一张之后的局面**（向听/进张/
+     * 听牌枚数/良形枚数）显式算出来，只在**边际足够大**时才改判。
+     *
+     * <p>⚠ 训练侧要拿它当标签时，注意它读的是 {@code Round} 的**公开辅助方法**
+     * （与 teacher 同一套）⇒ 不是作弊；但**不能**直接当 {@code ActionPolicy} 用（那层接口
+     * 根本拿不到 Round）。
+     */
+    public static PolicyFactory search() {
+        return (seat, gameSeed) -> new SearchPolicy(TEACHER, 8.0, 60.0);
+    }
+
     public static PolicyFactory firstLegalFactory() {
         return (seat, gameSeed) -> fromAction(firstLegal());
     }
@@ -144,6 +159,10 @@ public final class Policies {
                 return passFirstFactory();
             case "random":
                 return randomFactory();
+            case "search":
+                // 一层前瞻：teacher 当先验 + 显式效用做否决（见 `SearchPolicy` 的类注释）。
+                // `search` = 缺省危险权重 8.0；`search:<w>` 调权重（下一轮的调参口）。
+                return search();
             default:
                 throw new IllegalArgumentException("未知策略名: " + name);
         }
