@@ -20,7 +20,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 JAR = ROOT / "server" / "build" / "mahjong-server.jar"
 #: 训练端可执行（`trainer/build.ps1` 的产物；Windows 带 `.exe`）
+#: ⚠ 可用 **`MAHJONG_TRAINER`** 覆盖成别的副本。为什么需要（2026-09-29 实测）：
+#: 受限沙箱按「**可执行文件所在位置**」决定写入是否生效 —— **工作区里的 exe 写数据根会被静默吞掉**
+#: （退出码 0、目录不存在、连影子副本都找不到），而把同一份 `trainer.exe` 放到数据根上再跑就正常。
+#: 沙箱/受限环境里用这个变量指过去即可（`S:\…\tools\trainer\trainer.exe`）。
 TRAINER = ROOT / "trainer" / "build" / ("trainer.exe" if os.name == "nt" else "trainer")
+if (os.environ.get("MAHJONG_TRAINER") or "").strip():
+    TRAINER = Path(os.environ["MAHJONG_TRAINER"].strip())
 
 PRODUCERS = ("java", "cpp")
 

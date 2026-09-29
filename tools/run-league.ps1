@@ -8,6 +8,8 @@
 # 用法：pwsh -File release/run-league.ps1 [-Generations 8] [-Games 1000]
 param([int]$Generations = 8, [int]$Games = 1000)
 $ErrorActionPreference = 'Stop'
+# ⚠ `$root` 必须在下面两个探测**之前**定义（我上一版把它排到了后面，`Join-Path` 直接炸）。
+$root = 'C:\Users\HP\source\games\mahjong'
 # ⚠ 解释器：**优先用 S: 上那份 3.12**（若存在）。
 #   为什么：沙箱把"工作区内的可执行文件"交给 overlay hook 管，于是**工作区里的 python
 #   （含 .venv 与 .uv-python 的基础解释器）写不了 S: 的数据根**（[Errno 13]），
@@ -18,6 +20,12 @@ $ErrorActionPreference = 'Stop'
 $pyS = 'S:\mahjong-training\tools\py312\python.exe'
 $pyVenv = Join-Path $root 'python\.venv\Scripts\python.exe'
 $py = if (Test-Path $pyS) { $pyS } else { $pyVenv }
+# ⚠ 训练端也要用**数据根上那份副本**：受限沙箱按「可执行文件位置」决定写入是否生效 ——
+#   工作区里的 `trainer.exe` 写数据根会被**静默吞掉**（退出码 0、目录不存在），
+#   同一份 exe 放到 `S:` 上再跑就正常（2026-09-29 实测）。准备：
+#     robocopy <repo>\trainer\build S:\mahjong-training\tools\trainer /E
+$trainerS = 'S:\mahjong-training\tools\trainer\trainer.exe'
+if (Test-Path $trainerS) { $env:MAHJONG_TRAINER = $trainerS }
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
