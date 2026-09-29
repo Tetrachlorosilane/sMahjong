@@ -302,11 +302,17 @@ def cmd_ablate(argv: list[str]) -> int:
     return ablate.main(argv)
 
 
+def cmd_arena(argv: list[str]) -> int:
+    """竞技场（`python -m mahjong_ml.v4 arena`）—— 多策略共享牌山 + 序贯判决。"""
+    from . import arena
+    return arena.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `loop` / `ablate` 的参数集自成一套（见 `v4/loop.py` / `v4/ablate.py`）：整段转走
-    if argv and argv[0] in ("loop", "ablate"):
-        return cmd_loop(argv[1:]) if argv[0] == "loop" else cmd_ablate(argv[1:])
+    # `loop` / `ablate` / `arena` 的参数集自成一套（见各自模块）：整段转走
+    if argv and argv[0] in ("loop", "ablate", "arena"):
+        return {"loop": cmd_loop, "ablate": cmd_ablate, "arena": cmd_arena}[argv[0]](argv[1:])
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="打印块清单与张量形状").set_defaults(fn=cmd_spec)

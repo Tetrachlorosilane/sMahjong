@@ -2574,6 +2574,32 @@ ok(v4_loop.phase_order(_lo3).index("critic") > v4_loop.phase_order(_lo3).index("
 ok(set(v4_loop.PHASE_WHAT) >= set(v4_loop.PHASES) | {"check"},
    "v4 回路：每个相都有人话标签（漏一个就会打印裸 id，不好读）",
    str(sorted(set(v4_loop.PHASES) | {"check"} - set(v4_loop.PHASE_WHAT))))
+# ---- 第三十六轮：竞技场（多策略共享牌山 + 序贯判决）----------------------------------------
+# 为什么钉：以前的"每轮 200 场 Δ"根本没有判决力（sd≈53 ⇒ 检出 Δ=2 要 ~5000 场），却被当成结论读。
+from mahjong_ml.v4 import arena as v4_arena                       # noqa: E402
+eq("竞技场：配对计划 = 全部两两组合（顺序稳定，便于比对台账）",
+   v4_arena.pair_plan(["t", "a", "b"]), [("t", "a"), ("t", "b"), ("a", "b")])
+eq("竞技场：结论只看 CI（排除 0 才算更好/更差，否则分不出）",
+   (v4_arena.verdict(1.0, 0.5, 2.0), v4_arena.verdict(-1.0, -2.0, -0.5),
+    v4_arena.verdict(0.0, -1.0, 1.0)), ("更好", "更差", "分不出"))
+eq("竞技场：序贯判决（未满一块不停 / 满了且 CI 排除 0 就停 / 跑满目标给「分不出」）",
+   (v4_arena.seq_decide(100, 1.0, 0.5, 2.0, games_target=1000, block=500),
+    v4_arena.seq_decide(500, 1.0, 0.5, 2.0, games_target=1000, block=500),
+    v4_arena.seq_decide(500, -1.0, -2.0, -0.5, games_target=1000, block=500),
+    v4_arena.seq_decide(1000, 0.0, -1.0, 1.0, games_target=1000, block=500)),
+   ("continue", "stop_better", "stop_worse", "stop_null"))
+# 校准空对照：把**真实读数**逐场随机换标签 ⇒ 真值 Δ=0 ⇒ 假阳率应当 ≈α（不是 1.0，也不是 0）
+_rng36 = np.random.default_rng(36)
+_sa36 = {i: float(_rng36.normal(60, 20)) for i in range(300)}
+_sb36 = {i: _sa36[i] - 8.0 for i in range(300)}          # 真实效应 −8（换标签前 CI 必排除 0）
+_cal36 = v4_arena.null_shuffle(_sa36, _sb36, k=120, seed=36)
+ok(_cal36["false_positive_rate"] <= 0.15,
+   "竞技场：换标签后假阳率 ≈α（**红证**：不换标签时这一对必判「更好」）",
+   f"假阳率 {_cal36['false_positive_rate']:.3f}（k={_cal36['k']}）")
+_p36 = ml_eval.paired_test(_sa36, _sb36, "a", "b", "rank_points")
+ok(_p36.ci[0] > 0,
+   "竞技场：同一对**不换标签**时 CI 排除 0（Δ=a−b=+8）⇒ 上面那条假阳率不是「检验恒不显著」",
+   f"Δ={_p36.mean:+.2f} CI[{_p36.ci[0]:+.2f},{_p36.ci[1]:+.2f}]")
 # ⚠ 第二十八轮修的真 bug：`audit` 写死看 `<tag>`（PPO 那份），而开了值头相时 `export` 导的是
 #   `<tag>-critic` ⇒ **闸门判的不是要上线的那份权重**（实测两者 EV 差 −2.93 vs −6.03）。
 eq("v4 回路：判据与产物**指同一份权重**（开了值头相 ⇒ audit/export 都看 `<tag>-critic`）",
