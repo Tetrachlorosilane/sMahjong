@@ -3246,6 +3246,26 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 3. **结果**：`-Generations 8 -Games 1000` 起跑，第 1 代采集中（4 分钟已落盘 606 个轨迹文件）。
    台账 `S:\mahjong-training\league\v4-league-v4.json`。
 
+**第四十七轮：竞技场加"不许写进仓库"的闸 + C: 上 17.1 GB 的清理（2026-09-29）**
+
+用户问"训练数据的写入位置对不对、为什么 C/D 盘频繁读写"，查出三件事：
+
+1. **`S:` 是真实分区**（`Get-Partition -DriveLetter S` → Disk 1 / Partition 2 / 231.5 GB / 卷名
+   `Silicon_files`；`subst` 空）⇒ **不是 SUBST、不是映射到 C/D 的目录**，训练数据的写入位置物理正确。
+2. ⚠ **C: 上的 17.1 GB 是我造成的**：早前 shell 写不了数据根，竞技场 `--out` 被指到仓库内的
+   `python/.tmp/arena` —— 几轮下来 `search-v3-3000` 7.9 GB + `search-vs-teacher` 7.9 GB + …，
+   **直到这次才被发现**。已删（保留 9 个 JSON 台账），**C: 可用 80.5 → 97.3 GB**。
+   ⇒ **判据写成代码**：`v4/arena.py` 新增 `guard_out()` —— `--out` 落在仓库内**直接报错**
+   （缺省输出根 = `paths.DATA_ROOT/arena` = `S:\mahjong-training\arena`），
+   确实要在仓库里跑得显式加 `--allow-repo-out`（会打警告）。红证：`--out python\.tmp\arena` → 拒（退出码 1）；
+   `guard_out(DATA_ROOT/'arena')` → 放行。
+   ⚠ 顺带记一条**别误诊**的：用 venv 解释器跑 `--out S:\…` 仍会 `WinError 5` —— 那是
+   "工作区内的解释器写不了数据根"（第四十四轮的规律），**不是闸门拒绝**；真实跑要用 `S:` 上那份解释器。
+3. **D: 的读写与训练无关**：页面文件在 C:（`C:\pagefile.sys` 3.2 GB），`TEMP`/`TMP` 都指向
+   `C:\Users\HP\AppData\Local\Temp`；D: 顶层是迅雷/BaiduNetdisk/BiliGame/CloudMusic 等常驻应用
+   ⇒ 它的 I/O 来自它们（外加索引/Defender）。训练端只碰 `S:` 与仓库内 `tools\build\<tag>\net.bin`。
+4. **联赛未受影响**：最近 20 分钟内 `python\.tmp` 零改动；联赛产物全在 `S:`，当时已到第 3 代。
+
 
 
 

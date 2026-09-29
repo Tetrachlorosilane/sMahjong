@@ -42,6 +42,29 @@ from mahjong_ml import producer
 ARENA_DIRNAME = "arena"
 
 
+def guard_out(out: Path, *, allow_repo: bool = False) -> None:
+    """⛔ 不许把竞技场产物写进仓库（`AGENTS.md` §0.1 约束 ①）。
+
+    为什么要有这道闸（2026-09-29 实测）：早前 shell 写不了数据根，竞技场被 `--out` 指到了仓库内的
+    `python/.tmp/arena` —— 几轮下来**静静躺了 17.1 GB**（`search-v3-3000` 7.9 GB + `search-vs-teacher`
+    7.9 GB + …），直到清盘时才发现。判据靠人眼盯太晚，所以写成代码：
+    轨迹目录**默认落在数据根**（`paths.DATA_ROOT/arena`），落进仓库就直接报错。
+    """
+    repo = Path(producer.ROOT).resolve()
+    try:
+        rel = out.resolve().relative_to(repo)
+    except ValueError:
+        return                                  # 不在仓库里 ⇒ 放行
+    if allow_repo:
+        print(f"⚠ `--out` 落在仓库内（{rel}）—— 你显式加了 `--allow-repo-out`，"
+              f"产物会占 C: 且违反 §0.1 ①，记得跑完立刻删", file=sys.stderr)
+        return
+    raise SystemExit(
+        f"⛔ `--out {out}` 落在仓库内（{rel}）：训练产物不许进仓库（AGENTS §0.1 ①）。\n"
+        f"   请改用数据根（缺省就是 `{paths.DATA_ROOT / ARENA_DIRNAME}`，可用 `--out` 指定 `S:\\…` 下的目录）；\n"
+        f"   确实要在仓库里跑（例如 CI 里的一次性小规模冒烟）再加 `--allow-repo-out`。")
+
+
 def pair_plan(policies: list[str]) -> list[tuple[str, str]]:
     """要跑哪些配对（**全部两两组合**；顺序稳定，便于比对两次运行的台账）。"""
     return list(combinations(policies, 2))
@@ -223,14 +246,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="谁跑自对弈：cpp（快，只认 teacher/net/first…）或 java（慢，但认 search）")
     ap.add_argument("--metric", default="rank_points", choices=["rank_points", "place", "score"])
     ap.add_argument("--out", default=None, help="输出根（缺省 `S:<数据根>/arena`）")
+    ap.add_argument("--allow-repo-out", action="store_true",
+                    help="允许把产物写进仓库（⚠ 违反 §0.1 ①、占 C:；只给一次性小冒烟用）")
     ap.add_argument("--tag", default="arena")
     ap.add_argument("--self-check", action="store_true",
                     help="先跑工具自身对照：`teacher vs first`（必须判「更好」）与 `A vs A`（必须「分不出」）")
     args = ap.parse_args(argv)
-
     # ⚠ **必须转成绝对路径**：自对弈是在仓库根下起的（`cwd=producer.ROOT`），相对路径会被
     #   trainer 解析到仓库根，而 Python 这边按自己的 cwd 去读 ⇒ 找不到 summary.json（实测踩过）。
     out_root = Path(args.out).resolve() if args.out else paths.DATA_ROOT / ARENA_DIRNAME
+    guard_out(out_root, allow_repo=args.allow_repo_out)
     policies = [s for s in args.policies.split(",") if s]
 
     if args.self_check:
