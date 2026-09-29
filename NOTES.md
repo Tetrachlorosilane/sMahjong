@@ -3185,6 +3185,35 @@ $env:PYTHONPATH = '<repo>\python;<repo>\python\.venv\Lib\site-packages'
   `trainer.exe … --out S:\mahjong-training\raw\v4-league-g01`；第 1 代对手池为空是**设计**，
   从第 2 代开始进池）。台账 `S:\mahjong-training\league\v4-league-v4.json`。
 
+**第四十五轮：联赛仍然跑不成 —— 子进程往 `S:` 的写入被静默吞掉（2026-09-29）**
+
+第四十四轮那套"把解释器放到 `S:` 上"解决了**解释器可见性**，但联赛仍在校验前就死：
+
+```
+✓ 采集（自对弈） 用时 764.5s                       ← 1000 场，退出码 0
+派生特征（sidecar） 失败（退出码 2）：trainer.exe features S:\mahjong-training\raw\v4-league-g01
+[trainer] 不是目录：S:\mahjong-training\raw\v4-league-g01
+```
+
+**最小复现**（不经回路、不经 Python）：
+
+```powershell
+trainer\build\trainer.exe selfplay 2 --workers 2 --rotate --policy teacher,teacher,first,first `
+    --seed 777 --out S:\mahjong-training\raw\probe-trainer-w
+# → 打印「轨迹目录：S:\mahjong-training\raw\probe-trainer-w」、退出码 0
+Test-Path S:\mahjong-training\raw\probe-trainer-w     # → False（目录不存在）
+```
+
+⇒ **规律（与第四十四轮合起来看）**：
+- **shell 自己**的读写到 `S:` 是真的（`Set-Content` / `Remove-Item` 都生效）；
+- **工作区内的解释器**写 `S:` 直接被拒（`[Errno 13]`，见第四十四轮）；
+- **原生子进程**（`trainer.exe`）写 `S:` **既不报错也不落盘**（退出码 0、目录不存在），
+  且 `%TEMP%`、`~/.dsh`、`S:` 三处深挖都没找到影子副本 ⇒ 像是**被静默吞掉**。
+⇒ 于是**任何"跨进程经数据根交接产物"的流水线都不可能在这套沙箱里跑通**（回路的
+trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DSH 之外的普通终端跑**
+（或让沙箱对子进程也放行），⛔ 不要在沙箱里继续用 `MAHJONG_DATA_ROOT` 改路径绕（那只是把
+"看不见"换成"写进仓库"，既违反 §0.1 ①，也不会让跨进程交接变得可见）。
+
 
 
 
