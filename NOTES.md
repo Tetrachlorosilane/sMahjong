@@ -3566,9 +3566,15 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   `doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.13.0、exe 内 UTF-16 串实测 1.13.0。
   本地草稿与摘要表：`release\RELEASE-v1.13.0.md`。
 
-- **v1.14.0**（2026-09-29，**服务端 v4 前向增量事件缓存（1.70×）+ 值头闸门进训练回路**）：
+- **v1.14.0**（2026-09-29，**服务端 v4 前向增量事件缓存（1.70×）+ 值头闸门进训练回路 + 音效修复**）：
   release id **398826351**（<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.14.0>），
-  tag `v1.14.0` → 远端 **`17e153381122302ed44c77366948dad625292ff2`**（tree `5d3e438e…` == 本地 HEAD 的 tree）。
+  tag `v1.14.0` → 远端 **`cd8d30352b0c87fc2d1c4fc74917c72dda852f60`**（**r2**；r1 曾是 `17e15338`）。
+  ⚠ **原地重发过一次（r2）**：只换**客户端 zip**（音效修复，见 §6.2「临时 WAV 必须落在真能写的目录」）；
+  服务端 / 机器人包 / v4 包三个资产**保持 r1 的 sha256 不变**（`ecc976d0…` / `7d507fd5…` / `352cd603…` …）。
+  走的是 §9.5 那条坑的完整链路：`DELETE /git/refs/tags/v1.14.0`（**release 当场变 draft**）→
+  `POST /git/refs` 指向新提交 → `DELETE /releases/assets/597257309`（旧客户端包）→ 上传新包 →
+  **`PATCH /releases/398826351 {draft:false, tag_name:"v1.14.0", body}`**（漏最后一步 release 就静默是草稿）。
+  内容等价判据：远端提交 tree `fc193119…` == 本地 HEAD（`503b868`）的 tree。
   **本版性质**：① 服务端 v4 谱系前向走**增量事件缓存**，单决策 **38.12 → 22.50 ms（1.70×）**、
   七头逐位相同（判据成对：增量 == 全量 **且** 真的命中；`SelfTest.v4CacheTests` +
   `tools\v4-cache-check.mjs`）；② 训练侧（`python/`，**不改变对局行为**）：`v4 loop` 新增
@@ -3577,8 +3583,9 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   ⚠ **客户端源码自 v1.13.0 起没变**（只有版本号两处）⇒ 玩家可见增量只有"v4 包更快"。
   通道：`github_commit_files`（REST，一个提交带 5 个文件）→ `POST /git/refs` 建 tag →
   `POST /releases` → 资产走 `uploads.github.com`（`github_upload_release_asset`）。
-  6 个资产（本地 sha256 与 GitHub `digest` **逐一核对一致**；资产 id 见括号）：
-  `sMahjong-client-v1.14.0-win64.zip` 38,848,428 B `ee002bfb…`（**597257309**）·
+  6 个资产（本地 sha256 与 GitHub `digest` **逐一核对一致**；资产 id 见括号；
+  ⚠ 客户端包是 **r2** 的，其余 5 个与 r1 相同）：
+  `sMahjong-client-v1.14.0-win64.zip` 38,849,862 B `4fab9d2d…`（**597430144**，r1 是 597257309）·
   `sMahjong-server-v1.14.0.zip` 410,817 B `ecc976d0…`（**597256892**）·
   `sMahjong-bot-ai-v1.14.0.zip` 18,084,284 B `7d507fd5…`（**597257075**）·
   `v4-bc-004.zip` 5,030,913 B `352cd603…`（**597257655**）· `v4-p3-001.zip` 5,023,840 B `5b81cf59…`
