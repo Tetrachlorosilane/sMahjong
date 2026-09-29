@@ -902,6 +902,11 @@ CE 过 ✅、覆盖率 **2.9 / 1.1 / 0.3pp 全过** ✅、CRPS 2.386 vs 气候�
   顺手修掉 `selfcheck.py` 里一条**写死 `S:/mahjong-training`** 的断言（换盘/换机本来会假红），
   并把 `docs/HANDOVER.md` 里错位的 §2.21–§2.37 整块挪回 §2.20 之后（行号单调性现在自检可见）。
 - 记录与摘要表：`NOTES.md` §9.5 的 v1.14.0 条目 + `release/RELEASE-v1.14.0.md`。
+- **已上线**：release id **398826351**（<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.14.0>），
+  tag `v1.14.0` → 远端 `17e15338`（tree == 本地 HEAD tree）；6 个资产的 sha256 与 GitHub `digest` 逐一核对一致。
+  ⚠ 推送通道：`github_git_push` 仍是 **broker 502**（git → github.com 不通）；
+  `github_commit_files` 本次多次 `建 tree → HTTP 400`（重试即过，**逐个文件推**更稳）；
+  `docs/HANDOVER.md` 工作区是 **CRLF** ⇒ 必须带 `normalizeEol: true`（否则工具直接报错告诉你原因）。
 
 ## 4. 环境与命令备忘（本机实测）
 
