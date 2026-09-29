@@ -3537,6 +3537,34 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   `doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.13.0、exe 内 UTF-16 串实测 1.13.0。
   本地草稿与摘要表：`release\RELEASE-v1.13.0.md`。
 
+- **v1.14.0**（2026-09-29，**服务端 v4 前向增量事件缓存（1.70×）+ 值头闸门进训练回路**）：
+  release id 见下表，tag `v1.14.0` → 远端 `Training`。
+  **本版性质**：① 服务端 v4 谱系前向走**增量事件缓存**，单决策 **38.12 → 22.50 ms（1.70×）**、
+  七头逐位相同（判据成对：增量 == 全量 **且** 真的命中；`SelfTest.v4CacheTests` +
+  `tools\v4-cache-check.mjs`）；② 训练侧（`python/`，**不改变对局行为**）：`v4 loop` 新增
+  **值头判据相**（每轮 `value-audit --strict --ev-ref legit`）、**值头相**（`--critic-steps`，缺省关）、
+  **数据量守门**（`value_gate_feasible`）、`--eval-vs prev` 同牌山配对，以及 5 轮战役结论。
+  ⚠ **客户端源码自 v1.13.0 起没变**（只有版本号两处）⇒ 玩家可见增量只有"v4 包更快"。
+  通道：`github_commit_files`（REST，一个提交带 5 个文件）→ `POST /git/refs` 建 tag →
+  `POST /releases` → 资产走 `uploads.github.com`（`github_upload_release_asset`）。
+  6 个资产（本地 sha256）：
+  `sMahjong-client-v1.14.0-win64.zip` 38,848,428 B `ee002bfb…` ·
+  `sMahjong-server-v1.14.0.zip` 410,817 B `ecc976d0…` ·
+  `sMahjong-bot-ai-v1.14.0.zip` 18,084,284 B `7d507fd5…` ·
+  `v4-bc-004.zip` 5,030,913 B `352cd603…` · `v4-p3-001.zip` 5,023,840 B `5b81cf59…` ·
+  `v4-ppo-001.zip` 5,030,883 B `b4995708…`。
+  ⚠ **三个模型包与"一包全给"与 v1.13.0 逐字节相同**（sha256 全等）⇒ 本版**不新增** AI 包，
+  v1.13.0 里"v4 谱系还没有一代打出比 teacher 强"的结论原样成立（纯网络 α=0 的发布口径不变）。
+  发布前实测：L1 **1443/1443**、`selfcheck.py` **646/646**、`v4 check` PASS、
+  `trainer --selftest` PASS、`doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、
+  `VERSION` = 1.14.0、exe 内 UTF-16 串含 1.14.0、客户端 zip 不含 `settings.json`。
+  ⚠ **L2 本会话 851 通过 / 13 失败**，13 条**全在音效组**（`QSoundEffect` 到不了 `Ready`）：
+  对照 v1.13.0 那个未改动的 exe 在同一会话里**同样 851/13** ⇒ **环境**（非交互会话的音频初始化），
+  不是代码回归；要拿到干净读数需在有音频会话的桌面上跑。
+  ⚠ 顺手修掉 `selfcheck.py` 里一条**写死 `S:/mahjong-training`** 的断言（换盘/换机本来会假红），
+  以及会话内 shell 被限制在仓库时用 `MAHJONG_DATA_ROOT=python\.tmp\selfcheck-root` 跑自检的路子。
+  本地草稿与摘要表：`release\RELEASE-v1.14.0.md`。
+
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
 **需求**：把本项目的对局导出成能被 AI 复盘工具直接吃的牌谱
