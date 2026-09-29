@@ -95,7 +95,12 @@ public final class Policies {
      * 根本拿不到 Round）。
      */
     public static PolicyFactory search() {
-        return (seat, gameSeed) -> new SearchPolicy(TEACHER, 8.0, 60.0);
+        // 第三十九轮：三个旋钮都按"减少坏改判"的方向调过 ——
+        //   `margin` 60 → **300**（只让结构性改进翻得动）、危险项改成**硬约束**
+        //   （见 `SearchPolicy.HARD_DANGER_PENALTY`，在类里）、并接上**打点项**（hanWeight）。
+        // 实测依据：第一版（margin=60、无打点、粗危险）在 3,000 场里 Δ=+2.03 略输 teacher，
+        // 改判样本显示病因正是这三处（见 NOTES §6.5 第三十八轮）。
+        return (seat, gameSeed) -> new SearchPolicy(TEACHER, 8.0, 300.0, 60.0);
     }
 
     public static PolicyFactory firstLegalFactory() {
