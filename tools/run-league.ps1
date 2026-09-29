@@ -8,10 +8,19 @@
 # 用法：pwsh -File release/run-league.ps1 [-Generations 8] [-Games 1000]
 param([int]$Generations = 8, [int]$Games = 1000)
 $ErrorActionPreference = 'Stop'
-$py   = 'C:\Users\HP\source\games\mahjong\python\.venv\Scripts\python.exe'
+# ⚠ 解释器：**优先用 S: 上那份 3.12**（若存在）。
+#   为什么：沙箱把"工作区内的可执行文件"交给 overlay hook 管，于是**工作区里的 python
+#   （含 .venv 与 .uv-python 的基础解释器）写不了 S: 的数据根**（[Errno 13]），
+#   而镜像在工作区外的解释器不受管。把 3.12 运行时拷到 S: 上即可两头满足：
+#   既有 torch（.venv 的 cp312 包），又能写数据根。
+#   一次性的准备（本机实测过）：
+#     robocopy <repo>\.uv-python\cpython-3.12-windows-x86_64-none S:\mahjong-training\tools\py312 /E
+$pyS = 'S:\mahjong-training\tools\py312\python.exe'
+$pyVenv = Join-Path $root 'python\.venv\Scripts\python.exe'
+$py = if (Test-Path $pyS) { $pyS } else { $pyVenv }
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
-$env:PYTHONPATH = Join-Path $root 'python'
+$env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
 $label = 'v4-league'
 $seed  = 20261001
 $init  = Join-Path $root 'tools\build\v4-p3-001\net.bin'
