@@ -2553,7 +2553,8 @@ ok(_flag(_lc3, "--only-heads") == "value" and "--freeze-trunk" in _lc3
 eq("v4 回路：值头相用 `--max-steps`（不是 epochs），且步数来自 `--critic-steps`",
    _flag(_lc3, "--max-steps"), "400")
 eq("v4 回路：值头相的 `--init` 是 **PPO 那一步的 ckpt 目录**（目录按 `<dir>/model.pt` 解）",
-   _flag(_lc3, "--init"), str(Path("S:/mahjong-training/ckpt/v4-sc3-g01")))
+   # ⚠ 别写死 `S:/mahjong-training`：自检要能换 `MAHJONG_DATA_ROOT` 跑（否则换盘/换机就假红）
+   _flag(_lc3, "--init"), str(paths.DATA_ROOT / "ckpt" / "v4-sc3-g01"))
 eq("v4 回路：PPO 的 `--init` 仍是**采集那份权重**（不再链到 critic）",
    _flag(_lo3t, "--init"), str(_lo_net))
 eq("v4 回路：PPO 的 `--behaviour` 是采集那份权重（`log π_old` 与采集同源）",
