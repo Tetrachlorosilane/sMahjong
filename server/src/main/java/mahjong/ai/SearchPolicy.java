@@ -91,7 +91,27 @@ public final class SearchPolicy implements Policy {
         if (baseScore == Double.NEGATIVE_INFINITY) {
             return base;
         }
-        return (best - baseScore > margin) ? bestAction.toCmd() : base;
+        // ⚠ **代价审计**：`MAHJONG_SEARCH_TRACE=1` 时每次改判打一行（`tile` = 改成打哪张、
+        //   `base` = teacher 原来打哪张、两边效用）。为什么要有它：搜索与 teacher 的差别
+        //   全在这些改判上 —— 只看"赢没赢"不知道**改了哪一类**（为了 +1 枚进张丢掉现物？
+        //   还是把愚形听牌换成良形？），而这两类该往哪个方向调完全相反。
+        if (best - baseScore > margin) {
+            if (traceOn()) {
+                System.err.println("[search] 改判 " + baseKey + " → " + bestAction.tile
+                        + "  U " + fmt(baseScore) + " → " + fmt(best)
+                        + "（Δ" + fmt(best - baseScore) + "）");
+            }
+            return bestAction.toCmd();
+        }
+        return base;
+    }
+
+    private static boolean traceOn() {
+        return System.getenv("MAHJONG_SEARCH_TRACE") != null;
+    }
+
+    private static String fmt(double v) {
+        return String.format(java.util.Locale.ROOT, "%.1f", v);
     }
 
     /** 打完这一张之后的显式效用（见类注释的公式）。 */
