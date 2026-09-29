@@ -2977,6 +2977,33 @@ $ python -m mahjong_ml.v4 value-audit --data compact/v4-sp-004 --ckpt ckpt/v4-ha
 - **判据**：`python/selfcheck.py` **651/0**（+5：配对计划 / 结论只看 CI / 序贯三条边界 /
   换标签后假阳率 ≤0.15 + 不换标签时同一对 CI 排除 0 的**红证**）。
 
+**第三十七轮：② 搜索算子第一版 `search`（teacher 先验 + 一层前瞻否决）（2026-09-29）**
+
+目标：造一个"比 teacher 强的老师"（模仿的优化上限就是被模仿者）。第一版**刻意不从零写启发** ——
+teacher（`bot/Bot.java`）的牌效/危险度/打点权重是调过的，粗糙的手写模型顶上去只会更差。
+所以结构是 **teacher 当先验 + 显式效用做否决**：
+
+- `ai/SearchPolicy.java`：只在**自家摸打**询问上做前瞻（鸣牌段沿用 teacher）；对合法动作集里的
+  **打牌候选**评估"打完之后的局面"（`HandEval.of`）：
+  `未听牌 U = -1000·向听 + 2·进张枚数 + 1·进张种类`、`听牌 U = 40·听牌枚数 + 25·良形枚数`
+  （⚠ v1 **不含打点项**：`HandEval.estimatedHan` 要 8 个参数，先不引）、
+  `U -= w·危险度`（**只在有人立直时计入**，且只认"现物 / 近绝张"—— 刻意粗糙；
+  真正细的危险度在 `rules/Danger.java`，teacher 用的是它）。
+  **只有最优候选比 teacher 那一手高出 `margin`（缺省 60）才改判**，否则听 teacher 的。
+  副露手（`melds >= 1`）**直接不进搜索**（`HandEval.of` 的副露口径没接）。
+- `ai/Policies.java`：策略串 `search`（危险权重 8.0 / margin 60.0）。⚠ 它实现 `Policy`
+  （读 `Round` 的**公开**辅助方法，与 teacher 同一套读法 ⇒ 不是作弊），**不能**当 `ActionPolicy`
+  用（那层拿不到 `Round`）⇒ 将来蒸馏要走"离线标签"通道。
+- `v4/arena.py`：`--producer {cpp,java}`。⚠ C++ trainer **只认识** `teacher`/`net:`/`first`…，
+  `search` 必须 `--producer java`。**实测速度**：Java+search ≈ **1.2 s/场**（8 workers，20 场 0.4 分钟）
+  ⇒ 3000 场 ≈ 1 小时。
+- **冒烟**（20 场，只证管线通、不是结论）：Δ=−0.53 CI[−20.96,+20.70] ⇒ 分不出；
+  `required_n(Δ=2) ≈ 4,755`（配对差分 sd≈24）。正式 3000 场判决（block=1000）在后台跑。
+- **下一步**：① 若 `search` 赢 ⇒ 用 `teacher_label` 那条现成通道扩展成 `search_label` 做**蒸馏**
+  （不然每次决策带搜索，做不了联网对战主力）；② 若分不出/输 ⇒ 调 `margin`/危险项/接上打点项 ——
+  **每次改动都用竞技场量**（20 场 ≈ 0.4 分钟，迭代很便宜）。
+- **判据**：服务端 `build.ps1` PASS；`v4 arena` 两条冒烟跑通。
+
 
 
 
