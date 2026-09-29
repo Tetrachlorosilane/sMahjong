@@ -527,6 +527,34 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   - ⚠ **`MAHJONG_SFX_TRACE=1` 在"恒假"这一支下的读法**：正常行是 `playing=1 status=2`；
     真出问题时能看到连续的 `playing=0` 行（三次之后就应紧跟一行"重建音频池"）。
     用 `node tools\mock-server.mjs 10999 sfxburst`（连发多条音效、专门制造竞态）验证。
+  - ⚠⚠ **临时 WAV 落盘：目录必须"真能写"**（2026-09-29 修的"好几个版本都没音效"，用户点名要解决）：
+    `QSoundEffect` **只吃 URL**（没有 `setData()`）⇒ 必须先把它落到磁盘再 `setSource()`。
+    旧实现写死 `QTemporaryFile(QDir::tempPath() + "/mahjong-sfx-XXXXXX.wav")` 且**只看 `open()` 的
+    布尔值、失败就静默 `continue`** —— 于是当系统临时目录**不可写**时（受限沙箱 / 组策略 / 漫游
+    配置损坏；实测这一台会话里就是 `[Errno 13]/拒绝访问`），**8 个音效全部被跳过**：
+    `m_effects` 是空的 ⇒ 每次 `play()` 只留一句 `效果 missing`，玩家**一点声音都没有**，
+    而后端（`qsoundeffect`）与默认输出设备（`Headphone (Realtek(R) Audio)`）**都是好的** ——
+    光看"后端可用/素材 >1KB"这两条判据会完全漏掉它。
+    **修法（`tempCacheDir()`）**：按 `%TEMP%` → `QStandardPaths::CacheLocation` →
+    **exe 同级 `sfx-cache/`** 逐个**真写一个探针文件**（`mkpath` 成功 ≠ 能建文件），能写就用。
+    **判据（实测三档）**：① 正常 `%TEMP%` ⇒ 建池 3 ×8、L2 **854/0 PASS**；
+    ② 把 `TEMP` 指到 `C:\Windows\System32\config`（拒绝访问）⇒ **仍然**建池 3 ×8、**854/0 PASS**、
+    退出码 0（走回退目录）；③ 修前 ⇒ `m_effects` 空、L2 **851 通过 / 13 失败**（全在音效组）。
+    **红证**：去掉回退链（只留 `QDir::tempPath()`）在 ② 的条件下立刻复现 13 条失败。
+  - ⛔ **这一条路径上别用函数内 `static` 缓存**（写这一版时自己踩的第二个坑）：
+    我先把选中的目录缓存在 `static QString cached` 里 —— 而函数内静态的析构顺序是"后构造先析构"，
+    `Player` 实例本身也是函数内静态、且在 `tempCacheDir()` **之前**构造 ⇒ 退出时
+    `~Player → sweepTempFiles → tempCacheDir()` 读到**已经析构**的 `QString` ⇒ **退出时堆损坏**
+    （返回码 `0xC0000374`，而自检 854/0 全绿、看起来一切正常；旧 exe 同样条件退出码 0，可对照）。
+    **修法**：缓存放**成员** `m_cacheDir`（对象活着，成员就活着）。
+    ⚠ 判据必须是**退出码**，不只是"自检 PASS" —— 这一条只有退出码能抓到。
+  - **临时文件不许攒**：`QTemporaryFile` 会自动删，换成 `QFile` 之后必须自己收 ——
+    `sweepTempFiles(staleOnly)`：析构/`shutdown()` 删**本进程**那份（`mahjong-sfx-<pid>-…`），
+    `init()` 顺手清掉**一天前的**历史遗留。实测旧实现（含被截断的运行）在 `%TEMP%` 里留了 **32 个**。
+  - ⚠ **音频栈要在 `QApplication` 还活着时拆**：`sound::Player` 是函数内静态 ⇒ 它的析构发生在
+    main 返回**之后**；`main.cpp` 里的 `SoundShutdownGuard`（声明在 `app` 之后，故先于 `app` 析构）
+    覆盖**所有** return 路径。⛔ 别只挂 `aboutToQuit`：`--selftest` / `--gentiles` / `--fontprobe`
+    这些模式**根本不跑事件循环**，那个信号永远不发。
 - **「手牌 + 摸牌」块的边界避让：一次算完 + 右移封顶**（同一个坑踩了三次，别简化）：
   - `layoutHand()` 里只允许**一个** `over`，且必须先取 `max`（①副露 ②角落名牌）再让 ③行首角落让步。
     分成两段钳制时，后一段会算出**负的 over**，`handLeft -= over` 等于把整块往右推，把前一段让出的空间又吃回去。
@@ -3157,6 +3185,7 @@ $ python -m mahjong_ml.v4 value-audit --data compact/v4-sp-004 --ckpt ckpt/v4-ha
 | **只有第一小局有音效** | 先跑 `MAHJONG_SFX_TRACE=1 client --demo ...` 看 stderr：每一条都会打出开关/可用/音量/池子状态（`pool3(ready/playing/stale/err)`）/`play()` 后是否 playing。客户端实测**每局都在播**，所以重点查 `stop()+play()` 那条路径（已改成实例池；池子真满时不再硬插），见 §6.2 |
 | **音效在"有副露 / 可副露时选择不副露"之后消失** | 同一个 `MAHJONG_SFX_TRACE=1`：看有没有 `stale`（自称在播但其实早该结束）。真因是 **`QSoundEffect::isPlaying()` 在设备异常后会永远为真**，而旧判据"还在播就跳过"会因此把那条音效永久静音 —— 现在按 **WAV 时长**对账（卡死则 `stop` 后复用），见 §6.2。⚠ 本机压测（85 次播放 / 池子打满）**复现不出来**：真机上请把 trace 发回来，`stale` 与 `放弃` 两行能直接定位 |
 | **所有音效一起失效，重开一局也不恢复，必须重启客户端** | 两个音效撞进竞态把音频通道打结了（此后 `play()` 既不响、`isPlaying()` 也不置位 ⇒ 池子看起来永远空闲）。现在连续 3 次"play 了却没 playing"就**整池重建**（`shouldRebuildStack`），见 §6.2。定性：`MAHJONG_SFX_TRACE=1` + `node tools\mock-server.mjs 10999 sfxburst` |
+| **一点声音都没有（后端与设备都正常）** | 临时 WAV 落盘失败 ⇒ 池子根本没建出来：看 `MAHJONG_SFX_TRACE=1` 里有没有 `init <名字> → 建池 3`；只有 `init … → 跳过：临时文件建不出（…：拒绝访问）` 就是它（系统临时目录不可写）。见 §6.2；现在会按 `%TEMP%` → Qt 缓存 → exe 同级 `sfx-cache/` 回退 |
 | **赤宝不该拼在「碰/吃」后面** | 用户口径：`碰` = 一个按钮，赤宝放进**副露子列表**；只有一种取法时**不区分**。`ActionBar::buildPonMenu/buildKanMenu` 是子列表的唯一来源（自检 `menuEntriesForTest` 直接读它），见 §6.2/PROTOCOL §3.6 |
 | **副露里横置的那张"浮"在中间** | 横置牌顶边必须是 `my + (riverH − riverW)`（底部与另两张齐平），见 §6.2 与 `TableView::meldSlotRects` |
 | **加杠看起来"换了副牌" / 第 4 张跑到中间格** | 横置的必须是**原碰里被鸣的那一张**，加上的第 4 张也横置并紧贴叠在它上方（同一格、不占新槽位）。旧实现给加杠单开分支、横置第 4 张 → 就是这个症状。见 §6.2 |
