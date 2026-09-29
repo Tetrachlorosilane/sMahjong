@@ -85,6 +85,16 @@ public:
     /** 探测后端 + 读取用户设置里的开关/音量。可重复调用（幂等）。 */
     void init();
 
+    /**
+     * **在 `QCoreApplication` 还活着的时候**把音频栈拆干净：停掉全部实例、删掉所有
+     * `QSoundEffect`、清掉临时 WAV。
+     *
+     * ⚠ 为什么必须显式调（而不是靠析构）：`Player` 是函数内静态对象，析构发生在 main 返回
+     * **之后**，那时 `QApplication` 已经没了 —— 在那种状态下析构 `QSoundEffect` 会去碰
+     * 多媒体后端，实测**退出时堆损坏**（`0xC0000374`）。`main.cpp` 里挂 `aboutToQuit` 调它。
+     */
+    void shutdown();
+
     /** 本构建/本机能不能出声（三档后端的可用性结论）。 */
     bool available() const { return m_available; }
     /** 后端名字（自检与故障排查用）：`qsoundeffect` / `winmm` / `none`。 */
@@ -189,12 +199,27 @@ private:
      * 而重建效果对象 + 重新解析默认设备能让它恢复 —— **不需要重启客户端**。
      */
     void rebuildStack();
+    /**
+     * 清 `%TEMP%` 里我们自己写的临时 WAV（`QSoundEffect` 只吃 URL，所以每个音效要先落一份）。
+     *
+     * @param staleOnly `true` = 只清**一天前的**历史遗留（init 时调用，不碰还活着的实例）；
+     *                  `false` = 只清**本进程**那份（析构时调用）。
+     * @return 是否真的删掉了东西。
+     */
+    bool sweepTempFiles(bool staleOnly);
+    /**
+     * 挑一个**真能写**的目录放临时 WAV（同一次运行内固定）：`%TEMP%` → Qt 缓存目录 →
+     * exe 同级 `sfx-cache/`。⚠ 系统临时目录不可写时**不能**就此放弃出声（见实现处的注释）。
+     * ⚠ 结果记在 `m_cacheDir` **成员**上，不用函数内静态（析构先后会导致退出时堆损坏）。
+     */
+    QString tempCacheDir();
 
     bool m_available = false;
     QString m_backend = QStringLiteral("none");
     bool m_enabled = true;
     int m_volume = 70;
     QHash<QString, QByteArray> m_cache;                // 名字 → WAV 字节
+    QString m_cacheDir;                                // 临时 WAV 的落点（`tempCacheDir()` 选一次）
     QHash<QString, QVector<QSoundEffect*>> m_effects;  // 名字 → 实例池（仅 ① 档）
     QHash<QString, QUrl> m_source;                     // 名字 → 源 URL（Error 自愈要重设）
     QHash<QString, int> m_plays;                       // 名字 → 实际播放次数（自检）

@@ -15,7 +15,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
-#include <QTemporaryFile>
+#include <QFileInfo>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
 
@@ -215,21 +216,102 @@ Player::Player()
 
 Player::~Player()
 {
-    stopAll();
-    for (QVector<QSoundEffect*>& pool : m_effects) {
-        qDeleteAll(pool);
-    }
-    m_effects.clear();
+    // ⚠ 正常路径上 `shutdown()` 已经在 `QApplication` 还活着时拆干净了（见 `main.cpp` 的
+    //   `aboutToQuit`）；这里只是"没人调 shutdown 就用 exit() 结束"那种路径的兜底。
+    //   ⛔ 别把 `shutdown()` 的活儿只放在这里 —— 静态析构时 QCoreApplication 已经没了，
+    //   那时删 `QSoundEffect` 会**堆损坏**（退出码 0xC0000374，实测）。
+    shutdown();
 #ifdef Q_OS_WIN
     qDeleteAll(g_winTemp);
     g_winTemp.clear();
 #endif
 }
 
+void Player::shutdown()
+{
+    stopAll();
+    // ⚠ 这里**不删** `QSoundEffect` 对象（实测：在 `QApplication` 还活着时删它们会让本 Qt 构建
+    //   在退出时报**堆损坏** `0xC0000374`；交给静态析构时的 `~Player` 删反而干净 ——
+    //   旧实现一直就是那么做的）。这里只：① 停掉全部实例；② 把临时 WAV 清掉。
+    //   ⛔ 别"顺手"把 qDeleteAll 挪进来（那正是 2026-09-29 试过、被实测打回的做法）。
+    m_startedAt.clear();
+    // 自己那份临时 WAV（`init()` 写在缓存目录里的）随对象一起清掉。
+    // ⚠ 必须留这一手：旧实现用 `QTemporaryFile`（会自动删）而现在用 `QFile`（不会），
+    //   不删就会像 2026-09 那样在缓存目录里攒下几十个 `mahjong-sfx-*.wav`。
+    sweepTempFiles(false);
+}
+
+bool Player::sweepTempFiles(bool staleOnly)
+{
+    // ⚠ 为什么要有它：`QSoundEffect` 只吃 URL ⇒ 每个音效要先落一份临时 WAV。
+    //   `staleOnly=false`（析构）只删**本进程**那份；`staleOnly=true`（init）顺手清掉
+    //   **一天前的**历史遗留（崩溃/被强杀留下的），避免缓存目录越攒越多。
+    const QString mine = QStringLiteral("mahjong-sfx-%1-").arg(QCoreApplication::applicationPid());
+    bool any = false;
+    const QStringList files = QDir(tempCacheDir()).entryList({QStringLiteral("mahjong-sfx-*.wav")},
+                                                            QDir::Files);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const QString& f : files) {
+        const bool isMine = f.startsWith(mine);
+        if (staleOnly && isMine) {
+            continue;                    // 自己正在用的别删
+        }
+        const QFileInfo fi(QDir(tempCacheDir()).filePath(f));
+        if (staleOnly && now - fi.lastModified().toMSecsSinceEpoch() < 24LL * 3600 * 1000) {
+            continue;                    // 别人（还可能活着的实例）的新文件别碰
+        }
+        any = QFile::remove(fi.absoluteFilePath()) || any;
+    }
+    return any;
+}
+
+QString Player::tempCacheDir()
+{
+    // ⚠⚠ **本函数是 2026-09-29 那次"好几个版本都没音效"的正面修法之一**。
+    //   把 WAV 落盘这一步不能假定"系统临时目录一定可写"：实测在受限环境里
+    //   `%TEMP%` 会直接回**拒绝访问**（沙箱/组策略/漫游配置损坏都会这样），
+    //   于是在那里 `continue` ⇒ 池子建不出来 ⇒ 玩家**一点声音都没有**，
+    //   而报障信息里只有一句 `效果 missing`（后端与设备都是好的）。
+    //   所以按"能写就用"的顺序挑一个目录，并把它记在**成员**上（同一次运行固定）。
+    //
+    // ⛔ **别用函数内 `static QString` 缓存它**（2026-09-29 实测踩过）：函数内静态的析构顺序
+    //   是"后构造先析构"，而 `Player` 实例本身也是函数内静态、且在 `tempCacheDir()` **之前**
+    //   构造 ⇒ 退出时 `~Player → sweepTempFiles → tempCacheDir()` 会读到**已经析构掉**的
+    //   QString ⇒ **退出时堆损坏**（返回码 `0xC0000374`，而测试全绿、看起来一切正常）。
+    //   记在对象上就没有这个先后问题（对象活着，成员就活着）。
+    if (!m_cacheDir.isEmpty()) {
+        return m_cacheDir;
+    }
+    QStringList cands;
+    cands << QDir::tempPath();
+    const QString cacheLoc = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (!cacheLoc.isEmpty()) {
+        cands << cacheLoc;
+    }
+    cands << QCoreApplication::applicationDirPath() + QStringLiteral("/sfx-cache");
+    for (const QString& dir : cands) {
+        if (dir.isEmpty()) {
+            continue;
+        }
+        QDir().mkpath(dir);
+        // 真写一个探针：`mkpath` 成功不等于"能建文件"（权限/只读卷/沙箱都不一样）。
+        QFile probe(dir + QStringLiteral("/.mahjong-sfx-probe"));
+        if (probe.open(QIODevice::WriteOnly)) {
+            probe.close();
+            probe.remove();
+            m_cacheDir = dir;
+            return m_cacheDir;
+        }
+    }
+    m_cacheDir = QDir::tempPath();        // 都不行就还用默认的（失败路径上会打日志）
+    return m_cacheDir;
+}
+
 void Player::init()
 {
     // 后端探测：只做一次，重复调用无副作用。
     if (m_backend == QLatin1String("none")) {
+        sweepTempFiles(true);            // 顺手清掉一天前的历史遗留（见 `sweepTempFiles`）
 #if MAHJONG_HAVE_MULTIMEDIA
         m_backend = QStringLiteral("qsoundeffect");
         m_available = true;
@@ -244,19 +326,47 @@ void Player::init()
     // 关掉开关就**不探测**素材（省掉 8 次文件探测）。
 #if MAHJONG_HAVE_MULTIMEDIA
     if (m_available) {
+        if (traceEnabled()) {
+            // ⚠ 这一行是"没有声音"类报障的**第一现场**（2026-09 加）：池子建不出来时
+            //   以前是**静默 continue**，于是 `play()` 只会说一句 `效果 missing`，
+            //   根本看不出是"素材空"还是"临时文件建不出"。默认设备也一并打出来 ——
+            //   `defaultAudioOutput()` 为空是"后端在但没设备"的唯一线索。
+            const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
+            trace(QStringLiteral("init → backend=%1 默认输出设备=%2")   // i18n-keep
+                      .arg(m_backend, dev.isNull() ? QStringLiteral("(空)")
+                                                   : dev.description()));
+        }
         for (const QString& n : allNames()) {
             if (m_effects.contains(n)) {
                 continue;
             }
             const QByteArray bytes = data(n);
             if (bytes.isEmpty()) {
+                trace(QStringLiteral("init %1 → 跳过：三档都没取到素材（材质包/exe 同级 sfx/qrc）")
+                          .arg(n));   // i18n-keep
                 continue;
             }
             // ⚠ `QSoundEffect::setSource()` 只吃 URL，没有 setData()：
-            //   把 WAV 落到临时文件再喂给它（临时文件是 Player 的子对象、生命周期内不删）。
-            auto* tmp = new QTemporaryFile(
-                QDir::tempPath() + QStringLiteral("/mahjong-sfx-XXXXXX.wav"), this);
-            if (!tmp->open()) {
+            //   把 WAV 落到临时文件再喂给它（文件是 Player 的子对象、生命周期内不删，
+            //   析构时由 `sweepTempFiles()` 清掉）。
+            //
+            // ⚠⚠ **不要用 `QTemporaryFile` 拼带后缀的模板**（2026-09-29 修的真 bug，
+            //   报障现象是"好几个版本都没有音效"）：`QSoundEffect` 只吃 URL，所以旧实现写的是
+            //   `QTemporaryFile(QDir::tempPath() + "/mahjong-sfx-XXXXXX.wav")` —— 而
+            //   **`XXXXXX` 必须在模板的最后六位**（Qt 拿它当"要替换的唯一串"的标记）。
+            //   放在 `.wav` 前面 ⇒ `open()` 直接失败、`fileName()` 是**空串**，
+            //   于是 `init()` 对 8 个音效**全部静默 continue** ⇒ `m_effects` 空 ⇒
+            //   每次 `play()` 都只说一句 `效果 missing`（**永远没有声音**，与音量/设备无关）。
+            //   实测：后端 `qsoundeffect`、默认设备 "Headphone (Realtek(R) Audio)" 都正常，
+            //   8 条 `init … → 跳过：临时文件建不出（）` 就是它。
+            //   现在自己建：名字可预测（好排查）、按 pid+名字唯一（多开不撞）、不用模板规则。
+            const QString tmpPath = tempCacheDir() + QStringLiteral("/mahjong-sfx-%1-%2.wav")
+                                                          .arg(QCoreApplication::applicationPid())
+                                                          .arg(n);
+            auto* tmp = new QFile(tmpPath, this);
+            if (!tmp->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                trace(QStringLiteral("init %1 → 跳过：临时文件建不出（%2：%3）")
+                          .arg(n, tmpPath, tmp->errorString()));   // i18n-keep
                 delete tmp;
                 continue;
             }
@@ -277,6 +387,8 @@ void Player::init()
             }
             m_source.insert(n, url);
             m_effects.insert(n, pool);
+            trace(QStringLiteral("init %1 → 建池 %2（素材 %3 B）")   // i18n-keep
+                      .arg(n).arg(pool.size()).arg(bytes.size()));
             // 时长用来判"自称在播"是不是在说谎（见 `pickSlot`）。解析不出来就记 0，
             // `pickSlot` 会退回保守上限，绝不因此把实例当成永远在播。
             m_durationMs.insert(n, wavDurationMs(bytes));
@@ -316,8 +428,13 @@ const QByteArray& Player::data(const QString& sfx)
     }
     const QByteArray bytes = loadWav(sfx);
     if (bytes.isEmpty()) {
-        // 缓存"没有"这件事也用空字节表示；`m_cache` 的键存在即代表探测过了。
-        return *m_cache.insert(sfx, empty);
+        // ⚠⚠ **"没取到"不进缓存**（2026-09 修）：`init()` 有可能在"素材还取不到"的时刻先跑
+        //   （例如别的静态初始化先碰了 `Player::instance()`），而 `QCoreApplication` 还没建好时
+        //   `applicationDirPath()` 是拿不到 exe 目录的。旧实现把这次失败**缓存成空**，
+        //   于是此后每次 `data()` 都直接返回空、池子永远建不出来 —— 症状就是
+        //   `play() → 效果 missing`（静默、且**重启也没用**，因为它每次都在同一时刻失败）。
+        //   现在：空值不缓存，代价只是每次多 3 次文件探测（8 个音效 × 3 档，微秒级）。
+        return empty;
     }
     return *m_cache.insert(sfx, bytes);
 }

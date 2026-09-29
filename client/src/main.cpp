@@ -89,6 +89,20 @@ int main(int argc, char* argv[])
     QCoreApplication::setApplicationName(QStringLiteral("mahjong-client"));
     QCoreApplication::setApplicationVersion(QStringLiteral("1.14.0"));
 
+    // ⚠⚠ **音频栈必须在 `QApplication` 还活着的时候拆掉**（2026-09-29 修的真 bug）：
+    //   `sound::Player` 是函数内静态对象 ⇒ 它的析构发生在 **main 返回之后**，那时
+    //   `QApplication`（栈对象）已经没了 —— 而 `QSoundEffect` 的析构会去碰多媒体后端
+    //   （设备/线程），在没有 QCoreApplication 的情况下析构 = **退出时堆损坏**
+    //   （实测：`--selftest` 打完 `SELFTEST PASS` 之后返回码 `0xC0000374`）。
+    //   ⚠ 只挂 `aboutToQuit` **不够**：`--selftest` / `--gentiles` / `--fontprobe` 这些
+    //   模式从 main 里直接 `return`，**根本不会跑事件循环** ⇒ 那个信号永远不发。
+    //   所以用一个**栈上的守卫**：它声明在 `app` 之后 ⇒ 一定先于 `app` 析构 ⇒
+    //   所有 return 路径（含早退）都覆盖，且那时 `app` 仍然活着。
+    struct SoundShutdownGuard {
+        ~SoundShutdownGuard() { sound::Player::instance().shutdown(); }
+    } soundShutdownGuard;
+    Q_UNUSED(soundShutdownGuard);
+
     const QStringList args = QCoreApplication::arguments();
 
     // 语言文件：**所有用户可见文案**都从这里取（协议里只传 ASCII 码）。
