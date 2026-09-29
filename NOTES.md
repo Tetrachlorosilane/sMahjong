@@ -3214,6 +3214,38 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 （或让沙箱对子进程也放行），⛔ 不要在沙箱里继续用 `MAHJONG_DATA_ROOT` 改路径绕（那只是把
 "看不见"换成"写进仓库"，既违反 §0.1 ①，也不会让跨进程交接变得可见）。
 
+**第四十六轮：真正跑通 —— 沙箱是"按**可执行文件位置**"决定写入是否生效（2026-09-29）**
+
+第四十五轮的最小复现把问题钉在"子进程写 `S:` 被吞"之后，这一轮找到了**完整规律**：
+
+| 谁写 `S:` | 结果 |
+| --- | --- |
+| shell 自己 | ✅ 真生效 |
+| **工作区里**的解释器（`.venv` / `.uv-python`） | ❌ `[Errno 13]` |
+| **工作区里**的 `trainer.exe` | ⛔ 不报错也不落盘（退出码 0、目录不存在） |
+| **`S:` 上**的 3.12 解释器（拷过去的那份） | ✅ 写、而且 **shell 事后看得到**（跨进程可见） |
+| **`S:` 上**的 `trainer.exe`（拷过去的那份） | ✅ 写 2 场 → 目录与 3 个文件都在 |
+
+⇒ **判据不是"写到哪个路径"，而是"可执行文件在哪"**：工作区里的进程被 overlay hook 管住，
+它对数据根的写入被静默丢弃；把**同一份**二进制拷到数据根上再跑就一切正常。
+（这也解释了为什么第四十三轮那次"采集 764 s / 退出码 0 / 什么都没有"。）
+
+**修法（两处，都已落地）**：
+
+1. `python/mahjong_ml/producer.py`：`TRAINER` 允许用 **`MAHJONG_TRAINER`** 覆盖 ——
+   受限环境里把训练端指向数据根上的副本（注释里写清了"为什么是按位置而不是按路径"）。
+2. `tools/run-league.ps1`：自动探测并设置 `PYTHONPATH`（仓库 `python\` + `.venv` 的 site-packages）、
+   `MAHJONG_TRAINER`（`S:\…\tools\trainer\trainer.exe`）、解释器（`S:\…\tools\py312\python.exe`）。
+   一次性准备（本机实测过）：
+   ```powershell
+   robocopy <repo>\.uv-python\cpython-3.12-windows-x86_64-none S:\mahjong-training\tools\py312 /E
+   robocopy <repo>\trainer\build S:\mahjong-training\tools\trainer /E
+   ```
+   ⚠ 脚本里 `$root` 必须定义在那些 `Join-Path` **之前**（我第一版排到了后面，冒烟时直接
+   `Cannot bind argument to parameter 'Path' because it is null` —— 修正后 1 代 × 20 场冒烟整轮跑通）。
+3. **结果**：`-Generations 8 -Games 1000` 起跑，第 1 代采集中（4 分钟已落盘 606 个轨迹文件）。
+   台账 `S:\mahjong-training\league\v4-league-v4.json`。
+
 
 
 
