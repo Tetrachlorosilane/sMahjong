@@ -3128,6 +3128,30 @@ teacher（`bot/Bot.java`）的牌效/危险度/打点权重是调过的，粗糙
 - **判据**：3,000 场同牌山配对（台账 `python/.tmp/arena/search-v3-3000.json`）；
   服务端 `build.ps1` PASS。
 
+**第四十三轮：在线自对弈 + 结果奖励（补上"对手池"这味药）—— 引擎就绪，但本轮起不来（2026-09-29）**
+
+用户点名"直接尝试在线自对弈 + 结果奖励"。必须先说清一件事：**v4 回路本身就是在线自对弈 + 结果奖励**
+（每轮用当前网采集、按收支/顺位训练、导出下一代）；我们前面跑的 `v4-camp01` 5 轮就是这个，
+结论是"值头过关、强度无证据"。所以真正缺的不是"要不要在线自对弈"，而是**对手池**：
+
+- `v4/loop.py` 原来固定"自己×2 + teacher×2" ⇒ **对手永远同一批**，结果奖励里关于**通用强度**的信息
+  极少（你强你弱都在同一张桌子上）；而 v3 谱系唯一出过正结果的那条路，采集桌上有**历史快照**。
+- 本轮给回路加 **`--opponents <net.bin>`（可重复）**：把**一个非学生座位**换成对手池里的历史快照，
+  按代轮换（`generation % len(opponents)`）；**学生席位数不变**（`--student` 串照旧逐字匹配），
+  对手用**贪心**（它是标尺，不该跟自己一样抖）。
+  实测策略串：`--opponents g01,g02` ⇒ `g1: …,teacher,net:g02` / `g2: …,teacher,net:g01` / `g3: …g02`。
+- `tools/run-league.ps1`（新，随仓库走）：逐代跑、每代结束把这一代的 net 加进对手池
+  （只留最近两代 —— 更早的落后太多，留着只会稀释结果奖励的信息）、每代 `--eval-vs prev`
+  同牌山配对看"这一代有没有长进"、S 盘逐代轮换（删 raw/compact/eval，只留 ckpt/net.bin/台账/审计）。
+  配方：`--games 1000 --max-steps 2000 --epochs 2 --kl-early-stop 0.15 --value-target delta
+  --advantage hand --rank-weight 0.2 --critic-steps 0`（前几轮量出来的"两个轴都够"的那一档）。
+- ⛔ **本轮没跑起来**：Windows 侧沙箱把 shell 限在仓库内，而训练数据根必须是 `S:\mahjong-training`
+  ⇒ `paths.ensure_root()` 的写探针直接 `[Errno 13] Permission denied`（**任何** shell 都一样，
+  前台/后台都试过）。第一代 3 秒即退（日志 `release/v4-league-g01.log`）。
+  ⇒ 要么**在普通终端里跑** `pwsh -File tools\run-league.ps1 -Generations 8 -Games 1000`，
+  要么明确同意把本轮数据根临时指到仓库内（**违反 §0.1 约束 ①**，所以我没有擅自做）。
+- **判据**：`loop.py` 的策略串与轮换已实测（见上）；脚本就绪；沙箱阻断有明确报错文本。
+
 
 
 
