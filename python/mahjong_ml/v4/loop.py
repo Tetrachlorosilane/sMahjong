@@ -66,6 +66,9 @@ class LoopConfig:
     init: str
     student_temp: float = 0.5
     teacher_seats: int = 2
+    #: 对手池（历史快照的 `net.bin` 路径）：把一个非学生座位换成它、按代轮换。
+    #: 见 `policy()` 的注释 —— 固定对手时「结果奖励」几乎不含通用强度信息。
+    opponents: tuple[str, ...] = ()
     objective: str = "ppo"
     value_target: str = "final"
     epochs: int = 4
@@ -118,10 +121,22 @@ class LoopConfig:
         """采集/数据集共用的学生策略串：**逐字同一个字符串**（`is_student` 靠字符串相等判定）。"""
         return f"net:{net}@0#{self.student_temp:g}"
 
-    def policy(self, net: Path) -> str:
-        """四席策略串：学生 N 席 + teacher 其余（2+2 是默认，`--teacher-seats` 可调）。"""
-        seats = [self.student_spec(net)] * (4 - self.teacher_seats) + ["teacher"] * self.teacher_seats
-        return ",".join(seats)
+    def policy(self, net: Path, generation: int = 0) -> str:
+        """四席策略串：学生 N 席 + teacher +（可选）**对手池**里的一个历史快照。
+
+        ⚠ 为什么要 `--opponents`（第四十三轮）：v4 回路原来固定"自己×2 + teacher×2"，
+        于是**结果奖励里关于"通用强度"的信息很少** —— 对手永远是同一批（teacher 与自己的上一代），
+        你变强变弱都在同一张桌子上。v3 谱系唯一出过正结果的那条路，采集桌上有**历史快照**。
+        这里按代轮换对手池（`generation % len(opponents)`），其余座位不变；
+        **学生席位数不变**（`--student` 串照旧逐字匹配，见 `student_spec`）。
+        """
+        students = [self.student_spec(net)] * (4 - self.teacher_seats)
+        others = ["teacher"] * self.teacher_seats
+        if self.opponents and others:
+            # 对手用**贪心**（不带温度）：它是"标尺"，不该跟自己一样抖。
+            pick = self.opponents[generation % len(self.opponents)]
+            others[-1] = f"net:{pick}"
+        return ",".join(students + others)
 
 
 @dataclass
@@ -172,7 +187,7 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     spec = cfg.student_spec(net_in)
     p = cfg.producer
     r.commands["collect"] = producer.selfplay_cmd(
-        games, cfg.workers, cfg.policy(net_in), cfg.seed + generation, r.raw,
+        games, cfg.workers, cfg.policy(net_in, generation), cfg.seed + generation, r.raw,
         hands=cfg.hands, sample=cfg.sample, rotate=True, aux=True, name=p)
     r.commands["features"] = producer.features_cmd(r.raw, cfg.workers, name=p)
     r.commands["check"] = ["node", "tools/selfplay-check.mjs", str(r.raw)]
@@ -525,6 +540,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gen-offset", type=int, default=0,
                     help="代号的偏移：一次只跑一代、由外面轮换大件时，用它把第 i 次调用编成第 i 代"
                          "（否则每轮都编 -g01，后一轮会覆盖前一轮的产物）")
+    ap.add_argument("--opponents", action="append", default=[],
+                    help="对手池（可重复）：把一个非学生座位换成这个历史快照的 net.bin，按代轮换")
     ap.add_argument("--eval-workers", type=int, default=24)
     ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="ppo")
     ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
@@ -574,7 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"--producer 只能是 {'/'.join(producer.PRODUCERS)}，收到 {chosen!r}")
     cfg = LoopConfig(
         label=args.label, init=args.init, student_temp=args.student_temp,
-        teacher_seats=args.teacher_seats, objective=args.objective,
+        teacher_seats=args.teacher_seats, opponents=tuple(args.opponents),
+        objective=args.objective,
         value_target=args.value_target, epochs=args.epochs, batch=args.batch, lr=args.lr,
         stage_a=args.stage_a, stage_b=args.stage_b, workers=args.workers,
         eval_games=args.eval_games, eval_workers=args.eval_workers, seed=args.seed,
