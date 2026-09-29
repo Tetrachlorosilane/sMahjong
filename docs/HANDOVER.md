@@ -904,9 +904,31 @@ CE 过 ✅、覆盖率 **2.9 / 1.1 / 0.3pp 全过** ✅、CRPS 2.386 vs 气候�
 - 记录与摘要表：`NOTES.md` §9.5 的 v1.14.0 条目 + `release/RELEASE-v1.14.0.md`。
 - **已上线**：release id **398826351**（<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.14.0>），
   tag `v1.14.0` → 远端 `17e15338`（tree == 本地 HEAD tree）；6 个资产的 sha256 与 GitHub `digest` 逐一核对一致。
-  ⚠ 推送通道：`github_git_push` 仍是 **broker 502**（git → github.com 不通）；
-  `github_commit_files` 本次多次 `建 tree → HTTP 400`（重试即过，**逐个文件推**更稳）；
+  ⚠ 推送通道：`github_git_push` 仍是 **broker 502**（git → github.com 不通）；  `github_commit_files` 本次多次 `建 tree → HTTP 400`（重试即过，**逐个文件推**更稳）；
   `docs/HANDOVER.md` 工作区是 **CRLF** ⇒ 必须带 `normalizeEol: true`（否则工具直接报错告诉你原因）。
+
+### 2.39 修「好几个版本都没有音效」（2026-09-29，用户点名）
+
+- **现场**：L2 每次 **851 通过 / 13 失败**，13 条全在音效组（池子 = 0、`status` 到不了 `Ready`）。
+- **根因**：`QSoundEffect` **只吃 URL** ⇒ 每个音效要先把 WAV **落到临时文件**再 `setSource()`；
+  旧实现写死 `QTemporaryFile(QDir::tempPath() + "/mahjong-sfx-XXXXXX.wav")` 且**只看 `open()` 布尔值、
+  失败就静默 `continue`** ⇒ 系统临时目录**不可写**时（受限沙箱/组策略/漫游配置损坏；本会话实测
+  「拒绝访问」）**8 个音效全部被跳过**：`m_effects` 空 ⇒ `play()` 只留一句 `效果 missing`，
+  玩家**一点声音都没有**；而后端 `qsoundeffect` 与默认设备 `Headphone (Realtek(R) Audio)` 都正常
+  —— 所以"后端可用 / 素材 >1KB"这两条判据全绿也发现不了。
+- **修法**：`tempCacheDir()` 按 `%TEMP%` → `QStandardPaths::CacheLocation` → **exe 同级 `sfx-cache/`**
+  逐个**真写探针**试（`mkpath` 成功 ≠ 能建文件）；`data()` **不再缓存"没取到"**（一次瞬时失败以前会
+  **永久**关掉声音）；临时文件改可预测名字 + `sweepTempFiles()`（自己那份退出删、一天前的 init 清 ——
+  实测旧实现留了 **32 个**）；`init()` 逐音效打"为什么跳过"的日志。
+- ⛔ **过程中自己踩的坑**：选中的目录缓存在函数内 `static QString` ⇒ 静态析构顺序让 `~Player` 读到
+  **已析构**对象 ⇒ **退出时堆损坏 `0xC0000374`**（自检 854/0 全绿，**只有退出码能抓到**）⇒ 改成成员
+  `m_cacheDir`；另加 `SoundShutdownGuard`（在 `QApplication` 还活着时拆音频栈；⛔ 只挂 `aboutToQuit`
+  不够 —— `--selftest`/`--gentiles`/`--fontprobe` 不跑事件循环）。
+- **判据（三档实测）**：正常 `%TEMP%` ⇒ 建池 3 ×8、**L2 854/0 PASS**、退出码 0；
+  `TEMP` 指向拒绝访问的目录 ⇒ **仍然** 854/0 + 退出码 0（走回退目录）；修前 ⇒ 池空 + **851/13**。
+  红证：去掉回退链，在第二种条件下立刻复现 13 条失败。
+- **记录**：`AGENTS.md` §6.2（两条硬判据）、`NOTES.md` §6.2 + §7 症状行。
+- ⚠ **尚未重出发布资产**：v1.14.0 已发（r2 的 exe 不带这个修复）⇒ 要跟玩家交代需发 **v1.14.1**。
 
 ## 4. 环境与命令备忘（本机实测）
 
