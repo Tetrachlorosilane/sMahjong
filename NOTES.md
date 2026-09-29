@@ -3538,7 +3538,8 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   本地草稿与摘要表：`release\RELEASE-v1.13.0.md`。
 
 - **v1.14.0**（2026-09-29，**服务端 v4 前向增量事件缓存（1.70×）+ 值头闸门进训练回路**）：
-  release id 见下表，tag `v1.14.0` → 远端 `Training`。
+  release id **398826351**（<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.14.0>），
+  tag `v1.14.0` → 远端 **`17e153381122302ed44c77366948dad625292ff2`**（tree `5d3e438e…` == 本地 HEAD 的 tree）。
   **本版性质**：① 服务端 v4 谱系前向走**增量事件缓存**，单决策 **38.12 → 22.50 ms（1.70×）**、
   七头逐位相同（判据成对：增量 == 全量 **且** 真的命中；`SelfTest.v4CacheTests` +
   `tools\v4-cache-check.mjs`）；② 训练侧（`python/`，**不改变对局行为**）：`v4 loop` 新增
@@ -3547,12 +3548,12 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   ⚠ **客户端源码自 v1.13.0 起没变**（只有版本号两处）⇒ 玩家可见增量只有"v4 包更快"。
   通道：`github_commit_files`（REST，一个提交带 5 个文件）→ `POST /git/refs` 建 tag →
   `POST /releases` → 资产走 `uploads.github.com`（`github_upload_release_asset`）。
-  6 个资产（本地 sha256）：
-  `sMahjong-client-v1.14.0-win64.zip` 38,848,428 B `ee002bfb…` ·
-  `sMahjong-server-v1.14.0.zip` 410,817 B `ecc976d0…` ·
-  `sMahjong-bot-ai-v1.14.0.zip` 18,084,284 B `7d507fd5…` ·
-  `v4-bc-004.zip` 5,030,913 B `352cd603…` · `v4-p3-001.zip` 5,023,840 B `5b81cf59…` ·
-  `v4-ppo-001.zip` 5,030,883 B `b4995708…`。
+  6 个资产（本地 sha256 与 GitHub `digest` **逐一核对一致**；资产 id 见括号）：
+  `sMahjong-client-v1.14.0-win64.zip` 38,848,428 B `ee002bfb…`（**597257309**）·
+  `sMahjong-server-v1.14.0.zip` 410,817 B `ecc976d0…`（**597256892**）·
+  `sMahjong-bot-ai-v1.14.0.zip` 18,084,284 B `7d507fd5…`（**597257075**）·
+  `v4-bc-004.zip` 5,030,913 B `352cd603…`（**597257655**）· `v4-p3-001.zip` 5,023,840 B `5b81cf59…`
+  （**597257881**）· `v4-ppo-001.zip` 5,030,883 B `b4995708…`（**597258153**）。
   ⚠ **三个模型包与"一包全给"与 v1.13.0 逐字节相同**（sha256 全等）⇒ 本版**不新增** AI 包，
   v1.13.0 里"v4 谱系还没有一代打出比 teacher 强"的结论原样成立（纯网络 α=0 的发布口径不变）。
   发布前实测：L1 **1443/1443**、`selfcheck.py` **646/646**、`v4 check` PASS、
