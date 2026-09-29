@@ -395,6 +395,12 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   判据 = 纯函数 `sound::shouldRebuildStack(连续失败数)`（阈值 `kRebuildAfterFailures = 3`）；
   ⛔ 别做成"失败就永久静音"，也别 1 次失败就重建（首播异步未置位时会拆成断续）。
   排查：`MAHJONG_SFX_TRACE=1`；复现用 `mock-server … sfxburst`。
+  ⚠ **临时 WAV 必须落在"真能写"的目录**（`%TEMP%` → Qt 缓存 → exe 同级 `sfx-cache/`，逐个**真写探针**试）：
+  `QSoundEffect` 只吃 URL ⇒ 先落盘；系统临时目录不可写时**不能**就此放弃出声 —— 实测那样会把 8 个
+  音效**全部静默跳过**（一点声音都没有，而报障信息只有一句 `效果 missing`）。
+  ⛔ 这条路径上**别用函数内 `static`**（如缓存目录名）：静态析构顺序会让 `~Player` 读到**已析构**对象
+  ⇒ **退出时堆损坏**（返回码 `0xC0000374`，而自检全绿）。判据：L2 音效组（池 ≥2 + `Ready`）+
+  `MAHJONG_SFX_TRACE=1` 的 `init <名字> → 建池 3`。
 - **座位方位**：`pos = (seat − mySeat + 4) % 4` → `0=下(自己) 1=右 2=上 3=左`。每家在自己**局部坐标系**
   里绘制再整体旋转到屏幕 —— 侧家的牌自然横置、"横置以牌主视角判定"自动成立。
 ### 6.3 牌桌行为、规则与资源
