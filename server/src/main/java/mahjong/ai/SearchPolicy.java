@@ -183,17 +183,24 @@ public final class SearchPolicy implements Policy {
             u = -1000.0 * s.shanten + 2.0 * s.advanceTiles + 1.0 * s.advanceTypes;
         }
         u -= dangerWeight * dangerOf(d, a);
-        // ② **危险硬约束**：有人立直时，**非现物**且**没有结构性改进**（没把向听压到本次最好）
-        //    的手一律重罚 —— teacher 的押し引き是调过的，用它换 1~3 枚进张是亏的（实测 Δ=+2.03）。
+        // ② **押し引き软约束**（2026-09-29 第四十一轮：从"硬否决"改成"有界软罚 + 门控"）。
+        //   口径是麻将里那条标准尺子：**远い手は降りる、近い手は押す** ——
+        //   只有在"有人立直 **且** 这一手打完还离听牌很远（`shanten >= 2`）**且** 打的是非现物"时，
+        //   才在**效用同一量纲**里扣一笔固定的分。
+        //   ⛔ 别再写成 1e5 那种硬否决：实测那样改判率会从 ~0.6 次/场 涨到 ~20 次/场，
+        //   等于把"teacher 先验 + 偶尔改进"变成"基本不听 teacher"（越权否定了 teacher 调过的押し引き）。
         int kind = a.tile == null ? -1 : Tiles.parseKind(a.tile);
-        if (threat && kind >= 0 && !isGenbutsu(d.obs, kind) && s.shanten >= bestShanten) {
-            u -= HARD_DANGER_PENALTY;
+        if (threat && kind >= 0 && !isGenbutsu(d.obs, kind) && s.shanten >= 2) {
+            u -= FOLD_PENALTY;
         }
         return u;
     }
 
-    /** ② 的重罚额度：远大于任何"枚数分/番数分"的差，等价于一条**硬约束**。 */
-    private static final double HARD_DANGER_PENALTY = 1.0e5;
+    /**
+     * ② 押し引き软罚的额度：落在**效用同一量纲**里（≈ 10 枚进张 / 几番），
+     * 所以它只**影响边际**、不会一票否决 —— 见 `utility` 里的口径注释。
+     */
+    private static final double FOLD_PENALTY = 400.0;
 
     /** ① 打点：`HandEval.estimatedHan` 的 8 参数版（缺任何一项都退化成按 1 番算，绝不抛）。 */
     private double estimatedHan(Decision d, Action a) {
