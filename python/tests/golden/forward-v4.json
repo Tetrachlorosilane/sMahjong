@@ -1,5 +1,5 @@
 {
-  "cases": 10,
+  "cases": 8,
   "format": 1,
   "dims": {
     "d_model": 32,
@@ -7,35 +7,29 @@
     "n_heads": 2,
     "value_bins": 5
   },
-  "net_bytes": 208398,
-  "bytes": 573336,
-  "trace": "S:\\mahjong-training\\raw\\v4-bc-002",
+  "net_bytes": 208410,
+  "bytes": 512895,
+  "trace": "S:\\mahjong-training\\raw\\v4-golden",
   "seed": 20260928,
   "blocks_fingerprint": "e1f5dd0fc1e9aba8",
   "case_kinds": [
     "turn",
     "turn",
-    "claim",
-    "claim",
-    "claim",
     "turn",
     "claim",
     "turn",
     "turn",
-    "claim"
+    "turn",
+    "turn"
   ],
   "coverage": [
     "aka_evt",
     "aka_hand",
     "claim",
-    "evt_dora_flip",
-    "evt_kan",
     "evt_meld",
-    "furiten",
     "ippatsu",
     "own_meld",
     "riichi_any",
-    "self_riichi",
     "tedashi",
     "tsumogiri",
     "turn"

@@ -145,7 +145,13 @@ class Heads(nn.Module):
 
     def __init__(self, d: int = D_MODEL, value_bins: int = VALUE_BINS) -> None:
         super().__init__()
-        self.policy = nn.Linear(d, 1)
+        # ⚠ **policy 的输入宽度 = d + 3**（2026-09-30，第四十九轮）：把 `belief_tenpai` 的
+        #   三个概率**拼进逐候选表示**再出 policy —— 理由是实测（`heads_audit.py`）：
+        #   `belief_tenpai` 的 AUC 0.978（BCE 比边缘基线好 73%），**却因为头与头之间不互通
+        #   而在 `V4Policy` 里算完就丢**（只对 policy 取 argmax）。押し引き的输入信息
+        #   本来就在模型手里，缺的是"接上"。⛔ 这也意味着**旧 `net.bin` 会在构造期被拒**
+        #   （`heads.policy.weight` 期望 `[1, d+3]`），必须重训 —— 不静默兼容。
+        self.policy = nn.Linear(d + 3, 1)
         self.value = nn.Linear(d, value_bins)
         self.placement = nn.Linear(d, 4)
         self.belief_hand = nn.Linear(d, 3 * 34)
@@ -154,7 +160,11 @@ class Heads(nn.Module):
         self.effect = nn.Linear(d, 3)
 
     def forward(self, u: torch.Tensor, state: torch.Tensor, mask: torch.Tensor | None) -> dict:
-        logits = self.policy(u).squeeze(-1)                     # [B,L]
+        bt = self.belief_tenpai(state)                          # [B,3]
+        # 把三个对手听牌概率**广播**到每个候选上拼起来（顺序：u 在前、bt 在后 ——
+        # Java/C++ 两端的镜像必须**逐位同序**，见 `V4Policy.policyVec` 的注释）。
+        bt_rep = torch.sigmoid(bt).unsqueeze(1).expand(*u.shape[:-1], 3)
+        logits = self.policy(torch.cat([u, bt_rep], dim=-1)).squeeze(-1)   # [B,L]
         if mask is not None:
             logits = logits.masked_fill(~mask, float("-inf"))
         return {
@@ -162,7 +172,7 @@ class Heads(nn.Module):
             "value": self.value(state),                         # [B,VALUE_BINS]
             "placement": self.placement(state),                 # [B,4]
             "belief_hand": self.belief_hand(state).view(*state.shape[:-1], 3, 34),
-            "belief_tenpai": self.belief_tenpai(state),         # [B,3]
+            "belief_tenpai": bt,                                # [B,3]
             "danger": self.danger(u),                           # [B,L,4]
             "effect": self.effect(u),                           # [B,L,3]
         }

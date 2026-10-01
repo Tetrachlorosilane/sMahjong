@@ -132,7 +132,10 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.out.net.0.weight": (dm, 3 * dm), "fusion.out.net.0.bias": (dm,),
         "fusion.out.net.2.weight": (dm, dm), "fusion.out.net.2.bias": (dm,),
         # 头
-        "heads.policy.weight": (1, dm), "heads.policy.bias": (1,),
+        # ⚠ **policy 的输入宽度是 `dm+3`**（2026-09-30 第四十九轮）：它的输入是
+        #   `[u ; sigmoid(belief_tenpai)]`（与 `model.py` 的 `Heads.forward`、
+        #   Java `V4Policy`、C++ `v4policy.cpp` 逐位同序）。旧权重（`dm` 宽）**构造期拒绝**。
+        "heads.policy.weight": (1, dm + 3), "heads.policy.bias": (1,),
         "heads.value.weight": (vb, dm), "heads.value.bias": (vb,),
     }
     for name, width in HEAD_WIDTHS.items():
@@ -163,7 +166,10 @@ def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: st
 
 def dims_from_state(sd: Mapping[str, torch.Tensor]) -> dict[str, int]:
     """从权重形状反推四个宽度（`nHeads` 反推不出来 —— 只是分组方式，必须外部给）。"""
-    dm = int(sd["heads.policy.weight"].shape[1])
+    # ⚠ `heads.policy.weight` 的**第 1 维是 `dm+3`**（policy 的输入多拼了 3 个 belief_tenpai 概率）
+    #   ⇒ 反推 d_model 要**减 3**（第四十九轮改）。⛔ 别改回直接取 shape[1]：
+    #   那会把 d_model 读成 195，导出头部宽度与权重全部错位。
+    dm = int(sd["heads.policy.weight"].shape[1]) - 3
     return {"d_model": dm, "tile_d": int(sd["tile.enc.0.weight"].shape[0]),
             "n_heads": M.N_HEADS, "value_bins": int(sd["heads.value.weight"].shape[0])}
 

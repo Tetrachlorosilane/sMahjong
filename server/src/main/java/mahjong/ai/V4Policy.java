@@ -338,7 +338,7 @@ public final class V4Policy implements LogitPolicy {
         mat("fusion.out.net.2.weight", dm, dm);
         vec("fusion.out.net.2.bias", dm);
 
-        mat("heads.policy.weight", 1, dm);
+        mat("heads.policy.weight", 1, dm + 3);
         vec("heads.policy.bias", 1);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
@@ -660,10 +660,15 @@ public final class V4Policy implements LogitPolicy {
         }
 
         // ---- 头
+        // ⚠ **policy 的输入是 `[u ; sigmoid(belief_tenpai)]`（宽度 dm+3）**（2026-09-30 第四十九轮）：
+        //   实测 `belief_tenpai` 的 AUC 0.978（BCE 比边缘基线好 73%），但它原先**与 policy 不互通**
+        //   （各头各算、算完即丢）⇒ 押し引き的输入信息在模型手里却没接上。顺序必须是
+        //   **u 在前、三个听牌概率在后**（与 `python/mahjong_ml/v4/model.py` 的 `Heads.forward`
+        //   逐位同序）；因此 bt 必须在 policy 之前算出来 ⇒ 先求 `meanU`，再求 bt，最后出 policy。
         float[] policy = new float[n];
         float[][] danger = new float[n][];
         float[][] effect = new float[n][];
-        float[][] polW = mat("heads.policy.weight", 1, dm);
+        float[][] polW = mat("heads.policy.weight", 1, dm + 3);
         float polB = vec("heads.policy.bias", 1)[0];
         float[][] danW = mat("heads.danger.weight", 4, dm);
         float[] danB = vec("heads.danger.bias", 4);
@@ -671,7 +676,6 @@ public final class V4Policy implements LogitPolicy {
         float[] effB = vec("heads.effect.bias", 3);
         float[] meanU = new float[dm];
         for (int i = 0; i < n; i++) {
-            policy[i] = polB + dot(polW[0], u[i]);
             danger[i] = new float[4];
             linear(danger[i], u[i], danW, danB);
             effect[i] = new float[3];
@@ -679,6 +683,20 @@ public final class V4Policy implements LogitPolicy {
             for (int j = 0; j < dm; j++) {
                 meanU[j] += u[i][j] / Math.max(1, n);
             }
+        }
+        float[] bt = new float[3];
+        linear(bt, meanU, mat("heads.belief_tenpai.weight", 3, dm),
+                vec("heads.belief_tenpai.bias", 3));
+        for (int j = 0; j < 3; j++) {
+            // ⚠ 这里用 sigmoid 后的**概率**（与 Python 侧 `torch.sigmoid(bt)` 一致）；
+            //   而**输出的 `belief_tenpai` 仍然是 logits**（见下面的 `head(...)`）—— 别把两者搞混。
+            bt[j] = (float) (1.0 / (1.0 + Math.exp(-bt[j])));
+        }
+        float[] polVec = new float[dm + 3];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(u[i], 0, polVec, 0, dm);
+            System.arraycopy(bt, 0, polVec, dm, 3);
+            policy[i] = polB + dot(polW[0], polVec);
         }
         if (n == 0) {
             meanU = new float[dm];

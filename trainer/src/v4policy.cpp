@@ -998,7 +998,11 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     std::vector<float> policy(static_cast<size_t>(n), 0.f);
     std::vector<std::vector<float>> danger(static_cast<size_t>(n), std::vector<float>(4, 0.f));
     std::vector<std::vector<float>> effect(static_cast<size_t>(n), std::vector<float>(3, 0.f));
-    const Mat *polW = mat("heads.policy.weight", 1, dm, err);
+    // ⚠ **policy 的输入是 `[u ; sigmoid(belief_tenpai)]`（宽度 dm+3）**（2026-09-30 第四十九轮）：
+    //   与 Java `V4Policy` / Python `model.py` 的 `Heads.forward` **逐位同序**（u 在前、3 个概率在后）。
+    //   为什么：实测 `belief_tenpai` 的 AUC 0.978，但它原先与 policy 不互通（各头各算、算完即丢）。
+    //   ⇒ bt 必须在 policy 之前算（先 meanU，再 bt，最后 policy）。
+    const Mat *polW = mat("heads.policy.weight", 1, dm + 3, err);
     const std::vector<float> *polB = vec("heads.policy.bias", 1, err);
     const Mat *danW = mat("heads.danger.weight", 4, dm, err);
     const std::vector<float> *danB = vec("heads.danger.bias", 4, err);
@@ -1010,7 +1014,6 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     std::vector<float> meanU(static_cast<size_t>(dm), 0.f);
     const float polBias = (*polB)[0];
     for (int i = 0; i < n; i++) {
-        policy[static_cast<size_t>(i)] = polBias + dot(polW->data, u[static_cast<size_t>(i)]);
         linear(danger[static_cast<size_t>(i)], u[static_cast<size_t>(i)].data(),
                static_cast<size_t>(dm), *danW, *danB);
         linear(effect[static_cast<size_t>(i)], u[static_cast<size_t>(i)].data(),
@@ -1022,6 +1025,29 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         }
     }
     // n == 0 时 meanU 保持全 0（Java 显式重赋值一次，效果相同）
+
+    // 先算 `belief_tenpai` 的**概率**（只喂 policy，见上面的注释），再逐候选出 policy。
+    // ⚠ 输出的 `belief_tenpai` 仍然是 **logits**（下面 `head(...)` 重新算一遍）—— 别搞混。
+    std::vector<float> btProb(3, 0.f);
+    {
+        std::vector<float> btLogits;
+        if (!head(*this, meanU, "belief_tenpai", 3, btLogits, err)) {
+            return false;
+        }
+        for (int j = 0; j < 3; j++) {
+            btProb[static_cast<size_t>(j)]
+                    = 1.f / (1.f + std::exp(-btLogits[static_cast<size_t>(j)]));
+        }
+    }
+    std::vector<float> polVec(static_cast<size_t>(dm) + 3, 0.f);
+    for (int i = 0; i < n; i++) {
+        std::copy(u[static_cast<size_t>(i)].begin(), u[static_cast<size_t>(i)].end(),
+                  polVec.begin());
+        polVec[static_cast<size_t>(dm)] = btProb[0];
+        polVec[static_cast<size_t>(dm) + 1] = btProb[1];
+        polVec[static_cast<size_t>(dm) + 2] = btProb[2];
+        policy[static_cast<size_t>(i)] = polBias + dot(polW->data, polVec);
+    }
 
     outAll.clear();
     outAll["policy"] = std::move(policy);
