@@ -25,7 +25,17 @@ $py = if (Test-Path $pyS) { $pyS } else { $pyVenv }
 #   同一份 exe 放到 `S:` 上再跑就正常（2026-09-29 实测）。准备：
 #     robocopy <repo>\trainer\build S:\mahjong-training\tools\trainer /E
 $trainerS = 'S:\mahjong-training\tools\trainer\trainer.exe'
-if (Test-Path $trainerS) { $env:MAHJONG_TRAINER = $trainerS }
+if (Test-Path $trainerS) {
+    # ⚠ **每次跑之前同步一遍训练端 exe**：受限沙箱要求训练端从 `S:` 上跑（工作区里的 exe 写数据根
+    #   会被静默吞掉），但 `v4policy.cpp` 一改就要重编 —— 忘了同步就会拿**旧副本**跑，
+    #   症状极具误导性（例如"加载 v4 权重失败：[1,195] != [1,192]"，看着像代码 bug，其实是旧 exe）。
+    $trainerRepo = Join-Path $root 'trainer\build\trainer.exe'
+    if ((Test-Path $trainerRepo) -and ((Get-Item $trainerRepo).LastWriteTime -gt (Get-Item $trainerS).LastWriteTime)) {
+        Copy-Item $trainerRepo $trainerS -Force
+        Write-Output "（已把仓库里的 trainer.exe 同步到 S:）"
+    }
+    $env:MAHJONG_TRAINER = $trainerS
+}
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
