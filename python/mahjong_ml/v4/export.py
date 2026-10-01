@@ -419,6 +419,13 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     d = dict(dims or GOLDEN_DIMS)
     torch.manual_seed(seed)
     net = M.build(seed, **d)
+    # ⚠ **夹具必须显式扰动"零初始化"的张量**，否则那条路径根本没被测到（"假接入"的温床）：
+    #   `Heads.__init__` 把 `policy_gate` **零初始化**（训练起点应当恒等），而夹具直接沿用初始化权重
+    #   ⇒ 夹具里的门控全是 0 ⇒ `g ≡ 1` ⇒ Java/C++ 里 tanh 写错、索引/偏置写错都会**照样全绿**。
+    #   这里显式塞随机门控，让三端对拍**真的**走到 `1 + tanh(...)` 那条分支。
+    with torch.no_grad():
+        net.heads.policy_gate.weight.normal_(0.0, 0.5)
+        net.heads.policy_gate.bias.normal_(0.0, 0.5)
     sd = net.state_dict()
     blob = net_blob(sd, d)
 
