@@ -1,76 +1,73 @@
-# 在线自对弈（带**对手池**）+ 结果奖励：逐代跑，每代结束把这一代的 net 加进对手池。
+# 季联赛：在线自对弈（带**对手池** + **接受闸门**）+ 结果奖励。
 #
 #   · 采集桌 = 学生×2（当前网，温度 0.5）+ teacher + **对手池里的一个历史快照**（按代轮换）
-#   · 奖励 = 小局收支（`--value-target delta`）+ 顺位点（`--rank-weight 0.2`）—— 都是**结果**
-#   · 每代评测：2+2 对**上一代**（`--eval-vs prev`，同牌山配对）—— 看"这一代有没有长进"
-#   · S 盘：每代成功后删掉那一代的大件（raw/compact/eval），只留 ckpt / net.bin / 台账 / 审计
+#   · 奖励 = 小局收支（`--value-target delta`）+ 顺位点（`--rank-weight 0.2`）
+#   · **接受闸门**（第五十五轮加）：每代跑完，用**多套牌山集合**的合并配对判决跟"现任"比；
+#     只有 CI 排除 0 且为正才采纳（成为新现任、进对手池），否则**回滚**并把这代挪进 `_rejected/`。
+#     ⚠ 为什么必须有：第二季 8 代"跑完即采纳"，终点比它的起点退步 6.13 顺位点
+#     `[-9.50,-2.74]`，而逐代 200 场读数是纯噪声（±8~10 的 CI 摆动）⇒ 没有闸门，训练会把退步当推进。
+#   · **只跑缓存档**：固定 `--games 1000`（紧凑集实测 ≈14.8 GB < 0.8×31.6 GB = 25.3 GB）
+#     —— 刻意**不**用 `--target-minutes`，免得规划器为了凑时间把轮次顶到磁盘档（45 分钟那档）。
+#   · S 盘：每代成功后轮换删掉这一代的大件（raw/compact/eval）。
 #
-# 用法：pwsh -File release/run-league.ps1 [-Generations 8] [-Games 1000]
-param([int]$Generations = 8, [int]$Games = 1000)
+# 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000]
+param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000)
 $ErrorActionPreference = 'Stop'
-# ⚠ `$root` 必须在下面两个探测**之前**定义（我上一版把它排到了后面，`Join-Path` 直接炸）。
 $root = 'C:\Users\HP\source\games\mahjong'
-# ⚠ 解释器：**优先用 S: 上那份 3.12**（若存在）。
-#   为什么：沙箱把"工作区内的可执行文件"交给 overlay hook 管，于是**工作区里的 python
-#   （含 .venv 与 .uv-python 的基础解释器）写不了 S: 的数据根**（[Errno 13]），
-#   而镜像在工作区外的解释器不受管。把 3.12 运行时拷到 S: 上即可两头满足：
-#   既有 torch（.venv 的 cp312 包），又能写数据根。
-#   一次性的准备（本机实测过）：
-#     robocopy <repo>\.uv-python\cpython-3.12-windows-x86_64-none S:\mahjong-training\tools\py312 /E
+$S    = 'S:\mahjong-training'
+
+# ⚠ 解释器：**优先用 S: 上那份 3.12**（镜像在工作区外 ⇒ 不受 overlay hook 管，能写数据根）。
 $pyS = 'S:\mahjong-training\tools\py312\python.exe'
 $pyVenv = Join-Path $root 'python\.venv\Scripts\python.exe'
 $py = if (Test-Path $pyS) { $pyS } else { $pyVenv }
-# ⚠ 训练端也要用**数据根上那份副本**：受限沙箱按「可执行文件位置」决定写入是否生效 ——
-#   工作区里的 `trainer.exe` 写数据根会被**静默吞掉**（退出码 0、目录不存在），
-#   同一份 exe 放到 `S:` 上再跑就正常（2026-09-29 实测）。准备：
-#     robocopy <repo>\trainer\build S:\mahjong-training\tools\trainer /E
+
+# ⚠ 训练端也要用**数据根上那份副本**（工作区里的 exe 写数据根会被静默吞掉），
+#   且**每次开跑前按时间戳同步**：`v4policy.cpp` 一改就要重编，忘了同步会拿旧 exe 跑，
+#   症状极具误导性（例如"加载 v4 权重失败：[1,195] != [1,192]"，看着像代码 bug）。
 $trainerS = 'S:\mahjong-training\tools\trainer\trainer.exe'
 if (Test-Path $trainerS) {
-    # ⚠ **每次跑之前同步一遍训练端 exe**：受限沙箱要求训练端从 `S:` 上跑（工作区里的 exe 写数据根
-    #   会被静默吞掉），但 `v4policy.cpp` 一改就要重编 —— 忘了同步就会拿**旧副本**跑，
-    #   症状极具误导性（例如"加载 v4 权重失败：[1,195] != [1,192]"，看着像代码 bug，其实是旧 exe）。
     $trainerRepo = Join-Path $root 'trainer\build\trainer.exe'
-    if ((Test-Path $trainerRepo) -and ((Get-Item $trainerRepo).LastWriteTime -gt (Get-Item $trainerS).LastWriteTime)) {
+    if ((Test-Path $trainerRepo) -and
+        ((Get-Item $trainerRepo).LastWriteTime -gt (Get-Item $trainerS).LastWriteTime)) {
         Copy-Item $trainerRepo $trainerS -Force
         Write-Output "（已把仓库里的 trainer.exe 同步到 S:）"
     }
     $env:MAHJONG_TRAINER = $trainerS
 }
-$root = 'C:\Users\HP\source\games\mahjong'
-$S    = 'S:\mahjong-training'
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league2'
+$label = 'v4-league3'
 $seed  = 20261001
-# ⚠ 起点 = **第一季的终点 g08**：第四十九轮把 `belief_tenpai` 接进 policy 后，旧 net 的 policy 宽是
-#   `dm`，三端加载期**右侧补 0**（等价于 belief 输入恒为 0 ⇒ 与接之前逐位相同）⇒ 这一季是从
-#   "g08 的水平"起步**带 belief 微调**，而不是从零重训（省掉 BC 预训练那一轮）。
-$init  = Join-Path $root 'tools\build\v4-league-g08\net.bin'
+# 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
+$incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
 $pool  = New-Object System.Collections.Generic.List[string]
+$rejected = Join-Path $root 'tools\build\_rejected'
+$gateSeeds = "$seed,$($seed + 1),$($seed + 2)"
 
 function Free-GB { (Get-PSDrive S).Free / 1GB }
 function Log($m) { Write-Output ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
 
-Log ("开始：{0} 代 × {1} 场（在线自对弈 + 对手池）；S 盘剩余 {2:N0} GB" -f $Generations, $Games, (Free-GB))
+Log ("开始：{0} 代 × {1} 场（在线自对弈 + 对手池 + **接受闸门**）" -f $Generations, $Games)
+Log ("现任（incumbent）= {0}" -f (Split-Path $incumbent -Parent | Split-Path -Leaf))
+Log ("闸门：每代 3 套牌山（{0}）× {1} 场/套；S 盘剩余 {2:N0} GB" -f $gateSeeds, $GateBlock, (Free-GB))
 for ($g = 1; $g -le $Generations; $g++) {
     $tag = "$label-g{0:D2}" -f $g
-    # 对手池取**最近两代**（更早的已经落后太多，留着只会稀释结果奖励的信息）
     $opp = @()
     if ($pool.Count -gt 0) { $opp = $pool | Select-Object -Last 2 }
-    $args = @('-m', 'mahjong_ml.v4', 'loop', '--label', $label, '--init', $init,
-              '--generations', '1', '--gen-offset', "$($g - 1)",
-              '--games', "$Games", '--workers', '20', '--eval-workers', '20',
-              '--objective', 'ppo', '--value-target', 'delta', '--advantage', 'hand',
-              '--rank-weight', '0.2', '--max-steps', '2000', '--epochs', '2',
-              '--kl-early-stop', '0.15', '--kl-min-steps', '60', '--critic-steps', '0',
-              '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
-    foreach ($p in $opp) { $args += @('--opponents', $p) }
-    Log ("=== 第 {0} 代（{1}）init={2} 对手池={3}；S 盘 {4:N0} GB ===" -f $g, $tag, $init,
-         $(if ($opp.Count) { ($opp | ForEach-Object { Split-Path $_ -Parent | Split-Path -Leaf }) -join ',' } else { '（无）' }), (Free-GB))
+    $largs = @('-m', 'mahjong_ml.v4', 'loop', '--label', $label, '--init', $incumbent,
+               '--generations', '1', '--gen-offset', "$($g - 1)",
+               '--games', "$Games", '--workers', '20', '--eval-workers', '20',
+               '--objective', 'ppo', '--value-target', 'delta', '--advantage', 'hand',
+               '--rank-weight', '0.2', '--max-steps', '2000', '--epochs', '2',
+               '--kl-early-stop', '0.15', '--kl-min-steps', '60', '--critic-steps', '0',
+               '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
+    foreach ($p in $opp) { $largs += @('--opponents', $p) }
+    Log ("=== 第 {0} 代（{1}）init={2} 对手池={3} ===" -f $g, $tag,
+         (Split-Path $incumbent -Parent | Split-Path -Leaf),
+         $(if ($opp.Count) { ($opp | ForEach-Object { Split-Path $_ -Parent | Split-Path -Leaf }) -join ',' } else { '（无）' }))
     $log = Join-Path $root "release\$tag.log"
-    & $py @args *> $log
+    & $py @largs *> $log
     $rc = $LASTEXITCODE
-    Log ("第 {0} 代退出码 {1}（日志 {2}）" -f $g, $rc, $log)
-    if ($rc -ne 0) { Log '这一代失败，停止（保留现场）'; break }
+    if ($rc -ne 0) { Log ("第 {0} 代失败（退出码 {1}）—— 保留现场并停止" -f $g, $rc); break }
 
     foreach ($d in @("raw\$tag", "compact\$tag", "raw\eval-$tag")) {
         $p = Join-Path $S $d
@@ -80,9 +77,29 @@ for ($g = 1; $g -le $Generations; $g++) {
             Log ("  轮换删除 {0}（{1:N0} MB）" -f $d, $sz)
         }
     }
-    $init = Join-Path $root "tools\build\$tag\net.bin"
-    if (-not (Test-Path $init)) { Log "缺 $init，停止"; break }
-    $pool.Add($init)
-    Log ("S 盘剩余 {0:N0} GB；对手池现在 {1} 个" -f (Free-GB), $pool.Count)
+    $candidate = Join-Path $root "tools\build\$tag\net.bin"
+    if (-not (Test-Path $candidate)) { Log "缺 $candidate，停止"; break }
+
+    # ---- 接受闸门：多套牌山集合的合并配对判决（CI 排除 0 且为正才采纳）
+    Log ("  闸门：现任 vs {0}（3 套牌山 × {1} 场）" -f $tag, $GateBlock)
+    $gateLog = Join-Path $root "release\gate-$tag.log"
+    & $py -m mahjong_ml.v4.gate --incumbent $incumbent --candidate $candidate `
+        --seeds $gateSeeds --games $GateBlock --block $GateBlock --workers 20 `
+        --out (Join-Path $S 'gate') --tag $tag *> $gateLog
+    $grc = $LASTEXITCODE
+    Get-Content $gateLog | Select-String -Pattern '牌山 20|合并判决' | ForEach-Object { Log ("    " + $_.Line.Trim()) }
+    if ($grc -eq 0) {
+        $incumbent = $candidate
+        $pool.Add($candidate)
+        Log ("  ⇒ **采纳**：新现任 = {0}；对手池 {1} 个" -f $tag, $pool.Count)
+    } elseif ($grc -eq 3) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $rejected $tag) | Out-Null
+        Move-Item $candidate (Join-Path $rejected "$tag\net.bin") -Force
+        Log ("  ⇒ **不采纳**：回滚到现任；这一代挪到 _rejected\{0}" -f $tag)
+    } else {
+        Log ("  ⛔ 闸门出错（退出码 {0}）—— 保留现场并停止" -f $grc)
+        break
+    }
+    Log ("S 盘剩余 {0:N0} GB" -f (Free-GB))
 }
-Log '联赛结束'
+Log '季联赛结束'

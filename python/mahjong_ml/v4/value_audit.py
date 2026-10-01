@@ -38,6 +38,7 @@ import numpy as np
 import torch
 
 from . import dataset as ds
+from . import export as v4export
 from . import model as M
 from . import adv as v4adv
 from .pretrain import _batch
@@ -184,7 +185,9 @@ def forward_value(model: M.V4Model, data: dict, n: int, device: str,
 def load_model(ckpt: str | Path, device: str) -> M.V4Model:
     ck = torch.load(Path(ckpt) / "model.pt", map_location=device, weights_only=False)
     model = M.build().to(device)
-    model.load_state_dict(ck["model"], strict=True)
+    # ⚠ 跨代差异（policy 宽度 / 可缺的门控张量）统一走 `normalize_state`：直接 `strict=True`
+    #   载旧 ckpt 会 `Missing key(s): heads.policy_gate.*`（实测踩过）。
+    model.load_state_dict(v4export.normalize_state(ck["model"]), strict=True)
     model.eval()
     return model
 

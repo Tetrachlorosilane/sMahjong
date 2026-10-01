@@ -131,13 +131,54 @@ def report(data_dir: Path, ckpt: Path, split: str, device: str) -> int:
     return 0
 
 
+def danger_baseline(data_dir: Path, split: str) -> int:
+    """**危险标签的便宜基线**：逐候选输入列对「任意一家放铳」的 AUC 最高能到多少？
+
+    为什么要有它（2026-09-30）：判决出 `danger` 头 AUC 只有 0.64（被选中候选上的实际放铳）之后，
+    必须先分清是「**头没吃满输入**」还是「**标签/信息本身到顶**」—— 这就是杠杆①的"先量再改"。
+    实测（`v4-heads-g01` val）：**最好的单列只有 0.558**，而 net 的头是 0.638~0.650
+    ⇒ 头已超过任何便宜线性特征 ⇒ 天花板在**标签**（`aux_opp_dealin` 只落在被选中的候选上、
+    无反事实）⇒ 该做的是**稠密逐候选标签**，而不是把同一个头再训一遍。
+    """
+    data = v4ds.load_split(data_dir, split)
+    n = int(data["label"].shape[0])
+    label = np.asarray(data["label"], dtype=np.int64)
+    dealin = np.asarray(data["aux_opp_dealin"], dtype=np.float64)
+    cand = np.asarray(data["cand"][np.arange(n), label, :], dtype=np.float32)
+    y = (dealin.max(axis=1) > 0).astype(np.int64)
+    print(f"== danger 便宜基线（{Path(data_dir).name}/{split}，n={n}）==")
+    print(f"   任意一家放铳基率 = {float(y.mean()):.4f}")
+    rows: list[tuple[float, int]] = []
+    flat: list[int] = []
+    for c in range(cand.shape[1]):
+        if float(np.std(cand[:, c])) == 0.0:
+            flat.append(c)
+            continue
+        a = auc(cand[:, c], y)
+        if a == a:
+            rows.append((a, c))
+    rows.sort(reverse=True)
+    for a, c in rows[:5]:
+        print(f"   列 {c:3d}  AUC {a:.4f}")
+    if flat:
+        print(f"   [警告] 常量列（AUC 恒 0.5 = 没给信息）：{flat[:12]}"
+              f"{' ...' if len(flat) > 12 else ''}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="量对手模型（belief/danger 头）的成色")
     ap.add_argument("--data", required=True, help="compact 目录")
-    ap.add_argument("--ckpt", required=True, help="ckpt 目录（含 model.pt）")
+    ap.add_argument("--ckpt", help="ckpt 目录（含 model.pt）；只跑 --danger-baseline 时可省")
     ap.add_argument("--split", default="val", choices=["train", "val"])
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--danger-baseline", action="store_true",
+                    help="只跑「危险标签的便宜基线」（不需要 --ckpt）")
     args = ap.parse_args(argv)
+    if args.danger_baseline:
+        return danger_baseline(Path(args.data), args.split)
+    if not args.ckpt:
+        ap.error("量三个头必须给 --ckpt（只跑 --danger-baseline 时才可省）")
     return report(Path(args.data), Path(args.ckpt), args.split, args.device)
 
 

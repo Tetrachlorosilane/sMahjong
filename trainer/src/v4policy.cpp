@@ -399,28 +399,45 @@ bool V4Policy::bindAll(std::string &err) {
     M("fusion.out.net.2.weight", dm, dm);
     V("fusion.out.net.2.bias", dm);
 
-    // ⚠ **旧网兼容**（第四十九轮之前 policy 的输入宽 = dm，之后 = dm+3）：旧宽右侧补 3 个 0
-    //   ⇒ 那 3 个 `sigmoid(belief_tenpai)` 输入的贡献恒为 0 ⇒ 与"接 belief 之前"**逐位相同**。
-    //   必须两端都留这条路：`p3-001` / 联赛各代权重仍是旧宽，否则训出来的网在训练端跑不了。
+    // ⚠ **policy 宽度兼容**（第五十五轮定稿）：
+    //   · `[1, dm]` = 正常（第五十五轮起的门控版、以及第一季之前的旧网）；
+    //   · `[1, dm+3]` = 第五十轮那版"拼接 sigmoid(belief_tenpai)" —— **截断**掉后 3 列。
+    //     截断不是权宜近似：那 3 列乘的是**逐行常数**（同一行候选共用同一组 bt）⇒ 对
+    //     argmax/softmax 无贡献（红证见 NOTES §6.5）。于是三种网共用同一条前向代码。
     {
         const Mat *w = mat("heads.policy.weight", 1, dm, err);
         if (w == nullptr && !err.empty()) {
-            err.clear();                        // 旧宽不匹配不是错，接着按新宽试
-            w = mat("heads.policy.weight", 1, dm + 3, err);
-            if (w != nullptr) {
+            err.clear();                        // 不是正常宽 ⇒ 再试第五十轮那版
+            const Mat *old = mat("heads.policy.weight", 1, dm + 3, err);
+            if (old != nullptr) {
+                Mat cut;
+                cut.rows = 1;
+                cut.cols = dm;
+                cut.data.assign(static_cast<size_t>(dm), 0.f);
+                for (int j = 0; j < dm; j++) {
+                    cut.data[static_cast<size_t>(j)] = old->data[static_cast<size_t>(j)];
+                }
+                mats["heads.policy.weight"] = std::move(cut);
                 used.insert("heads.policy.weight");
+                err.clear();
             }
         } else if (w != nullptr) {
-            // 命中旧宽 ⇒ 复制一份、右侧补 0、替换掉表里的张量（后面只按 dm+3 读）
-            Mat pad;
-            pad.rows = 1;
-            pad.cols = dm + 3;
-            pad.data.assign(static_cast<size_t>(dm + 3), 0.f);
-            for (int j = 0; j < dm; j++) {
-                pad.data[static_cast<size_t>(j)] = w->data[static_cast<size_t>(j)];
-            }
-            mats["heads.policy.weight"] = std::move(pad);
             used.insert("heads.policy.weight");
+        }
+    }
+    // 逐候选门控（第五十五轮）：**可缺** —— 旧网/第二季的网都没有 ⇒ 全 0 ⇒ `g ≡ 1`（恒等）。
+    {
+        const Mat *gw = mat("heads.policy_gate.weight", dm, 3, err);
+        if (gw != nullptr) {
+            used.insert("heads.policy_gate.weight");
+        } else {
+            err.clear();                        // 缺它不是错：按全 0 处理
+        }
+        const std::vector<float> *gb = vec("heads.policy_gate.bias", dm, err);
+        if (gb != nullptr) {
+            used.insert("heads.policy_gate.bias");
+        } else {
+            err.clear();
         }
     }
     V("heads.policy.bias", 1);
@@ -1021,11 +1038,10 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     std::vector<float> policy(static_cast<size_t>(n), 0.f);
     std::vector<std::vector<float>> danger(static_cast<size_t>(n), std::vector<float>(4, 0.f));
     std::vector<std::vector<float>> effect(static_cast<size_t>(n), std::vector<float>(3, 0.f));
-    // ⚠ **policy 的输入是 `[u ; sigmoid(belief_tenpai)]`（宽度 dm+3）**（2026-09-30 第四十九轮）：
-    //   与 Java `V4Policy` / Python `model.py` 的 `Heads.forward` **逐位同序**（u 在前、3 个概率在后）。
-    //   为什么：实测 `belief_tenpai` 的 AUC 0.978，但它原先与 policy 不互通（各头各算、算完即丢）。
-    //   ⇒ bt 必须在 policy 之前算（先 meanU，再 bt，最后 policy）。
-    const Mat *polW = mat("heads.policy.weight", 1, dm + 3, err);
+    // ⚠ **belief 用"逐候选门控"接进 policy**（第五十五轮）：`g = 1 + tanh(W_g·sigmoid(bt) + b_g)`，
+    //   `policy_i = W·(u_i ⊙ g) + b`。⛔ 第五十轮那版"把 sigmoid(bt) 拼在每个候选后面"是**空操作**
+    //   （逐行常数 ⇒ argmax/softmax 不变、梯度恒 0，红证见 NOTES §6.5）；门控逐候选 ⇒ 真能改判。
+    const Mat *polW = mat("heads.policy.weight", 1, dm, err);
     const std::vector<float> *polB = vec("heads.policy.bias", 1, err);
     const Mat *danW = mat("heads.danger.weight", 4, dm, err);
     const std::vector<float> *danB = vec("heads.danger.bias", 4, err);
@@ -1034,6 +1050,12 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     if (!err.empty()) {
         return false;
     }
+    // 门控张量**可缺**（旧网没有）：缺 ⇒ 权重当全 0、偏置当全 0 ⇒ `g ≡ 1`（恒等）。
+    // ⚠ 这里用 `err` 探测会污染它，所以查表而不是查 `err`。
+    const Mat *pgW = mats.count("heads.policy_gate.weight") ? &mats.at("heads.policy_gate.weight")
+                                                            : nullptr;
+    const std::vector<float> *pgB = vecs.count("heads.policy_gate.bias")
+                                            ? &vecs.at("heads.policy_gate.bias") : nullptr;
     std::vector<float> meanU(static_cast<size_t>(dm), 0.f);
     const float polBias = (*polB)[0];
     for (int i = 0; i < n; i++) {
@@ -1049,7 +1071,7 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     }
     // n == 0 时 meanU 保持全 0（Java 显式重赋值一次，效果相同）
 
-    // 先算 `belief_tenpai` 的**概率**（只喂 policy，见上面的注释），再逐候选出 policy。
+    // 先算 `belief_tenpai` 的**概率**（喂门控），再逐候选出 policy。
     // ⚠ 输出的 `belief_tenpai` 仍然是 **logits**（下面 `head(...)` 重新算一遍）—— 别搞混。
     std::vector<float> btProb(3, 0.f);
     {
@@ -1062,14 +1084,25 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
                     = 1.f / (1.f + std::exp(-btLogits[static_cast<size_t>(j)]));
         }
     }
-    std::vector<float> polVec(static_cast<size_t>(dm) + 3, 0.f);
+    // 逐候选门控：`g[j] = 1 + tanh(Σ_k pgW[j][k]·btProb[k] + pgB[j])`（缺门控 ⇒ g ≡ 1）
+    std::vector<float> gate(static_cast<size_t>(dm), 1.f);
+    if (pgW != nullptr) {
+        for (int j = 0; j < dm; j++) {
+            float acc = pgB != nullptr ? (*pgB)[static_cast<size_t>(j)] : 0.f;
+            for (int k = 0; k < 3; k++) {
+                acc += pgW->data[static_cast<size_t>(j) * 3 + static_cast<size_t>(k)]
+                        * btProb[static_cast<size_t>(k)];
+            }
+            gate[static_cast<size_t>(j)] = 1.f + std::tanh(acc);
+        }
+    }
+    std::vector<float> gu(static_cast<size_t>(dm), 0.f);
     for (int i = 0; i < n; i++) {
-        std::copy(u[static_cast<size_t>(i)].begin(), u[static_cast<size_t>(i)].end(),
-                  polVec.begin());
-        polVec[static_cast<size_t>(dm)] = btProb[0];
-        polVec[static_cast<size_t>(dm) + 1] = btProb[1];
-        polVec[static_cast<size_t>(dm) + 2] = btProb[2];
-        policy[static_cast<size_t>(i)] = polBias + dot(polW->data, polVec);
+        for (int j = 0; j < dm; j++) {
+            gu[static_cast<size_t>(j)] = u[static_cast<size_t>(i)][static_cast<size_t>(j)]
+                    * gate[static_cast<size_t>(j)];
+        }
+        policy[static_cast<size_t>(i)] = polBias + dot(polW->data, gu);
     }
 
     outAll.clear();

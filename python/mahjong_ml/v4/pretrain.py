@@ -467,9 +467,11 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
         model = M.build(1, **parsed["dims"])
         model.load_state_dict(v4export.state_from_net(parsed), strict=True)
     else:
+        from . import export as v4export
         ck = torch.load(p, map_location="cpu", weights_only=False)
         model = M.build(1, **(ck.get("config", {}).get("dims") or M.build(1).dims()))
-        model.load_state_dict(ck["model"], strict=True)
+        # ⚠ 旧 ckpt 没有门控张量 ⇒ `normalize_state` 补 0（门控恒等）；policy 宽度也在这里归一。
+        model.load_state_dict(v4export.normalize_state(ck["model"]), strict=True)
     return model.to(device).eval()
 
 

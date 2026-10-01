@@ -132,11 +132,13 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.out.net.0.weight": (dm, 3 * dm), "fusion.out.net.0.bias": (dm,),
         "fusion.out.net.2.weight": (dm, dm), "fusion.out.net.2.bias": (dm,),
         # 头
-        # ⚠ **policy 的输入宽度是 `dm+3`**（2026-09-30 第四十九轮）：输入是 `[u ; sigmoid(belief_tenpai)]`
-        #   （与 `model.py` 的 `Heads.forward`、Java `V4Policy`、C++ `v4policy.cpp` 逐位同序）。
-        #   **旧网（宽 `dm`）仍可导出**：三端加载期会把旧宽右侧补 0（等价于 belief 输入恒为 0
-        #   ⇒ 与接 belief 之前逐位相同），所以这里**两种宽度都接受**。
-        "heads.policy.weight": ((1, dm + 3), (1, dm)), "heads.policy.bias": (1,),
+        # ⚠ **policy 的输入宽度 = `dm`**（第五十五轮把 belief 改成"逐候选门控"后恢复）；
+        #   但**旧网**里它可能是 `dm+3`（第五十轮那版"拼接"）⇒ 加载期**截断**掉后 3 列：
+        #   那 3 列乘的是逐行常数 ⇒ 对 argmax/softmax 无贡献（红证见 NOTES §6.5），丢掉等价。
+        "heads.policy.weight": ((1, dm), (1, dm + 3)), "heads.policy.bias": (1,),
+        # 逐候选门控：**可缺**（旧网没有它 ⇒ 补 0 ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等）
+        "heads.policy_gate.weight": ((dm, 3),),
+        "heads.policy_gate.bias": ((dm,),),
         "heads.value.weight": (vb, dm), "heads.value.bias": (vb,),
     }
     for name, width in HEAD_WIDTHS.items():
@@ -154,11 +156,22 @@ def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: st
     got = {k: tuple(v.shape) for k, v in sd.items()}
     bad: list[str] = []
     for k, s in want.items():
-        # ⚠ 期望形状可以是**多个**（`tuple[tuple[int, ...], ...]`）：目前只有
-        #   `heads.policy.weight` 用得上（新宽 `dm+3` / 旧宽 `dm` 都接受，见 `expected_shapes`）。
-        alts = s if isinstance(s, tuple) and s and isinstance(s[0], tuple) else (s,)
+        # ⚠ 期望形状支持两种写法（见 `expected_shapes` 的注释）：
+        #   · 多个候选形状：`((1,dm), (1,dm+3))` —— `heads.policy.weight` 用（新旧两版都接受）；
+        #   · **可缺**：候选里带 `None`，如 `(None, (dm,3))` —— 逐候选门控张量用
+        #     （旧网没有它 ⇒ 补 0 ⇒ `g = 1+tanh(0) = 1` ⇒ 恒等，不影响任何旧行为）。
+        # ⚠ 先分清"这是**一个形状**还是**一串候选**"：只有当元组的**每个元素都是元组或 None**
+        #   时才算候选串（`(64,48)` 是一个形状，`((1,dm),(1,dm+3))` 是候选串，
+        #   `(None,(dm,3))` 是"可缺 + 形状"）。搞混的后果是**所有**张量都报形状不符。
+        if isinstance(s, tuple) and s and all(isinstance(a, tuple) or a is None for a in s):
+            raw = s
+        else:
+            raw = (s,)
+        alts = tuple(a for a in raw if isinstance(a, tuple))
+        optional = any(a is None for a in raw)
         if k not in got:
-            bad.append(f"缺 {k}{alts[0]}")
+            if not optional:
+                bad.append(f"缺 {k}{alts[0] if alts else ''}")
         elif got[k] not in alts:
             bad.append(f"{k} 形状 {got[k]} != " + " 或 ".join(str(x) for x in alts))
     for k in got:
@@ -284,28 +297,45 @@ def read_net(path: str | Path) -> dict[str, Any]:
             "bytes": len(raw)}
 
 
+def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """把**任意一代**的状态字典归一成**当前模型**的形状 —— 所有加载点共用这一处。
+
+    处理两件跨代差异（第五十/五十五轮）：
+
+    1. `heads.policy.weight` 可能是 `[1, dm]`（第一季及以前、第五十五轮起）或 `[1, dm+3]`
+       （第五十轮那版"拼接 sigmoid(belief_tenpai)"）⇒ `dm+3` **截断**：那 3 列乘的是逐行常数
+       ⇒ 对 argmax/softmax 无贡献（红证见 NOTES §6.5），丢掉等价；
+    2. `heads.policy_gate.{weight,bias}`（第五十五轮加的逐候选门控）**可能不存在** ⇒ 补 **0**
+       ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等（不给旧权重强加新行为，`strict=True` 也不会红）。
+
+    ⚠ 别把这段逻辑抄到各处：`state_from_net`（net.bin）与 `value_audit.load_model`（ckpt）
+    都必须走它 —— 抄漏一处就是"某些旧权重能载入、某些不能"的鬼故事（实测踩过一次：
+    `value_audit` 直接 `strict=True` 载 ckpt ⇒ `Missing key(s): heads.policy_gate.*`）。
+    """
+    out = dict(sd)
+    dm = int(out["tile.proj.weight"].shape[0])
+    w = out.get("heads.policy.weight")
+    if w is not None and w.ndim == 2:
+        if int(w.shape[1]) == dm + 3:
+            out["heads.policy.weight"] = w[:, :dm].contiguous()
+        elif int(w.shape[1]) != dm:
+            raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是 {dm} "
+                                 f"也不是旧版 {dm + 3}")
+    dtype = out["tile.proj.weight"].dtype
+    if "heads.policy_gate.weight" not in out:
+        out["heads.policy_gate.weight"] = torch.zeros((dm, 3), dtype=dtype)
+    if "heads.policy_gate.bias" not in out:
+        out["heads.policy_gate.bias"] = torch.zeros((dm,), dtype=dtype)
+    return out
+
+
 def state_from_net(parsed: Mapping[str, Any]) -> dict[str, torch.Tensor]:
     """张量表 → `state_dict()`（自检用它做"导出 → 读回 → 前向"的闭环）。
 
-    ⚠ **旧网兼容**（第四十九/五十轮）：`heads.policy.weight` 的宽度可能是**旧宽 `dm`**
-    （第四十九轮之前训的网，如 `p3-001` / 第一季 `g08`）。这里**右侧补 3 个 0**再交给
-    `load_state_dict(strict=True)` —— 与 Java `V4Policy.matOrPadPolicy`、C++
-    `v4policy.cpp` 的绑定期补 0 **同一语义**（那 3 个 `sigmoid(belief_tenpai)` 输入贡献恒为 0
-    ⇒ 前向与"接 belief 之前"逐位相同）。⛔ 少了这一步，`--init <旧网>` 会直接
-    `size mismatch for heads.policy.weight: [1,192] vs [1,195]`（第二季第一代实测踩过）。
+    跨代差异（policy 宽度 / 可缺的门控张量）统一交给 `normalize_state`，见那里的注释。
     """
-    sd = {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in parsed["tensors"].items()}
-    w = sd.get("heads.policy.weight")
-    if w is not None and w.ndim == 2:
-        dm = int(sd["tile.proj.weight"].shape[0])
-        if int(w.shape[1]) == dm:                # 旧宽 ⇒ 右侧补 0
-            pad = torch.zeros((w.shape[0], dm + 3), dtype=w.dtype)
-            pad[:, :dm] = w
-            sd["heads.policy.weight"] = pad
-        elif int(w.shape[1]) != dm + 3:
-            raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是新宽 "
-                                 f"{dm + 3} 也不是旧宽 {dm}")
-    return sd
+    return normalize_state({k: torch.from_numpy(np.ascontiguousarray(v))
+                            for k, v in parsed["tensors"].items()})
 
 
 # ------------------------------------------------------------------ 夹具

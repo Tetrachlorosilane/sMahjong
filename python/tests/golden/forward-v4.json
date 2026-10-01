@@ -7,8 +7,8 @@
     "n_heads": 2,
     "value_bins": 5
   },
-  "net_bytes": 208410,
-  "bytes": 512895,
+  "net_bytes": 208974,
+  "bytes": 513459,
   "trace": "S:\\mahjong-training\\raw\\v4-golden",
   "seed": 20260928,
   "blocks_fingerprint": "e1f5dd0fc1e9aba8",

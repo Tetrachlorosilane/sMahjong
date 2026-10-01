@@ -238,32 +238,76 @@ public final class V4Policy implements LogitPolicy {
 
     // ---------------------------------------------------------------- 取张量
     /**
-     * `heads.policy.weight` 的**兼容绑定**：接受 `[1, dm+3]`（新）或 `[1, dm]`（旧，右侧补 0）。
+     * `heads.policy.weight` 的**兼容绑定**：接受 `[1, dm]`（第五十五轮起的正常宽度）或
+     * `[1, dm+3]`（第五十轮那版"拼接 sigmoid(belief_tenpai)"）。
      *
-     * <p>补 0 不是权宜近似：policy 的输入是 `[u ; sigmoid(belief_tenpai)]`，右侧 3 列乘 0
-     * ⇒ 那三项对 logits 的贡献恒为 0 ⇒ 与"接 belief 之前"逐位相同。于是旧网照跑、新网用 belief，
-     * 两者共用同一条前向代码（`forwardAll` 里只有 `mat(..., 1, dm+3)` 一种读法）。
+     * <p>对 `dm+3` 做**截断**（丢掉后 3 列）不是权宜近似：那 3 列乘的是**逐行常数**
+     * （同一行的所有候选共用同一组 `sigmoid(bt)`）⇒ 对 argmax / softmax 无贡献
+     * （红证：行内位移极差 4.8e-07~7.6e-06、argmax 完全一致、softmax 差 8.3e-07；见 NOTES §6.5）。
+     * 于是三种网（第一季旧网 / 第二季拼接网 / 新门控网）共用同一条前向代码。
      */
-    private void matOrPadPolicy(int dm) throws IOException {
+    private void matPolicyCompat(int dm) throws IOException {
         float[][] w = mats.get("heads.policy.weight");
         if (w == null) {
             throw new IOException("权重缺张量：heads.policy.weight");
         }
         int cols = w.length > 0 ? w[0].length : 0;
-        if (cols == dm + 3) {
+        if (cols == dm) {
             used.add("heads.policy.weight");
             return;
         }
-        if (cols != dm) {
+        if (cols != dm + 3) {
             throw new IOException("张量 heads.policy.weight 形状 [" + w.length + "," + cols
-                    + "] != [" + 1 + "," + (dm + 3) + "]，也不是旧宽 [" + 1 + "," + dm + "]");
+                    + "] != [" + 1 + "," + dm + "]，也不是第五十轮那版 [" + 1 + "," + (dm + 3) + "]");
         }
-        float[][] pad = new float[w.length][dm + 3];
+        float[][] cut = new float[w.length][dm];
         for (int i = 0; i < w.length; i++) {
-            System.arraycopy(w[i], 0, pad[i], 0, dm);      // 后 3 列保持 0
+            System.arraycopy(w[i], 0, cut[i], 0, dm);      // 丢掉后 3 列（逐行常数，等价）
         }
-        mats.put("heads.policy.weight", pad);
+        mats.put("heads.policy.weight", cut);
         used.add("heads.policy.weight");
+    }
+
+    /**
+     * 逐候选门控张量（第五十五轮）：`heads.policy_gate.weight [dm,3]` + `bias [dm]`。
+     *
+     * <p>**可缺**：旧网 / 第二季的网里没有它 ⇒ 补 0 ⇒ `g[j] = 1 + tanh(0) = 1` ⇒ 恒等
+     * （不给旧权重强加新行为）。有它时把名字记进 `used`，否则"有张量没人读"的校验会红。
+     */
+    private void bindPolicyGate(int dm) {
+        float[][] gw = mats.get("heads.policy_gate.weight");
+        if (gw != null) {
+            used.add("heads.policy_gate.weight");
+            if (gw.length != dm || (dm > 0 && gw[0].length != 3)) {
+                throw new IllegalStateException("张量 heads.policy_gate.weight 形状 [" + gw.length + ","
+                        + (gw.length > 0 ? gw[0].length : 0) + "] != [" + dm + ",3]");
+            }
+        }
+        // ⚠ **必须在这里（绑定期）标记**，不能等前向：加载期就有一条"有张量没人读"的校验，
+        //   前向里再 `used.add(...)` 太晚 —— 症状是「权重里 1 个张量没有任何参数读取它：
+        //   [heads.policy_gate.bias]」，看起来像多余张量，其实是标记时机不对（实测踩过）。
+        float[] gb = vecs.get("heads.policy_gate.bias");
+        if (gb != null) {
+            used.add("heads.policy_gate.bias");
+            if (gb.length != dm) {
+                throw new IllegalStateException("张量 heads.policy_gate.bias 长度 " + gb.length
+                        + " != " + dm);
+            }
+        }
+    }
+
+    /**
+     * 门控偏置（`heads.policy_gate.bias`，长度 `dm`）：**可缺** ⇒ 全 0（与缺权重一起 = 恒等门控）。
+     *
+     * <p>⚠ 一维张量存在 `vecs` 里，**不在** `mats` —— 拿 `mats.get(...)` 去查它永远是 null。
+     */
+    private float[] gateBias(int dm) {
+        float[] v = vecs.get("heads.policy_gate.bias");
+        if (v != null) {
+            used.add("heads.policy_gate.bias");
+            return v;
+        }
+        return new float[dm];
     }
 
     private float[][] mat(String name, int rows, int cols) throws IOException {        float[][] m = mats.get(name);
@@ -370,7 +414,8 @@ public final class V4Policy implements LogitPolicy {
         //   旧宽在**右侧补 3 个 0** ⇒ 等价于那 3 个 `sigmoid(belief_tenpai)` 输入恒为 0
         //   ⇒ 前向与"接 belief 之前"**逐位相同**（不是近似）。为什么要留这条路：
         //   `p3-001` / 联赛 `g08` 等已训权重都还是旧宽，没有它全部作废（重训要几小时）。
-        matOrPadPolicy(dm);
+        matPolicyCompat(dm);
+        bindPolicyGate(dm);
         vec("heads.policy.bias", 1);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
@@ -692,15 +737,16 @@ public final class V4Policy implements LogitPolicy {
         }
 
         // ---- 头
-        // ⚠ **policy 的输入是 `[u ; sigmoid(belief_tenpai)]`（宽度 dm+3）**（2026-09-30 第四十九轮）：
-        //   实测 `belief_tenpai` 的 AUC 0.978（BCE 比边缘基线好 73%），但它原先**与 policy 不互通**
-        //   （各头各算、算完即丢）⇒ 押し引き的输入信息在模型手里却没接上。顺序必须是
-        //   **u 在前、三个听牌概率在后**（与 `python/mahjong_ml/v4/model.py` 的 `Heads.forward`
-        //   逐位同序）；因此 bt 必须在 policy 之前算出来 ⇒ 先求 `meanU`，再求 bt，最后出 policy。
+        // ⚠ **belief 用"逐候选门控"接进 policy**（2026-09-30 第五十五轮）：
+        //   `g = 1 + tanh(W_g·sigmoid(bt) + b_g)`（[dm]），`policy_i = W·(u_i ⊙ g) + b`。
+        //   ⛔ 第五十轮那版把 `sigmoid(bt)` **拼在每个候选后面**是**数学空操作**：同一行所有候选
+        //   共用同一组 bt ⇒ 只给 logits 加逐行常数 ⇒ softmax/argmax 不变、梯度恒为 0
+        //   （红证见 NOTES §6.5 第四十八~五十四轮）。门控是**逐候选**的（`u_i` 各不相同）⇒ 真能改判。
+        //   `bt` 由 `meanU` 算出 ⇒ 必须先求 meanU、再求 bt、最后出 policy。
         float[] policy = new float[n];
         float[][] danger = new float[n][];
         float[][] effect = new float[n][];
-        float[][] polW = mat("heads.policy.weight", 1, dm + 3);
+        float[][] polW = mat("heads.policy.weight", 1, dm);
         float polB = vec("heads.policy.bias", 1)[0];
         float[][] danW = mat("heads.danger.weight", 4, dm);
         float[] danB = vec("heads.danger.bias", 4);
@@ -724,11 +770,26 @@ public final class V4Policy implements LogitPolicy {
             //   而**输出的 `belief_tenpai` 仍然是 logits**（见下面的 `head(...)`）—— 别把两者搞混。
             bt[j] = (float) (1.0 / (1.0 + Math.exp(-bt[j])));
         }
-        float[] polVec = new float[dm + 3];
+        // ---- 逐候选门控（第五十五轮）：`g[j] = 1 + tanh(dot(gw[j], bt) + gb[j])`
+        //   旧网没有这两个张量 ⇒ 全 0 ⇒ `g ≡ 1` ⇒ 与"没有门控"逐位相同。
+        float[][] pgW = mats.get("heads.policy_gate.weight");        // [dm,3] 或 null
+        float[] pgB = gateBias(dm);
+        float[] g = new float[dm];
+        for (int j = 0; j < dm; j++) {
+            double acc = 0.0;
+            if (pgW != null) {
+                for (int k = 0; k < 3; k++) {
+                    acc += (double) pgW[j][k] * bt[k];
+                }
+            }
+            g[j] = (float) (1.0 + Math.tanh(acc + pgB[j]));
+        }
+        float[] gu = new float[dm];
         for (int i = 0; i < n; i++) {
-            System.arraycopy(u[i], 0, polVec, 0, dm);
-            System.arraycopy(bt, 0, polVec, dm, 3);
-            policy[i] = polB + dot(polW[0], polVec);
+            for (int j = 0; j < dm; j++) {
+                gu[j] = u[i][j] * g[j];                                // 逐候选：u_i 各不相同
+            }
+            policy[i] = polB + dot(polW[0], gu);
         }
         if (n == 0) {
             meanU = new float[dm];

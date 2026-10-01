@@ -2279,8 +2279,8 @@ import struct as _struct                                               # noqa: E
 from mahjong_ml.v4 import export as v4_export                          # noqa: E402
 
 _v4shape = v4_export.expected_shapes(v4_export.FULL_DIMS)
-eq("P5 导出：期望张量表条数（74 个张量）", len(_v4shape), 74)
-eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 74)
+eq("P5 导出：期望张量表条数（76 个张量 = 74 + 逐候选门控 2）", len(_v4shape), 76)
+eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 76)
 _v4sd = v4_model.build(20260928).state_dict()
 _v4dims = v4_export.dims_from_state(_v4sd)
 eq("P5 导出：从权重形状反推的维度", _v4dims, v4_export.FULL_DIMS)
@@ -2294,7 +2294,7 @@ _v4p = v4_export.save_net(_v4sd, _v4dims, _pnet)
 _eq = v4_export.read_net(_v4p)
 eq("P5 导出：读回的格式号", _eq["format"], v4_export.NET_FORMAT)
 eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
-eq("P5 导出：读回的张量数", len(_eq["tensors"]), 74)
+eq("P5 导出：读回的张量数", len(_eq["tensors"]), 76)
 eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
 eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
 ok(all(tuple(np.asarray(_eq["tensors"][k]).shape) in
