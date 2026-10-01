@@ -29,9 +29,12 @@ if (Test-Path $trainerS) { $env:MAHJONG_TRAINER = $trainerS }
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league'
+$label = 'v4-league2'
 $seed  = 20261001
-$init  = Join-Path $root 'tools\build\v4-p3-001\net.bin'
+# ⚠ 起点 = **第一季的终点 g08**：第四十九轮把 `belief_tenpai` 接进 policy 后，旧 net 的 policy 宽是
+#   `dm`，三端加载期**右侧补 0**（等价于 belief 输入恒为 0 ⇒ 与接之前逐位相同）⇒ 这一季是从
+#   "g08 的水平"起步**带 belief 微调**，而不是从零重训（省掉 BC 预训练那一轮）。
+$init  = Join-Path $root 'tools\build\v4-league-g08\net.bin'
 $pool  = New-Object System.Collections.Generic.List[string]
 
 function Free-GB { (Get-PSDrive S).Free / 1GB }
