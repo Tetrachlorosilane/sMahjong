@@ -58,8 +58,16 @@ def pooled_diffs(series: list[tuple[dict[int, float], dict[int, float]]],
 
 def decide(sa: dict[int, float], sb: dict[int, float], a: str, b: str,
            metric: str = "rank_points") -> dict:
-    """纯判据：CI 排除 0 且为正 ⇒ 采纳。（`a` = 现任，`b` = 候选）"""
-    r = arena.judge_pair(sa, sb, a, b, metric)
+    """纯判据：**候选（`b`）− 现任（`a`）** 的 CI 排除 0 且为正 ⇒ 采纳。
+
+    ⚠ **符号陷阱（实测踩过，代价是整轮判决方向反了）**：`eval.paired_test` 的约定是
+    `diff = a_series − b_series`、**正 = `a` 更好**；而"采纳"要问的是**候选更好吗**。
+    所以这里**必须**按 `judge_pair(sb, sa, b, a)`（候选在前）算 —— 若写成 `(sa, sb, a, b)`，
+    `lo > 0` 就变成"**现任显著更好**"却去采纳候选（方向整反）。
+    空对照（`a == b` ⇒ Δ=0 ⇒ CI[0,0]）**两种写法都判不采纳**，所以它抓不出这个反向 ——
+    必须有**方向性对照**（见 `self_check`：弱现任 vs 强候选 ⇒ 必须采纳）。
+    """
+    r = arena.judge_pair(sb, sa, b, a, metric)          # 候选 − 现任（正 = 候选更好）
     return {"delta": r.delta, "lo": r.lo, "hi": r.hi, "p": r.p, "n": r.games,
             "sd": r.sd, "win": r.win, "lose": r.lose, "tie": r.tie,
             "need_for_2": r.need_for_2, "verdict": r.verdict,
@@ -100,10 +108,58 @@ def _policy(spec: str) -> str:
     return s if s.startswith(("net:", "teacher", "first", "pass", "random")) else f"net:{s}"
 
 
+def self_check(out_root: Path, *, workers: int = 12, prod: str | None = None) -> int:
+    """闸门自证：**方向必须对**（空对照抓不出方向问题，所以这里用强弱对照）。
+
+    两组对照（用竞技场自证那对已知强弱的策略，200 场足够把 Δ≈90 拉开）：
+
+    1. 弱现任（`first`）vs 强候选（`teacher`）⇒ **必须采纳**；
+    2. 强现任（`teacher`）vs 弱候选（`first`）⇒ **必须拒绝**。
+
+    另外把"符号写反"的后果**显式跑一遍**（同两份序列按相反顺序调 `decide`）：
+    正确顺序采纳、反向顺序不采纳 ⇒ 一旦有人把顺序改回去，这两条会立刻打脸。
+    """
+    ok = 0
+    print("== 闸门自证①：弱现任 vs 强候选 ⇒ 必须采纳 ==")
+    d = {"incumbent": "first", "candidate": "teacher"}
+    arena.run_pair(out_root / "selfcheck-weak-to-strong", "first", "teacher", 200, 20260930,
+                   workers=workers, prod=prod)
+    sa, sb = arena.judge_series(out_root / "selfcheck-weak-to-strong", "first", "teacher")
+    r1 = decide(sa, sb, "first", "teacher")
+    r1_wrong = decide(sb, sa, "teacher", "first")          # 故意写反
+    print(f"   正确顺序：Δ={r1['delta']:+.2f} CI[{r1['lo']:+.2f},{r1['hi']:+.2f}] "
+          f"⇒ {'采纳' if r1['adopt'] else '不采纳'}")
+    print(f"   写反顺序：Δ={r1_wrong['delta']:+.2f} ⇒ {'采纳' if r1_wrong['adopt'] else '不采纳'}"
+          "（必须与正确顺序**相反**，否则这条自证没意义）")
+    if r1["adopt"] and not r1_wrong["adopt"]:
+        ok += 1
+        print("   ✓ 方向对照通过（且反向写法会被抓住）")
+    else:
+        print("   ✗ 方向对照失败")
+
+    print("== 闸门自证②：强现任 vs 弱候选 ⇒ 必须拒绝 ==")
+    arena.run_pair(out_root / "selfcheck-strong-to-weak", "teacher", "first", 200, 20260930,
+                   workers=workers, prod=prod)
+    sa2, sb2 = arena.judge_series(out_root / "selfcheck-strong-to-weak", "teacher", "first")
+    r2 = decide(sa2, sb2, "teacher", "first")
+    print(f"   Δ={r2['delta']:+.2f} CI[{r2['lo']:+.2f},{r2['hi']:+.2f}] "
+          f"⇒ {'采纳' if r2['adopt'] else '不采纳'}")
+    if not r2["adopt"]:
+        ok += 1
+        print("   ✓ 通过")
+    else:
+        print("   ✗ 失败（把更弱的候选采纳了）")
+    print("GATE SELFCHECK PASS：方向与判据都不是空转" if ok == 2
+          else "GATE SELFCHECK FAIL")
+    return 0 if ok == 2 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="训练的接受闸门（多套牌山集合的合并配对判决）")
-    ap.add_argument("--incumbent", required=True, help="现任 net.bin（a），可写路径或 net: 串")
-    ap.add_argument("--candidate", required=True, help="候选 net.bin（b），可写路径或 net: 串")
+    ap.add_argument("--incumbent", help="现任 net.bin（a），可写路径或 net: 串")
+    ap.add_argument("--candidate", help="候选 net.bin（b），可写路径或 net: 串")
+    ap.add_argument("--self-check", action="store_true",
+                    help="跑方向性对照（弱现任 vs 强候选必须采纳、反向必须拒绝）")
     ap.add_argument("--seeds", default="20260930,20261001,20261002",
                     help="逗号分隔的牌山 seed（每套一个 block）")
     ap.add_argument("--games", type=int, default=2000, help="每套的场次上限（配合 --block 提前收工）")
@@ -116,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     out_root = Path(args.out).resolve() if args.out else paths.DATA_ROOT / "gate"
     arena.guard_out(out_root)
+    if args.self_check:
+        return self_check(out_root, workers=args.workers, prod=args.producer)
+    if not (args.incumbent and args.candidate):
+        ap.error("要么给 --incumbent/--candidate，要么用 --self-check")
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     r = gate(_policy(args.incumbent), _policy(args.candidate), seeds, args.games, args.block,
              out_root, workers=args.workers, metric=args.metric, tag=args.tag,
