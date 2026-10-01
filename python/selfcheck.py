@@ -2297,7 +2297,9 @@ eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
 eq("P5 导出：读回的张量数", len(_eq["tensors"]), 74)
 eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
 eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
-ok(all(tuple(np.asarray(_eq["tensors"][k]).shape) == s for k, s in _v4shape.items()),
+ok(all(tuple(np.asarray(_eq["tensors"][k]).shape) in
+       (s if isinstance(s, tuple) and s and isinstance(s[0], tuple) else (s,))
+       for k, s in _v4shape.items()),
    "P5 导出：读回的每个张量形状与契约一致")
 # 导出 → 读回 → 载入模型 → 前向必须与原始模型逐位相同（"导出的就是训练的那个"）
 _v4m2 = v4_model.build(1)
