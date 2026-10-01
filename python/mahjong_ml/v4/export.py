@@ -285,8 +285,27 @@ def read_net(path: str | Path) -> dict[str, Any]:
 
 
 def state_from_net(parsed: Mapping[str, Any]) -> dict[str, torch.Tensor]:
-    """张量表 → `state_dict()`（自检用它做"导出 → 读回 → 前向"的闭环）。"""
-    return {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in parsed["tensors"].items()}
+    """张量表 → `state_dict()`（自检用它做"导出 → 读回 → 前向"的闭环）。
+
+    ⚠ **旧网兼容**（第四十九/五十轮）：`heads.policy.weight` 的宽度可能是**旧宽 `dm`**
+    （第四十九轮之前训的网，如 `p3-001` / 第一季 `g08`）。这里**右侧补 3 个 0**再交给
+    `load_state_dict(strict=True)` —— 与 Java `V4Policy.matOrPadPolicy`、C++
+    `v4policy.cpp` 的绑定期补 0 **同一语义**（那 3 个 `sigmoid(belief_tenpai)` 输入贡献恒为 0
+    ⇒ 前向与"接 belief 之前"逐位相同）。⛔ 少了这一步，`--init <旧网>` 会直接
+    `size mismatch for heads.policy.weight: [1,192] vs [1,195]`（第二季第一代实测踩过）。
+    """
+    sd = {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in parsed["tensors"].items()}
+    w = sd.get("heads.policy.weight")
+    if w is not None and w.ndim == 2:
+        dm = int(sd["tile.proj.weight"].shape[0])
+        if int(w.shape[1]) == dm:                # 旧宽 ⇒ 右侧补 0
+            pad = torch.zeros((w.shape[0], dm + 3), dtype=w.dtype)
+            pad[:, :dm] = w
+            sd["heads.policy.weight"] = pad
+        elif int(w.shape[1]) != dm + 3:
+            raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是新宽 "
+                                 f"{dm + 3} 也不是旧宽 {dm}")
+    return sd
 
 
 # ------------------------------------------------------------------ 夹具
