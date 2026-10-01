@@ -132,10 +132,11 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.out.net.0.weight": (dm, 3 * dm), "fusion.out.net.0.bias": (dm,),
         "fusion.out.net.2.weight": (dm, dm), "fusion.out.net.2.bias": (dm,),
         # 头
-        # ⚠ **policy 的输入宽度是 `dm+3`**（2026-09-30 第四十九轮）：它的输入是
-        #   `[u ; sigmoid(belief_tenpai)]`（与 `model.py` 的 `Heads.forward`、
-        #   Java `V4Policy`、C++ `v4policy.cpp` 逐位同序）。旧权重（`dm` 宽）**构造期拒绝**。
-        "heads.policy.weight": (1, dm + 3), "heads.policy.bias": (1,),
+        # ⚠ **policy 的输入宽度是 `dm+3`**（2026-09-30 第四十九轮）：输入是 `[u ; sigmoid(belief_tenpai)]`
+        #   （与 `model.py` 的 `Heads.forward`、Java `V4Policy`、C++ `v4policy.cpp` 逐位同序）。
+        #   **旧网（宽 `dm`）仍可导出**：三端加载期会把旧宽右侧补 0（等价于 belief 输入恒为 0
+        #   ⇒ 与接 belief 之前逐位相同），所以这里**两种宽度都接受**。
+        "heads.policy.weight": ((1, dm + 3), (1, dm)), "heads.policy.bias": (1,),
         "heads.value.weight": (vb, dm), "heads.value.bias": (vb,),
     }
     for name, width in HEAD_WIDTHS.items():
@@ -153,10 +154,13 @@ def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: st
     got = {k: tuple(v.shape) for k, v in sd.items()}
     bad: list[str] = []
     for k, s in want.items():
+        # ⚠ 期望形状可以是**多个**（`tuple[tuple[int, ...], ...]`）：目前只有
+        #   `heads.policy.weight` 用得上（新宽 `dm+3` / 旧宽 `dm` 都接受，见 `expected_shapes`）。
+        alts = s if isinstance(s, tuple) and s and isinstance(s[0], tuple) else (s,)
         if k not in got:
-            bad.append(f"缺 {k}{s}")
-        elif got[k] != s:
-            bad.append(f"{k} 形状 {got[k]} != {s}")
+            bad.append(f"缺 {k}{alts[0]}")
+        elif got[k] not in alts:
+            bad.append(f"{k} 形状 {got[k]} != " + " 或 ".join(str(x) for x in alts))
     for k in got:
         if k not in want:
             bad.append(f"多 {k}{got[k]}")
@@ -166,10 +170,10 @@ def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: st
 
 def dims_from_state(sd: Mapping[str, torch.Tensor]) -> dict[str, int]:
     """从权重形状反推四个宽度（`nHeads` 反推不出来 —— 只是分组方式，必须外部给）。"""
-    # ⚠ `heads.policy.weight` 的**第 1 维是 `dm+3`**（policy 的输入多拼了 3 个 belief_tenpai 概率）
-    #   ⇒ 反推 d_model 要**减 3**（第四十九轮改）。⛔ 别改回直接取 shape[1]：
-    #   那会把 d_model 读成 195，导出头部宽度与权重全部错位。
-    dm = int(sd["heads.policy.weight"].shape[1]) - 3
+    # ⚠ `d_model` **从 `tile.proj.weight`（`[dm, td]`）反推**，别再从 policy 权重反推：
+    #   第四十九轮起 policy 的输入是 `dm+3`（多拼了 3 个 belief 概率），而**旧网仍是 `dm` 宽**
+    #   ⇒ 从它反推会把 d_model 读成 192 或 195 两种，取决于网的新旧。`tile.proj` 与新旧无关。
+    dm = int(sd["tile.proj.weight"].shape[0])
     return {"d_model": dm, "tile_d": int(sd["tile.enc.0.weight"].shape[0]),
             "n_heads": M.N_HEADS, "value_bins": int(sd["heads.value.weight"].shape[0])}
 

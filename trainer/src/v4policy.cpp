@@ -399,7 +399,30 @@ bool V4Policy::bindAll(std::string &err) {
     M("fusion.out.net.2.weight", dm, dm);
     V("fusion.out.net.2.bias", dm);
 
-    M("heads.policy.weight", 1, dm);
+    // ⚠ **旧网兼容**（第四十九轮之前 policy 的输入宽 = dm，之后 = dm+3）：旧宽右侧补 3 个 0
+    //   ⇒ 那 3 个 `sigmoid(belief_tenpai)` 输入的贡献恒为 0 ⇒ 与"接 belief 之前"**逐位相同**。
+    //   必须两端都留这条路：`p3-001` / 联赛各代权重仍是旧宽，否则训出来的网在训练端跑不了。
+    {
+        const Mat *w = mat("heads.policy.weight", 1, dm, err);
+        if (w == nullptr && !err.empty()) {
+            err.clear();                        // 旧宽不匹配不是错，接着按新宽试
+            w = mat("heads.policy.weight", 1, dm + 3, err);
+            if (w != nullptr) {
+                used.insert("heads.policy.weight");
+            }
+        } else if (w != nullptr) {
+            // 命中旧宽 ⇒ 复制一份、右侧补 0、替换掉表里的张量（后面只按 dm+3 读）
+            Mat pad;
+            pad.rows = 1;
+            pad.cols = dm + 3;
+            pad.data.assign(static_cast<size_t>(dm + 3), 0.f);
+            for (int j = 0; j < dm; j++) {
+                pad.data[static_cast<size_t>(j)] = w->data[static_cast<size_t>(j)];
+            }
+            mats["heads.policy.weight"] = std::move(pad);
+            used.insert("heads.policy.weight");
+        }
+    }
     V("heads.policy.bias", 1);
     M("heads.value.weight", vb, dm);
     V("heads.value.bias", vb);

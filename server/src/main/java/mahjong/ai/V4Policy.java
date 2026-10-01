@@ -237,8 +237,36 @@ public final class V4Policy implements LogitPolicy {
     }
 
     // ---------------------------------------------------------------- 取张量
-    private float[][] mat(String name, int rows, int cols) throws IOException {
-        float[][] m = mats.get(name);
+    /**
+     * `heads.policy.weight` 的**兼容绑定**：接受 `[1, dm+3]`（新）或 `[1, dm]`（旧，右侧补 0）。
+     *
+     * <p>补 0 不是权宜近似：policy 的输入是 `[u ; sigmoid(belief_tenpai)]`，右侧 3 列乘 0
+     * ⇒ 那三项对 logits 的贡献恒为 0 ⇒ 与"接 belief 之前"逐位相同。于是旧网照跑、新网用 belief，
+     * 两者共用同一条前向代码（`forwardAll` 里只有 `mat(..., 1, dm+3)` 一种读法）。
+     */
+    private void matOrPadPolicy(int dm) throws IOException {
+        float[][] w = mats.get("heads.policy.weight");
+        if (w == null) {
+            throw new IOException("权重缺张量：heads.policy.weight");
+        }
+        int cols = w.length > 0 ? w[0].length : 0;
+        if (cols == dm + 3) {
+            used.add("heads.policy.weight");
+            return;
+        }
+        if (cols != dm) {
+            throw new IOException("张量 heads.policy.weight 形状 [" + w.length + "," + cols
+                    + "] != [" + 1 + "," + (dm + 3) + "]，也不是旧宽 [" + 1 + "," + dm + "]");
+        }
+        float[][] pad = new float[w.length][dm + 3];
+        for (int i = 0; i < w.length; i++) {
+            System.arraycopy(w[i], 0, pad[i], 0, dm);      // 后 3 列保持 0
+        }
+        mats.put("heads.policy.weight", pad);
+        used.add("heads.policy.weight");
+    }
+
+    private float[][] mat(String name, int rows, int cols) throws IOException {        float[][] m = mats.get(name);
         if (m == null) {
             throw new IOException("权重缺张量：" + name);
         }
@@ -338,7 +366,11 @@ public final class V4Policy implements LogitPolicy {
         mat("fusion.out.net.2.weight", dm, dm);
         vec("fusion.out.net.2.bias", dm);
 
-        mat("heads.policy.weight", 1, dm + 3);
+        // ⚠ **旧网兼容**（第四十九轮之前 policy 的输入宽 = `dm`，第四十九轮起 = `dm+3`）：
+        //   旧宽在**右侧补 3 个 0** ⇒ 等价于那 3 个 `sigmoid(belief_tenpai)` 输入恒为 0
+        //   ⇒ 前向与"接 belief 之前"**逐位相同**（不是近似）。为什么要留这条路：
+        //   `p3-001` / 联赛 `g08` 等已训权重都还是旧宽，没有它全部作废（重训要几小时）。
+        matOrPadPolicy(dm);
         vec("heads.policy.bias", 1);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
