@@ -4529,6 +4529,19 @@ Compare-Object (Get-Content old.txt) (Get-Content new.txt)   # 期望：无差�
 实测 **747 行全同**（`g08` 权重、746 条决策）⇒ "可缺张量 ⇒ 补 0 ⇒ 恒等"这条路**在真权重上成立**，
 不是"看起来能加载"。
 
+**⑦ 端到端缓存判据要"非平凡"，得先造一份"活门控"的网**：`v4-cache-check` 拿旧网（没有 `fusion.mem.*`）
+跑是**假绿**（`g_mem ≡ 1` ⇒ `h` 不进输出 ⇒ 缓存算错也看不出来）。做法（探针网留在
+`S:\mahjong-training\probe\w1-mem\net.bin`，约 5 MB）：
+
+```python
+sd = X.normalize_state(torch.load(<g08 ckpt>)["model"])
+sd['fusion.mem.weight'].normal_(0.0, 0.3); sd['fusion.mem.bias'].normal_(0.0, 0.1)   # 唯一改动
+X.save_net(sd, dims, r'S:\mahjong-training\probe\w1-mem\net.bin', label='w1-mem-probe')
+```
+实测：`node tools/v4-cache-check.mjs <探针网>` ⇒ 2 场 × 4 小局**逐字节一致**；
+`node tools/trainer-v4-parity.mjs <探针网> <g0/g1.jsonl>` ⇒ **1638 条决策 maxΔ=0.000e+0**
+（Java 的缓存路径 ↔ C++ 的整手重放，含活门控）。
+
 
 
 
