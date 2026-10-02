@@ -35,7 +35,7 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league5'
+$label = 'v4-league6'
 $seed  = 20261001
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
@@ -70,8 +70,8 @@ for ($g = 1; $g -le $Generations; $g++) {
                '--generations', '1', '--gen-offset', "$($g - 1)",
                '--games', "$Games", '--workers', '20', '--eval-workers', '20',
                '--objective', 'ppo', '--value-target', 'delta', '--advantage', 'hand',
-               '--rank-weight', '0.2', '--max-steps', '2000', '--epochs', '2',
-               '--kl-early-stop', '0.15', '--kl-min-steps', '60', '--critic-steps', '0',
+               '--rank-weight', '0.2', '--max-steps', '600', '--epochs', '1',
+               '--kl-early-stop', '0.03', '--kl-min-steps', '60', '--critic-steps', '0',
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
     Log ("=== 第 {0} 代（{1}）init={2} 对手池={3} ===" -f $g, $tag,
@@ -101,9 +101,12 @@ for ($g = 1; $g -le $Generations; $g++) {
         --out (Join-Path $S 'gate') --tag $tag *> $gateLog
     $grc = $LASTEXITCODE
     Get-Content $gateLog | Select-String -Pattern '牌山 20|合并判决' | ForEach-Object { Log ("    " + $_.Line.Trim()) }
+    # ⚠ **候选一律进池（无论是否被采纳）**：池是**采集时的对手**、现任是**基准**，两件事。
+    #   第五季实测踩过：把"进池"绑在"采纳"上 ⇒ 一个都没采纳 ⇒ 池永远是空的 ⇒ 采集桌上
+    #   只剩 student×2 + teacher×2，**把第一季赖以起效的历史快照多样性整条掐掉了**。
+    $pool.Add($candidate)
     if ($grc -eq 0) {
         $incumbent = $candidate
-        $pool.Add($candidate)
         Log ("  ⇒ **采纳**：新现任 = {0}；对手池 {1} 个" -f $tag, $pool.Count)
     } elseif ($grc -eq 3) {
         New-Item -ItemType Directory -Force -Path (Join-Path $rejected $tag) | Out-Null
