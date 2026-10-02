@@ -86,8 +86,14 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
         d = root / f"s{s}"
         arena.run_pair(d, incumbent, candidate, block, s, workers=workers, prod=prod)
         x, y = arena.judge_series(d, incumbent, candidate, metric)
-        part = arena.judge_pair(x, y, incumbent, candidate, metric)
-        print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}")
+        # ⚠ **逐牌山这行必须与下面的合并判决同一个符号**（候选 − 现任）。`judge_pair(sa, sb, a, b)`
+        #   的约定是 `Δ = a − b`，所以这里要按 `(y, x, 候选, 现任)` 调 —— 写成 `(x, y, 现任, 候选)`
+        #   会打印出**符号相反**的逐牌山读数（判决本身不受影响，因为它走 `decide`），
+        #   症状极具误导性：两套牌山 `+2.34 / −0.08` 而合并是 `−1.13`，读日志的人会以为
+        #   "候选赢了一套"。（实测踩过：第八季 g01；判决逻辑没错，错的是这行 printf。）
+        part = arena.judge_pair(y, x, candidate, incumbent, metric)
+        print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}"
+              f"（候选 − 现任）")
         series.append((x, y))
     sa, sb = pooled_diffs(series)
     out = decide(sa, sb, incumbent, candidate, metric)

@@ -1,5 +1,11 @@
 # 季联赛：在线自对弈（带**对手池** + **接受闸门**）+ 结果奖励。
 #
+#   ⚠ **第八季（`v4-league8`）= W1 的验证季**：配方与第七季**逐字相同**（同 `--max-steps 600`、
+#     同 `--seed 20261001` ⇒ 同两套闸门牌山），**只多了一个变量** —— 模型多了 `fusion.mem`
+#     长程门控、数据集的 `h0` 列（窗口之前的整手 carry）真的喂进前向。
+#     于是"这一季的判决"可以直接与第七季（5/5 被拒、均值 −1.10）对照：若 W1 有价值，
+#     应当看到"至少一代被采纳"；若还是 5/5 被拒，那 W1 在这套配方下**不是改进算子**。
+#
 #   · 采集桌 = 学生×2（当前网，温度 0.5）+ teacher + **对手池里的一个历史快照**（按代轮换）
 #   · 奖励 = 小局收支（`--value-target delta`）+ 顺位点（`--rank-weight 0.2`）
 #   · **接受闸门**（第五十五轮加）：每代跑完，用**多套牌山集合**的合并配对判决跟"现任"比；
@@ -41,7 +47,7 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league7'
+$label = 'v4-league8'
 $seed  = 20261001
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
