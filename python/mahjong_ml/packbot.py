@@ -93,7 +93,11 @@ def export_net(ckpt: Path, out_bin: Path) -> int:
     cfg = ck["config"]
     if cfg.get("model") == "v4":
         from .v4 import export as v4export
-        sd = ck["model"]
+        # ⚠ **必须走 `normalize_state`**（第五十五轮起的跨代差异：policy 宽度、可缺的门控张量）：
+        #   直接拿 `ck["model"]` 去 `save_net` ⇒ 旧 ckpt（没有 `heads.policy_gate.*`）会在
+        #   `_check_shapes` 上直接报"张量表与 v4 契约不符"，打包整个失败（实测踩过：
+        #   打包 `v4-bc-004/v4-p3-001/v4-ppo-001/v4-league-g08` 时全部缺门控张量）。
+        sd = v4export.normalize_state(ck["model"])
         dims = dict(cfg.get("dims") or v4export.dims_from_state(sd))
         blob = v4export.save_net(sd, dims, out_bin, label=ckpt.parent.name, source=str(ckpt))
         return blob.stat().st_size
