@@ -709,6 +709,7 @@ public final class V4Policy implements LogitPolicy {
         float[] writeB = vec("fusion.write.bias", dm);
         float[][] filmW = mat("fusion.film.weight", dm, dm);
         float[] filmB = vec("fusion.film.bias", dm);
+
         float[][] u = new float[n][dm];
         float[] cat = new float[2 * dm];
         float[] state = new float[dm];

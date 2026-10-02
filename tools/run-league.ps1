@@ -35,20 +35,20 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league4'
+$label = 'v4-league5'
 $seed  = 20261001
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
 $pool  = New-Object System.Collections.Generic.List[string]
 $rejected = Join-Path $root 'tools\build\_rejected'
-$gateSeeds = "$seed,$($seed + 1),$($seed + 2)"
+$gateSeeds = "$seed,$($seed + 1)"   # 2 套牌山（省 ~1/3 闸门时间，仍是多集合）
 
 function Free-GB { (Get-PSDrive S).Free / 1GB }
 function Log($m) { Write-Output ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
 
 Log ("开始：{0} 代 × {1} 场（在线自对弈 + 对手池 + **接受闸门**）" -f $Generations, $Games)
 Log ("现任（incumbent）= {0}" -f (Split-Path $incumbent -Parent | Split-Path -Leaf))
-Log ("闸门：每代 3 套牌山（{0}）× {1} 场/套；S 盘剩余 {2:N0} GB" -f $gateSeeds, $GateBlock, (Free-GB))
+Log ("闸门：每代 2 套牌山（{0}）× {1} 场/套；S 盘剩余 {2:N0} GB" -f $gateSeeds, $GateBlock, (Free-GB))
 
 # ⚠ **开跑前先验闸门方向**：`eval.paired_test` 的约定是 `diff = a − b`（正 = a 更好），
 #   而"采纳"问的是**候选更好吗** ⇒ `gate.decide` 必须按 `(候选, 现任)` 的顺序算。
@@ -94,7 +94,7 @@ for ($g = 1; $g -le $Generations; $g++) {
     if (-not (Test-Path $candidate)) { Log "缺 $candidate，停止"; break }
 
     # ---- 接受闸门：多套牌山集合的合并配对判决（CI 排除 0 且为正才采纳）
-    Log ("  闸门：现任 vs {0}（3 套牌山 × {1} 场）" -f $tag, $GateBlock)
+    Log ("  闸门：现任 vs {0}（2 套牌山 × {1} 场）" -f $tag, $GateBlock)
     $gateLog = Join-Path $root "release\gate-$tag.log"
     & $py -m mahjong_ml.v4.gate --incumbent $incumbent --candidate $candidate `
         --seeds $gateSeeds --games $GateBlock --block $GateBlock --workers 20 `

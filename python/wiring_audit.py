@@ -26,11 +26,16 @@ sys.path.insert(0, ".")
 import torch                                                          # noqa: E402
 from mahjong_ml.v4 import export as X, model as M, spec                # noqa: E402
 
-#: 允许"从 policy 损失收不到梯度"的白名单前缀（各有各的损失，或已知的死重待处理）
+#: 允许"从 policy 损失收不到梯度"的白名单前缀（各有各的损失）。
+#: ⚠ `event.cell.`（GRU）**目前仍在白名单里**，但**不是**因为它没价值 —— 见下面那条注释。
 EXPECT_ZERO = (
     "heads.value.", "heads.placement.", "heads.belief_hand.", "heads.belief_tenpai.",
     "heads.danger.", "heads.effect.",
-    "event.cell.",          # ⚠ 已知死重（GRU 没接进任何头）—— 见模块注释，待"删或接"
+    # ⚠ `event.cell.`（GRU）**仍未接** —— 它不是"没价值"（窗口 K=60 覆盖不到半局，它是唯一的长程
+    #   记忆），而是**暂时不能接**：Java 的 `h` 是整局 carry、Python/夹具的 `h` 是窗口冷启动，
+    #   接进融合会让两条路径分叉（三端不同值 + "增量 == 全量"红证变红）。
+    #   ⇒ 正确接法要先把 `h_evt` 变成**显式输入**（夹具/三端/缓存契约一起改）。修好后**从这里删掉**。
+    "event.cell.",
 )
 
 

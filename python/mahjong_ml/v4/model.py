@@ -123,6 +123,13 @@ class Fusion(nn.Module):
         self.gate = nn.Linear(2 * d, d)
         self.write = nn.Linear(d, d)
         self.film = nn.Linear(d, d)
+        # ⛔ **`h_evt`（GRU 长程记忆）暂时仍未接**（第五十八轮把改动回退了，见 NOTES §6.5）：
+        #   它不是"删掉就完了"的死重（窗口 `K_EVT=60` 覆盖不到半局，它是唯一的长程记忆），
+        #   但**不能在这里顺手接**：Java 生产路径的 `h` 是**整局 carry**（`V4Policy.cachedHidden`），
+        #   而 Python/夹具的 `h` 是**窗口冷启动**（`eventTowerFull`）—— 两个不同的量。
+        #   一旦接进融合，两条路径的输出就分叉（三端不同值 + "增量 == 全量"红证变红）。
+        #   ⇒ 正确接法要先把 `h_evt` 变成**显式输入**（夹具/三端/缓存契约一起改），见
+        #   `V4Policy.cachedHidden` 的注释（那条判据就是为这一天留的绊线）。
         self.out = Mlp(3 * d, d)
 
     def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor, e_tokens: torch.Tensor,
