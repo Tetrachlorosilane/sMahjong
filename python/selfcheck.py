@@ -2279,8 +2279,9 @@ import struct as _struct                                               # noqa: E
 from mahjong_ml.v4 import export as v4_export                          # noqa: E402
 
 _v4shape = v4_export.expected_shapes(v4_export.FULL_DIMS)
-eq("P5 导出：期望张量表条数（76 个张量 = 74 + 逐候选门控 2）", len(_v4shape), 76)
-eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 76)
+# 78 = 74（三塔 + 融合 + 多头）+ 2（`heads.policy_gate.*`，第五十五轮）+ 2（`fusion.mem.*`，第六十轮 W1）
+eq("P5 导出：期望张量表条数（78 个张量 = 74 + 逐候选门控 2 + 长程门控 2）", len(_v4shape), 78)
+eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 78)
 _v4sd = v4_model.build(20260928).state_dict()
 _v4dims = v4_export.dims_from_state(_v4sd)
 eq("P5 导出：从权重形状反推的维度", _v4dims, v4_export.FULL_DIMS)
@@ -2294,13 +2295,24 @@ _v4p = v4_export.save_net(_v4sd, _v4dims, _pnet)
 _eq = v4_export.read_net(_v4p)
 eq("P5 导出：读回的格式号", _eq["format"], v4_export.NET_FORMAT)
 eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
-eq("P5 导出：读回的张量数", len(_eq["tensors"]), 76)
+eq("P5 导出：读回的张量数", len(_eq["tensors"]), 78)
 eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
 eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
-ok(all(tuple(np.asarray(_eq["tensors"][k]).shape) in
-       (s if isinstance(s, tuple) and s and isinstance(s[0], tuple) else (s,))
-       for k, s in _v4shape.items()),
-   "P5 导出：读回的每个张量形状与契约一致")
+# ⚠ 契约里有两种"候选写法"（见 `export._check_shapes` 的注释）：**多个候选形状**（policy 宽 dm 或 dm+3）
+# 与**可缺张量**（`(None,(dm,dm))`：旧网没有它 ⇒ 补 0 ⇒ 恒等）。这里必须用同一套规则解析，
+# 否则可缺张量会被当成"形状不符"（第六十轮加 `fusion.mem.*` 时当场踩到）。
+_v4bad = []
+for _k, _s in _v4shape.items():
+    _raw = _s if (isinstance(_s, tuple) and _s
+                  and all(isinstance(a, tuple) or a is None for a in _s)) else (_s,)
+    _alts = tuple(a for a in _raw if isinstance(a, tuple))
+    if _k not in _eq["tensors"]:
+        if not any(a is None for a in _raw):
+            _v4bad.append(_k + " 缺")
+        continue
+    if tuple(np.asarray(_eq["tensors"][_k]).shape) not in _alts:
+        _v4bad.append(f"{_k} 形状 {tuple(np.asarray(_eq['tensors'][_k]).shape)}")
+ok(not _v4bad, "P5 导出：读回的每个张量形状与契约一致", "；".join(_v4bad[:5]))
 # 导出 → 读回 → 载入模型 → 前向必须与原始模型逐位相同（"导出的就是训练的那个"）
 _v4m2 = v4_model.build(1)
 _v4m2.load_state_dict(v4_export.state_from_net(_eq), strict=True)
@@ -2338,6 +2350,68 @@ eq("P5 夹具：魔数（MJ4G）", _gmagic, v4_export.GOLDEN_MAGIC)
 eq("P5 夹具：用例数与 meta 一致", _gcases, _gmeta["cases"])
 ok(_gnetlen == _gmeta["net_bytes"] and len(_graw) == _gmeta["bytes"],
    "P5 夹具：内嵌权重长度与总长度都与 meta 对得上")
+
+# ---- W1（第六十轮）：长程 carry 的**算法结构**与夹具**非空转**判据 ---------------------------
+# 为什么这些必须逐条钉住：W1 把 GRU 的 `h_evt` 经 `fusion.mem` 门控接进融合之后，
+# ①"增量 == 全量"第一次真的管到隐状态；②"训练侧 h0"与"生产侧整手 carry"必须是**同一个量**。
+# ⚠ 而**容差型**判据在这里几乎没用：随机初始化的 GRU 是收缩的（满窗上 `h0` 的影响实测 3e-8），
+#   三端把 `h0` 整个忽略也照样"通过"。所以判据必须落在"**同一把递推**"（逐位）与夹具的**红证**上。
+ok(_gmeta.get("cases_with_long_carry", 0) >= 1,
+   "W1：夹具里有事件流长于窗口的用例（否则每个用例的 `h0` 都是全 0 ⇒ 忽略 h0 也能全绿）",
+   f"cases_with_long_carry={_gmeta.get('cases_with_long_carry')}")
+ok(_gmeta.get("mem_probe_max_dlogit", 0) > 1e-4,
+   "W1 红证①：归零 `fusion.mem.weight` 会改变策略头（门控真的被消费）",
+   f"maxΔ={_gmeta.get('mem_probe_max_dlogit')}")
+ok(_gmeta.get("h0_probe_max_dlogit", 0) > 1e-4,
+   "W1 红证②：扰动 `h0` 会改变策略头（窗口没把初始状态吞掉 ⇒ 夹具能测到 h0 路线）",
+   f"maxΔ={_gmeta.get('h0_probe_max_dlogit')}")
+ok(_gmeta.get("logit_spread_min", 0) > 1e-4,
+   "W1：策略头真的在区分候选（组内极差过小 ⇒ argmax 判据是噪声、候选路径没被测到）",
+   f"min={_gmeta.get('logit_spread_min')}")
+ok({"fusion.mem.weight", "fusion.mem.bias"} <= set(_gmeta.get("perturbed_zero_params", [])),
+   "W1：夹具把零初始化的 `fusion.mem.*` 显式扰动了（铁律①：零初始化路径必须被扰动）",
+   f"perturbed={_gmeta.get('perturbed_zero_params')}")
+eq("P5 夹具：格式号 == 2（W1 起每用例带 h0/h_evt）", v4_export.GOLDEN_FORMAT, 2)
+
+# ② **同一把递推**：把 70 条事件"逐条推进"与"前缀 carry + 窗口推进"必须逐位一致。
+#    这是"离线端算 h0 的唯一算法"（`cache.CarryTracker` / `carry_prefix`）与
+#    "网络前向里那条递推"（`EventTower.forward`）同源的可判据 —— 生产端（Java/C++）
+#    走的正是后者（整手重放 = 前缀 + 窗口）。
+_w1m = v4_model.build(seed=17)
+_w1m.eval()
+_w1enc = (lambda tok, h: _w1m.step_event(
+    _torch.from_numpy(np.asarray(tok, dtype=np.float32))[None], h))
+_w1codes = ["1m", "2m", "0p", "9s", "1z", "7z", "3p", "5s"]
+
+
+def _w1_events(n):
+    """合成 n 条公开事件（够 `blocks.event_matrix` 用：type/tile/actor/turn/seq_delta）。"""
+    return [{"type": "discard" if i % 3 else "meld", "tile": _w1codes[i % len(_w1codes)],
+             "actor": i % 4, "from": (i + 1) % 4, "turn": i // 4,
+             "tsumogiri": bool(i % 2), "seq_delta": (i % 4) + 1} for i in range(n)]
+
+
+_w1obs = {"v": v4_spec.OBS_VERSION_V4, "seat": 2, "events": _w1_events(70)}
+_w1full = v4_cache.carry_prefix(_w1enc, _w1obs, 70)
+_w1pre = v4_cache.carry_prefix(_w1enc, _w1obs, 10)
+with _torch.no_grad():
+    _w1evt = _torch.from_numpy(v4_blocks.event_matrix(_w1obs))[None]
+    _w1route = _w1m.event(_w1evt, _w1pre)[1]
+_w1d = float((_w1full - _w1route).abs().max())
+ok(_w1d <= 1e-6, "W1：**前缀 carry + 窗口 == 整手重放**（逐位判据，差 ≤1e-6）", f"maxΔ={_w1d:.3e}")
+
+# ③ **padding 口径**：窗口前部是零 padding，**不喂** GRU（喂了就是 `GRUCell(0,h) ≠ h` 的静默累积）。
+#    判据：整窗前向（前 65 行是 padding）== 只把 5 条真实行喂进去。
+_w1obs5 = {"v": v4_spec.OBS_VERSION_V4, "seat": 2, "events": _w1_events(5)}
+with _torch.no_grad():
+    _w1evt5 = _torch.from_numpy(v4_blocks.event_matrix(_w1obs5))[None]
+    _h_mask = _w1m.event(_w1evt5, None)[1]
+    _h_step = _w1m.event.step(_w1evt5[:, -5:], None)
+_w1dm = float((_h_mask - _h_step).abs().max())
+ok(_w1dm <= 1e-6, "W1：窗口前部的零 padding **不喂** GRU（整窗前向 == 只喂真实行）",
+   f"maxΔ={_w1dm:.3e}（行数 {int((np.abs(v4_blocks.event_matrix(_w1obs5)).sum(1) > 0).sum())}/"
+   f"{v4_spec.K_EVT}）")
+
 
 # ---- 价值头审计（`v4/value_audit.py`；判据口径 §8.2）----------------------------------------
 from mahjong_ml.v4 import value_audit as v4_va                          # noqa: E402

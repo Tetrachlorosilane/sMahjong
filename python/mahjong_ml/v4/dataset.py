@@ -23,6 +23,7 @@ v3 的紧凑集存的是 **state 615 / cand 96**（特征 v3 的拼装结果）�
 | `rtg` | float32 | **逐决策** reward-to-go（千点）：`Σ_{本局及其后} 收支 + 终局余棒`（轨迹 `reward_to_go`）—— λ=1 的 GAE 目标；老轨迹写 NaN |
 | `placement` | int8 | 该座位终局顺位 − 1（0..3；缺字段填 −1） |
 | `seat` / `game` / `hand_no` | int8 / int32 / int16 | 溯源与按座位诊断 |
+| `h0` | `[dm]` float32 | **窗口之前**的 GRU carry（W1b）：用**学生网**重放 `events[0, max(0,n-K))`（`cache.CarryTracker`）；只有 `carry_model` 非空时才建这一列 |
 | `aux_opp_hand` | `[3,34]` uint8 | `g*.aux.npz`（**隐藏真值**；信念头） |
 | `aux_opp_tenpai` | `[3]` uint8 | 同上（对手听牌信念头） |
 | `aux_opp_dealin` | `[3]` uint8 | 本小局是否放铳给第 j 家（危险头；只在**被选中的那个候选**上有标签） |
@@ -44,12 +45,17 @@ import numpy as np
 from .. import auxlabels as _aux
 from .. import dataset as _v3
 from . import blocks, spec, traces
+#: ⚠ `cache` 只在模块层导入（它自己**惰性**引 torch，见 `cache.torch_encoder`）——
+#: `model` / `export` 是 torch 重依赖，只在**真的带 carry 构建**时才在 `build` 里导入。
+from . import cache as v4cache
 
 #: 张量的存盘 dtype（float16：显存/磁盘减半，训练时再转 float32 —— 与 v3 紧凑集同一个取舍）
 TENSOR_DTYPE = np.float16
 
 #: 数据集格式版本（列增删要 +1）
-DATASET_VERSION = 1
+#: v2 = W1b 起**可能**多一列 `h0`（窗口之前的 carry；只有给了 `carry_model` 才建 ——
+#: 所以"版本 2"不等于"一定有这一列"，判据看 `meta.has_h0` / 列文件在不在）。
+DATASET_VERSION = 2
 
 
 def trace_dir_files(directory: str | Path) -> list[Path]:
@@ -151,6 +157,14 @@ _COLUMNS: dict[str, tuple] = {
     #   ⚠ **不在 Python 里重算 uma/oka**（那是 `Payments`/`Settlement` 的活，重写必然漂移）：
     #   直接读生产者登记的 `summary.json`；缺它就写 NaN，`--rank-weight > 0` 会当场报错。
     "rank_points": (np.float32, ()),
+    # `h0`（W1b）：**窗口之前**的长程 carry（GRU 隐状态），形状 `[dm]`（dm = 学生网的 d_model，
+    #   开列时才定）。它是"训练侧的整手 carry" —— 上线端（Java/C++）算的是同一个量
+    #   （从 0 起逐事件推进整手），所以训练与推理同源。
+    #   ⚠ 尾形状写成占位符 `"dm"`：`open_columns` 把它换成实参（没给就**不建这一列**，
+    #   见 `build`/`open_columns` 的注释 —— 不静默建一个宽度错的列）。
+    #   ⚠ 用 float32 而**不是** float16（其它张量列）：它是隐状态、逐维门控 `fusion.mem` 的输入，
+    #   16 位尾数（~1e-3 相对误差）会让"h0 是不是同一个量"这条判据失去意义。
+    "h0": (np.float32, ("dm",)),
     "aux_opp_hand": (np.uint8, (3, 34)),
     "aux_opp_tenpai": (np.uint8, (3,)),
     "aux_opp_dealin": (np.uint8, (3,)),
@@ -161,13 +175,31 @@ _COLUMNS: dict[str, tuple] = {
 
 
 def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
-                 mode: str = "w+") -> dict[str, np.memmap]:
-    """建/开这一份切分的全部列（`mode="w+"` 建、`"r+"` 由子进程开）。"""
+                 mode: str = "w+", dm: int | None = None) -> dict[str, np.memmap]:
+    """建/开这一份切分的全部列（`mode="w+"` 建、`"r+"` 由子进程开）。
+
+    @param dm 学生网的 `d_model` —— 它只用来定 `h0` 列的宽度（`_COLUMNS` 里的 `"dm"` 占位符）。
+        **`dm=None` ⇒ 不建 `h0` 列**（= 这一份没有长程 carry 的老行为；`build` 已经在 meta 里
+        记了 `has_h0=False` 并打了醒目提示）。给了 `dm` 就必须是整数：形状错在这里、写盘时才炸
+        的话，症状是"训练跑起来了但 h0 全是垃圾"，而那是静默的。
+    """
+    if dm is not None and int(dm) <= 0:
+        raise spec.ContractError(f"dm 必须是正的 d_model（给了 {dm!r}）")
     out: dict[str, np.memmap] = {}
     for name, (dt, tail) in _COLUMNS.items():
-        shape = (n, *tuple(lmax if t == "lmax" else t for t in tail))
-        out[name] = np.lib.format.open_memmap(out_dir / f"{tag}.{name}.npy", mode=mode,
-                                              dtype=dt, shape=shape)
+        shape = [n]
+        for t in tail:
+            if t == "lmax":
+                shape.append(int(lmax))
+            elif t == "dm":
+                if dm is None:
+                    break               # 没有 carry ⇒ 这一列**不建**（不是建一个 0 宽的）
+                shape.append(int(dm))
+            else:
+                shape.append(int(t))
+        else:
+            out[name] = np.lib.format.open_memmap(out_dir / f"{tag}.{name}.npy", mode=mode,
+                                                  dtype=dt, shape=tuple(shape))
     return out
 
 
@@ -193,17 +225,27 @@ def _rank_points_of(f: Path) -> dict[int, list[float]]:
 
 
 def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
-                student: str | None = None) -> None:
+                student: str | None = None, carry=None) -> None:
     """把一个文件的**前 `take` 条**决策写进 `mm` 的 `[i0, i0+take)` 行。
 
     ⚠ 串行与并行**共用这一份行逻辑**（并行只是把不同文件分给不同进程，各写各的连续行区间）
     ⇒ "并行产物 == 串行产物"是构造出来的，不是大概一样。
+
+    @param carry `seat -> CarryTracker` 的**工厂**（`None` = 这一份没有 `h0` 列）。
+        ⚠ 工厂而不是实例：一个文件里四家的决策是**交错**的（同一手事件流被四条座位各自推进），
+        所以按座位各留一个 tracker，在**这个文件内复用**（同一手的事件只重放一次）。
     """
+    if carry is not None and "h0" not in mm:
+        raise spec.ContractError(
+            "要写 `h0` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 `dm`（并行分支要从 "
+            "req.json 读回同一个 dm）。**不静默跳过**：跳过就等于训练端拿到一份没有长程 carry 的"
+            "数据，而上线端用整手 carry")
     start = _game_start_score(f)
     rp_of_game = _rank_points_of(f)
     ax = _aux.load_aux(_aux.aux_path(f)) if aux else None
     axcols = _aux_arrays(ax, int(ax["n"]) if ax else 0)
     sc = traces.load_sidecar(_v3.sidecar_path(f))
+    trackers: dict[int, object] = {}
     j = 0
     with f.open(encoding="utf-8") as fh:
         for ln, line in enumerate(fh, 1):
@@ -283,6 +325,30 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
             # ④ `rank_points`：整场顺位点（**生产者登记的** `summary.json`；缺就 NaN）
             rp = rp_of_game.get(int(row.get("game", -1)))
             mm["rank_points"][i] = rp[seat] if (rp is not None and 0 <= seat < 4) else np.nan
+            if carry is not None:
+                # ⑤ `h0`（W1b）：**窗口之前**的 carry —— 训练侧的长程记忆入口。
+                #   口径三条（`build` 里也写着同一份，别两处抄歪）：
+                #   ① **一律用学生网**（= 这一代的 `--student` 那个网）算，**不**按行换网；
+                #   ② 事件是公开的 ⇒ 同一批事件在"学生网的编码器"下的 carry 是良定义的；
+                #   ③ 训练起点 = 现任 = 上线部署的那份权重 ⇒ 训练与推理同源。
+                #   ⚠ 权重在训练中会移动 ⇒ `h0` 是**构建期冻结**的（与 PPO 的行为策略同类的
+                #   off-policy 现象）；**每代重建数据集**即复位（这正是 `v4 loop` 的节奏）。
+                #   ⚠ 事件行怎么编码**不在这里管**：`EventStream`/`blocks.event_matrix` 负责
+                #   （按 obs.seat 编码、新事件在尾部）—— 自己拼 token 就是第三条口径、必漂移。
+                evts = list(obs.get("events") or [])
+                seat_of_stream = int(obs.get("seat", seat))     # 编码按 obs.seat（与 evt 张量同源）
+                tk = trackers.get(seat_of_stream)
+                if tk is None:
+                    tk = trackers[seat_of_stream] = carry(seat_of_stream)
+                # `key` = 小局身份：`obs.events` **每小局清零**（`Round.events`）⇒ 换局必须重放，
+                # 不能靠"新流的前几条恰好等于旧流尾部"这种小概率去蒙（见 `CarryTracker.advance`）。
+                tk.advance(evts, key=(int(row.get("game", -1)), int(row.get("hand_no", -1))))
+                h0 = tk.h0(len(evts))
+                if h0 is None:
+                    mm["h0"][i] = 0.0                           # 窗口之前没有事件 ⇒ 全 0 冷启动
+                else:
+                    mm["h0"][i] = np.asarray(h0.detach().cpu().numpy(),
+                                             dtype=np.float32).reshape(-1)
             if ax is not None:
                 mm["aux_opp_hand"][i] = axcols["opp_hand"][j]
                 mm["aux_opp_tenpai"][i] = axcols["opp_tenpai"][j]
@@ -329,20 +395,111 @@ def _spawn(jobs: list[list[str]], log_dir: Path) -> None:
             raise RuntimeError(f"v4 数据集并行子进程 job{k} 退出码 {rc}：\n{tail}")
 
 
+def student_net_path(spec_or_path: str | None) -> str | None:
+    """`net:<路径>[@<α>][#<T>]` → `<路径>`（剥掉两个后缀）；不是 `net:` 串就返回 `None`。
+
+    ⚠ **只解析、不换网**：`h0` 一律用**学生网**算（见 `build` 的注释）。
+    ⚠ 这里**不校验文件存在**（调用方决定"不存在"怎么办）—— `--student` 的主用途是
+    `is_student` 的**字符串比对**，它不要求权重在本机（自检的玩具紧凑集就是一个不存在的串）。
+    """
+    s = str(spec_or_path or "").strip()
+    if not s.lower().startswith("net:"):
+        return None
+    p = s[4:]
+    if "#" in p:                                # 文法：`net:<路径>[@<α>][#<T>]` ⇒ 先剥 `#T`
+        p, _, _t = p.rpartition("#")
+    if "@" in p:                                # 再剥 `@α`
+        p, _, _a = p.rpartition("@")
+    p = p.strip()
+    return p or None
+
+
 def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split_seed: int = 0,
           aux: bool = False, limit_files: int | None = None, workers: int = 0,
-          quiet: bool = False, student: str | None = None) -> dict:
+          quiet: bool = False, student: str | None = None,
+          carry_model: str | None = None) -> dict:
     """轨迹目录 → v4 数据集（`train.*.npy` / `val.*.npy` 各一组列 + `meta.json`）。
 
     @param aux 是否要求并读取标签侧 `g*.aux.npz`（信念/危险头的监督来源）
     @param student 本轮要训练的那一代的**确切策略串**（写 `is_student` 列；None = 全部算学生）
+    @param carry_model `h0` 列（**窗口之前**的 GRU carry，W1b）用哪个网算；缺省 = 从 `student`
+        解析（`net:<路径>[@α][#T]` → `<路径>`）。`None` ⇒ **不建 `h0` 列**（老行为）：
+        meta 里 `has_h0=false` / `carry_model=null`，并打一行醒目提示（训练端会因此**硬拒**，
+        除非显式 `--no-carry` —— 见 `pretrain.train`）。
     @param workers 并行进程数（0 = 自动，≤75% 的核、上限 12）；**产物与串行逐字节相同**是判据
         （各进程只写自己那段连续行区间，行逻辑只有 `_write_file` 一份）
+
+    ★ `h0` 的口径（**三条，写死在这里，别在别处再抄一份**）：
+
+    ① **一律用"学生网"**（= 本轮要训练的那一代，也就是 `--student net:<...>` 指的那个网）算，
+       **不要**按每一行自己的 `policy` 换网。理由：事件是公开的 ⇒ 同一批事件在"学生网的编码器"
+       下的 carry 是良定义的；**若按行换网**，老师行/对手行的 `h0` 会退化成 0（他们的网不在本机、
+       或根本不是这一代的编码器），模型就能从"`h0` 是否为 0"反推出 `is_student`（**隐式泄漏**）；
+       而训练起点的学生网 == 现任网 == 上线部署的那个网 ⇒ 训练与推理同源。
+    ② 生产端（Java `V4Policy`）算的是"**从 0 起逐事件推进整手事件**"的 carry；离线端给的是同一个量：
+       `h0 = 重放 events[0, max(0, n-K))`，再由窗口那 60 步把它推进成 `h_evt` —— 两边同一把递推。
+    ③ 权重在训练中会移动，所以 `h0` 是**构建期冻结**的（与 PPO 的行为策略同类的 off-policy 现象）；
+       **每代重建数据集**即复位（`v4 loop` 的节奏本来就是"每代重采重建"）。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if workers <= 0:
         workers = max(1, min(12, (os.cpu_count() or 4) * 3 // 4))
+    # ---- `h0` 用哪个网：显式 `--carry-model` 优先；否则从学生串解析（见 docstring 的★口径）----
+    dm: int | None = None
+    carry_spec: str | None = None
+    if carry_model is not None:
+        carry_spec = student_net_path(carry_model) or str(carry_model)
+        if not Path(carry_spec).is_file():
+            # ⚠ **不静默跳过**：显式点名了用哪个网算 `h0`，文件不在就报错 —— 悄悄退化成
+            #   "没有 h0"会让训练端拿到一份与上线端不同源的数据，而那是不报错的。
+            raise spec.ContractError(f"`carry_model` 指向的权重文件不存在：{carry_spec} —— "
+                                     f"`h0` 必须由**学生网**算，别跳过这一列")
+    elif student:
+        cand = student_net_path(student)
+        if cand is not None and Path(cand).is_file():
+            carry_spec = cand
+        elif cand is not None and not quiet:
+            # `--student` 的主用途是字符串比对（写 `is_student`），它不要求权重在本机
+            # （自检的玩具紧凑集就是一个不存在的串）⇒ 这里只**醒目提示**、不当成错误。
+            print(f"⚠ `--student {student}` 指向的权重不存在（{cand}）⇒ **这一份没有长程 carry**："
+                  f"`h0` 列不建，训练会退化成「窗口冷启动」，而上线端用整手 carry"
+                  f"（两边不是同一个量）。要 `h0` 就传一个真实存在的 `net:<...>`，"
+                  f"或显式 `--carry-model <net.bin>`")
+    if carry_spec is not None:
+        # torch 只在**带 carry 的构建**里才需要：纯 numpy 的构建路径（`carry_model=None`）
+        # 不该因为环境里没有 torch 就跑不动。
+        from . import export as v4export
+        from . import model as M
+        parsed = v4export.read_net(carry_spec)
+        dims = {k: int(v) for k, v in parsed["dims"].items()}
+        net = M.build(**dims)                       # `n_heads` 已在 `read_net` 的 dims 里
+        net.load_state_dict(v4export.state_from_net(parsed), strict=True)
+        net.eval()
+        net.requires_grad_(False)                   # 算 `h0` 是**推理**：不建图、不更新这个网
+        dm = int(dims["d_model"])
+        # ⚠ encoder 只建一次、四条座位共用（同一个网）；tracker 每座位一个（`_write_file` 里）
+        _encoder = v4cache.torch_encoder(net)
+        if not quiet:
+            print(f"长程 carry：`h0` 列用**学生网** {carry_spec} 算（d_model={dm}；"
+                  f"逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）")
+    else:
+        _encoder = None
+    if carry_spec is None and not quiet:
+        # ⚠ 醒目提示（不是安静的 debug 行）：这一份数据**教不出长程记忆**，
+        #   而上线端（Java/C++）是喂整手 carry 的 ⇒ 训练/推理两个量。
+        print("=" * 78)
+        print("⚠⚠ 这一份紧凑集**没有长程 carry**（`h0` 列未建）：训练会用**窗口冷启动**，")
+        print("    而上线端用**整手 carry** ⇒ 两边不是同一个量。`pretrain` 会因此**硬拒**，")
+        print("    除非显式 `--no-carry`。要 `h0` 就用 `--student net:<真实存在的网>`")
+        print("    （或 `--carry-model <net.bin>`）重建数据集。")
+        print("=" * 78)
+
+    def make_carry(seat: int):
+        """按座位建一个 tracker（`_write_file` 在**一个文件内**复用同一个座位的实例）。"""
+        return v4cache.CarryTracker(_encoder, int(seat))
+
+    carry_factory = make_carry if _encoder is not None else None
     files = trace_dir_files(src)
     if limit_files:
         files = files[:limit_files]
@@ -358,13 +515,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         n = sum(counts)
         if n == 0:
             raise spec.ContractError(f"{tag} 切分里没有决策（val_frac={val_frac} 太小？）")
-        paths = {name: out_dir / f"{tag}.{name}.npy" for name in
-                 ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect",
-                  "value", "placement", "seat", "game", "hand_no",
-                  "aux_opp_hand", "aux_opp_tenpai", "aux_opp_dealin",
-                  "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag")}
-        mm = open_columns(out_dir, tag, n, lmax, mode="w+")
-        i = 0
+        mm = open_columns(out_dir, tag, n, lmax, mode="w+", dm=dm)
         # 每个文件的**行区间**（行号只由"文件顺序 + 文件内行序"决定，与并行度无关）
         tasks: list[tuple[Path, int, int]] = []
         off = 0
@@ -384,13 +535,18 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
             req.write_text(json.dumps({
                 "out_dir": str(out_dir), "tag": tag, "lmax": lmax, "aux": bool(aux),
                 "student": student,
+                # ⚠ 子进程**自己载网、自己建 tracker**（把 `carry_model` 与 `dm` 一起带过去）：
+                #   漏了 `dm` 就会少建 `h0` 列（`open_columns` 只在给了 dm 时才建它），
+                #   而"少一列"在写盘时才炸 ⇒ 这里两个键都要有，`_chunk` 也会再校验一次。
+                "carry_model": carry_spec, "dm": (None if dm is None else int(dm)),
                 "chunks": [[[str(f), int(i0), int(take)] for f, i0, take in ch] for ch in chunks],
             }, ensure_ascii=False), encoding="utf-8")
             _spawn([["_chunk", str(req), str(k)] for k in range(len(chunks))], tmp / "logs")
             shutil.rmtree(tmp, ignore_errors=True)
         else:
             for f, i0, take in tasks:
-                _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student)
+                _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student,
+                            carry=carry_factory)
             for m in mm.values():
                 m.flush()
         # 逐决策 reward-to-go 的**覆盖率**（NaN = 老轨迹没有这个字段 ⇒ `--value-target rtg`
@@ -403,11 +559,30 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         rank_frac = float(np.isfinite(
             np.asarray(np.load(out_dir / f"{tag}.rank_points.npy", mmap_mode="r")[:n],
                        dtype=np.float32)).mean())
+        # ★ `h0` 的**覆盖率自证**：非全 0 的行占比。为什么这能当判据：采集里必然有一批
+        #   `n > K` 的行（一手的事件数远超 60）⇒ 非 0 是**必然**的。若为 0，只可能是算错了
+        #   （载错了网 / 没喂进去 / 前缀口径写反）—— 那就**当场报错**，绝不写出一份全 0 的列
+        #   （全 0 的列 = 训练时"长程记忆恒为冷启动"，而训练照跑、指标照出）。
+        h0_frac: float | None = None
+        if dm is not None:
+            h0 = np.asarray(np.load(out_dir / f"{tag}.h0.npy", mmap_mode="r")[:n], dtype=np.float32)
+            h0_frac = float((np.abs(h0).sum(axis=1) > 0).mean())
+            if not h0_frac > 0.0:
+                raise spec.ContractError(
+                    f"`h0` 列**全 0**（{tag}：{n} 行 / {len(part)} 场，d_model={dm}）—— "
+                    f"窗口之前的 carry 不可能是全 0：采集里必然有一批事件数 > K={spec.K_EVT} 的行。"
+                    f"查 ① `carry_model` 是不是学生网那份权重；② 事件流有没有真的喂进 tracker"
+                    f"（`CarryTracker.advance` 的前缀校验是不是每次都判失败、退化成冷启动）。"
+                    f"**不写出一个全 0 的列**")
         return {"files": [f.name for f in part], "decisions": n, "lmax": lmax,
-                "rtg_frac": rtg_frac, "rank_frac": rank_frac}
+                "rtg_frac": rtg_frac, "rank_frac": rank_frac, "h0_frac": h0_frac}
 
     train = one_split(train_files, "train")
     val = one_split(val_files, "val")
+    n_all = max(1, train["decisions"] + val["decisions"])
+    h0_frac_all = (None if dm is None else
+                   (train["h0_frac"] * train["decisions"] + val["h0_frac"] * val["decisions"])
+                   / n_all)
     meta = {
         "dataset_version": DATASET_VERSION,
         "feature_version": spec.FEATURE_VERSION_V4,
@@ -418,7 +593,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "action_types": list(ACTION_TYPES),
         "tensor_dtype": np.dtype(TENSOR_DTYPE).name,
         "shapes": {"tile": [34, spec.C_TILE], "evt": [spec.K_EVT, spec.C_EVT],
-                   "ctx": [spec.C_CTX], "cand": ["lmax", spec.C_CAND]},
+                   "ctx": [spec.C_CTX], "cand": ["lmax", spec.C_CAND],
+                   **({"h0": [int(dm)]} if dm is not None else {})},
         "src": str(src),
         "train_decisions": train["decisions"], "val_decisions": val["decisions"],
         "train_files": train["files"], "val_files": val["files"],
@@ -427,6 +603,13 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "student": student,
         "rtg_frac": {"train": train["rtg_frac"], "val": val["rtg_frac"]},
         "rank_frac": {"train": train["rank_frac"], "val": val["rank_frac"]},
+        # ---- W1b：长程 carry（`h0` 列）的三条自证 ----
+        "has_h0": bool(dm is not None),
+        "carry_model": carry_spec,                  # `None` ⇒ 这一份没有 `h0` 列
+        "h0_dim": (None if dm is None else int(dm)),
+        # 非全 0 的行占比（**全 0 会被上面的 build 直接判错**；这里留数字给验收/台账）
+        "h0_nonzero_frac": h0_frac_all,
+        "h0_nonzero_frac_splits": {"train": train["h0_frac"], "val": val["h0_frac"]},
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -443,6 +626,12 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
               f"（0% = 老采集器；`--value-target rtg` 会在入口报错）")
         print(f"  顺位点覆盖：train {train['rank_frac']:.1%} / val {val['rank_frac']:.1%}"
               f"（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）")
+        if dm is None:
+            print("  长程 carry：**无**（`h0` 列未建）—— 训练会退化成窗口冷启动")
+        else:
+            print(f"  长程 carry：`h0[{dm}]` 非全 0 的行 "
+                  f"train {train['h0_frac']:.1%} / val {val['h0_frac']:.1%}"
+                  f"（其余行的事件数 ≤ K={spec.K_EVT} ⇒ 窗口之前没有事件、carry 全 0 是正确的）")
     return meta
 
 
@@ -536,10 +725,12 @@ def load_split(out_dir: str | Path, split: str) -> dict:
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
                  "placement", "seat", "game", "hand_no", "is_student", "delta", "rtg",
-                 "rank_points",
+                 "rank_points", "h0",
                  "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"
+        # ⚠ 缺席写 `None`（**存在才读**）：`h0` 是 W1b 才有的列，老紧凑集没有它 ——
+        #   训练端据此**硬拒**（见 `pretrain.train`），不静默退化成窗口冷启动。
         out[name] = np.load(p, mmap_mode="r") if p.is_file() else None
     return out
 
@@ -560,6 +751,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit-files", type=int, default=None, help="只取前 N 个轨迹文件（冒烟）")
     ap.add_argument("--student", default=None,
                     help="本轮要训练的那一代的**确切策略串**（写 `is_student` 列；缺省 = 全部算学生）")
+    ap.add_argument("--carry-model", default=None, metavar="NET.BIN",
+                    help="算 `h0`（**窗口之前**的 GRU carry，W1b）用哪个网 —— 缺省空 = 从 `--student` "
+                         "解析（`net:<路径>[@α][#T]`）。⚠ 一律用**学生网**：见 build 的口径注释。"
+                         "给了它却找不到文件会**报错**（不静默跳过这一列）")
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数（0 = 自动，≤75%% 的核、上限 12）；产物与串行逐字节相同")
     ap.add_argument("--backfill-rank", action="store_true",
@@ -574,10 +769,48 @@ def main(argv: list[str] | None = None) -> int:
         tag = req["tag"]
         tasks = [(Path(f), int(i0), int(take)) for f, i0, take in req["chunks"][k]]
         n = int(np.load(out_dir / f"{tag}.nlegal.npy", mmap_mode="r").shape[0])
-        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+")
+        # ⚠ 子进程**自己载网**（不共享父进程的内存）：行逻辑仍只有 `_write_file` 一份，
+        #   所以"并行产物 == 串行产物"依旧是构造出来的（不是"大概一样"）。
+        carry_spec = req.get("carry_model")
+        dm = req.get("dm")
+        if carry_spec is not None and dm is None:
+            # 父进程带了 carry、子进程却没拿到 `dm` ⇒ 会少建 `h0` 列。宁可当场报错，
+            # 也不要写出一份"列少了但跑完"的数据集（那正是静默降级）。
+            raise spec.ContractError(
+                f"{Path(args.src).name} 里有 `carry_model` 却没有 `dm` —— 并行分支漏传了列宽，"
+                f"会少建 `h0` 列；这是构建器自己的 bug，不猜、直接报错")
+        carry_factory = None
+        if carry_spec is not None:
+            from . import export as v4export
+            from . import model as M
+            parsed = v4export.read_net(carry_spec)
+            dims = {kk: int(v) for kk, v in parsed["dims"].items()}
+            net = M.build(**dims)
+            net.load_state_dict(v4export.state_from_net(parsed), strict=True)
+            net.eval()
+            net.requires_grad_(False)
+            if int(dims["d_model"]) != int(dm):
+                raise spec.ContractError(
+                    f"req.json 的 dm={dm} != 权重 {carry_spec} 的 d_model={dims['d_model']} "
+                    f"—— 并行分支的列宽与父进程不一致")
+            _enc = v4cache.torch_encoder(net)
+
+            def _make(seat: int):
+                return v4cache.CarryTracker(_enc, int(seat))
+
+            carry_factory = _make
+        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+", dm=dm)
+        if carry_factory is not None:
+            # `open_columns(mode="r+")` 是**打开已有文件**（numpy 会忽略传入的 shape/dtype、
+            # 按文件头走）⇒ 这里再自己核一次宽度：错了就会把别的宽度写进去（静默）。
+            if "h0" not in mm:
+                raise spec.ContractError(f"{tag} 里没有 `h0` 列（父进程建列时漏了 dm？）")
+            got = int(mm["h0"].shape[1])
+            if got != int(dm):
+                raise spec.ContractError(f"{tag}.h0.npy 的宽度 {got} != req 的 dm={dm}")
         for f, i0, take in tasks:
             _write_file(mm, f, i0, take, lmax=int(req["lmax"]), aux=bool(req["aux"]),
-                        student=req.get("student"))
+                        student=req.get("student"), carry=carry_factory)
         for m in mm.values():
             m.flush()
         return 0
@@ -587,7 +820,8 @@ def main(argv: list[str] | None = None) -> int:
         backfill_rank_points(args.out, args.src)
         return 0
     build(args.src, args.out, val_frac=args.val_frac, split_seed=args.split_seed, aux=args.aux,
-          limit_files=args.limit_files, workers=args.workers, student=args.student)
+          limit_files=args.limit_files, workers=args.workers, student=args.student,
+          carry_model=args.carry_model)
     return 0
 
 

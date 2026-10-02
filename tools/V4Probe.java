@@ -43,6 +43,12 @@ import mahjong.util.Log;
  *   （例如权重压根没读进去、或读了另一个张量）；
  * ④ **失败要指名道姓**：打出超差最多的那几格（`tile[k][c]` / `evt[row][field]` / `cand[row][col]`…），
  *   否则"maxΔ=1.0"这种输出等于没说。
+ *
+ * <p>⚠ **夹具格式 2（W1，第六十轮）**：每用例在四张量**之前**多一个 `h0 f32[dModel]`
+ * （= **窗口之前**的 GRU carry，三端同值），在最后多一个 `h_evt f32[dModel]`（= 窗口之后的 carry，
+ * 也就是喂进融合的那个向量）。前向必须走 `forwardAll(t, h0)`；判据里多两条：
+ * ⑤ `h_evt` 逐元素 ≤ tol（只看七个头的话，随机初始化的收缩 GRU 会把 `h0` 洗到 3e-8 ⇒ 测不到）；
+ * ⑥ **h0 红证**：扰动 `h0` 必须让策略头变化（>1e-4）—— 否则"同 h0 ⇒ 同输出"是空转。
  */
 public final class V4Probe {
 
@@ -407,11 +413,14 @@ public final class V4Probe {
         bb.get(netBytes);
         V4Policy net = V4Policy.loadBytes(netBytes, file);
         int vb = net.valueBins();
+        int dm = net.dims().get("d_model");
 
         Cmp feat = new Cmp(tol, 12);
         Cmp head = new Cmp(tol, 12);
         int argmaxOk = 0;
         List<Map<String, Object>> obsList = new ArrayList<>();
+        V4Features.Tensors firstT = null;
+        float[] firstH0 = null;
         for (int c = 0; c < nCases; c++) {
             int obsLen = bb.getInt();
             byte[] ob = new byte[obsLen];
@@ -423,6 +432,9 @@ public final class V4Probe {
                 int kl = bb.getShort() & 0xFFFF;
                 bb.position(bb.position() + kl);
             }
+            // 格式 2 起：每用例带 `h0`（**窗口之前**的 carry，进）与 `h_evt`（窗口之后，出）。
+            // ⚠ 少了这一步整个夹具从第一个用例起就错位（症状 = 无输出 + 退出码 1）。
+            float[] h0 = readVec(bb, dm);
             float[][] tile = readMat(bb, V4Features.KIND_COUNT, V4Features.C_TILE);
             float[][] evt = readMat(bb, V4Features.K_EVT, V4Features.C_EVT);
             float[] ctx = readVec(bb, V4Features.C_CTX);
@@ -431,19 +443,26 @@ public final class V4Probe {
             float[] value = readVec(bb, vb);
             float[] belief = readVec(bb, 3);
             float[][] danger = readMat(bb, n, 4);
+            float[] hEvt = readVec(bb, dm);
 
             V4Features.Tensors t = V4Features.assemble(obs);
+            if (firstT == null) {
+                firstT = t;
+                firstH0 = h0;
+            }
             String tag = "c" + c + ".";
             cmpMat(feat, tag + "tile", t.tile, tile, "k", "ch");
             cmpMat(feat, tag + "evt", t.evt, evt, "row", "f");
             cmpVec(feat, tag + "ctx", t.ctx, ctx, "i");
             cmpMat(feat, tag + "cand", t.cand, cand, "row", "col");
 
-            Map<String, float[]> o = net.forwardAll(obs);
+            Map<String, float[]> o = net.forwardAll(t, h0);
             cmpVec(head, tag + "policy", o.get("policy"), logits, "i");
             cmpVec(head, tag + "value", o.get("value"), value, "i");
             cmpVec(head, tag + "belief_tenpai", o.get("belief_tenpai"), belief, "i");
             cmpMat(head, tag + "danger", reshape(o.get("danger"), n, 4), danger, "row", "col");
+            // ⚠ 这一条才是 W1 的"`h0` 路线"判据（只看七个头的话，收缩的 GRU 会把 `h0` 洗到 3e-8）
+            cmpVec(head, tag + "h_evt", o.get("h_evt"), hEvt, "i");
             if (argmaxOf(o.get("policy")) == argmaxOf(logits)) {
                 argmaxOk++;
             }
@@ -458,14 +477,30 @@ public final class V4Probe {
                 worstRed = Math.max(worstRed, Math.abs((b[i] - a[i]) - 1f));
             }
         }
-        boolean pass = feat.worst <= tol && head.worst <= tol && argmaxOk == nCases && worstRed <= 1e-3f;
+        // 红证②（W1）：扰动 `h0` ⇒ 策略头必须变（否则"同 h0 ⇒ 同输出"是空转）
+        float worstH0 = 0f;
+        if (firstT != null) {
+            float[] h1 = firstH0.clone();
+            for (int i = 0; i < h1.length; i++) {
+                h1[i] += 0.5f;
+            }
+            float[] a = net.forwardAll(firstT, firstH0).get("policy");
+            float[] b = net.forwardAll(firstT, h1).get("policy");
+            for (int i = 0; i < a.length; i++) {
+                worstH0 = Math.max(worstH0, Math.abs(a[i] - b[i]));
+            }
+        }
+        boolean pass = feat.worst <= tol && head.worst <= tol && argmaxOk == nCases
+                && worstRed <= 1e-3f && worstH0 > 1e-4f;
         if (!pass) {
             feat.dump("特征侧");
             head.dump("前向侧");
         }
         System.out.println(String.format(Locale.ROOT,
-                "golden cases=%d tol=%g 特征 maxΔ=%.3g 前向 maxΔ=%.3g argmax=%d/%d 红证 maxΔ=%.3g → %s",
-                nCases, tol, feat.worst, head.worst, argmaxOk, nCases, worstRed, pass ? "PASS" : "FAIL"));
+                "golden cases=%d tol=%g 特征 maxΔ=%.3g 前向 maxΔ=%.3g argmax=%d/%d 红证 maxΔ=%.3g"
+                        + " h0红证 maxΔ=%.3g → %s",
+                nCases, tol, feat.worst, head.worst, argmaxOk, nCases, worstRed, worstH0,
+                pass ? "PASS" : "FAIL"));
         return pass ? 0 : EXIT_ERROR;
     }
 

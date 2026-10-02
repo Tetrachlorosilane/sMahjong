@@ -172,7 +172,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     x = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in t3.as_dict().items()}
     mask = torch.ones(1, t3.cand.shape[0], dtype=torch.bool)
     with torch.no_grad():
-        out = m(**x, mask=mask)
+        # `h=None`：这条体检是**单条合成 obs**（没有"窗口之前的事件流"）⇒ 冷启动。
+        # 显式写出来是为了让"前向的 `h` 参数"在调用点一眼可见（别的地方都是 `h=b.get("h")`）。
+        out = m(**x, mask=mask, h=None)
     ok(set(out) >= {"policy", "value", "placement", "belief_hand", "belief_tenpai", "danger", "effect"},
        f"多头输出齐全：{sorted(out)}")
     ok(tuple(out["policy"].shape) == (1, t3.cand.shape[0]), f"策略 logits {tuple(out['policy'].shape)}")

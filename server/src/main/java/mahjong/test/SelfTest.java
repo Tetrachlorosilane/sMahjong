@@ -3673,7 +3673,7 @@ public final class SelfTest {
         java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
                 .order(java.nio.ByteOrder.LITTLE_ENDIAN);
         eq("v4 golden 夹具魔数（MJ4G）", bb.getInt(), V4_GOLDEN_MAGIC);
-        eq("v4 golden 夹具格式版本", bb.getInt(), 1);
+        eq("v4 golden 夹具格式版本", bb.getInt(), 2);
         int nCases = bb.getInt();
         int netLen = bb.getInt();
         byte[] netBytes = new byte[netLen];
@@ -3700,8 +3700,11 @@ public final class SelfTest {
         // ③ 逐元素对拍：四张量（特征）+ 四个推理头（前向）
         float worstFeat = 0f;
         float worstHead = 0f;
+        float worstTower = 0f;
         int argmaxOk = 0;
         java.util.Map<String, Object> firstObs = null;
+        mahjong.ai.V4Features.Tensors firstT = null;
+        float[] firstH0 = null;
         for (int c = 0; c < nCases; c++) {
             int obsLen = bb.getInt();
             byte[] ob = new byte[obsLen];
@@ -3718,6 +3721,9 @@ public final class SelfTest {
                 int kl = bb.getShort() & 0xFFFF;
                 bb.position(bb.position() + kl);
             }
+            // ⚠ **格式 2 起**每用例多一个 `h0`（**窗口之前**的 GRU carry）：三端拿同一个 `h0`
+            //   才能判"同 h ⇒ 同输出"（`docs/VALVES-AND-FIXTURES.md` §3 W1）。
+            float[] h0 = v4ReadVec(bb, net.dims().get("d_model"));
             float[][] tile = v4ReadMat(bb, mahjong.ai.V4Features.KIND_COUNT, mahjong.ai.V4Features.C_TILE);
             float[][] evt = v4ReadMat(bb, mahjong.ai.V4Features.K_EVT, mahjong.ai.V4Features.C_EVT);
             float[] ctx = v4ReadVec(bb, mahjong.ai.V4Features.C_CTX);
@@ -3726,15 +3732,21 @@ public final class SelfTest {
             float[] value = v4ReadVec(bb, net.valueBins());
             float[] belief = v4ReadVec(bb, 3);
             float[][] danger = v4ReadMat(bb, n, 4);
+            // 格式 2 的**第五个期望输出**：`h_evt`（窗口之后的 carry = 喂进融合的那个向量）
+            float[] hEvt = v4ReadVec(bb, net.dims().get("d_model"));
 
             mahjong.ai.V4Features.Tensors t = mahjong.ai.V4Features.assemble(obs);
+            if (firstT == null) {
+                firstT = t;
+                firstH0 = h0;
+            }
             worstFeat = Math.max(worstFeat, maxAbs(t.tile, tile));
             worstFeat = Math.max(worstFeat, maxAbs(t.evt, evt));
             worstFeat = Math.max(worstFeat, maxAbs(t.ctx, ctx));
             worstFeat = Math.max(worstFeat, maxAbs(t.cand, cand));
             java.util.Map<String, float[]> o;
             try {
-                o = net.forwardAll(obs);
+                o = net.forwardAll(t, h0);
             } catch (java.io.IOException e) {
                 check("v4 前向抛异常：" + e.getMessage(), false);
                 return;
@@ -3743,12 +3755,37 @@ public final class SelfTest {
             worstHead = Math.max(worstHead, maxAbs(o.get("value"), value));
             worstHead = Math.max(worstHead, maxAbs(o.get("belief_tenpai"), belief));
             worstHead = Math.max(worstHead, maxAbs(o.get("danger"), v4Flatten(danger)));
+            worstTower = Math.max(worstTower, maxAbs(o.get("h_evt"), hEvt));
             if (v4Argmax(o.get("policy")) == v4Argmax(logits)) {
                 argmaxOk++;
             }
         }
         check("v4 golden：四张量逐元素一致（最大误差 " + worstFeat + "）", worstFeat < 1e-4f);
         check("v4 golden：四个推理头逐元素一致（最大误差 " + worstHead + "）", worstHead < 1e-4f);
+        // ⚠ W1：这一条才是"`h0` 路线"的判据 —— 只看七个头的话，随机初始化的 GRU 会把 `h0`
+        //   的影响洗到 3e-8（判据看不见）；夹具因此把更新门偏置抬到 z≈0.95，并直接比 `h_evt`。
+        check("v4 golden：事件塔隐状态 h_evt 逐元素一致（最大误差 " + worstTower + "）",
+                worstTower < 1e-4f);
+        // ③c **红证（W1）**：`h0` 真的被消费 —— 扰动 `h0` 必须改变策略头（否则"同 h ⇒ 同输出"
+        //   是空转：门控恒等或压根没读初始状态；夹具的更新门偏置保证这个差在 1e-2 量级）。
+        if (firstT != null) {
+            try {
+                float[] h1 = firstH0.clone();
+                for (int i = 0; i < h1.length; i++) {
+                    h1[i] += 0.5f;
+                }
+                float[] a = net.forwardAll(firstT, firstH0).get("policy");
+                float[] b = net.forwardAll(firstT, h1).get("policy");
+                float d = 0f;
+                for (int i = 0; i < a.length; i++) {
+                    d = Math.max(d, Math.abs(a[i] - b[i]));
+                }
+                check("v4 golden 红证：扰动 h0 ⇒ 策略头确实变化（maxΔ=" + d + "，证明 h 被消费）",
+                        d > 1e-4f);
+            } catch (java.io.IOException e) {
+                check("v4 h0 红证前向抛异常：" + e.getMessage(), false);
+            }
+        }
         eq("v4 golden：每条的 argmax 与 Python 一致", argmaxOk, nCases);
 
         // ④ 红证：策略头偏置 +1 ⇒ 每条 logit 恰好 +1
@@ -3950,34 +3987,56 @@ public final class SelfTest {
         }
         eq("v4 缓存：窗口 token 行 == eventMatrix（逐位，" + (seq.size() * 60 * 96) + " 格）",
                 tokBad, 0L);
-        // ④ 口径说明：cache 的 h（carry 全部事件）与全量路径的 h（窗口冷启动）**是两回事** ——
-        //    但七个头逐位相同 ⇒ 证明当前模型**没有任何头消费 h**。将来谁把 h 接进融合，
-        //    这条断言就会红（那时必须让训练也改成 carry 语义）。
-        boolean hDiffers = false;
-        int diffAt = -1;
+        // ④ **W1 改写（第六十轮）**：`h` 现在**被融合消费**（`fusion.mem` 逐候选门控），
+        //    于是"全量路径的 h"与"缓存槽的 carry"必须**逐位相同** —— 第五十八轮那条
+        //    "h 不同但七头逐位相同"的绊线**兑现了**，这里改成它的反面（硬判据）。
+        //    再加一条同样严格的：**"前缀 carry + 窗口" == "整手重放"** —— 这是夹具/离线
+        //    （`h0` 显式输入）与生产（整手 carry）两条路线同源的判据，逐位比、无容差。
+        long hBad = 0;
+        int hDiffAt = -1;
+        float hWorst = 0f;
         try {
             for (int i = 0; i < seq.size(); i++) {
+                net.setCacheEnabled(true);
+                net.setCacheLevel(3);
                 net.forwardCached(seq.get(i));
                 float[] hCache = net.cachedHidden(seq.get(i));
-                net.forwardAll(seq.get(i));
+                java.util.Map<String, float[]> full = net.forwardAll(seq.get(i));
                 float[] hFull = net.debugFullHidden();
                 for (int j = 0; j < hCache.length; j++) {
                     if (Float.floatToIntBits(hCache[j]) != Float.floatToIntBits(hFull[j])) {
-                        hDiffers = true;
-                        diffAt = i;
-                        break;
+                        hBad++;
+                        hWorst = Math.max(hWorst, Math.abs(hCache[j] - hFull[j]));
+                        if (hDiffAt < 0) {
+                            hDiffAt = i;
+                        }
                     }
                 }
-                if (hDiffers) {
-                    break;
+                // 夹具路线：`h0` = 前缀 carry ⇒ `forwardAll(t, h0)` 必须与整手重放逐位相同
+                float[] h0 = net.debugPrefixCarry(seq.get(i));
+                java.util.Map<String, float[]> viaH0 = net.forwardAll(
+                        mahjong.ai.V4Features.assemble(seq.get(i)), h0);
+                for (java.util.Map.Entry<String, float[]> e : full.entrySet()) {
+                    float[] a = e.getValue();
+                    float[] b = viaH0.get(e.getKey());
+                    for (int j = 0; j < a.length; j++) {
+                        if (Float.floatToIntBits(a[j]) != Float.floatToIntBits(b[j])) {
+                            hBad++;
+                            hWorst = Math.max(hWorst, Math.abs(a[j] - b[j]));
+                            if (hDiffAt < 0) {
+                                hDiffAt = i;
+                            }
+                        }
+                    }
                 }
             }
         } catch (java.io.IOException e) {
             check("v4 缓存：h 口径对比（" + e.getMessage() + "）", false);
             return;
         }
-        check("v4 缓存：h 口径确实不同（carry vs 窗口冷启动，首个不同在第 " + diffAt + " 条）—— "
-                + "而七头仍逐位相同 ⇒ 当前没有头消费 h", hDiffers);
+        eq("v4 缓存：**缓存 carry == 全量整手重放**、且**前缀 carry + 窗口 == 整手重放**"
+                + "（逐位；" + (hDiffAt < 0 ? "全一致" : "首个不同在第 " + hDiffAt + " 条，"
+                + "最大 Δ=" + hWorst) + "）", hBad, 0L);
         // ⑤ 陈旧必须被发现：改坏事件流 ⇒ 判陈旧 + 结果仍等于"对该 obs 全量重算"
         net.resetCacheStats();
         java.util.Map<String, Object> tampered = null;

@@ -1,14 +1,14 @@
 {
-  "cases": 8,
-  "format": 1,
+  "cases": 10,
+  "format": 2,
   "dims": {
     "d_model": 32,
     "tile_d": 16,
     "n_heads": 2,
     "value_bins": 5
   },
-  "net_bytes": 208974,
-  "bytes": 513459,
+  "net_bytes": 213248,
+  "bytes": 596377,
   "trace": "S:\\mahjong-training\\raw\\v4-golden",
   "seed": 20260928,
   "blocks_fingerprint": "e1f5dd0fc1e9aba8",
@@ -20,6 +20,8 @@
     "turn",
     "turn",
     "turn",
+    "turn",
+    "turn",
     "turn"
   ],
   "coverage": [
@@ -27,9 +29,11 @@
     "aka_hand",
     "claim",
     "evt_meld",
+    "evt_short",
     "ippatsu",
     "own_meld",
     "riichi_any",
+    "self_riichi",
     "tedashi",
     "tsumogiri",
     "turn"
@@ -39,7 +43,29 @@
     "claim",
     "own_meld",
     "riichi_any",
-    "ippatsu"
+    "ippatsu",
+    "evt_short"
   ],
+  "perturbed_zero_params": [
+    "tile.attn.in_proj_bias",
+    "tile.attn.out_proj.bias",
+    "tile.norm.bias",
+    "event.tr.layers.0.self_attn.in_proj_bias",
+    "event.tr.layers.0.self_attn.out_proj.bias",
+    "event.tr.layers.0.norm1.bias",
+    "event.tr.layers.0.norm2.bias",
+    "fusion.q_tile.in_proj_bias",
+    "fusion.q_tile.out_proj.bias",
+    "fusion.q_evt.in_proj_bias",
+    "fusion.q_evt.out_proj.bias",
+    "fusion.mem.weight",
+    "fusion.mem.bias",
+    "heads.policy_gate.weight",
+    "heads.policy_gate.bias"
+  ],
+  "mem_probe_max_dlogit": 0.023003697395324707,
+  "h0_probe_max_dlogit": 0.15334594249725342,
+  "logit_spread_min": 0.00018680095672607422,
+  "cases_with_long_carry": 1,
   "tol": 0.0001
 }

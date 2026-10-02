@@ -2288,7 +2288,8 @@ int main(int argc, char** argv) {
                      "                                   格式：step=<s> n=<n> argmax=<i> logits=<v0>,<v1>,…（值 %%.9g）\n"
                      "  v4net <net.bin 格式2> <轨迹1.jsonl> …  逐条 decision 行打印 **v4** 策略头 logits\n"
                      "                                   （与 tools/V4Probe.java 逐字符对拍；格式同 net）\n"
-                     "  v4golden <夹具> [--tol 1e-4]     读 python/tests/golden/forward-v4.bin：四张量 + 四个推理头 + 红证\n"
+                     "  v4golden <夹具> [--tol 1e-4]     读 python/tests/golden/forward-v4.bin（**格式 2**，不是 2 直接报错）：\n"
+                     "                                   四张量 + 四个推理头 + `h_evt` + 两条红证（偏置 +1 / 扰动 h0）\n"
                      "                                   全部通过 exit 0 并打印一行汇总；任一不过 exit 1\n");
         return 2;
     }

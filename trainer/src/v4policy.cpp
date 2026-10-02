@@ -399,6 +399,34 @@ bool V4Policy::bindAll(std::string &err) {
     M("fusion.out.net.2.weight", dm, dm);
     V("fusion.out.net.2.bias", dm);
 
+    // 长程记忆门控（W1，第六十轮）：`fusion.mem.weight [dm,dm]` + `fusion.mem.bias [dm]`。
+    //   **可缺** —— v1.14.1 及以前训练出来的网里没有它 ⇒ 补 0 ⇒ `g ≡ 1` ⇒ 旧网逐位不变。
+    //   ⚠ 必须**在绑定期**把名字记进 `used`：`finishPolicy` 的"有张量没人读"校验只看这里
+    //     （前向路径按 hpp 的线程安全说明**不写**任何状态），漏了就是"有 mem 的网加载期就报错"。
+    //   ⚠ "缺张量"与"形状不符"是两件事：形状不符必须炸掉（= Java `bindMemGate` 抛异常），
+    //     所以直接查表，而不是用 `mat()` / `vec()` 的 `err` 探测（那会把形状错误当成"没有"）。
+    {
+        const auto mw = mats.find("fusion.mem.weight");
+        if (mw != mats.end()) {
+            if (mw->second.rows != dm || (dm > 0 && mw->second.cols != dm)) {
+                err = "张量 fusion.mem.weight 形状 [" + std::to_string(mw->second.rows) + ","
+                      + std::to_string(mw->second.rows > 0 ? mw->second.cols : 0) + "] != ["
+                      + std::to_string(dm) + "," + std::to_string(dm) + "]";
+                return false;
+            }
+            used.insert("fusion.mem.weight");
+        }
+        const auto mb = vecs.find("fusion.mem.bias");
+        if (mb != vecs.end()) {
+            if (static_cast<int>(mb->second.size()) != dm) {
+                err = "张量 fusion.mem.bias 长度 " + std::to_string(mb->second.size()) + " != "
+                      + std::to_string(dm);
+                return false;
+            }
+            used.insert("fusion.mem.bias");
+        }
+    }
+
     // ⚠ **policy 宽度兼容**（第五十五轮定稿）：
     //   · `[1, dm]` = 正常（第五十五轮起的门控版、以及第一季之前的旧网）；
     //   · `[1, dm+3]` = 第五十轮那版"拼接 sigmoid(belief_tenpai)" —— **截断**掉后 3 列。
@@ -860,15 +888,227 @@ void flatten(const std::vector<std::vector<float>> &rows, int cols, std::vector<
     }
 }
 
+// ---------------------------------------------------------------- 事件塔（W1：carry 也进融合）
+//
+// 为什么把事件塔单独拆出来：W1 起 `h_evt` 是融合的输入（`fusion.mem` 门控），而"窗口冷启动"
+// 与"整手 carry"是**两个不同的量**（窗口 K=60 覆盖不到一整手）—— 生产全量路径必须给出与增量
+// 缓存槽里的 `s.h` **逐位同源**的那个 carry（= Java `eventTowerRound`）。三条路线：
+//   ① 生产全量 = `eventTowerRound`（整手 carry）；② 增量 = 槽里的 `s.h`（Java 侧，C++ 无缓存）；
+//   ③ golden 夹具 = `eventTowerWindow`（`h0` 由 Python 显式给出，只喂窗口里的真实行）。
+
+/** `event.enc` 的两层（**末尾没有 ReLU** —— 与 `tile.enc` 不同，见 hpp 顶部纪律①）。 */
+struct EventEnc {
+    const V4Policy::Mat *w1 = nullptr;
+    const std::vector<float> *b1 = nullptr;
+    const V4Policy::Mat *w2 = nullptr;
+    const std::vector<float> *b2 = nullptr;
+
+    /** 绑定一次、逐行复用：逐行重放是热路径，没必要每行再查 4 次表 + 核形状。 */
+    bool bind(const V4Policy &p, std::string &err) {
+        const int dm = p.dModel;
+        w1 = p.mat("event.enc.0.weight", dm, kCEvt, err);
+        b1 = p.vec("event.enc.0.bias", dm, err);
+        w2 = p.mat("event.enc.2.weight", dm, dm, err);
+        b2 = p.vec("event.enc.2.bias", dm, err);
+        return err.empty();
+    }
+
+    /** 一条 token 行 → 事件编码器输出（`linear` 别名安全：第二个线性层原地复用 `out`）。 */
+    void row(const float *tok, std::vector<float> &out) const {
+        out.assign(static_cast<size_t>(w1->rows), 0.f);
+        linear(out, tok, kCEvt, *w1, *b1);
+        relu(out);
+        linear(out, out.data(), out.size(), *w2, *b2);
+    }
+};
+
+/** `event.cell`（GRU）的四个张量 —— 同样绑一次、逐行复用。 */
+struct EventGru {
+    const V4Policy::Mat *wih = nullptr;
+    const V4Policy::Mat *whh = nullptr;
+    const std::vector<float> *bih = nullptr;
+    const std::vector<float> *bhh = nullptr;
+
+    bool bind(const V4Policy &p, std::string &err) {
+        const int dm = p.dModel;
+        wih = p.mat("event.cell.weight_ih", 3 * dm, dm, err);
+        whh = p.mat("event.cell.weight_hh", 3 * dm, dm, err);
+        bih = p.vec("event.cell.bias_ih", 3 * dm, err);
+        bhh = p.vec("event.cell.bias_hh", 3 * dm, err);
+        return err.empty();
+    }
+
+    std::vector<float> step(const std::vector<float> &x, const std::vector<float> &h) const {
+        return gruStep(x, h, *wih, *whh, *bih, *bhh);
+    }
+};
+
+/** 事件塔一次前向的两样产物（= Java `V4Policy.EvtTower`）：窗口表示 + 隐状态。 */
+struct EvtTower {
+    std::vector<std::vector<float>> tokens;
+    std::vector<float> h;
+};
+
+/**
+ * 窗口 60 行的两条产物：`e[i]`（`event.enc` 之后的 GRU 输入）与 Transformer 表示。
+ *
+ * <p>两条 carry 路线在这里是**同一份代码**（Java 里那两段也是逐行同构）—— 所以"给定同一个 h、
+ * 同一个窗口 ⇒ 同一个结果"是构造出来的，不是靠两处实现碰巧一样。
+ */
+bool encodeWindow(const V4Policy &p, const V4Tensors &t, const EventEnc &enc,
+                  std::vector<std::vector<float>> &e, std::vector<std::vector<float>> &tokens,
+                  std::string &err) {
+    e.assign(static_cast<size_t>(kKEvt),
+             std::vector<float>(static_cast<size_t>(p.dModel), 0.f));
+    for (int i = 0; i < kKEvt; i++) {
+        enc.row(t.evt[static_cast<size_t>(i)].data(), e[static_cast<size_t>(i)]);
+    }
+    return transformerLayer(p, e, "event.tr.layers.0", tokens, err);
+}
+
+/**
+ * 窗口里**真实事件**的行数（前部是零 padding，**不喂** GRU）= Java `V4Policy.realRows`。
+ *
+ * <p>判据靠"整行是否全 0"：真实事件 token 的 `type` 段是 one-hot，恒有一位为 1 ⇒ 全 0 行只可能
+ * 是 padding。还要确认零行**都在真实行之前**（否则窗口形状就坏了）—— 不一致当场报错，
+ * 而不是算出一个"看起来能用"的 carry。为什么不能连 padding 一起喂：`GRUCell(0,h) ≠ h`，
+ * 历史实测那会让两条路线的 carry 差出 1e-2 量级。
+ */
+bool realRows(const V4Tensors &t, int &out, std::string &err) {
+    int real = 0;
+    for (int row = 0; row < kKEvt; row++) {
+        bool nz = false;
+        for (float x : t.evt[static_cast<size_t>(row)]) {
+            if (x != 0.f) {
+                nz = true;
+                break;
+            }
+        }
+        if (nz) {
+            real++;
+        } else if (real > 0) {
+            err = "事件窗口的零行出现在真实事件之后（形状坏了）";
+            return false;
+        }
+    }
+    out = real;
+    return true;
+}
+
+/**
+ * 把 `ev[0, upto)` 这 `upto` 条**真实**事件行喂进 GRU（从 0 起）= Java `replayCarry`。
+ *
+ * <p>⚠ 每条事件的 token 行都过 `v4EventRow`（**自带清零**）：这里复用同一支缓冲逐事件重放，
+ * 不清零就是**静默累积**（第 i 行 = 前 i 条事件按位或）—— Java 侧刚踩过，见 NOTES §6.5 第六十轮。
+ */
+bool replayCarry(const V4Policy &p, const std::vector<const JVal *> &ev, int seat, int upto,
+                 const EventEnc &enc, const EventGru &gru, std::vector<float> &h,
+                 std::string &err) {
+    std::vector<float> tok(static_cast<size_t>(kCEvt), 0.f);
+    std::vector<float> rowEnc;
+    std::vector<float> acc(static_cast<size_t>(p.dModel), 0.f);
+    for (int i = 0; i < upto; i++) {
+        if (!v4EventRow(*ev[static_cast<size_t>(i)], seat, tok.data(), err)) {
+            return false;
+        }
+        enc.row(tok.data(), rowEnc);
+        acc = gru.step(rowEnc, acc);
+    }
+    h = std::move(acc);
+    return true;
+}
+
+/**
+ * **窗口内**推进：从 `h0`（**窗口之前**的 carry）推进窗口里的**真实**行 = Java `eventTowerWindow`。
+ *
+ * <p>golden 夹具（格式 2）走这条：三端拿同一个 `h0` 与同一个窗口，`h_evt` 必须逐位相同。
+ */
+bool eventTowerWindow(const V4Policy &p, const V4Tensors &t, const std::vector<float> &h0,
+                      EvtTower &tw, std::string &err) {
+    EventEnc enc;
+    EventGru gru;
+    if (!enc.bind(p, err) || !gru.bind(p, err)) {
+        return false;
+    }
+    std::vector<std::vector<float>> e;
+    if (!encodeWindow(p, t, enc, e, tw.tokens, err)) {
+        return false;
+    }
+    int real = 0;
+    if (!realRows(t, real, err)) {
+        return false;
+    }
+    std::vector<float> h = h0;
+    for (int i = kKEvt - real; i < kKEvt; i++) {
+        h = gru.step(e[static_cast<size_t>(i)], h);
+    }
+    tw.h = std::move(h);
+    return true;
+}
+
+/**
+ * **整手**推进（生产全量路径）：先重放 `events[0, max(0, n-K))`，再喂窗口里的真实行
+ * ⇒ "整手 carry"（= 增量路径槽里的 `s.h`）= Java `eventTowerRound`。
+ *
+ * <p>⛔ 不能退回"窗口 K 行冷启动"：那与槽里的 carry 是两个不同的量，而 W1 起它被融合消费
+ * （两条生产路径会分叉、三端也会分叉）。
+ */
+bool eventTowerRound(const V4Policy &p, const JVal &obs, const V4Tensors &t, EvtTower &tw,
+                     std::string &err) {
+    EventEnc enc;
+    EventGru gru;
+    if (!enc.bind(p, err) || !gru.bind(p, err)) {
+        return false;
+    }
+    std::vector<std::vector<float>> e;
+    if (!encodeWindow(p, t, enc, e, tw.tokens, err)) {
+        return false;
+    }
+    const std::vector<const JVal *> ev = v4EventsOf(obs);
+    const int events = static_cast<int>(ev.size());
+    // obs 的 `seat` 是**数字**（`v4Assemble` 已核过它在 0..3）：这里只要那一条语义。
+    const JVal *seatVal = obs.find("seat");
+    const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
+    std::vector<float> h;
+    if (!replayCarry(p, ev, seat, std::max(0, events - kKEvt), enc, gru, h, err)) {
+        return false;
+    }
+    const int real = std::min(events, kKEvt);
+    for (int i = kKEvt - real; i < kKEvt; i++) {
+        h = gru.step(e[static_cast<size_t>(i)], h);
+    }
+    tw.h = std::move(h);
+    return true;
+}
+
 }  // namespace
 
 bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
-                          std::string &err) const {
+                          std::string &err, const std::vector<float> *h0) const {
     err.clear();
     V4Tensors t;
     if (!v4Assemble(obs, missingBlocks, t, err)) {
         return false;
     }
+    // ---- 事件塔：**先**定下 carry 与窗口表示（W1 起两者都进融合）
+    //   h0 == nullptr ⇒ 生产路径的**整手 carry**（重放 events[0, n-K) 再喂窗口里的真实行）；
+    //   给了 h0 ⇒ golden 夹具那条（只从 h0 起喂窗口里的真实行）。
+    //   ⛔ 别把这两条合成"窗口冷启动"：那与整手 carry 是两个量，融合消费它之后就会分叉。
+    EvtTower tw;
+    if (h0 != nullptr) {
+        if (static_cast<int>(h0->size()) != dModel) {
+            err = "h0 长度 " + std::to_string(h0->size()) + " != d_model " + std::to_string(dModel)
+                  + "（既不截断也不补零：静默凑合会让'同 h ⇒ 同输出'变成空转）";
+            return false;
+        }
+        if (!eventTowerWindow(*this, t, *h0, tw, err)) {
+            return false;
+        }
+    } else if (!eventTowerRound(*this, obs, t, tw, err)) {
+        return false;
+    }
+    const std::vector<std::vector<float>> &eTokens = tw.tokens;
+    const std::vector<float> &hEvt = tw.h;
     const int n = static_cast<int>(t.cand.size());
     const int dm = dModel;
 
@@ -919,39 +1159,6 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         }
         linear(hTilePool, pool.data(), pool.size(), *tpW, *tpB);
     }
-
-    // ---- 事件塔
-    std::vector<std::vector<float>> e(kKEvt, std::vector<float>(static_cast<size_t>(dm), 0.f));
-    const Mat *ew1 = mat("event.enc.0.weight", dm, kCEvt, err);
-    const std::vector<float> *eb1 = vec("event.enc.0.bias", dm, err);
-    const Mat *ew2 = mat("event.enc.2.weight", dm, dm, err);
-    const std::vector<float> *eb2 = vec("event.enc.2.bias", dm, err);
-    if (!err.empty()) {
-        return false;
-    }
-    for (int i = 0; i < kKEvt; i++) {
-        linear(e[static_cast<size_t>(i)], t.evt[static_cast<size_t>(i)].data(), kCEvt, *ew1, *eb1);
-        relu(e[static_cast<size_t>(i)]);
-        // ⚠ 这里**没有** ReLU（与训练一致）：`event.enc` 的第二个线性层之后不接激活
-        linear(e[static_cast<size_t>(i)], e[static_cast<size_t>(i)].data(),
-               static_cast<size_t>(dm), *ew2, *eb2);
-    }
-    const Mat *gih = mat("event.cell.weight_ih", 3 * dm, dm, err);
-    const Mat *ghh = mat("event.cell.weight_hh", 3 * dm, dm, err);
-    const std::vector<float> *gbi = vec("event.cell.bias_ih", 3 * dm, err);
-    const std::vector<float> *gbh = vec("event.cell.bias_hh", 3 * dm, err);
-    if (!err.empty()) {
-        return false;
-    }
-    std::vector<float> h(static_cast<size_t>(dm), 0.f);          // 冷启动 h=0，喂满 K 个 token
-    for (int i = 0; i < kKEvt; i++) {
-        h = gruStep(e[static_cast<size_t>(i)], h, *gih, *ghh, *gbi, *gbh);
-    }
-    std::vector<std::vector<float>> x2;
-    if (!transformerLayer(*this, e, "event.tr.layers.0", x2, err)) {
-        return false;
-    }
-    const std::vector<std::vector<float>> &eTokens = x2;
 
     // ---- ctx / cand 编码器
     std::vector<float> ctxEmb;
@@ -1031,6 +1238,36 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         if (!mlp(*this, cat3.data(), cat3.size(), "fusion.out.net", 3 * dm, dm,
                  u[static_cast<size_t>(i)], err)) {
             return false;
+        }
+    }
+
+    // 长程记忆门控（W1）：`g_mem[j] = 1 + tanh(dot(memW[j], hEvt) + memB[j])`，`u_i ⊙ g_mem`（**逐候选**）。
+    //   ⛔ 为什么不能把 `hEvt` 拼进候选 / 当逐行常数加进去：那给同一行所有候选加的是**同一个量**
+    //     ⇒ softmax/argmax 数学上不变、那几列梯度恒为 0（第五十轮就是这么栽的）。门控乘在
+    //     `u_i` 上而 `u_i` 各不相同 ⇒ 真能改判。
+    //   ⚠ 门控在**所有头之前**（danger/effect/meanU 一起看到长程记忆），不只是 policy。
+    //   ⚠ 缺张量 ⇒ `g_mem ≡ 1` ⇒ 与"没有门控"逐位相同（旧网兼容）；累加器用 `double`（= Java 那份）。
+    //   ⚠ 查表而不是用 `mat()` 探测：探测会污染 `err`，而且**维度不符**必须炸掉、不能当成"没有"。
+    {
+        const Mat *memW = mats.count("fusion.mem.weight") ? &mats.at("fusion.mem.weight") : nullptr;
+        const std::vector<float> *memB = vecs.count("fusion.mem.bias")
+                                                 ? &vecs.at("fusion.mem.bias") : nullptr;
+        if (memW != nullptr) {
+            std::vector<float> memG(static_cast<size_t>(dm), 1.f);
+            for (int j = 0; j < dm; j++) {
+                double acc = 0.0;
+                const float *row = memW->data.data() + static_cast<size_t>(j) * static_cast<size_t>(dm);
+                for (int q = 0; q < dm; q++) {
+                    acc += static_cast<double>(row[q]) * static_cast<double>(hEvt[static_cast<size_t>(q)]);
+                }
+                const double b = memB == nullptr ? 0.0 : static_cast<double>((*memB)[static_cast<size_t>(j)]);
+                memG[static_cast<size_t>(j)] = static_cast<float>(1.0 + std::tanh(acc + b));
+            }
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < dm; j++) {
+                    u[static_cast<size_t>(i)][static_cast<size_t>(j)] *= memG[static_cast<size_t>(j)];
+                }
+            }
         }
     }
 
@@ -1133,6 +1370,9 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     std::vector<float> effectFlat;
     flatten(effect, 3, effectFlat);
     outAll["effect"] = std::move(effectFlat);
+    // W1 起把**事件塔的隐状态**也交出来：它现在是融合的输入（`fusion.mem` 门控），于是"三端同值"
+    // 可以直接比这个向量（比只看七个头灵敏得多 —— 夹具格式 2 就是为此加了这一列）。
+    outAll["h_evt"] = hEvt;
     return true;
 }
 
@@ -1157,6 +1397,13 @@ bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::
 bool v4ForwardAll(const V4Policy &p, const JVal &obs,
                   std::map<std::string, std::vector<float>> &out, std::string &err) {
     return p.forwardAll(obs, out, err);
+}
+
+bool v4ForwardAllH0(const V4Policy &p, const JVal &obs, const std::vector<float> &h0,
+                    std::map<std::string, std::vector<float>> &out, std::string &err) {
+    // 长度核对在 `forwardAll` 里（那里才知道 dModel）；这里不预先截断/补零 —— 静默凑合会让
+    // "同 h0 ⇒ 同输出"这条判据变成空转。
+    return p.forwardAll(obs, out, err, &h0);
 }
 
 // ---------------------------------------------------------------- CLI：v4net
@@ -1403,6 +1650,8 @@ void cmpVec(Cmp &c, const std::string &name, const float *a, const float *b, int
 }
 
 constexpr uint32_t kGoldenMagic = 0x4D4A3447U;   // "MJ4G"
+/** 夹具格式（= `python/mahjong_ml/v4/export.py` 的 `GOLDEN_FORMAT`）。 */
+constexpr int32_t kGoldenFormat = 2;
 
 /**
  * Java `String.format("%g", (float) x)`（精度 6）的等价物。
@@ -1457,12 +1706,20 @@ int v4GoldenCli(int argc, char **argv) {
     }
     Reader r{raw.data(), raw.size(), 0, false};
     const uint32_t magic = r.u32();
-    r.i32();                                                  // 夹具格式号
+    const int32_t fmt = r.i32();
     const int32_t nCases = r.i32();
     const int32_t netLen = r.i32();
     if (magic != kGoldenMagic) {
         std::fprintf(stderr, "[trainer] 夹具魔数不对：%#x（期望 %#x）\n",
                      static_cast<unsigned>(magic), kGoldenMagic);
+        return 1;
+    }
+    // ⛔ **格式必须硬校验**：格式 1 的用例里没有 `h0` / `h_evt` 两列，按本文件的读法会整份错位，
+    //    "尽力兼容"的后果是拿垃圾数据比对出一个假 PASS（比报错危险得多）。
+    if (fmt != kGoldenFormat) {
+        std::fprintf(stderr, "[trainer] 夹具格式 %d != %d（格式 1 是 W1 之前的布局，不兼容）"
+                             "—— 重新生成：python -m mahjong_ml.v4.export golden …\n",
+                     fmt, kGoldenFormat);
         return 1;
     }
     if (netLen < 0 || r.bad) {
@@ -1490,6 +1747,10 @@ int v4GoldenCli(int argc, char **argv) {
     headCmp.tol = tol;
     int argmaxOk = 0;
     std::vector<JVal> obsList;
+    // 第一个用例的 obs 与 h0 —— W1 的"扰动 h0"红证要用（见循环之后）。
+    JVal firstObs;
+    std::vector<float> firstH0;
+    bool haveFirst = false;
     for (int c = 0; c < nCases; c++) {
         const int32_t obsLen = r.i32();
         std::vector<char> ob(static_cast<size_t>(std::max(0, obsLen)));
@@ -1508,6 +1769,12 @@ int v4GoldenCli(int argc, char **argv) {
             r.need(kl);                                       // 键只用于人读，不参与比较
             r.pos += kl;
         }
+        // 格式 2 起每用例多一个 `h0`（**窗口之前**的 GRU carry）：三端拿同一个 `h0` 才能判
+        // "同 h ⇒ 同输出"（W1）。它在四张量**之前**。
+        std::vector<float> h0(static_cast<size_t>(net.dModel));
+        for (float &v : h0) {
+            v = r.f32();
+        }
         std::vector<float> tile(static_cast<size_t>(kKindCount) * kCTile);
         std::vector<float> evt(static_cast<size_t>(kKEvt) * kCEvt);
         std::vector<float> ctx(kCCtx);
@@ -1516,6 +1783,7 @@ int v4GoldenCli(int argc, char **argv) {
         std::vector<float> value(static_cast<size_t>(vb));
         std::vector<float> belief(3);
         std::vector<float> danger(static_cast<size_t>(n) * 4);
+        std::vector<float> hEvt(static_cast<size_t>(net.dModel));   // 窗口**之后**的 carry（最后）
         for (float &v : tile) {
             v = r.f32();
         }
@@ -1540,9 +1808,17 @@ int v4GoldenCli(int argc, char **argv) {
         for (float &v : danger) {
             v = r.f32();
         }
+        for (float &v : hEvt) {
+            v = r.f32();
+        }
         if (r.bad) {
             std::fprintf(stderr, "[trainer] 夹具在第 %d 个用例处被截断\n", c);
             return 1;
+        }
+        if (c == 0) {
+            firstObs = obs;
+            firstH0 = h0;
+            haveFirst = true;
         }
 
         V4Tensors t;
@@ -1580,21 +1856,29 @@ int v4GoldenCli(int argc, char **argv) {
         cmpMat(feat, tag + "cand", myCand.data(), cand.data(), n, kCCand, "row", "col");
 
         std::map<std::string, std::vector<float>> o;
-        if (!v4ForwardAll(net, obs, o, err)) {
+        // ⚠ **用显式 h0 的那条入口**（不是整手 carry）：夹具的 h0 是 Python 按"窗口之前"的口径
+        //   算出来的，拿整手 carry 去比就是两个量（W1 之前这里蒙对了，因为那时窗口 60 行正好
+        //   覆盖全部真实事件；一旦一小局超过 60 条事件就不再成立）。
+        if (!v4ForwardAllH0(net, obs, h0, o, err)) {
             std::fprintf(stderr, "[trainer] 夹具第 %d 个用例：前向失败：%s\n", c, err.c_str());
             return 1;
         }
         if (o["policy"].size() != static_cast<size_t>(n)
-                || o["value"].size() != static_cast<size_t>(vb)) {
+                || o["value"].size() != static_cast<size_t>(vb)
+                || o["h_evt"].size() != static_cast<size_t>(net.dModel)) {
             std::fprintf(stderr, "[trainer] 夹具第 %d 个用例：前向输出宽度与夹具不符"
-                                 "（policy %zu != %u，value %zu != %d）\n",
-                         c, o["policy"].size(), static_cast<unsigned>(n), o["value"].size(), vb);
+                                 "（policy %zu != %u，value %zu != %d，h_evt %zu != %d）\n",
+                         c, o["policy"].size(), static_cast<unsigned>(n), o["value"].size(), vb,
+                         o["h_evt"].size(), net.dModel);
             return 1;
         }
         cmpVec(headCmp, tag + "policy", o["policy"].data(), logits.data(), n, "i");
         cmpVec(headCmp, tag + "value", o["value"].data(), value.data(), vb, "i");
         cmpVec(headCmp, tag + "belief_tenpai", o["belief_tenpai"].data(), belief.data(), 3, "i");
         cmpMat(headCmp, tag + "danger", o["danger"].data(), danger.data(), n, 4, "row", "col");
+        // W1 新增：事件塔的隐状态（融合的输入之一）。只看七个头的话，`h0` 的影响会被随机初始化的
+        // GRU 洗到 3e-8（判据看不见）—— 所以直接比这个向量。
+        cmpVec(headCmp, tag + "h_evt", o["h_evt"].data(), hEvt.data(), net.dModel, "i");
         if (netArgmax(o["policy"]) == netArgmax(logits)) {
             argmaxOk++;
         }
@@ -1616,17 +1900,39 @@ int v4GoldenCli(int argc, char **argv) {
             worstRed = std::max(worstRed, std::fabs((b[i] - a[i]) - 1.f));
         }
     }
+    // 红证（W1）：**`h0` 真的被消费** —— 把第一个用例的 h0 整体 +0.5 再跑一遍，策略头必须变。
+    //   为什么必须要这条：`fusion.mem` 缺张量时 `g_mem ≡ 1`、或者"算完 carry 就丢掉"这两种写法
+    //   都能让上面所有比较**全绿**（前者本来就该绿，后者在旧夹具上也能绿）—— 只有"扰动 h ⇒ 输出变"
+    //   能证明这条链真的接上了。夹具把更新门偏置刻意抬大，所以这个差在 1e-2 量级。
+    float worstH0 = 0.f;
+    if (haveFirst) {
+        std::vector<float> h0b = firstH0;
+        for (float &v : h0b) {
+            v += 0.5f;
+        }
+        std::map<std::string, std::vector<float>> oa, ob;
+        if (!v4ForwardAllH0(net, firstObs, firstH0, oa, err)
+                || !v4ForwardAllH0(net, firstObs, h0b, ob, err)) {
+            std::fprintf(stderr, "[trainer] h0 红证前向失败：%s\n", err.c_str());
+            return 1;
+        }
+        const size_t cnt = std::min(oa["policy"].size(), ob["policy"].size());
+        for (size_t i = 0; i < cnt; i++) {
+            worstH0 = std::max(worstH0, std::fabs(ob["policy"][i] - oa["policy"][i]));
+        }
+    }
     const bool pass = feat.worst <= tol && headCmp.worst <= tol && argmaxOk == nCases
-            && worstRed <= 1e-3f;
+            && worstRed <= 1e-3f && worstH0 > 1e-4f;
     if (!pass) {
         feat.dump("特征侧");
         headCmp.dump("前向侧");
     }
     std::printf("golden cases=%d tol=%s 特征 maxΔ=%.3g 前向 maxΔ=%.3g argmax=%d/%d 红证 maxΔ=%.3g"
-                " → %s\n",
+                " h0红证 maxΔ=%.3g → %s\n",
                 nCases, javaPercentG(static_cast<double>(tol)).c_str(),
                 static_cast<double>(feat.worst), static_cast<double>(headCmp.worst), argmaxOk,
-                nCases, static_cast<double>(worstRed), pass ? "PASS" : "FAIL");
+                nCases, static_cast<double>(worstRed), static_cast<double>(worstH0),
+                pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }
 

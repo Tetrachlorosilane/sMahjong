@@ -34,11 +34,20 @@ v4 是 `format=2`。这样 v3 的 `NeuralPolicy` 见到 v4 权重会报**格式�
 
 ## golden 夹具布局
 
-    magic u32 "MJ4G" · format u32 = 1 · nCases u32 · netLen u32 · net（上面那个格式 2）
+    magic u32 "MJ4G" · format u32 = 2 · nCases u32 · netLen u32 · net（上面那个格式 2）
     每个 case：obsLen u32 · obs(utf8 JSON) · nLegal u16 · (keyLen u16 · key)×n
+      · **h0 f32[dModel]**（W1 起：**窗口之前**的 GRU carry，三端都拿它当递推初值）
       · tile f32[34×C_TILE] · evt f32[K_EVT×C_EVT] · ctx f32[C_CTX] · cand f32[n×C_CAND]
       · logits f32[n]（策略头，逐候选）· value f32[valueBins] · beliefTenpai f32[3]
-      · danger f32[n×4]
+      · danger f32[n×4] · **h_evt f32[dModel]**（窗口之后的 carry —— 融合门控的输入）
+
+⚠ **格式 2 = 格式 1 + 每用例的 `h0`（输入）与 `h_evt`（期望输出）**（W1，第六十轮）：
+`h_evt`（长程记忆）接进融合之后，"三端同值"必须**给定同一个 `h0`** 才可判据（否则 Java 的
+整手 carry 与 Python 的窗口冷启动是两个量，见 `FEATURES-V4.md` §5.3）。`fusion.mem.*` 因此在
+夹具里**显式随机化**（零初始化 ⇒ `g_mem ≡ 1` ⇒ 不扰动则这条路径三端都没被测到）。
+⚠ 反过来，**别**拿"扰动 `h0` 就该让输出变"当判据：随机初始化的 GRU 是收缩的，
+满窗上 `h0` 的影响只有 3e-8（实测）——"`h0` 路线"由 `SelfTest.v4CacheTests` 的
+"前缀 carry + 窗口 == 整手重放"（**逐位**，无容差）钉住，而不是靠夹具的容差。
 
 ⚠ **夹具里的四张量是"训练侧输入"**（Python 按 `blocks.assemble(obs, sidecar_dict)` 拼的，
 其中 `cand[88:96]` 与 `tile.danger/safety` 来自 sidecar）。Java/C++ 侧要**只用 obs**
@@ -58,13 +67,13 @@ import numpy as np
 import torch
 
 from .. import dataset as _dataset
-from . import blocks, model as M, spec, traces
+from . import blocks, cache as _cache, model as M, spec, traces
 
 #: 与 v3 同一个魔数（`mahjong_ml.export.WEIGHT_MAGIC`），用 `format` 区分代号。
 NET_MAGIC = 0x4D4A4E4E          # "MJNN"
 NET_FORMAT = 2                  # v4 = 格式 2（带块清单）
 GOLDEN_MAGIC = 0x4D4A3447       # "MJ4G"
-GOLDEN_FORMAT = 1
+GOLDEN_FORMAT = 2
 
 #: 格式 2 的头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32 = 64）
 HEADER_BYTES = 64
@@ -129,6 +138,10 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.gate.weight": (dm, 2 * dm), "fusion.gate.bias": (dm,),
         "fusion.write.weight": (dm, dm), "fusion.write.bias": (dm,),
         "fusion.film.weight": (dm, dm), "fusion.film.bias": (dm,),
+        # 长程记忆门控（W1，第六十轮）：**可缺** —— 旧网没有它 ⇒ 补 0 ⇒ `g = 1+tanh(0) = 1`
+        # ⇒ 恒等（与 `heads.policy_gate` 同一个兼容套路，见 `normalize_state`）。
+        "fusion.mem.weight": (None, (dm, dm)),
+        "fusion.mem.bias": (None, (dm,)),
         "fusion.out.net.0.weight": (dm, 3 * dm), "fusion.out.net.0.bias": (dm,),
         "fusion.out.net.2.weight": (dm, dm), "fusion.out.net.2.bias": (dm,),
         # 头
@@ -300,16 +313,18 @@ def read_net(path: str | Path) -> dict[str, Any]:
 def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """把**任意一代**的状态字典归一成**当前模型**的形状 —— 所有加载点共用这一处。
 
-    处理两件跨代差异（第五十/五十五轮）：
+    处理三件跨代差异（第五十/五十五/六十轮）：
 
     1. `heads.policy.weight` 可能是 `[1, dm]`（第一季及以前、第五十五轮起）或 `[1, dm+3]`
        （第五十轮那版"拼接 sigmoid(belief_tenpai)"）⇒ `dm+3` **截断**：那 3 列乘的是逐行常数
        ⇒ 对 argmax/softmax 无贡献（红证见 NOTES §6.5），丢掉等价；
     2. `heads.policy_gate.{weight,bias}`（第五十五轮加的逐候选门控）**可能不存在** ⇒ 补 **0**
-       ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等（不给旧权重强加新行为，`strict=True` 也不会红）。
+       ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等（不给旧权重强加新行为，`strict=True` 也不会红）；
+    3. `fusion.mem.{weight,bias}`（W1 加的长程记忆门控，第六十轮）同上：**可能不存在** ⇒ 补 **0**
+       ⇒ `g_mem = 1 + tanh(0) = 1` ⇒ 恒等（旧网的前向**逐位不变**）。
 
     ⚠ 别把这段逻辑抄到各处：`state_from_net`（net.bin）与 `value_audit.load_model`（ckpt）
-    都必须走它 —— 抄漏一处就是"某些旧权重能载入、某些不能"的鬼故事（实测踩过一次：
+    都必须走它 —— 抄漏一处就是"某些旧权重能载入、某些不能"的鬼故事（实测踩过两次：
     `value_audit` 直接 `strict=True` 载 ckpt ⇒ `Missing key(s): heads.policy_gate.*`）。
     """
     out = dict(sd)
@@ -322,10 +337,11 @@ def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是 {dm} "
                                  f"也不是旧版 {dm + 3}")
     dtype = out["tile.proj.weight"].dtype
-    if "heads.policy_gate.weight" not in out:
-        out["heads.policy_gate.weight"] = torch.zeros((dm, 3), dtype=dtype)
-    if "heads.policy_gate.bias" not in out:
-        out["heads.policy_gate.bias"] = torch.zeros((dm,), dtype=dtype)
+    # 可缺张量（旧网没有）⇒ 补 0 即"恒等"：加新的可缺张量时**只需要动这张表**
+    for name, shape in (("heads.policy_gate.weight", (dm, 3)), ("heads.policy_gate.bias", (dm,)),
+                        ("fusion.mem.weight", (dm, dm)), ("fusion.mem.bias", (dm,))):
+        if name not in out:
+            out[name] = torch.zeros(shape, dtype=dtype)
     return out
 
 
@@ -349,10 +365,14 @@ def _iter_cases(trace_dir: Path, want: int, *, scan_files: int = 8):
     `turn` / `claim` / 带副露，7 个用例**恰好都没人立直** —— 于是 Java 把 obs 里的
     `riichi`/`ippatsu`（**布尔数组**）用 `ints()` 读成 0、而 Python 读成 1，三端对拍
     全绿却掩盖了 8 个通道的漂移。现在按状态打标签，并把必须覆盖的标签写成闸门。
+
+    ⚠ W1 起还多要一条：**至少一个用例的事件流长于窗口 `K_EVT`**（`h0` 非 0）。否则每个用例
+    的 `h0` 都是全 0，"同一 `h0` ⇒ 同一输出"就成了空转（三端都忽略 `h0` 也全绿）。
     """
     picked: list[tuple[Path, int, dict]] = []
     seen_tags: set[str] = set()
     seen_kinds: set[str] = set()
+    long_seen = False
     for f in traces.trace_files(trace_dir)[:scan_files]:
         idx = 0
         for line in f.read_text(encoding="utf-8").splitlines():
@@ -365,18 +385,24 @@ def _iter_cases(trace_dir: Path, want: int, *, scan_files: int = 8):
             tags = _tags(obs)
             new = tags - seen_tags
             kind = str(obs.get("kind"))
-            if new or kind not in seen_kinds:
+            long = len(obs.get("events") or []) > spec.K_EVT
+            if new or kind not in seen_kinds or (long and not long_seen):
                 seen_tags |= tags
                 seen_kinds.add(kind)
                 picked.append((f, idx, row))
+            long_seen = long_seen or long
             idx += 1
-            if len(picked) >= want:
+            if len(picked) >= want and long_seen:
                 return picked
     return picked
 
 
 #: 夹具**必须**覆盖的状态标签（覆盖不到就报错 —— 免得夹具"看着有 7 条"却全在一条分支上）
-REQUIRED_TAGS = ("turn", "claim", "own_meld", "riichi_any", "ippatsu")
+#: ⚠ `evt_short`（事件流 ≤8 条）是 W1 加的：窗口前部是**零 padding**，而"喂不喂 padding"
+#:   在**满窗**用例上被 GRU 的收缩性洗掉（实测 |Δh|=1.3e-7，判据看不见）；只有在
+#:   "绝大多数是 padding、真实事件只有几条"的用例上才会放大到 1e-2 量级 ⇒ 缺了它，
+#:   三端把 padding 也喂进 GRU 也照样全绿。
+REQUIRED_TAGS = ("turn", "claim", "own_meld", "riichi_any", "ippatsu", "evt_short")
 
 
 def _tags(obs: Mapping[str, Any]) -> set[str]:
@@ -396,6 +422,8 @@ def _tags(obs: Mapping[str, Any]) -> set[str]:
         tags.add("furiten")
     events = obs.get("events") or []
     types = {str(e.get("type")) for e in events}
+    if len(events) <= 8:
+        tags.add("evt_short")                                     # 窗口几乎全是 padding（W1）
     for t in ("kan", "dora_flip", "meld"):
         if t in types:
             tags.add("evt_" + t)
@@ -419,13 +447,40 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     d = dict(dims or GOLDEN_DIMS)
     torch.manual_seed(seed)
     net = M.build(seed, **d)
-    # ⚠ **夹具必须显式扰动"零初始化"的张量**，否则那条路径根本没被测到（"假接入"的温床）：
-    #   `Heads.__init__` 把 `policy_gate` **零初始化**（训练起点应当恒等），而夹具直接沿用初始化权重
-    #   ⇒ 夹具里的门控全是 0 ⇒ `g ≡ 1` ⇒ Java/C++ 里 tanh 写错、索引/偏置写错都会**照样全绿**。
-    #   这里显式塞随机门控，让三端对拍**真的**走到 `1 + tanh(...)` 那条分支。
+    # ⚠ **夹具必须显式扰动"零初始化"的张量**，否则那条路径根本没被测到（"假接入"的温床）。
+    #   第五十七轮的手写版只扰动了 `policy_gate`；W1 起改成**通用规则**（`VALVES-AND-FIXTURES`
+    #   §2.1 铁律①）：凡 `state_dict()` 里 `max|·| == 0` 的参数一律 `normal_(0, 0.5)` ——
+    #   零初始化层的设计意图就是"起步恒等"（`policy_gate` / `fusion.mem`），
+    #   而夹具要的恰恰是**非恒等**，否则 tanh/索引/偏置换成错的也照样全绿。
     with torch.no_grad():
-        net.heads.policy_gate.weight.normal_(0.0, 0.5)
-        net.heads.policy_gate.bias.normal_(0.0, 0.5)
+        perturbed: list[str] = []
+        for name, p in net.state_dict().items():
+            if p.numel() and float(p.abs().max()) == 0.0:
+                p.normal_(0.0, 0.5)
+                perturbed.append(name)
+        # ⚠ **让初始状态活得过窗口**：随机初始化的 GRU 是收缩的（更新门 z≈0.5 ⇒ `0.5^60 ≈ 1e-18`），
+        #   实测满窗上 `h0` 的影响只有 3e-8 < 夹具容差 1e-4 ⇒ 三端**都忽略 `h0`** 也照样全绿，
+        #   而 `h0` 恰恰是 W1 唯一新增的输入。把更新门偏置抬到 +3（z≈0.95）⇒ `h0` 的影响
+        #   放大到 1e-2 量级，"同一 h0 ⇒ 同一输出"第一次有牙齿。
+        #   ⚠ 这是**夹具的权重选择**（合成小网本来就不是真实权重），不是模型改动：上线的网
+        #   自己的遗忘门是多少由训练决定。
+        #   ⚠ 门序是 PyTorch `GRUCell` 的 **(r, z, n)**：更新门 `z` 在第 **2** 块 `[dm:2dm)`，
+        #   不是第 3 块（写错成 `n` 只是把候选值顶饱和，`h0` 照样被洗掉 —— 实测 h0 探针为 0）。
+        dm = int(d["d_model"])
+        pr = dict(net.named_parameters())
+        for name in ("event.cell.bias_ih", "event.cell.bias_hh"):
+            pr[name][dm:2 * dm] += 3.0
+        # ⚠ **让注意力真的"看"候选**（W1 顺手补的夹具缺陷）：随机小网的 `q·k/√d` 只有 ~0.02
+        #   量级 ⇒ softmax 近乎均匀 ⇒ `u_evt` 与候选**逐元素相同**、策略头 logits 的组内极差
+        #   只有 **1e-7** ⇒ ① argmax 由浮点噪声决定（三端谁的求和顺序不同谁就换个动作）；
+        #   ② "候选 → 注意力 → 策略"整条路**根本没被测到**（注意力权重写错也全绿）。
+        #   把融合两处注意力的 `in_proj` 放大 **20×**（score 放大 20×，softmax 变尖）。
+        #   ⚠ 别贪大：再放大（60×/150×）softmax 会**饱和成硬 argmax** ⇒ 所有候选查到的
+        #   都是同一个 key ⇒ `u` 重新变成与候选无关（实测 60× 时极差回落到 7e-7、150× 为 0）。
+        #   20× 是实测的峰值（组内极差 1e-4~1e-3，比不放大的 1e-7 高三个数量级）。
+        for name in ("fusion.q_tile.in_proj_weight", "fusion.q_tile.in_proj_bias",
+                     "fusion.q_evt.in_proj_weight", "fusion.q_evt.in_proj_bias"):
+            pr[name] *= 20.0
     sd = net.state_dict()
     blob = net_blob(sd, d)
 
@@ -442,6 +497,11 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             f"或加长扫描（`--scan-files`）。**别降级跳过**：夹具没覆盖到的分支就是没钉住的漂移面")
     cache: dict[Path, dict] = {}
     body = bytearray()
+    dm = int(d["d_model"])
+    mem_probe = 0.0                                 # ① `fusion.mem` 被消费（归零 ⇒ 输出变）
+    h0_probe = 0.0                                  # ② `h0` 真的传播（仅长事件流用例）
+    n_long = 0                                      # 有用例真的走了"重放前缀"那条路
+    spread_min = float("inf")                       # ③ 策略头**真的在区分候选**（否则 argmax 是噪声）
     for src, idx, row in rows:
         obs = row["obs"]
         traces.gate_obs(obs, where=f"{src.name}:{idx}")
@@ -458,23 +518,80 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             raise NetFormatError(
                 f"{src.name} 第 {idx} 条：legal {len(legal)} != cand {t.cand.shape[0]}")
         with torch.no_grad():
-            o = net(torch.from_numpy(t.tile[None]), torch.from_numpy(t.evt[None]),
+            # `h0` = **窗口之前**的 carry：重放本手事件流的前 `n-K` 条（离线端的**唯一**算法，
+            # 见 `cache.carry_prefix`）⇒ 夹具里的 `h0` 与**生产端**（Java 重放整手 / 缓存槽）
+            # 是同一个量，"同 h ⇒ 同输出"才是真的在生产语义上被判据。
+            pre = max(0, len(obs.get("events") or []) - spec.K_EVT)
+            n_long += 1 if pre > 0 else 0
+            h0 = _cache.carry_prefix(
+                lambda tok, h: net.step_event(torch.from_numpy(np.asarray(tok, np.float32))[None], h),
+                obs, pre)
+            h0 = torch.zeros(dm) if h0 is None else h0[0].detach()
+            args = (torch.from_numpy(t.tile[None]), torch.from_numpy(t.evt[None]),
                     torch.from_numpy(t.ctx[None]), torch.from_numpy(t.cand[None]))
+            o = net(*args, h=h0[None])
+            # 红证①（**夹具必须能测到 `fusion.mem`**）：把 `fusion.mem.weight` 归零 ⇒ 策略头
+            #   必须变。零初始化只保证"起步恒等"，不保证"这条接线真的在算"。
+            if float(net.fusion.mem.weight.abs().sum()) == 0.0:
+                raise NetFormatError("夹具空转：`fusion.mem.weight` 全 0（零初始化没被扰动）")
+            saved = net.fusion.mem.weight.detach().clone()
+            net.fusion.mem.weight.zero_()
+            o0 = net(*args, h=h0[None])
+            net.fusion.mem.weight.copy_(saved)
+            fin = torch.isfinite(o["policy"] - o0["policy"])
+            mem_probe = max(mem_probe, float((o["policy"] - o0["policy"])[fin].abs().max()))
+            # ③ 策略头组内极差（>1 个候选时才有意义）：太小 ⇒ argmax 判据是噪声（见下面的闸门）
+            if len(legal) > 1:
+                pol = o["policy"][0]
+                spread_min = min(spread_min, float(pol.max() - pol.min()))
+            # 红证②（**夹具必须能测到 `h0`**，只在 `h0 != 0` 的用例上有意义）：扰动 `h0`
+            #   ⇒ 输出必须变。没有它，"三端都忽略 h0"也能全绿（GRU 收缩时实测差 3e-8）。
+            if pre > 0:
+                o1 = net(*args, h=(h0 + 0.5)[None])
+                fin1 = torch.isfinite(o["policy"] - o1["policy"])
+                h0_probe = max(h0_probe, float((o["policy"] - o1["policy"])[fin1].abs().max()))
         obs_b = json.dumps(obs, ensure_ascii=False).encode("utf-8")
         body += struct.pack("<I", len(obs_b)) + obs_b
         body += struct.pack("<H", len(legal))
         for k in legal:
             kb = k.encode("utf-8")
             body += struct.pack("<H", len(kb)) + kb
+        body += h0.numpy().astype("<f4").tobytes()          # 格式 2：h0 在四张量之前
         for arr in (t.tile, t.evt, t.ctx, t.cand):
             body += np.ascontiguousarray(arr, dtype="<f4").tobytes()
         body += o["policy"][0].numpy().astype("<f4").tobytes()
         body += o["value"][0].numpy().astype("<f4").tobytes()
         body += o["belief_tenpai"][0].numpy().astype("<f4").tobytes()
         body += o["danger"][0].numpy().astype("<f4").tobytes()
+        # 格式 2 起**多一个期望输出**：`h_evt`（窗口之后的 carry，即喂进融合的那个向量）。
+        # 它让"padding 喂不喂"这条口径**直接**可比 —— 只看七个头的话，满窗用例上
+        # 那个差被 GRU 收缩性洗到 1e-7（判据看不见），而 `evt_short` 用例上它是 1e-2 量级。
+        body += o["h_evt"][0].numpy().astype("<f4").tobytes()
 
     p = Path(out)
     p.parent.mkdir(parents=True, exist_ok=True)
+    # ② 空转闸门：`h0` 若对输出毫无影响（例如 `fusion.mem` 没被扰动 / 前向没消费它），
+    #    这份夹具就**测不到 W1 那条接线的三端一致性** —— 当场报错，别写出一份假绿的夹具。
+    # 空转闸门（三条一起）：`fusion.mem` 必须被消费、`h0` 必须能传播、且**至少一个用例
+    # 的 `h0` 非 0**（否则"忽略 h0"的三端也能全绿 —— 判据必须能测到那条路，不是"看起来全绿"）。
+    if not (mem_probe > 1e-4):
+        raise NetFormatError(
+            f"夹具空转：归零 `fusion.mem.weight` 只让策略头动了 {mem_probe:.3g}（应 >1e-4）—— "
+            f"`fusion.mem.*` 是否被随机化？`Fusion` 是否真的消费了 `h_evt`？")
+    if n_long == 0:
+        raise NetFormatError(
+            "夹具覆盖不足：没有任何用例的事件流长于窗口 K_EVT ⇒ 每个用例的 `h0` 都是全 0，"
+            "三端**都忽略 `h0`** 也照样全绿（换个轨迹目录，或加长 `--scan-files`）")
+    if not (h0_probe > 1e-4):
+        raise NetFormatError(
+            f"夹具空转：长事件流用例上扰动 `h0` 只让策略头动了 {h0_probe:.3g}（应 >1e-4）—— "
+            f"夹具的 GRU 太收缩（`event.cell.*` 的更新门偏置没抬？），三端忽略 `h0` 也测不出来")
+    # ③ **候选必须真的区分开**：极差 ~1e-7 时 argmax 由浮点噪声决定（"每条的 argmax 一致"这条
+    #    判据会随机红），而更糟的是"候选 → 注意力 → 策略"那条路根本没被测到。
+    if not (spread_min > 1e-4):
+        raise NetFormatError(
+            f"夹具空转：策略头 logits 的**组内极差**只有 {spread_min:.3g}（应 >1e-4）—— "
+            f"注意力太接近均匀（`fusion.q_*` 的 in_proj 没放大？），候选差异没有进 logits")
     head_b = struct.pack("<4I", GOLDEN_MAGIC, GOLDEN_FORMAT, len(rows), len(blob))
     p.write_bytes(head_b + blob + bytes(body))
     meta = {"cases": len(rows), "format": GOLDEN_FORMAT, "dims": d, "net_bytes": len(blob),
@@ -482,6 +599,11 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             "blocks_fingerprint": fingerprint_of(),
             "case_kinds": [f"{r[2].get('kind')}" for r in rows],
             "coverage": sorted(covered), "required_tags": list(REQUIRED_TAGS),
+            "perturbed_zero_params": perturbed,
+            "mem_probe_max_dlogit": mem_probe,
+            "h0_probe_max_dlogit": h0_probe,
+            "logit_spread_min": spread_min,
+            "cases_with_long_carry": n_long,
             "tol": 1e-4}
     p.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                       encoding="utf-8", newline="\n")
@@ -524,7 +646,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         p = build_golden(a.trace, a.out, cases=a.cases, scan_files=a.scan_files,
                          dims=FULL_DIMS if a.full else GOLDEN_DIMS, seed=a.seed)
-        print(f"已写出 v4 golden 夹具：{p}（{p.stat().st_size} 字节，{a.cases} 个用例）")
+        # ⚠ 用例数可能**多于** `--cases`：`_iter_cases` 要凑齐覆盖闸门（含"事件流长于窗口"那条）
+        #   才会停 ⇒ 报数从写出的 meta 读，别报 `--cases`（那会与实际不符）。
+        n = json.loads(p.with_suffix(".json").read_text(encoding="utf-8"))["cases"]
+        print(f"已写出 v4 golden 夹具：{p}（{p.stat().st_size} 字节，{n} 个用例）")
     return 0
 
 

@@ -426,8 +426,15 @@ public final class V4Features {
      * **新增**的那几条事件 —— 逐行函数是"同一份实现、两种调用"的前提（另写一份必然漂移，
      * 而漂移的症状是"缓存看起来正常、结果差一点点"）。⚠ 行内容只依赖 `(事件, seat)`，
      * **不依赖窗口位置或其它事件** ⇒ 前缀可以安全复用（这是缓存成立的唯一前提）。
+     *
+     * <p>⚠ **本函数自带清零**（`FEATURES-V4.md` §5.3 的纪律④）：签名收的是"一个待填的行缓冲"，
+     * 而调用方**会复用**同一个缓冲（缓存建槽时逐事件重放就是复用一支 `tok`）。
+     * 不清零的后果是**静默累积**：第 i 行 = 前 i 条事件所有位或的结果 —— 而 `s.h` 原先没人消费，
+     * 所以这个 bug 藏了很久（W1 把 `h_evt` 接进融合的当天，"增量 == 全量"与"陈旧退回"
+     * 三条判据一起红，见 NOTES §6.5 第六十轮）。清零的成本是 96 次写，相对一次 matvec 可忽略。
      */
     static void eventRow(Map<String, Object> e, int seat, float[] row) {
+        java.util.Arrays.fill(row, 0f);
         String t = str(e.get("type"));
         for (int i = 0; i < EVT_TYPES.length; i++) {
             if (EVT_TYPES[i].equals(t)) {

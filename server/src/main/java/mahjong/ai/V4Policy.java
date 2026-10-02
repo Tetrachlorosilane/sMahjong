@@ -80,7 +80,7 @@ public final class V4Policy implements LogitPolicy {
      * `3` = 再复用注意力 `in_proj`（最全）。0 = 等于关缓存（走全量路径）。
      */
     private int cacheLevel = 3;
-    /** 全量路径最近一次的冷启动 `h`（自检钩子；见 {@link #cachedHidden}）。 */
+    /** 全量路径最近一次的**整手 carry**（自检钩子；见 {@link #cachedHidden}）。 */
     private float[] lastFullHidden;
     /** padding 行的常量（零 token 的编码 / 注意力 `in_proj`）——多行共享同一份引用。 */
     private float[] padTokRow;
@@ -310,6 +310,41 @@ public final class V4Policy implements LogitPolicy {
         return new float[dm];
     }
 
+    /**
+     * 长程记忆门控张量（W1，第六十轮）：`fusion.mem.weight [dm,dm]` + `bias [dm]`。
+     *
+     * <p>**可缺**：v1.14.1 及以前训练出来的网里没有它 ⇒ 补 0 ⇒ `g_mem[j] = 1 + tanh(0) = 1`
+     * ⇒ 恒等（不给旧权重强加新行为）。有它时把名字记进 `used` —— ⚠ **必须在绑定期标记**，
+     * 理由同 {@link #bindPolicyGate}（加载期的"有张量没人读"校验不等前向）。
+     */
+    private void bindMemGate(int dm) {
+        float[][] mw = mats.get("fusion.mem.weight");
+        if (mw != null) {
+            used.add("fusion.mem.weight");
+            if (mw.length != dm || (dm > 0 && mw[0].length != dm)) {
+                throw new IllegalStateException("张量 fusion.mem.weight 形状 [" + mw.length + ","
+                        + (mw.length > 0 ? mw[0].length : 0) + "] != [" + dm + "," + dm + "]");
+            }
+        }
+        float[] mb = vecs.get("fusion.mem.bias");
+        if (mb != null) {
+            used.add("fusion.mem.bias");
+            if (mb.length != dm) {
+                throw new IllegalStateException("张量 fusion.mem.bias 长度 " + mb.length + " != " + dm);
+            }
+        }
+    }
+
+    /** 长程记忆门控偏置（**可缺** ⇒ 全 0；一维张量在 `vecs` 里，`mats.get` 查不到）。 */
+    private float[] memBias(int dm) {
+        float[] v = vecs.get("fusion.mem.bias");
+        if (v != null) {
+            used.add("fusion.mem.bias");
+            return v;
+        }
+        return new float[dm];
+    }
+
     private float[][] mat(String name, int rows, int cols) throws IOException {        float[][] m = mats.get(name);
         if (m == null) {
             throw new IOException("权重缺张量：" + name);
@@ -416,6 +451,7 @@ public final class V4Policy implements LogitPolicy {
         //   `p3-001` / 联赛 `g08` 等已训权重都还是旧宽，没有它全部作废（重训要几小时）。
         matPolicyCompat(dm);
         bindPolicyGate(dm);
+        bindMemGate(dm);
         vec("heads.policy.bias", 1);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
@@ -439,42 +475,74 @@ public final class V4Policy implements LogitPolicy {
                 "belief_tenpai", all.get("belief_tenpai"), "danger", all.get("danger"));
     }
 
-    /** 全部七个头（自检与 golden 对拍用）。 */
+    /**
+     * 全部七个头（**生产全量路径**，判据④的基准）：事件塔的隐状态 = **整手 carry**
+     * （从 0 起重放 `obs.events` 里的**全部**事件行），Transformer 仍只吃窗口。
+     *
+     * <p>⚠ W1 起 `h` 被融合消费（`fusion.mem` 门控）⇒ 全量与增量**必须**给出同一个 `h`
+     * （{@link #forwardCached} 的 `s.h`）。所以这里不能再用"窗口 60 行的冷启动"当全量基准：
+     * 那个量与缓存槽的 carry 是两个不同的数（见 {@link #cachedHidden} 的注释）。
+     */
     public Map<String, float[]> forwardAll(Map<String, Object> obs) throws IOException {
-        return forwardAll(V4Features.assemble(obs, missingBlocks));
+        V4Features.Tensors t = V4Features.assemble(obs, missingBlocks);
+        EvtTower tw = eventTowerRound(obs, t.evt);
+        return forwardWith(t, tw.tokens, tw.h);
     }
 
     /**
-     * 全部七个头，**输入已经拼好的四张量**（无缓存路径 = 判据④的基准）。
+     * 只有四张量、**没有事件表**的退化入口（性能基准与老调用）：窗口内冷启动。
      *
-     * <p>分开这一层是为了两件事：① 性能基准要能把"特征"与"网络"分开计时
-     * （两者的优化手段完全不同，混在一起报一个数就没法判断该动哪一边——
-     * ⚠ **只报实测，不设指标**（`docs/FEATURES-V4.md` §8））；② **增量缓存**
-     * （{@link #forwardCached}）要把"事件塔"换成只算新行的版本、其余原样复用 ——
-     * 所以这里把事件塔的输出当参数传下去（{@link #forwardWith}）。
+     * <p>它**不等于**生产路径（生产有整手 carry）—— 只用来量"前向本身"的耗时。
      */
     public Map<String, float[]> forwardAll(V4Features.Tensors t) throws IOException {
-        return forwardWith(t, eventTowerFull(t.evt));
+        EvtTower tw = eventTowerWindow(t.evt, null);
+        return forwardWith(t, tw.tokens, tw.h);
+    }
+
+    /**
+     * **golden 夹具入口**：`h0` = **窗口之前**的 carry（夹具显式给出，三端同值）。
+     *
+     * <p>这就是"三端同源"在 W1 之后的形式：给定同一个 `h0` 与同一个窗口，`h_evt` 必须逐位相同
+     * （`docs/FEATURES-V4.md` §6 的夹具布局 format 2 里带着它）。
+     */
+    public Map<String, float[]> forwardAll(V4Features.Tensors t, float[] h0) throws IOException {
+        EvtTower tw = eventTowerWindow(t.evt, h0);
+        return forwardWith(t, tw.tokens, tw.h);
     }
 
     // ---------------------------------------------------------------- 增量事件缓存
     /**
      * 全部七个头，走**增量事件缓存**（`docs/FEATURES-V4.md` §5.3）。
      *
-     * <p>与 {@link #forwardAll(V4Features.Tensors)} 的关系：**只有事件塔的前半段不同**
-     * （逐行编码 + 注意力 `in_proj` 复用），从 Transformer 的注意力往后是**同一份代码**、
-     * 同一批浮点值 ⇒ 七个头应当**逐位相同**（自检按 `floatToIntBits` 比）。
+     * <p>与 {@link #forwardAll(Map)} 的关系：**只有事件塔的前半段不同**
+     * （逐行编码 + 注意力 `in_proj` 复用 + 隐状态增量推进），从 Transformer 的注意力往后是
+     * **同一份代码**、同一批浮点值 ⇒ 七个头应当**逐位相同**（自检按 `floatToIntBits` 比）。
      *
      * <p>三条纪律（设计文档 §5.3）：① 隐状态每小局清零（小局键变了就丢槽）；
      * ② 缓存必须能从当前 obs 完整重建（{@link V4Cache#overlapOk} 逐行校验，不信"应该是它"）；
      * ③ 自检/对拍永远拿无缓存路径当基准（{@link #setCacheEnabled}）。
+     *
+     * <p>⚠ W1 起 `h`（槽里的整手 carry）**被融合消费** ⇒ "增量 == 全量"这条判据第一次真正
+     * 管到隐状态：槽里的 carry 与全量路径重放出来的必须**逐位**相同（自检直接比对两者）。
      */
     public Map<String, float[]> forwardCached(Map<String, Object> obs) throws IOException {
         V4Features.Tensors t = V4Features.assemble(obs, missingBlocks);
         if (!cacheEnabled || !missingBlocks.isEmpty()) {
-            return forwardAll(t);                                // 关掉缓存 / 消融实验：走基准路径
+            return forwardAll(obs);                              // 关掉缓存 / 消融实验：走基准路径
         }
-        return forwardWith(t, eventTowerCached(obs, t));
+        EvtTower tw = eventTowerCached(obs, t);
+        return forwardWith(t, tw.tokens, tw.h);
+    }
+
+    /** 事件塔一次前向的两样产物：窗口的 Transformer 表示 + 隐状态（W1 起两者都被消费）。 */
+    private static final class EvtTower {
+        final float[][] tokens;
+        final float[] h;
+
+        EvtTower(float[][] tokens, float[] h) {
+            this.tokens = tokens;
+            this.h = h;
+        }
     }
 
     /**
@@ -484,8 +552,12 @@ public final class V4Policy implements LogitPolicy {
      * 一条事件的 token 行只依赖 `(事件, 自己座位)`，它的 MLP 输出与 `in_proj` 也只依赖这一行
      * ⇒ 窗口整体左移（新事件在尾部）时，**幸存行可以按引用平移**，只有新增的 `delta` 行要算。
      * 代价从"每决策 60 行"降到"每决策 delta 行"（实测 delta 的中位数是 1–2）。
+     *
+     * <p>⚠ 隐状态**只喂真实事件行**（前部零 padding 不喂）—— 与 {@link #eventTowerRound}
+     * 和 `v4/cache.py` 的 `EventStream.recompute` 同一条口径：`GRUCell(0, h) ≠ h`，
+     * 把 padding 也喂进去会让两条路径的 carry 差出 1e-2 量级（历史上实测过）。
      */
-    private float[][] eventTowerCached(Map<String, Object> obs, V4Features.Tensors t)
+    private EvtTower eventTowerCached(Map<String, Object> obs, V4Features.Tensors t)
             throws IOException {
         final int k = cache.window();
         int seat = V4Features.i(obs.get("seat"), 0);
@@ -493,7 +565,7 @@ public final class V4Policy implements LogitPolicy {
         int events = ev.size();
         String key = V4Features.handKey(obs);
         if (key == null) {
-            return eventTowerFull(t.evt);                         // 没有 round 信息 ⇒ 不缓存
+            return eventTowerRound(obs, t.evt);                   // 没有 round 信息 ⇒ 不缓存（但仍是整手 carry）
         }
         V4Cache.Slot s = cache.slot(seat);
         boolean rebuild = !s.valid || !key.equals(s.handKey);
@@ -574,7 +646,7 @@ public final class V4Policy implements LogitPolicy {
         s.seen = events;
         s.len = len;
         s.valid = true;
-        return transformerFromQkv(s.enc, s.qkv, "event.tr.layers.0");
+        return new EvtTower(transformerFromQkv(s.enc, s.qkv, "event.tr.layers.0"), s.h);
     }
 
     private float[] eventRowOf(Map<String, Object> event, int seat) {
@@ -629,8 +701,17 @@ public final class V4Policy implements LogitPolicy {
         return qkv;
     }
 
-    /** 事件塔（全量路径）：喂满 K 个 token 的冷启动 —— 判据④的基准。 */
-    private float[][] eventTowerFull(float[][] evt) throws IOException {
+    /**
+     * 事件塔（**窗口内**推进）：从 `h0`（**窗口之前**的 carry；`null` ⇒ 全 0）推进窗口里的
+     * **真实事件行**，`padding` 不喂。
+     *
+     * <p>三条路径都汇到这里或与它同口径（见 {@link #eventTowerRound}）：
+     * ① 全量生产路径 = {@link #eventTowerRound}（整手 carry）；
+     * ② 增量生产路径 = 缓存槽的 `s.h`（同一把递推，只是分成多次走）；
+     * ③ **golden 夹具** = 这里（`h0` 由 Python 显式给出）—— 于是"给定同一个 `h0`，三端逐位相同"
+     * 成为可判据（W1 的核心验收，见 `docs/VALVES-AND-FIXTURES.md` §3 W1）。
+     */
+    private EvtTower eventTowerWindow(float[][] evt, float[] h0) throws IOException {
         float[][] e = new float[evt.length][];
         for (int i = 0; i < e.length; i++) {
             e[i] = eventMlpRow(evt[i]);
@@ -639,22 +720,95 @@ public final class V4Policy implements LogitPolicy {
         float[][] ghh = mat("event.cell.weight_hh", 3 * dModel, dModel);
         float[] gbi = vec("event.cell.bias_ih", 3 * dModel);
         float[] gbh = vec("event.cell.bias_hh", 3 * dModel);
-        float[] h = new float[dModel];                            // 冷启动 h=0，喂满 K 个 token
-        for (int i = 0; i < e.length; i++) {
+        float[] h = (h0 == null) ? new float[dModel] : h0.clone();
+        int real = realRows(evt);                                 // 前部零 padding 不喂 GRU
+        for (int i = evt.length - real; i < evt.length; i++) {
             h = gruStep(e[i], h, gih, ghh, gbi, gbh);
         }
         lastFullHidden = h;
-        return transformerLayer(e, "event.tr.layers.0");
+        return new EvtTower(transformerLayer(e, "event.tr.layers.0"), h);
     }
 
     /**
-     * 七个头的主体：**事件塔的输出从参数进来**（`eTokens[K][dm]`），其余全量共用。
+     * 事件塔（**整手**推进）：从 0 起重放 `obs.events` 的**全部**真实事件行 ⇒ 得到"整手 carry"，
+     * 与增量路径的 `s.h` **逐位同源**（同一把递推、同一个顺序、同一批行）。
+     *
+     * <p>为什么全量路径不能只喂窗口：窗口 `K=60` 覆盖不到一整手，那个"窗口冷启动"的 h
+     * 与槽里的 carry 是**两个不同的量**（见 {@link #cachedHidden}）；一旦融合消费 h，
+     * 两条路径就会分叉（三端不同值 + 判据④变红）。
+     */
+    private EvtTower eventTowerRound(Map<String, Object> obs, float[][] evt) throws IOException {
+        final int k = cache.window();
+        int seat = V4Features.i(obs.get("seat"), 0);
+        List<Map<String, Object>> ev = V4Features.eventsOf(obs);
+        int events = ev.size();
+        float[][] e = new float[evt.length][];
+        for (int i = 0; i < e.length; i++) {
+            e[i] = eventMlpRow(evt[i]);
+        }
+        float[] h = replayCarry(ev, seat, Math.max(0, events - k), null);
+        int real = Math.min(events, k);
+        // ⚠ 张量**取一次**（`mat`/`vec` 每行都会走一遍 HashMap + 形状核对；放在循环里纯属浪费）
+        float[][] gih = mat("event.cell.weight_ih", 3 * dModel, dModel);
+        float[][] ghh = mat("event.cell.weight_hh", 3 * dModel, dModel);
+        float[] gbi = vec("event.cell.bias_ih", 3 * dModel);
+        float[] gbh = vec("event.cell.bias_hh", 3 * dModel);
+        for (int i = evt.length - real; i < evt.length; i++) {
+            h = gruStep(e[i], h, gih, ghh, gbi, gbh);
+        }
+        lastFullHidden = h;
+        return new EvtTower(transformerLayer(e, "event.tr.layers.0"), h);
+    }
+
+    /** 把 `ev[0, upto)` 这 `upto` 条**真实**事件行喂进 GRU（`h == null` ⇒ 从 0 起）。 */
+    private float[] replayCarry(List<Map<String, Object>> ev, int seat, int upto, float[] h)
+            throws IOException {
+        float[] acc = (h == null) ? new float[dModel] : h;
+        float[][] gih = mat("event.cell.weight_ih", 3 * dModel, dModel);
+        float[][] ghh = mat("event.cell.weight_hh", 3 * dModel, dModel);
+        float[] gbi = vec("event.cell.bias_ih", 3 * dModel);
+        float[] gbh = vec("event.cell.bias_hh", 3 * dModel);
+        for (int i = 0; i < upto; i++) {
+            acc = gruStep(eventMlpRow(eventRowOf(ev.get(i), seat)), acc, gih, ghh, gbi, gbh);
+        }
+        return acc;
+    }
+
+    /**
+     * 窗口里**真实事件**的行数（前部是零 padding ⇒ 全是 0 的行）。
+     *
+     * <p>为什么靠"整行是否全 0"判定：真实事件 token 的 `type` 那一段是 one-hot，
+     * 恒有一位为 1 ⇒ 全 0 行只可能是 padding。判定后还要确认它们**确实在尾部前面的连续段**
+     * （否则窗口形状就坏了），不一致当场报错而不是算出一个奇怪的 carry。
+     */
+    static int realRows(float[][] evt) throws IOException {
+        int real = 0;
+        for (float[] row : evt) {
+            boolean nz = false;
+            for (float x : row) {
+                if (x != 0f) {
+                    nz = true;
+                    break;
+                }
+            }
+            if (nz) {
+                real++;
+            } else if (real > 0) {
+                throw new IOException("事件窗口的零行出现在真实事件之后（形状坏了）");
+            }
+        }
+        return real;
+    }
+
+    /**
+     * 七个头的主体：**事件塔的输出从参数进来**（`eTokens[K][dm]` + 隐状态 `hEvt[dm]`），
+     * 其余全量共用。
      *
      * <p>这就是"增量 == 全量"的判据能成立的原因：两条路径从 Transformer 的注意力往后
-     * 是**同一份代码、同一批浮点值**（`eTokens` 逐位相同）⇒ 七个头逐位相同，
+     * 是**同一份代码、同一批浮点值**（`eTokens` 与 `hEvt` 逐位相同）⇒ 七个头逐位相同，
      * 不是"差一点点"。⚠ 别把这里的顺序改成"看起来等价"的样子（浮点加法不满足结合律）。
      */
-    private Map<String, float[]> forwardWith(V4Features.Tensors t, float[][] eTokens)
+    private Map<String, float[]> forwardWith(V4Features.Tensors t, float[][] eTokens, float[] hEvt)
             throws IOException {
         int n = t.cand.length;
         int dm = dModel;
@@ -737,6 +891,32 @@ public final class V4Policy implements LogitPolicy {
             u[i] = mlp(cat3, "fusion.out.net", 3 * dm, dm);
         }
 
+        // ---- 长程记忆门控（W1，第六十轮）：`u_i ⊙ g_mem`（**逐候选**）
+        //   `g_mem[j] = 1 + tanh(dot(memW[j], hEvt) + memB[j])`。
+        //   ⛔ 为什么不能"把 hEvt 拼到候选后面 / 当逐行常数加进去"：那给同一行所有候选加的是
+        //   **同一个量** ⇒ softmax/argmax 数学上不变、那几列梯度恒为 0（第五十轮就是这么栽的，
+        //   红证见 NOTES §6.5 第四十八~五十四轮）。门控乘在 `u_i` 上而 `u_i` 各不相同 ⇒ 真能改判。
+        //   ⚠ 门控在**所有头**之前（danger/effect/meanU 一起看到长程记忆），不只是 policy。
+        //   旧网没有 `fusion.mem.*` ⇒ 全 0 ⇒ `g_mem ≡ 1` ⇒ 与"没有门控"**逐位相同**。
+        float[][] memW = mats.get("fusion.mem.weight");
+        if (memW != null) {
+            float[] memB = memBias(dm);
+            float[] memG = new float[dm];
+            for (int j = 0; j < dm; j++) {
+                double acc = 0.0;
+                float[] row = memW[j];
+                for (int q = 0; q < dm; q++) {
+                    acc += (double) row[q] * hEvt[q];
+                }
+                memG[j] = (float) (1.0 + Math.tanh(acc + memB[j]));
+            }
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < dm; j++) {
+                    u[i][j] *= memG[j];
+                }
+            }
+        }
+
         // ---- 头
         // ⚠ **belief 用"逐候选门控"接进 policy**（2026-09-30 第五十五轮）：
         //   `g = 1 + tanh(W_g·sigmoid(bt) + b_g)`（[dm]），`policy_i = W·(u_i ⊙ g) + b`。
@@ -803,6 +983,9 @@ public final class V4Policy implements LogitPolicy {
         out.put("belief_tenpai", head(meanU, "belief_tenpai", 3));
         out.put("danger", flatten(danger, 4));
         out.put("effect", flatten(effect, 3));
+        // W1 起把**事件塔的隐状态**也交出来：它现在是融合的输入（`fusion.mem` 门控），
+        // 于是"三端同值"可以直接比这个向量（比只看七个头灵敏得多 —— 见 golden 夹具格式 2）。
+        out.put("h_evt", hEvt);
         return out;
     }
 
@@ -893,21 +1076,34 @@ public final class V4Policy implements LogitPolicy {
     }
 
     /**
-     * 增量路径的隐状态（该座位当前小局的 carry）。
+     * 增量路径的隐状态（该座位当前小局的**整手 carry**）。
      *
-     * <p>⚠ 它与**全量路径**的 `h`（{@link #debugFullHidden()}，窗口 60 个 token 的冷启动）
-     * 是两个不同的量 —— 见 {@code docs/FEATURES-V4.md} §5.3 的口径说明。当前模型里
-     * `h` **不被任何头消费**（融合只读 `eTokens`），所以两者不同不影响任何输出；
-     * 自检把"h 不同但七头逐位相同"钉成一条判据，将来谁把 `h` 接进融合，这条就会红。
+     * <p>⚠ W1（第六十轮）起 `h` **被融合消费**（`fusion.mem` 逐候选门控）—— 于是它与
+     * {@link #debugFullHidden()}（全量路径重放出来的**同一个量**）必须**逐位相同**，
+     * 这从"一条警戒线"变成了**硬判据**（`SelfTest.v4CacheTests` 直接比两者）。
+     * 第五十八轮那条"h 不同但七头逐位相同"的绊线已经**兑现**：这里给出的是同一个 carry。
      */
     public float[] cachedHidden(Map<String, Object> obs) throws IOException {
         forwardCached(obs);
         return cache.slot(V4Features.i(obs.get("seat"), 0)).h;
     }
 
-    /** 全量路径最后一次前向里的冷启动 `h`（自检对比用；见 {@link #cachedHidden}）。 */
+    /** 全量路径最后一次前向里的**整手 carry**（自检对比用；见 {@link #cachedHidden}）。 */
     public float[] debugFullHidden() {
         return lastFullHidden;
+    }
+
+    /**
+     * **窗口之前**的 carry（自检用）：重放 `obs.events` 的前 `max(0, n-K)` 条。
+     *
+     * <p>这是"夹具/离线给的那个 `h0`"在生产侧的对应物 —— 有了它，"整手重放"与
+     * "前缀 carry + 窗口推进"两条路线可以在自检里**逐位对拍**（判据见
+     * {code SelfTest.v4CacheTests}）。
+     */
+    public float[] debugPrefixCarry(Map<String, Object> obs) throws IOException {
+        int seat = V4Features.i(obs.get("seat"), 0);
+        List<Map<String, Object>> ev = V4Features.eventsOf(obs);
+        return replayCarry(ev, seat, Math.max(0, ev.size() - cache.window()), null);
     }
 
     /** 缓存槽当前的窗口 token 行（自检用：必须与 `V4Features.eventMatrix` 逐位相同）。 */

@@ -129,8 +129,12 @@ def incremental_proof(obs: Mapping[str, Any], *, atol: float = 1e-5) -> dict[str
     events = obs.get("events") or []
     st_ok, st_d = cache.incremental_equals_full(obs, atol=atol)
     m = M.build(seed=11)
+    # ⚠ **座位要显式传**（`EventStream` 的默认 0 只适合"自己视角"的玩具 obs）：
+    #   事件 token 里的 actor/from 是相对座位的 one-hot，写死 0 会让这条自证
+    #   "自洽但与真实窗口不同源"（假绿）。
     stream = cache.EventStream(lambda tok, h: m.step_event(torch.tensor(tok, dtype=torch.float32)
-                                                           .unsqueeze(0), h))
+                                                           .unsqueeze(0), h),
+                               seat=int(obs.get("seat", 0)))
     for e in events:
         stream.push(e)
     h_inc = stream.step()

@@ -748,73 +748,106 @@ bool tileMatrix(const JVal &obs, const FeatureView &view, const PerSeatDerived &
 }
 
 // ---------------------------------------------------------------- evt
+/** `evt` 逐字段的起始列（算一次、逐行复用）= Java `evtOff` 的所有调用点。 */
+struct EvtOffsets {
+    int type = 0;
+    int tileKind = 0;
+    int tileAka = 0;
+    int calledKind = 0;
+    int calledAka = 0;
+    int actor = 0;
+    int from = 0;
+    int meldKind = 0;
+    int turn = 0;
+    int tsumogiri = 0;
+    int sideways = 0;
+    int ripPhase = 0;
+    int seqDelta = 0;
+};
+
+/** 逐字段取偏移（照 Java `evtOff` 的扫描；找不到就报错，不猜）。 */
+bool evtOffsetsOf(EvtOffsets &o, std::string &err) {
+    o.type = evtOffOf("type", err);
+    o.tileKind = evtOffOf("tile_kind", err);
+    o.tileAka = evtOffOf("tile_aka", err);
+    o.calledKind = evtOffOf("called_kind", err);
+    o.calledAka = evtOffOf("called_aka", err);
+    o.actor = evtOffOf("actor", err);
+    o.from = evtOffOf("from", err);
+    o.meldKind = evtOffOf("meld_kind", err);
+    o.turn = evtOffOf("turn", err);
+    o.tsumogiri = evtOffOf("tsumogiri", err);
+    o.sideways = evtOffOf("sideways", err);
+    o.ripPhase = evtOffOf("rip_phase", err);
+    o.seqDelta = evtOffOf("seq_delta", err);
+    return err.empty();
+}
+
+/**
+ * **一条事件**的 token 行（`eventMatrix` 的逐行版本 = Java `V4Features.eventRow`）。
+ *
+ * <p>为什么需要它：W1 起"整手 carry"要按顺序重放**窗口之前**的事件行（`V4Policy.replayCarry`），
+ * 而窗口那 60 行是 `eventMatrix` 拼的 —— 两处必须是**同一份实现**（另写一份必然漂移，
+ * 漂移的症状是"重放看起来正常、carry 差一点点"）。
+ *
+ * <p>⚠ **自带清零**（照 Java 侧刚修的那条）：调用方**会复用同一支行缓冲**，
+ * 不清零的后果是**静默累积**（第 i 行 = 前 i 条事件所有位或的结果）。清零是 96 次写，可忽略。
+ */
+void evtRowFill(const JVal &e, int seat, const EvtOffsets &o, float *row) {
+    std::fill(row, row + kCEvt, 0.f);
+    const std::string t = jStr(field(e, "type"));
+    for (int i = 0; i < 8; i++) {
+        if (t == kEvtTypes[i]) {
+            row[static_cast<size_t>(o.type + i)] = 1.f;
+        }
+    }
+    const int tk = parseKind(jStr(field(e, "tile")));
+    if (tk >= 0) {
+        row[static_cast<size_t>(o.tileKind + tk)] = 1.f;
+    }
+    const int ck = parseKind(jStr(field(e, "called_tile")));
+    if (ck >= 0) {
+        row[static_cast<size_t>(o.calledKind + ck)] = 1.f;
+    }
+    const JVal *actor = field(e, "actor");
+    if (present(actor)) {
+        row[static_cast<size_t>(o.actor + floorMod4(jInt(actor, 0) - seat))] = 1.f;
+    }
+    const JVal *src = field(e, "from");
+    if (present(src)) {
+        row[static_cast<size_t>(o.from + floorMod4(jInt(src, 0) - seat))] = 1.f;
+    }
+    const std::string mk = jStr(field(e, "meld_kind"));
+    for (int i = 0; i < 5; i++) {
+        if (mk == kMeldKindsV4[i]) {
+            row[static_cast<size_t>(o.meldKind + i)] = 1.f;
+        }
+    }
+    row[static_cast<size_t>(o.tileAka)] = startsWithZero(jStr(field(e, "tile"))) ? 1.f : 0.f;
+    row[static_cast<size_t>(o.calledAka)]
+            = startsWithZero(jStr(field(e, "called_tile"))) ? 1.f : 0.f;
+    row[static_cast<size_t>(o.turn)] = static_cast<float>(jInt(field(e, "turn"), 0)) / 18.f;
+    row[static_cast<size_t>(o.tsumogiri)] = jBool(field(e, "tsumogiri")) ? 1.f : 0.f;
+    row[static_cast<size_t>(o.sideways)] = jBool(field(e, "sideways")) ? 1.f : 0.f;
+    row[static_cast<size_t>(o.ripPhase)] = jBool(field(e, "rip_phase")) ? 1.f : 0.f;
+    // ⚠ 这里是 double 域算完再落 float（照 Java：`Math.min(d,8.0)/8.0` 然后 cast）
+    row[static_cast<size_t>(o.seqDelta)] = static_cast<float>(
+            std::min(jDouble(field(e, "seq_delta"), 1.0), 8.0) / 8.0);
+}
+
 /** `[60][96]`：最近 K 条公开事件，**新的在尾部**（与增量缓存同序）。 */
 bool eventMatrix(const JVal &obs, std::array<std::array<float, kCEvt>, kKEvt> &out,
                  std::string &err) {
     const auto events = eventsOf(obs);
     const int seat = jInt(obs.find("seat"), 0);
     const int m = std::min(static_cast<int>(events.size()), kKEvt);
-    int offType = 0, offTileKind = 0, offTileAka = 0, offCalledKind = 0, offCalledAka = 0;
-    int offActor = 0, offFrom = 0, offMeldKind = 0, offTurn = 0, offTsumogiri = 0;
-    int offSideways = 0, offRipPhase = 0, offSeqDelta = 0;
-    // 逐字段取偏移（照 Java `evtOff` 的扫描；找不到就报错，不猜）
-    offType = evtOffOf("type", err);
-    offTileKind = evtOffOf("tile_kind", err);
-    offTileAka = evtOffOf("tile_aka", err);
-    offCalledKind = evtOffOf("called_kind", err);
-    offCalledAka = evtOffOf("called_aka", err);
-    offActor = evtOffOf("actor", err);
-    offFrom = evtOffOf("from", err);
-    offMeldKind = evtOffOf("meld_kind", err);
-    offTurn = evtOffOf("turn", err);
-    offTsumogiri = evtOffOf("tsumogiri", err);
-    offSideways = evtOffOf("sideways", err);
-    offRipPhase = evtOffOf("rip_phase", err);
-    offSeqDelta = evtOffOf("seq_delta", err);
-    if (!err.empty()) {
+    EvtOffsets o;
+    if (!evtOffsetsOf(o, err)) {
         return false;
     }
     for (int x = 0; x < m; x++) {
-        const JVal &e = *events[events.size() - static_cast<size_t>(m - x)];
-        auto &row = out[static_cast<size_t>(kKEvt - m + x)];
-        const std::string t = jStr(field(e, "type"));
-        for (int i = 0; i < 8; i++) {
-            if (t == kEvtTypes[i]) {
-                row[static_cast<size_t>(offType + i)] = 1.f;
-            }
-        }
-        const int tk = parseKind(jStr(field(e, "tile")));
-        if (tk >= 0) {
-            row[static_cast<size_t>(offTileKind + tk)] = 1.f;
-        }
-        const int ck = parseKind(jStr(field(e, "called_tile")));
-        if (ck >= 0) {
-            row[static_cast<size_t>(offCalledKind + ck)] = 1.f;
-        }
-        const JVal *actor = field(e, "actor");
-        if (present(actor)) {
-            row[static_cast<size_t>(offActor + floorMod4(jInt(actor, 0) - seat))] = 1.f;
-        }
-        const JVal *src = field(e, "from");
-        if (present(src)) {
-            row[static_cast<size_t>(offFrom + floorMod4(jInt(src, 0) - seat))] = 1.f;
-        }
-        const std::string mk = jStr(field(e, "meld_kind"));
-        for (int i = 0; i < 5; i++) {
-            if (mk == kMeldKindsV4[i]) {
-                row[static_cast<size_t>(offMeldKind + i)] = 1.f;
-            }
-        }
-        row[static_cast<size_t>(offTileAka)] = startsWithZero(jStr(field(e, "tile"))) ? 1.f : 0.f;
-        row[static_cast<size_t>(offCalledAka)]
-                = startsWithZero(jStr(field(e, "called_tile"))) ? 1.f : 0.f;
-        row[static_cast<size_t>(offTurn)] = static_cast<float>(jInt(field(e, "turn"), 0)) / 18.f;
-        row[static_cast<size_t>(offTsumogiri)] = jBool(field(e, "tsumogiri")) ? 1.f : 0.f;
-        row[static_cast<size_t>(offSideways)] = jBool(field(e, "sideways")) ? 1.f : 0.f;
-        row[static_cast<size_t>(offRipPhase)] = jBool(field(e, "rip_phase")) ? 1.f : 0.f;
-        // ⚠ 这里是 double 域算完再落 float（照 Java：`Math.min(d,8.0)/8.0` 然后 cast）
-        row[static_cast<size_t>(offSeqDelta)] = static_cast<float>(
-                std::min(jDouble(field(e, "seq_delta"), 1.0), 8.0) / 8.0);
+        evtRowFill(*events[events.size() - static_cast<size_t>(m - x)], seat, o,
+                   out[static_cast<size_t>(kKEvt - m + x)].data());
     }
     return true;
 }
@@ -1048,6 +1081,23 @@ bool zeroBlock(const std::string &bid, V4Tensors &t, std::string &err) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------- 逐行事件口（V4Policy 的整手重放要用）
+//
+// 为什么由**本文件**对外提供这两件（而不是在 `v4policy.cpp` 里再写一份读 events / 编码 token）：
+// Java 侧就是 `V4Features.eventsOf` / `V4Features.eventRow` 由 `V4Policy` 调用 —— 事件的读取口径
+// 与 token 布局都只允许有一份实现（见 `eventRowFill` 的注释）。
+
+std::vector<const JVal *> v4EventsOf(const JVal &obs) { return eventsOf(obs); }
+
+bool v4EventRow(const JVal &e, int seat, float *row, std::string &err) {
+    EvtOffsets o;
+    if (!evtOffsetsOf(o, err)) {
+        return false;
+    }
+    evtRowFill(e, seat, o, row);
+    return true;
+}
 
 // ---------------------------------------------------------------- 总装
 

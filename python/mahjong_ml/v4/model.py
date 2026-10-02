@@ -87,11 +87,21 @@ class EventTower(nn.Module):
 
     def forward(self, evt: torch.Tensor, h: torch.Tensor | None = None
                 ) -> tuple[torch.Tensor, torch.Tensor]:
+        """窗口 → `(e_tokens, carry_after_window)`；`h` = **窗口之前**的 carry（`None` ⇒ 全 0）。
+
+        ⚠ **只喂真实事件行**（前部零 padding 不喂）：`GRUCell(0, h) ≠ h`，把 padding 也喂进去
+        会让"窗口冷启动"与"整手 carry"差到 1e-2 量级（`cache.EventStream.recompute` 的注释里
+        记着这次实测）。Java 的缓存路径只重放真实事件行 ⇒ 三端必须同一口径，否则 W1 之后
+        "增量 == 全量"当场变红。padding 行怎么认：事件 token 的 `type` 段是 one-hot，
+        恒有一位为 1 ⇒ **整行全 0** 只可能是 padding。
+        """
         e = self.enc(evt)                                   # [B,K,D]
         if h is None:
             h = torch.zeros(e.shape[0], e.shape[2], dtype=e.dtype, device=e.device)
-            for t in range(e.shape[1]):                     # 冷启动：一串全喂
-                h = self.cell(e[:, t], h)
+        real = evt.abs().sum(dim=-1) > 0                    # [B,K]
+        for t in range(e.shape[1]):
+            h_new = self.cell(e[:, t], h)
+            h = torch.where(real[:, t].unsqueeze(-1), h_new, h)
         return self.tr(e), h
 
     def step(self, new_evt: torch.Tensor, h: torch.Tensor | None):
@@ -123,13 +133,16 @@ class Fusion(nn.Module):
         self.gate = nn.Linear(2 * d, d)
         self.write = nn.Linear(d, d)
         self.film = nn.Linear(d, d)
-        # ⛔ **`h_evt`（GRU 长程记忆）暂时仍未接**（第五十八轮把改动回退了，见 NOTES §6.5）：
-        #   它不是"删掉就完了"的死重（窗口 `K_EVT=60` 覆盖不到半局，它是唯一的长程记忆），
-        #   但**不能在这里顺手接**：Java 生产路径的 `h` 是**整局 carry**（`V4Policy.cachedHidden`），
-        #   而 Python/夹具的 `h` 是**窗口冷启动**（`eventTowerFull`）—— 两个不同的量。
-        #   一旦接进融合，两条路径的输出就分叉（三端不同值 + "增量 == 全量"红证变红）。
-        #   ⇒ 正确接法要先把 `h_evt` 变成**显式输入**（夹具/三端/缓存契约一起改），见
-        #   `V4Policy.cachedHidden` 的注释（那条判据就是为这一天留的绊线）。
+        # ⚠ **长程记忆（GRU 的 carry `h_evt`）走"逐维门控"接进来**（W1，第六十轮）：
+        #   与 `Heads.policy_gate` **同一个理由** —— 把 `h_evt` 拼在候选表示后面、或作为逐行常数
+        #   加进去，对 policy 是**数学空操作**（同一行所有候选吃到同一个量 ⇒ softmax/argmax 不变、
+        #   那几列梯度恒为 0，红证见 NOTES §6.5 第四十八~五十四轮）。门控是**逐候选**的
+        #   （`u_i` 各不相同）⇒ 真能改变 argmax。
+        #   零初始化 ⇒ `g ≡ 1` ⇒ **旧网（权重里没有这两个张量）逐位不变**：加载期补 0，
+        #   见 `export.normalize_state`；`strict=True` 也不会红。
+        self.mem = nn.Linear(d, d)
+        nn.init.zeros_(self.mem.weight)
+        nn.init.zeros_(self.mem.bias)
         self.out = Mlp(3 * d, d)
 
     def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor, e_tokens: torch.Tensor,
@@ -144,7 +157,10 @@ class Fusion(nn.Module):
         # ② state → delta：FiLM 调制事件表示
         evt_mod = u_evt * (1.0 + torch.tanh(self.film(state)))
         ctx_b = ctx.unsqueeze(1).expand(-1, q.shape[1], -1)
-        return self.out(torch.cat([u_tile, evt_mod, ctx_b], dim=-1))
+        u = self.out(torch.cat([u_tile, evt_mod, ctx_b], dim=-1))
+        # ③ 长程记忆门控（乘在**逐候选**的 `u_i` 上；零初始化 ⇒ 恒等 ⇒ 旧网逐位不变）。
+        #    乘在 `u` 上而不是只乘 policy ⇒ danger/effect/state（value 等）一起看到长程记忆。
+        return u * (1.0 + torch.tanh(self.mem(h_evt))).unsqueeze(1)
 
 
 class Heads(nn.Module):
@@ -219,6 +235,18 @@ class V4Model(nn.Module):
     def forward(self, tile: torch.Tensor, evt: torch.Tensor, ctx: torch.Tensor,
                 cand: torch.Tensor, mask: torch.Tensor | None = None,
                 h: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """`h` = **窗口之前**的 GRU carry（`[B,dm]`；`None` ⇒ 全 0 冷启动）。
+
+        ⚠ 两个量必须分清（W1 定稿，`docs/FEATURES-V4.md` §5.3）：
+
+        - `h`（进来）：**窗口之前**所有事件的 carry。生产端（Java/C++ 的缓存槽、或对整手事件
+          的重放）与离线端（`dataset` 的 `h0` 列）都按"**当前小局**从 0 起、逐事件推进"算它；
+        - `h_evt`（出去，喂 `Fusion`）：**窗口之后**的 carry = `EventTower.forward(evt, h)[1]`。
+
+        两者是同一个递推的两个时刻；`h=None` 时 `h_evt` 退化成"窗口内冷启动"，这是**离线
+        审计**（`value_audit` / `heads_audit` / 老的紧凑集）没有 `h0` 时的合法退化 —— 但它
+        **不等于**生产端喂进来的值，所以**训练必须传 `h0`**（否则训练/上线两套统计量）。
+        """
         h_tile, tile_pool = self.tile(tile)
         e_tokens, h_evt = self.event(evt, h)
         u = self.fusion(h_tile, tile_pool, e_tokens, h_evt, self.ctx(ctx), self.cand(cand))

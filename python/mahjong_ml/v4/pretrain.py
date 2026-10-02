@@ -134,6 +134,13 @@ def _batch(data: dict, idx: np.ndarray, device: str,
             np.asarray(data["effect"][idx], dtype=np.float32)).to(device),
         "nlegal": torch.from_numpy(nleg).to(device),
     }
+    # `h0`（W1b）：**窗口之前**的 GRU carry ⇒ 前向的 `h`（`EventTower.forward(evt, h)` 的初值）。
+    # ⚠ **有才加这个键**（而不是无条件加一个 `None`）：前向统一写成 `h=b.get("h")`，
+    #   于是"老紧凑集（没有这一列）"与"新紧凑集"走的是同一个调用点 —— 前者 = 窗口冷启动。
+    #   而"缺列算不算允许"不在这里判（这里只负责搬运）：那是 `train()` 的**硬闸门**
+    #   + `--no-carry` 的事，避免同一个口径散在两个地方。
+    if data.get("h0") is not None:
+        b["h"] = torch.from_numpy(np.asarray(data["h0"][idx], dtype=np.float32)).to(device)
     for src, dst in (("aux_opp_hand", "opp_hand"), ("aux_opp_tenpai", "opp_tenpai"),
                      ("aux_opp_dealin", "opp_dealin"), ("aux_own_tenpai", "own_tenpai"),
                      ("aux_own_shanten_after", "own_shanten")):
@@ -163,7 +170,8 @@ def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> 
         for i0 in range(0, n, batch):
             idx = np.arange(i0, min(i0 + batch, n))
             b = _batch(data, idx, device)
-            v = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])["value"]
+            v = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
+                      h=b.get("h"))["value"]
             out[i0:i0 + idx.size] = (torch.softmax(v.float(), dim=-1) * center).sum(-1).cpu().numpy()
     return out
 
@@ -432,7 +440,8 @@ def _behaviour_logprobs(model: M.V4Model, data: dict, device: str, batch: int,
         for i0 in range(0, n, batch):
             idx = np.arange(i0, min(i0 + batch, n))
             b = _batch(data, idx, device)
-            logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])["policy"]
+            logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
+                           h=b.get("h"))["policy"]
             if temp > 0:
                 logits = logits / float(temp)
             lp = torch.log_softmax(logits, dim=-1).gather(1, b["label"][:, None]).squeeze(1)
@@ -506,7 +515,7 @@ def assert_behaviour_consistency(model: M.V4Model, data: dict, idx: np.ndarray,
     """
     with torch.no_grad():
         b0 = _batch(data, idx, device)
-        o0 = model(b0["tile"], b0["evt"], b0["ctx"], b0["cand"], mask=b0["mask"])
+        o0 = model(b0["tile"], b0["evt"], b0["ctx"], b0["cand"], mask=b0["mask"], h=b0.get("h"))
         lp_new = torch.log_softmax(_policy_logits(o0, temp), dim=-1).gather(
             1, b0["label"][:, None]).squeeze(1)
         kl = float((logp_old[idx].to(device) - lp_new).mean())
@@ -714,7 +723,7 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
             evt_masked, mask_rows, target = mask_events(b["evt"], mask_frac, gen)
             b["evt"] = evt_masked
             ssl = (ssl_head, mask_rows, target)
-        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
         # ⚠ 掩码要喂进损失：自对弈数据集里 `random` 那 1/4 行的动作在训练过的网看来**几乎是零概率**
         #   （实测逐行 CE 中位 0.05 / 90 分位 24 / 最大 672）—— 不遮的话"策略 CE"这个指标会被它带跑，
         #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
@@ -801,6 +810,37 @@ def train(args) -> dict:
     meta = train_data["meta"]
     train_data["meta"] = meta                        # `evaluate` 要 action_types
     val_data["meta"] = meta
+
+    # ---- ★ W1b 硬闸门：训练必须有"长程 carry"（`h0` 列）------------------------------------
+    # 为什么是硬闸门：上线端（Java/C++）喂的是"**从 0 起逐事件推进整手**"的 carry，而紧凑集的
+    # `evt` 只有最近 K=60 条事件 —— 没有 `h0` 就只能"窗口冷启动"，**两边不是同一个量**
+    # （模型看到的记忆长度都不一样）。而这类不一致**不会报错**：训练照跑、指标照出，
+    # 只是上线后的分布对不上。⇒ 缺 `h0` 一律**报错退出**，除非显式 `--no-carry` 承担后果。
+    # ⚠ 三态（`--no-carry` 的**存在性**本身就是信息，别把它写成简单的 `getattr(..., False)`）：
+    #   · True  = 调用方显式承担（打醒目告警后继续）；
+    #   · False = **CLI 的缺省值**（`main()` 里 `action="store_true"`）⇒ **硬拒**；
+    #   · 缺失  = 程序化调用（自检/临时脚本直接 `Namespace(**{...})`，压根走不到 CLI 的旗标）
+    #             ⇒ 告警后继续。这类调用里的紧凑集多半是**没有 net.bin 的小夹具**
+    #             （`python/selfcheck.py` 的玩具数据集就是），硬拒只会让整个夹具跑不起来。
+    no_carry = getattr(args, "no_carry", None)
+    has_h0 = train_data.get("h0") is not None
+    if not has_h0:
+        msg = ("这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** "
+               "⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用"
+               "**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果")
+        if no_carry is False:
+            raise SystemExit("⛔ " + msg)
+        print("⚠⚠ " + msg)
+    if val_data.get("h0") is None and has_h0:
+        # 两个切分在同一次 `build` 里写出来 ⇒ 一个有、一个没有只可能是**数据集被搬坏了**
+        # （手工删/换过某一列）。硬拒：训练与验证在不同输入分布上比数字毫无意义。
+        raise SystemExit("训练切分有 `h0` 列但**验证切分没有** —— 数据集被搬坏了（重新 build）")
+    if has_h0 and no_carry:
+        print("（提示）数据集**有** `h0` 列 ⇒ 它就是前向的 `h`；`--no-carry` 只放宽"
+              "「缺列时的硬闸门」，不会把已有的 carry 丢掉")
+    if has_h0 and not no_carry:
+        print(f"长程 carry：`h0[{int(train_data['h0'].shape[1])}]` 已接入前向"
+              f"（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推")
 
     device = _device(args.device)
     threads = guard.apply_cpu_limit(args.threads)
@@ -1024,6 +1064,7 @@ def train(args) -> dict:
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
           f"标签侧 {'有' if meta['has_aux'] else '无'}；"
+          f"长程 carry {'有（`h0` 列）' if has_h0 else '**无**（窗口冷启动）'}；"
           f"学生行占比 训练 {frac_tr:.1%} / 验证 {frac_va:.1%}"
           f"{'（`--student` 遮罩生效）' if keep_tr is not None else '（无掩码：全部行都算学生）'}")
     print(f"模型：{model.param_count():,} 参数（+SSL 头 {sum(p.numel() for p in ssl_head.parameters()):,}）；"
@@ -1073,7 +1114,7 @@ def train(args) -> dict:
                 evt_masked, mask_rows, target = mask_events(b["evt"], args.mask_frac, rng_gen)
                 b["evt"] = evt_masked
                 ssl = (ssl_head, mask_rows, target)
-            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
             kb = None if keep_tr is None else keep_tr[idx].to(device)
             wb = None if w_tr is None else w_tr[idx].to(device)
             ppo = None
@@ -1169,6 +1210,10 @@ def train(args) -> dict:
         "kl_early_stop": float(getattr(args, "kl_early_stop", 0.03) or 0.0),
         "adv_norm": ("global" if adv_tr is not None else
                      ("batch" if objective == "ppo" else "n/a")),
+        # W1b：这一轮**有没有**长程 carry 进前向（台账里一眼可见；重建数据集是唯一修复手段）
+        "has_h0": bool(has_h0),
+        "h0_dim": (int(train_data["h0"].shape[1]) if has_h0 else None),
+        "no_carry": bool(no_carry),
         "final_val_top1": history[-1]["val_top1"] if history else None,
         "stages": {"a": "policy+effect（主干先会打牌）", "b": "冻主干只训头", "c": "联合微调（余弦降 lr）",
                    "ssl": f"掩码事件重建 frac={args.mask_frac} weight={args.ssl_weight}"},
@@ -1249,6 +1294,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="把点名的输入块整段置 0（`v4 spec` 里登记的块 id）—— 消融矩阵用")
     ap.add_argument("--init", default=None,
                     help="从这份权重起步（ckpt 或 net.bin）—— 缺省随机初始化（纯模仿那几轮的口径）")
+    # ⚠ 缺省 False = **硬闸门**：紧凑集没有 `h0` 列（长程 carry）就报错退出。
+    #   为什么不是"缺了就退化"：上线端喂整手 carry、训练端喂窗口 —— 两边不是同一个量，
+    #   而那种不一致**不报错**（训练照跑、指标照出）。见 `train()` 里的三态说明。
+    ap.add_argument("--no-carry", action="store_true",
+                    help="允许在**没有 `h0` 列**的紧凑集上训练（= 明知是窗口冷启动、书面承担"
+                         "「训练与上线不同源」的后果）。缺省禁止 —— 要消融/复现老数据才用它")
     # P1 自监督：掩码事件重建
     ap.add_argument("--mask-frac", type=float, default=0.15, help="掩码多少比例的真实事件 token（0 = 关）")
     ap.add_argument("--ssl-weight", type=float, default=0.2, help="掩码重建损失权重")

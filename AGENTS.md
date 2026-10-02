@@ -538,8 +538,11 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   跨代选人与续训见 NOTES §6.5（`online screen` / `--opponents` / `--student-seats`）。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
 - **v4 前向的增量事件缓存**（默认开，`--no-v4-cache` 关）：判据必须**成对** —— **增量 == 全量（逐位）**
-  *且* **真的命中**（只有"相等"是假绿：退回全量的结果当然等于全量）。回归：`SelfTest.v4CacheTests`
-  + `tools\v4-cache-check.mjs`（同种子开/关缓存 ⇒ 轨迹逐字节）。细节见 NOTES §6.5 第十一轮。
+  *且* **真的命中**（只有"相等"是假绿）。回归：`SelfTest.v4CacheTests` + `tools\v4-cache-check.mjs`。
+  ⚠ **W1 起 `h_evt` 被融合消费** ⇒ 多两条**逐位**判据（缓存 carry == 整手重放；前缀 carry + 窗口 == 整手重放），
+  且训练侧没有 `h0` 列就**硬拒**（不许静默退化成窗口冷启动）；⚠ **逐行事件编码函数必须自带清零**
+  （调用方复用同一缓冲 ⇒ 不清零 = 静默累积）；⚠ **可缺张量**（`policy_gate` / `fusion.mem`）在**所有**
+  加载点走 `normalize_state` 补 0（= 恒等 ⇒ 旧网逐位不变）。见 NOTES §6.5 第十一/六十一轮。
 - ⛔ **critic 只剩"基线尺度"这一件事可做**（三条探针：`--ev-ref legit` / `--readout` / `--shaping`）：
   ① 判据**别用绝对门槛、也别拿标签侧真值当参照** —— `win_flag` 是**本小局结局本身**、`opp_*` 是隐藏真值，
   那样量出的 `EV(delta)=0.632` 是**作弊上界**；**合法**天花板只有 **0.069** ⇒ 闸门 = `EV ≥ 0.7 × 合法天花板`

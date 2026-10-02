@@ -82,9 +82,16 @@ struct V4Policy {
      */
     bool bindAll(std::string &err);
 
-    /** 全部七个头（自检与 golden 对拍用）= Java `V4Policy.forwardAll`（**只读**，可多线程共享）。 */
+    /**
+     * 全部七个头（自检与 golden 对拍用）= Java `V4Policy.forwardAll`（**只读**，可多线程共享）。
+     *
+     * @param h0 事件塔在**窗口之前**的 carry（长度 = `dModel`）。`nullptr`（缺省）= 生产路径的
+     *           **整手 carry**（从 0 起重放 `obs.events[0, n-K)` 再喂窗口里的真实行）；
+     *           给了 `h0` = 只从它起推进窗口里的真实行（golden 夹具那条路）。
+     *           ⚠ 两者**不是**同一个量（W1 起 carry 被融合消费，混用 ⇒ 三端分叉）。
+     */
     bool forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &out,
-                    std::string &err) const;
+                    std::string &err, const std::vector<float> *h0 = nullptr) const;
 
     /** 策略头 logits（逐候选，顺序 = `obs.legal`）= Java `V4Policy.logits`。 */
     bool logits(const JVal &obs, std::vector<float> &out, std::string &err) const;
@@ -107,6 +114,16 @@ bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::
 /** 全部七个头（自检 / golden 对拍用）= Java `V4Policy.forwardAll`。 */
 bool v4ForwardAll(const V4Policy &p, const JVal &obs,
                   std::map<std::string, std::vector<float>> &out, std::string &err);
+
+/**
+ * 全部七个头，**显式给"窗口之前"的 carry**（= Java `V4Policy.forwardAll(Tensors, h0)`）。
+ *
+ * <p>golden 夹具（格式 2）走这条：`h0` 由 Python 显式给出，三端拿同一个 `h0` 才能判
+ * "同 h ⇒ 同输出"。`h0` 长度必须是 `dModel` —— 对不上**当场报错**（既不截断也不补零：
+ * 静默退化会让"同 h ⇒ 同输出"这条判据变成空转）。
+ */
+bool v4ForwardAllH0(const V4Policy &p, const JVal &obs, const std::vector<float> &h0,
+                    std::map<std::string, std::vector<float>> &out, std::string &err);
 
 /**
  * 只读权重文件头 8 字节判格式（= Java `NetWeights.loadBytes` 的分派口）。

@@ -104,6 +104,24 @@ std::string v4Fingerprint(const std::vector<std::string> &ids, const std::vector
 bool v4Assemble(const JVal &obs, const std::vector<std::string> &ablate, V4Tensors &out,
                 std::string &err);
 
+/**
+ * 事件流（只保留**对象**元素，保持原顺序）= Java `V4Features.eventsOf`。
+ *
+ * <p>给 `V4Policy` 的"整手 carry"用：它要按顺序重放 `events[0, n-K)`，而 `v4Assemble` 只交出
+ * 尾部 K 行的张量。返回的指针指向 `obs` 内部，**obs 必须活得比它久**。
+ */
+std::vector<const JVal *> v4EventsOf(const JVal &obs);
+
+/**
+ * **一条事件**的 token 行（`eventMatrix` 的逐行版本 = Java `V4Features.eventRow`）。
+ *
+ * <p>`row` 由调用方提供（长度 `kCEvt`）。⚠ **本函数自带清零**：调用方逐事件重放时会复用同一支
+ * 缓冲，不清零就是"前 i 条事件按位或"的静默累积（Java 侧刚修过这条）。
+ *
+ * @return false 且填 `err`：事件字段布局表不自洽（不猜）
+ */
+bool v4EventRow(const JVal &e, int seat, float *row, std::string &err);
+
 /** 布局自述（日志用，与 Java `V4Features.describe()` 同义）。 */
 std::string v4FeatureLayout();
 

@@ -177,7 +177,7 @@ def forward_value(model: M.V4Model, data: dict, n: int, device: str,
     for i0 in range(0, n, batch):
         idx = np.arange(i0, min(i0 + batch, n))
         b = _batch(data, idx, device)
-        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
         prob[idx] = torch.softmax(out["value"].float(), dim=-1).cpu().numpy()
     return prob
 
@@ -569,7 +569,10 @@ def forward_pools(model: M.V4Model, data: dict, n: int, device: str,
         for i0 in range(0, idx_all.shape[0], batch):
             idx = idx_all[i0:i0 + batch]
             b = _batch(data, idx, device)
-            model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+            # `h=b.get("h")`：有 `h0` 列就把**窗口之前**的 carry 喂进去（与训练同源）；
+            # 老紧凑集没有这一列 ⇒ `None` ⇒ 窗口冷启动（审计是只读的，这里按老行为退化，
+            # **不报错** —— 但读出的数字要在报告里注明它没有长程 carry）。
+            model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
             u = cap["u"]                                            # [B,L,D]
             blocks = {**pool_features(u, b["mask"]),
                       "tile_pool": cap["tile_pool"], "h_evt": cap["h_evt"]}

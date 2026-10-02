@@ -68,7 +68,9 @@ def forward_heads(model: M.V4Model, data: dict, n: int, device: str,
         idx = np.arange(i0, min(i0 + batch, n))
         b = _batch(data, idx, device)
         with torch.no_grad():
-            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"])
+            # `h=b.get("h")`：有 `h0` 列（W1b）就喂**窗口之前**的 carry —— 与训练同源；
+            # 老紧凑集没有这一列 ⇒ `None` ⇒ 窗口冷启动（只读审计，按老行为退化即可）。
+            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
         for k in out_keys:
             acc[k].append(out[k].float().cpu().numpy())
     return {k: np.concatenate(v, axis=0) for k, v in acc.items()}

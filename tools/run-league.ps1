@@ -9,6 +9,12 @@
 #   · **只跑缓存档**：固定 `--games 1000`（紧凑集实测 ≈14.8 GB < 0.8×31.6 GB = 25.3 GB）
 #     —— 刻意**不**用 `--target-minutes`，免得规划器为了凑时间把轮次顶到磁盘档（45 分钟那档）。
 #   · S 盘：每代成功后轮换删掉这一代的大件（raw/compact/eval）。
+#   · **W1b：`h0` 列随 `--student` 的网自动来** —— 数据集由 `mahjong_ml.v4 loop` 内部调
+#     `v4.dataset build --student <这一轮学生的确切策略串>` 生成，而 `h0`（窗口之前的整手 carry）
+#     就从这个 `--student` 串里的 `net:<路径>` 解析（剥掉 `@α`/`#T` 后缀）⇒ **这里不需要额外传
+#     `--carry-model`**。口径：`h0` 一律用**学生网**算（= 采集那份权重 = 现任网 = 上线那份），
+#     所以训练与推理同源；缺 `h0` 列时 `pretrain` 会**硬拒**（不许静默退化成窗口冷启动）。
+#     本脚本自己**不建**数据集（没有别的 `dataset build` 调用点）—— 要改口径请改 `v4/loop.py`。
 #
 # 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000]
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000)
