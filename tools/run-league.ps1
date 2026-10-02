@@ -23,7 +23,7 @@
 #     本脚本自己**不建**数据集（没有别的 `dataset build` 调用点）—— 要改口径请改 `v4/loop.py`。
 #
 # 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000]
-param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000)
+param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
@@ -48,19 +48,30 @@ if (Test-Path $trainerS) {
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
 $label = 'v4-league8'
-$seed  = 20261001
+# ⚠ **季种子不能再是常数**（第八季审计）：采集 seed = `cfg.seed + 绝对代号`，而整条命令行也是
+#   同一批参数的确定函数 ⇒ 两个季只要 `--seed` 相同、"现任 + 对手池"相同，**同代号代就是逐字节
+#   同一次运行**（实测：`v4-league4-g04` 与 `_rejected\v4-league5-g04` 同 SHA256、同 5,446,406 B；
+#   league3/4/5 的 g01/g02、league6/7 的 g01 的逐套 Δ **逐位重复**）。后果有两条：
+#   ① 白跑一整代（含 33 分钟闸门）；② 把"N 个候选"当独立样本统计是**伪重复**（有效样本远小于 N）。
+#   现在按标签派生：`v4-league8` ⇒ 20261001 + 8×10000 = 20341001（需要复现旧季时显式 `-Seed`）。
+$seed  = if ($Seed -gt 0) { $Seed } else { 20261001 + 10000 * [int]($label -replace '\D', '') }
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
 $pool  = New-Object System.Collections.Generic.List[string]
 $rejected = Join-Path $root 'tools\build\_rejected'
-$gateSeeds = "$seed,$($seed + 1)"   # 2 套牌山（省 ~1/3 闸门时间，仍是多集合）
+# ⚠ **牌山每代换新**（第八季审计的第二条）：原来历季 19 个候选都用同一对 `20261001/2`，
+#   而"牌山"这个误差分量是**共模**的 —— 同一个候选换成别的牌山会翻号（实测：回路自评换 seed
+#   5/5 为正 +1.32~+3.10，闸门固定牌山 5/5 为负/零 −2.26~−0.09）⇒ 判决只能读成
+#   "**条件于这两套牌山**"，不能读成"这一代普遍更好/更差"，更不能把历次判决当独立复现来统计。
+#   从现在起按代派生两套新牌山（同一代内仍是多套合并 + 每套一个 block）。
+$gateSeedsFor = { param($g) "$($seed + 2 * $g - 1),$($seed + 2 * $g)" }
 
 function Free-GB { (Get-PSDrive S).Free / 1GB }
 function Log($m) { Write-Output ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
 
 Log ("开始：{0} 代 × {1} 场（在线自对弈 + 对手池 + **接受闸门**）" -f $Generations, $Games)
 Log ("现任（incumbent）= {0}" -f (Split-Path $incumbent -Parent | Split-Path -Leaf))
-Log ("闸门：每代 2 套牌山（{0}）× {1} 场/套；S 盘剩余 {2:N0} GB" -f $gateSeeds, $GateBlock, (Free-GB))
+Log ("闸门：每代 2 套**新**牌山（按代派生）× {0} 场/套；S 盘剩余 {1:N0} GB" -f $GateBlock, (Free-GB))
 
 # ⚠ **开跑前先验闸门方向**：`eval.paired_test` 的约定是 `diff = a − b`（正 = a 更好），
 #   而"采纳"问的是**候选更好吗** ⇒ `gate.decide` 必须按 `(候选, 现任)` 的顺序算。
@@ -118,14 +129,34 @@ for ($g = 1; $g -le $Generations; $g++) {
     $candidate = Join-Path $root "tools\build\$tag\net.bin"
     if (-not (Test-Path $candidate)) { Log "缺 $candidate，停止"; break }
 
+    # ---- ⚠ 候选去重（第八季审计）：与现任或池里任何一份**逐字节相同** ⇒ 这一代没有任何新信息。
+    #   实测踩过：`v4-league4-g04` 与 `v4-league5-g04` 同 SHA256（同 seed、同 offset、池空 ⇒ 整条
+    #   流水线逐字节复现）⇒ 白跑一场 33 分钟闸门，而且让"N 个候选"的统计**伪重复**。
+    #   命中就跳过闸门、**不进池**（池要的是有信息的对手），并记一行日志。
+    $candHash = (Get-FileHash $candidate -Algorithm SHA256).Hash
+    $dupOf = $null
+    if ((Get-FileHash $incumbent -Algorithm SHA256).Hash -eq $candHash) { $dupOf = '现任' }
+    else {
+        foreach ($p in $pool) {
+            if ((Test-Path $p) -and (Get-FileHash $p -Algorithm SHA256).Hash -eq $candHash) {
+                $dupOf = (Split-Path $p -Parent | Split-Path -Leaf); break
+            }
+        }
+    }
+    if ($dupOf) {
+        Log ("  ⏭ **跳过闸门**：{0} 与 {1} 逐字节相同（没有新信息；换 `-Seed` 或改配方再跑）" -f $tag, $dupOf)
+        continue
+    }
+
     # ---- 接受闸门：多套牌山集合的合并配对判决（CI 排除 0 且为正才采纳）
-    Log ("  闸门：现任 vs {0}（2 套牌山 × {1} 场）" -f $tag, $GateBlock)
+    $gateSeeds = & $gateSeedsFor $g
+    Log ("  闸门：现任 vs {0}（2 套**新**牌山 {1} × {2} 场）" -f $tag, $gateSeeds, $GateBlock)
     $gateLog = Join-Path $root "release\gate-$tag.log"
     & $py -m mahjong_ml.v4.gate --incumbent $incumbent --candidate $candidate `
         --seeds $gateSeeds --games $GateBlock --block $GateBlock --workers 20 `
         --out (Join-Path $S 'gate') --tag $tag *> $gateLog
     $grc = $LASTEXITCODE
-    Get-Content $gateLog | Select-String -Pattern '牌山 20|合并判决' | ForEach-Object { Log ("    " + $_.Line.Trim()) }
+    Get-Content $gateLog | Select-String -Pattern '牌山 |合并判决|套间' | ForEach-Object { Log ("    " + $_.Line.Trim()) }
     # ⚠ **候选一律进池（无论是否被采纳）**：池是**采集时的对手**、现任是**基准**，两件事。
     #   第五季实测踩过：把"进池"绑在"采纳"上 ⇒ 一个都没采纳 ⇒ 池永远是空的 ⇒ 采集桌上
     #   只剩 student×2 + teacher×2，**把第一季赖以起效的历史快照多样性整条掐掉了**。
