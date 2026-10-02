@@ -114,6 +114,16 @@
 β>0 时同一批数据的梯度方向把 logits 拉向 ref）。
 **训练验证**：独立一季（与 W1 分开）。
 
+**已落地（2026-10-04）**：`pretrain --ref <net.bin|model.pt|ckpt 目录>`（缺省 = `--init` 那一份
+**现任**）+ `--ref-beta <β>`（**缺省 0**）。损失项 `β·KL(π_θ(·|s) ‖ π_ref(·|s))` **只在学生行上**
+（与策略损失同一个 `row_keep`）、用**同一个** `softmax(logits/T)`，π_ref 冻结
+（`requires_grad_(False)` + `eval()` + `no_grad` 预算 logits）；每个 epoch 行打
+`ref_kl=<值>（β=…，占总损失 …%）`，`train()` 的返回 dict 带 `ref_beta`/`ref_kl`/`ref_kl_mean`。
+**为什么是 π_θ‖π_ref（反向 KL）**：它是 **mode-seeking**（π_ref 低概率处只要 π_θ 也低就不受罚）
+⇒ "别自作聪明地偏离现任"，设计文档写的也是这个方向；正向 `KL(π_ref‖π_θ)` 是 mass-covering，
+会逼 π_θ 覆盖 π_ref 的整个支撑集（把尾巴摊平），在"单调精修"这个目标下不是我们想要的。
+细节、判据与 CLI 表见 `docs/TRAINING-V4.md` §14.11。
+
 ### W4 —— 稠密逐候选危险标签（杠杆①）【监督信号】
 
 **依据**：`danger` 头 AUC 0.638~0.650，而输入里**最好的单列只有 0.5582**

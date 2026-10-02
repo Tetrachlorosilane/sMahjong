@@ -47,7 +47,7 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league8'
+$label = 'v4-league9'
 # ⚠ **季种子不能再是常数**（第八季审计）：采集 seed = `cfg.seed + 绝对代号`，而整条命令行也是
 #   同一批参数的确定函数 ⇒ 两个季只要 `--seed` 相同、"现任 + 对手池"相同，**同代号代就是逐字节
 #   同一次运行**（实测：`v4-league4-g04` 与 `_rejected\v4-league5-g04` 同 SHA256、同 5,446,406 B；
@@ -93,8 +93,32 @@ for ($g = 1; $g -le $Generations; $g++) {
                '--generations', '1', '--gen-offset', "$($g - 1)",
                '--games', "$Games", '--workers', '20', '--eval-workers', '20',
                '--objective', 'ppo', '--value-target', 'delta', '--advantage', 'hand',
-               '--rank-weight', '0.2', '--max-steps', '600', '--epochs', '1',
-               '--kl-early-stop', '0.03', '--kl-min-steps', '60', '--critic-steps', '0',
+               '--rank-weight', '0.2',
+               # ---- 方案 (B)：**让一轮真的能动**（2026-10-03 审计后放宽）--------------------------------
+               # 旧配方 `--max-steps 600 --kl-early-stop 0.03` 实测在第 **66** 步就被 KL 早停掐掉
+               # ⇒ 每代只是现任的微小扰动，而验收闸门在 n=2000 的分辨率是 **±2.35**（实测：一个
+               # **行为等价**的候选都测出 −0.13）⇒ 位移小于尺子 ⇒ 六季零累积。
+               # 现在放宽到 KL 0.10（第一/三季用的就是 0.15 那一档）+ 2000 步上限：**位移放大到
+               # 可测范围**。⚠ 单靠 (B) 会放大优势的噪声（critic 合法天花板只有 0.069）⇒ 必须与
+               # **W3 的对现任 KL 锚**（`--ref-beta`，子任务落地后接上）配对使用：锚只管方向，
+               # 不占 KL 预算的"位移额度"。
+               '--max-steps', '2000', '--epochs', '1',
+               '--kl-early-stop', '0.10', '--kl-min-steps', '60', '--critic-steps', '0',
+               # ---- (C1/W3) 对现任的 KL 锚 + 验证集早停（子任务已落地，这里接线）--------------------
+               # `--ref-beta 0.5`：锚 = 本轮的 `--init`（现任），β 是"别乱动"那个旋钮（0.3~1 起步）。
+               # ⚠ 子任务实测：锚的梯度走**共享主干** ⇒ `ref_kl` 只占总损失 ~1%，但 value 头 train 均值
+               #   会被抬（4.64→14.32）、裁剪前 |g| 4.32→10.04（val 侧几乎不变）⇒ 读台账要连别的头一起看。
+               # ⚠ 放宽 KL 预算时**别同时抬 lr**：实测 `--lr 1e-2`（缺省的 10×）会把 v4 直接打塌
+               #   （融合 ReLU 死区 ⇒ 逐候选 logits 全常数）。
+               # `--val-every 25 --val-patience 3`：每 25 步在**固定子集**上读 train/val 的 policy CE，
+               #   连续 3 次未改善就**正常收尾**（防过拟合；探针只读，实测与关掉时 epoch 1 逐位相同）。
+               #   ⚠ 探针子集 ≥1024 行是刻意的（逐行 CE 重尾：256 行子集的噪声 ≈0.048，会盖掉 0.03~0.05 的趋势）
+               #   ⇒ 探针的**绝对水位**不等于 epoch 行的全切分数，早停只看**趋势**。
+               '--ref-beta', '0.5', '--val-every', '25', '--val-patience', '3',
+               # ---- 防过拟合（用户点名的要求）--------------------------------------------------------
+               # `--val-every/--val-patience`（子任务落地后接上）会在**验证切分**上周期性量 policy CE，
+               # 连续若干次不改善就**正常收尾**（打印 train/val 两条 CE，让人一眼看出"还在学"还是
+               # "开始记数据"）；配合原有的 5% 验证切分 + grad-clip 0.5 + KL 锚，三件一起才算护栏。
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
     Log ("=== 第 {0} 代（{1}）init={2} 对手池={3} ===" -f $g, $tag,
