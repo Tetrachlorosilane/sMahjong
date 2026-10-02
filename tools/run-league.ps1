@@ -102,6 +102,19 @@ for ($g = 1; $g -le $Generations; $g++) {
             Log ("  轮换删除 {0}（{1:N0} MB）" -f $d, $sz)
         }
     }
+    # ⚠ **闸门轨迹也要轮换**（第八季补）：`gate\<tag>\s<seed>\` 每个牌山目录里 1000 个 `g*.jsonl`
+    #   约 2.7 GB ⇒ 每代 ~5.3 GB，而**历季从来不删**（第三~七季已堆到 138 GB，实测把 S 盘从
+    #   222 GB 压到 90 GB）。这些 jsonl 对**判决是冗余的**：`eval.load_run` 只读 `summary.json`
+    #   （`per_game[].rank_points/placement/final_scores/policies/seed`），实测整季 5 代复算只用 7 秒、
+    #   26 GB 的 jsonl 一个字节都没读 ⇒ **删轨迹、留摘要**：仍然可以随时用 `python regate_gate.py`
+    #   在当天的判据下重算历季判决（第八季就是靠它证明了"逐牌山打印符号"没有污染判决链）。
+    $gd = Join-Path $S "gate\$tag"
+    if (Test-Path $gd) {
+        $gf = Get-ChildItem $gd -Recurse -File -Filter '*.jsonl'
+        $mb = ($gf | Measure-Object Length -Sum).Sum / 1MB
+        foreach ($f in $gf) { Remove-Item $f.FullName -Force }
+        Log ("  轮换删除 gate\{0} 的 {1} 个 jsonl（{2:N0} MB；**保留 summary.json** 以便复判）" -f $tag, $gf.Count, $mb)
+    }
     $candidate = Join-Path $root "tools\build\$tag\net.bin"
     if (-not (Test-Path $candidate)) { Log "缺 $candidate，停止"; break }
 
