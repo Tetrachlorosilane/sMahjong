@@ -35,7 +35,7 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league6'
+$label = 'v4-league7'
 $seed  = 20261001
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
@@ -109,9 +109,12 @@ for ($g = 1; $g -le $Generations; $g++) {
         $incumbent = $candidate
         Log ("  ⇒ **采纳**：新现任 = {0}；对手池 {1} 个" -f $tag, $pool.Count)
     } elseif ($grc -eq 3) {
+        # ⚠ **必须 `Copy-Item` 而不是 `Move-Item`**：这一代的 net **已经在对手池里**（池记的就是
+        #   原位路径），挪走会让池里那条悬空 ⇒ 下一代采集时 `net:` 打不开权重、整季当场死。
+        #   实测踩过：`v4-league6` 第 2 代 `打不开权重文件 …\v4-league6-g01\net.bin`（退出码 2）。
         New-Item -ItemType Directory -Force -Path (Join-Path $rejected $tag) | Out-Null
-        Move-Item $candidate (Join-Path $rejected "$tag\net.bin") -Force
-        Log ("  ⇒ **不采纳**：回滚到现任；这一代挪到 _rejected\{0}" -f $tag)
+        Copy-Item $candidate (Join-Path $rejected "$tag\net.bin") -Force
+        Log ("  ⇒ **不采纳**：回滚到现任；这一代**副本**留在 _rejected\{0}（原位保留给对手池）" -f $tag)
     } else {
         Log ("  ⛔ 闸门出错（退出码 {0}）—— 保留现场并停止" -f $grc)
         break
