@@ -23,7 +23,8 @@
 #     本脚本自己**不建**数据集（没有别的 `dataset build` 调用点）—— 要改口径请改 `v4/loop.py`。
 #
 # 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000]
-param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0)
+param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
+      [double]$IlWeight = 1.0)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
@@ -47,7 +48,7 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league9'
+$label = 'v4-league10'
 # ⚠ **季种子不能再是常数**（第八季审计）：采集 seed = `cfg.seed + 绝对代号`，而整条命令行也是
 #   同一批参数的确定函数 ⇒ 两个季只要 `--seed` 相同、"现任 + 对手池"相同，**同代号代就是逐字节
 #   同一次运行**（实测：`v4-league4-g04` 与 `_rejected\v4-league5-g04` 同 SHA256、同 5,446,406 B；
@@ -115,6 +116,17 @@ for ($g = 1; $g -le $Generations; $g++) {
                #   ⚠ 探针子集 ≥1024 行是刻意的（逐行 CE 重尾：256 行子集的噪声 ≈0.048，会盖掉 0.03~0.05 的趋势）
                #   ⇒ 探针的**绝对水位**不等于 epoch 行的全切分数，早停只看**趋势**。
                '--ref-beta', '0.5', '--val-every', '25', '--val-patience', '3',
+               # ---- (C2/W4-A) 引擎逐候选牌效标签（子任务已落地，这里接线）--------------------------
+               # `--il-weight $IlWeight`：`loss += w·CE(logits, 引擎最优候选)`（只在学生行；**缺省 0
+               #   时与旧代码逐位相同**）。为什么上它：实测纯 BC 会把"引擎一致率"**显著练低**
+               #   （−1.35pp，McNemar p=0.007）——"更贴合行为数据"与"更贴合引擎牌效"在这份带温采样的
+               #   数据上**反向**；而 IL 项把它抬高 **+9.71pp（p=7.3e-23）**，且这个判据**不需要闸门算力、
+               #   也不吃采样噪声**。⚠ 它与 `--ref-beta` 独立可调（β=0.5 把 KL(π‖init) 0.377→0.168，
+               #   一致率增益相应砍半）⇒ "能动 / 别乱动"两个旋钮分开拧。
+               # `--val-metric il`：IL 臂**必须**用它读早停 —— 否则行为口径的 val CE 会因为"策略被推向
+               #   引擎标签"而必然抬升，把正常训练误判成过拟合（实测在 step 300 误停，而那一刻引擎
+               #   CE 还在降、一致率还在涨）。
+               '--il-weight', "$IlWeight", '--val-metric', 'il',
                # ---- 防过拟合（用户点名的要求）--------------------------------------------------------
                # `--val-every/--val-patience`（子任务落地后接上）会在**验证切分**上周期性量 policy CE，
                # 连续若干次不改善就**正常收尾**（打印 train/val 两条 CE，让人一眼看出"还在学"还是
