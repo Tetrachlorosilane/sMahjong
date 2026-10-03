@@ -1682,6 +1682,15 @@ v4 的随机网常常落在 **ReLU 死区**（实测逐候选 logits 全是 `0.0
 
 ## §14.13 W4 本体：引擎**稠密危险度标签**（实施规划 · 2026-10-03 立）
 
+> ⛔ **S0 已结（2026-10-04）：本节的前提被代码事实否掉 ⇒ 不做 S1/S2/S3。**
+> 口径表与全部证据见 **§14.13.1**。一句话版：逐家逐牌危险度**不需要 `Round`**
+> （`Danger.of` 的入参只有 `visible` / 各家牌河 / `riichi` / `turn`，四样**全在 obs 里**），
+> 而它**早在 sidecar v3 就已经落盘**（D/E/F/G 四段）并且**今天就已经是 `tile` 张量的输入通道**
+> （`tile.danger_all` / `danger_riichi` / `safety_*`，实测非零）⇒ 拿它当监督标签 =
+> 让危险头去复制它自己的输入，**没有"obs 里没有"的信息**（W1 的教训）。
+> ⚠ 更要紧的一条：这条启发式对**实际放铳**的 AUC 只有 **0.50~0.54**（实测，§14.13.1 三·探针③），
+> 而危险头今天是 **0.638~0.650** ⇒ 照这个标签训，**是把 0.64 的位移到 0.52**。
+
 **为什么是它**：A 路（引擎牌效标签）失败的原因是标签里**没有押し引き与打点**（实测 `--il-weight 1`
 把和了率 24.1%→20.8%、打点 7037→6010、闸门 **−12.65**）；B 路（搜索算子排序）相对 teacher 只多 **0.95%**
 的边际改判且只解决"打哪张"。唯一**"引擎真值里有、obs 里没有"**的信息是引擎的**逐家逐牌危险度**
@@ -1689,7 +1698,8 @@ v4 的随机网常常落在 **ReLU 死区**（实测逐候选 logits 全是 `0.0
 
 ### 五段流程（每段自带判据；**前一段全绿才进下一段**）
 
-**S0 侦察与口径冻结（只读代码，产出 §14.13.1 口径表）**
+**S0 侦察与口径冻结（只读代码，产出 §14.13.1 口径表）** ✅ 2026-10-04 —— **结论：停**
+（前提被代码事实否掉；口径表见 §14.13.1，S1/S2/S3 不启动）
 - 读 `server/src/main/java/mahjong/rules/Danger.java`（签名/量纲/范围/是否含现物·筋·壁）、
   `game/TraceFeatures.java`（sidecar 写出点）、`python/mahjong_ml/v4/traces.py:sidecar_dict`、
   `v4/spec.py` 的 `DERIVED_*` / `CAND_DERIVED`、`v4/dataset.py` 的 `_COLUMNS`。
@@ -1731,3 +1741,146 @@ v4 的随机网常常落在 **ReLU 死区**（实测逐候选 logits 全是 `0.0
 ### 交付顺序与"在哪停"
 S0 → S1 → S2 → S3 全都是**可独立验收**的；**S4 之前不许写"能力提升"**。
 每一段结束都写回本节（状态 ✅/⏳ + 实测数字），照 §3 W1 的做法。
+
+---
+
+### §14.13.1 S0 口径表（2026-10-04 结 · **S0 = ✅ / 结论 = 停** · 探针现场 `S:\mahjong-training\probe\w4s`，跑完即删）
+
+> **判据出处**：`docs/VALVES-AND-FIXTURES.md` §3「W4」· `NOTES.md` §6.5 第六十二/六十三/六十四轮 ·
+> `docs/PROTOCOL.md` §8.2/§8.4 · `docs/FEATURES-V4.md` §4.1/§4.3/§5.1/§5.2 · `docs/TRAINER-CPP.md` §6.21。
+> 本节所有行号都是**结这一天的仓库实况**（`HEAD = 959ffcd`）。
+
+#### 一、`Danger.java` 的公开面（`server/src/main/java/mahjong/rules/Danger.java`）
+
+| 位置 | 签名 | 量纲 / 范围 |
+| --- | --- | --- |
+| `:32-38` | `SAFE=0` / `RELATIVELY_SAFE=1` / `SUSPICIOUS=2` / `DANGEROUS=3` | 级别，int `0..3` |
+| `:40-45` | `CODE_GENBUTSU` / `SUJI` / `SUJI_WALL` / `WALL` / `RIICHI` / `UNKNOWN` | 6 个 ASCII 理由码 |
+| `:54-71` | `Report{level, score, code, genbutsu, suji, wall}` | `score` = int **0..83**（现物恒 0） |
+| `:87-117` | `of(int kind, int[] visible, int[] theirRivers, boolean theirRiichi, int turn) → Report` | **纯函数**；入参 = 牌种 / 可见计数 / 那家牌河计数 / 那家是否立直 / 巡目 |
+| `:127-144` | `isSuji(int kind, int[] theirRivers) → boolean` | 布尔（同花色 ±3 在那家牌河；字牌恒 false） |
+| `:152-166` | `worst(kind, visible, int[][] rivers, boolean[] riichi, turn, selfSeat) → Report` | 对四家取 `score` 最大（排除自己） |
+| `:169-180` | `riverCounts(List<Integer>[] discards) → int[4][34]` | 牌码列表 → 牌种计数 |
+| `:192-205` | `worstAgainstRiichi(kind, visible, rivers, riichi, turn, selfSeat) → Report` | 只对已立直家取最坏；无立直家时退回 `worst` |
+
+- **量纲**：`score = min(100, BASE[level] + clamp(turn, 0, 18))`，`BASE = {0, 12, 30, 65}`（`:48` + `:115-116`）；
+  **现物提前 return**，`score` 恒 0（`:91-93`）。⇒ `level` 只由 `genbutsu / suji / wall / riichi` 决定，
+  **`turn` 只进 `score` 不进 `level`**。
+  ⚠ `score → level` **不可逆**：`RELATIVELY_SAFE` 在 turn=18 是 30，`SUSPICIOUS` 在 turn=0 也是 30
+  —— 想用 score 反推级别，会在这一个点上翻车（本次没用到，记在这里免得后人踩）。
+- **含什么**：**现物**（`genbutsu`）· **筋**（`suji`）· **壁**（`visible[kind] >= 3`）· **立直与否**（`theirRiichi`）·
+  **巡目**（`turn`，只影响分数）。
+- **不含什么**（关键）：**"几家立直"这个聚合量没有**（也没有 `worstAgainstRiichi` 之外的计数）；
+  更重要的 —— **别家是否真的听牌、听哪几张、手里有什么，`Danger` 一个都不读**（它只有启发式）。
+- **需不需要 `Round`：不需要。** `of` 的四个入参分别来自 obs 的 `visible` / `discards` / `riichi` /
+  `total_discards`（`ai/ObsFeatures.java:145/158-168/169-174/199`），且 obs 的 `visible` 与内存通路的
+  `Visible.counts(r.discards, r.melds, r.doraIndicators())` **逐字同式**（`ai/Observation.java:173`
+  vs `ai/ObsFeatures.java:233`）⇒ **生产者侧完全可以只靠 obs 算出这份标签**。
+  这既是"能算"的理由，也正是"**它不是新信息**"的理由。
+
+#### 二、口径表（列名 | 谁产出 | 量纲/范围 | 是否已在 obs | 训练侧怎么用）
+
+**A 族 = `Danger` 的逐家逐牌量：四列全部"已在 obs"，而且已经是模型输入**
+
+| 列名 | 谁产出 | 量纲/范围 | 是否已在 obs | 训练侧怎么用 |
+| --- | --- | --- | --- | --- |
+| `danger_per_seat[j][k]`（j 相对方位 `0=下家/1=対面/2=上家`，k=34 牌种） | `ObsFeatures.perSeat`（`ai/ObsFeatures.java:379-401`）+ C++ 镜像（`trainer/src/obffeatures.cpp:482-503`） | int8 落盘、**0..100** | **是**：探针① 实测 1,217 决策 × 3 家 × 34 种 **零处不一致**（只用 obs 的 5 个字段重算） | 已是 `tile.danger_all`（通道 27..29，`/100`）；**不要再当标签** |
+| `danger_riichi_per_seat[j][k]`（假设该家已立直） | 同上（`:394-397`） | 同上 | 是（同上） | 已是 `tile.danger_riichi`（30..32） |
+| `genbutsu_per_seat[j]` / `suji_per_seat[j]` | 同上（`:388-393`） | 3×5 字节位图，**字节内 LSB 在前** | 是（位图逐字节一致） | 已是 `tile.safety_genbutsu`（21..23）/ `safety_suji`（24..26） |
+| `danger_worst[k]` / `danger_riichi[k]`（v3 的聚合 68 维） | `Danger.worst` / `worstAgainstRiichi`（`ai/ObsFeatures.java:413-417`） | int16（A 段）、`/100` | 是（同样是 obs 的函数，只是先"对四家取最坏"） | 已是 v3 派生输入段；**聚合过 ⇒ 拆不回"对哪一家"** |
+| `Report.level`（0..3）/ `Report.code`（6 个 ASCII） | `Danger.of` | int / str | 是（`score` 的确定性函数） | **没有落盘**；要用就现算（= 又一次证明"能算"） |
+
+**B 族 = 隐藏真值（`g*.aux.npz`）：只有这一族是"obs 里没有"**
+
+| 列名 | 谁产出 | 量纲/范围 | 是否已在 obs | 训练侧怎么用 |
+| --- | --- | --- | --- | --- |
+| `opp_hand[j][k]` | `TraceRecorder.writeAux`（`train/TraceRecorder.java:427-451`）/ C++ `trace.cpp:354-401` | uint8 `0..4` | **否**（别家暗牌；`PROTOCOL.md` §8.2 明令不进 obs） | 信念头；**押し引き唯一现成的隐藏真值** |
+| `opp_tenpai[j]` | 同上 | uint8 `0/1` | **否** | 信念头；"要不要弃和"的第一判据 |
+| `opp_dealin[j]` | 同上（**事后回填**，`TraceRecorder.java:301-304`） | uint8 `0/1`，**只在被选中的候选上有意义** | **否** | 危险头**今天的**标签（`pretrain.py:766-780`，头形 `[L,4]`：3 家 + "任一家"，`model.py:53/188`） |
+| `own_shanten_after` / `own_tenpai` / `win_flag` / `hand_delta` / `placement` | 同上 | 见 `auxlabels.py:35-44` | **否** | 牌效 / 听牌 / 价值 / 顺位头 |
+
+**C 族 = "逐候选 × 每家"的矩阵（W4 原本要加的那一列）**
+
+| 列名 | 谁产出 | 量纲/范围 | 是否已在 obs | 训练侧怎么用 |
+| --- | --- | --- | --- | --- |
+| `cand_danger[c][j] = danger_per_seat[j][kind(c)]` | **训练侧一次查表**（D 段 + `legal` 的牌码）；**不需要**动 sidecar | 0..100 | **是**（D 段是 obs 的确定性函数 ⇒ 这一列是同批数的重排） | 与 `tile.danger` 同一批数 ⇒ **纯复制**，边际信息 = 0 |
+| 逐候选 × 家长度 | —— | **3**（`ObsFeatures.SEATS = 3`，`ai/ObsFeatures.java:77`）——**不是 4** | —— | "放铳给自己"不存在；4 是错的 |
+
+#### 三、S0 的三条硬结论（每条都有实测/代码出处）
+
+**① "obs 里没有"这个前提是错的 —— 探针①（`probe/w4s/danger_from_obs.py`）**
+按 `Danger.java` 的公式在 Python 里**独立重写一份**（只用 obs 的 `seat` / `discards` / `riichi` /
+`visible` / `total_discards`），与真实 sidecar 的 D/E/F/G 四段逐元素比对：
+
+```
+  g0.jsonl: 519 条决策已比对；累计不一致 0
+  g1.jsonl: 698 条决策已比对；累计不一致 0
+== obs 重算 vs sidecar 逐家段：1217 条决策 / 不一致 0 处 ==
+```
+（源：`S:\mahjong-training\raw\v4-league8-g04`，逐条 `genbutsu` / `suji` / `danger` / `danger_riichi` 四段。）
+
+**② 它不只是"在 obs 里"，它已经是模型的输入 —— 探针②（`probe/w4s/tile_channels.py`）**
+
+```
+== v4-heads-g01/val（前 14831 行，共 14831）==
+  tile.safety    通道 21..26  max=1.0000  非零列=6/6
+  tile.danger    通道 27..32  max=0.8301  非零列=6/6
+  cand[88:96] cand.derived 的 ①~⑧（v3 的 8 维）  max=1.5000
+  cand[96:99] cand.derived 的 ⑨⑩⑪（设计里承诺、仍恒 0）  max=0.0000
+```
+（`v4/blocks.py:137-157` 把 sidecar 的 D/E 段 `/100` 填进 `danger_all` / `danger_riichi`。）
+⇒ 拿它当标签 = **让危险头去拟合它自己的输入通道** —— 对表示学习是恒等操作，
+不满足 §14.13 自己写的开工条件。
+
+**③ 而且这条启发式比今天那个头差得多 —— 探针③（`probe/w4s/danger_channel_auc.py`）**
+在**被选中的那个候选**上（与 `heads_audit.danger_baseline` / `report` 同口径）：
+
+```
+== v4-heads-g01/val（n=14831）==
+   家 0：基率 0.0465 | 全行 AUC 0.5002 | 自家摸打（label_type=0，n=11209）AUC 0.5023
+   家 1：基率 0.0462 | 全行 AUC 0.5265 | 自家摸打（label_type=0，n=11209）AUC 0.5139
+   家 2：基率 0.0562 | 全行 AUC 0.5317 | 自家摸打（label_type=0，n=11209）AUC 0.5426
+```
+对照同一份数据上已有的两条读数（`NOTES.md` §6.5 第五十五轮 + `heads_audit.py:136-143`）：
+危险头 **0.638~0.650**、逐候选输入列的最好单列 **0.5582**（"任一家"基率 0.1488）
+⇒ **`Danger` 的分数本身（0.50~0.54）连"最便宜的候选输入列"都不如**。
+所以原计划的 `--danger-weight` 若真的接上，方向是**把 0.64 拖向 0.52**。
+
+> 顺带修正 `NOTES.md` §6.5 第六十四轮末段与 `VALVES-AND-FIXTURES.md` §3 W4 的**依据句**
+> （"当前 obs 里只有聚合后的 `aux_*`" / "天花板在标签"）：前者把 `aux_*`（隐藏真值）误当成了
+> 危险度的聚合；后者的基线**只扫了 `cand[:, c]`、没扫 `tile` 的 `danger_*` 通道**，
+> 而危险头本来就能读 `tile`（`model.py:188/206` 的 `u` 来自候选表示）—— 两条都该按本节口径重写。
+
+#### 四、如果**仍然**要把逐候选 × 每家放进 sidecar（本次**不做**，供后人参考）
+
+| 项 | 事实 |
+| --- | --- |
+| 现有段写法 | A `nDec×71` int16 · B `nDec` int16 · C `ΣnLegal×8` int16 · **D/E `nDec×102` int8** · **F/G `nDec×15` byte**（`train/TraceFeatures.java:32-43` 的表 + `:147-154` 的缓冲 + `:208-224` 的写出顺序） |
+| 头部 | 20 B：`magic("MJFT") / featureVersion / nDec / perDec / perCand`（`:210-213`）—— 新段长度由 `nDec`/`ΣnLegal` 推出，**头不用改** |
+| 新段（假想的 H） | `ΣnLegal × 3` 字节（int8，与 D/E 同口径）；也可 int16（`ΣnLegal × 3 × 2`） |
+| 尺寸代价 | 实测 **518.5 B/决策** = `A 142 + B 2 + C ~141 + D/E 204 + F/G 30`（`TRAINER-CPP.md` §6.21）；C 段 141 B / 16 B/候选 ⇒ 平均 **≈8.8 个候选** ⇒ H 段 int8 **≈26 B/决策（+5%）**、int16 ≈53 B（+10%） |
+| `DERIVED_VERSION` 现值 | **3**，三处必须同号：Java `ai/ObsFeatures.java:70 FEATURE_VERSION = 3` → 写进头部（`TraceFeatures.java:211`）· C++ `trainer/src/obffeatures.cpp:470 kFeatureVersion` · Python `mahjong_ml/features.py:30 DERIVED_VERSION = 3` 与 `v4/spec.py:35 DERIVED_VERSION_V4 = 3` |
+| +1 会打到的**读取点（硬拒）** | `mahjong_ml/dataset.py:115-117`（版本不符 → `ValueError`）· `:118-121`（`perDec`/`perCand` 不符）· `:134-136`（**总长度**不自洽）· `v4/traces.py:93-96`（`!= spec.DERIVED_VERSION_V4` → `ContractError`）· `v4/dataset.py:929-934`（`load_split` 的 `feature_version` + `blocks_fingerprint`）· `v4/blocks.py:123`（版本不符 ⇒ 记降级/填 0，但 `traces` 会先抛）—— 另有自检用 `feat.DERIVED_VERSION` 造夹具（`python/selfcheck.py:390`） |
+| **不受影响**的点 | `net.bin` 格式 2 里的 `derivedVersion` 是**读了不用**（`ai/V4Policy.java:136` / `trainer/src/v4policy.cpp:501`）；golden 夹具校验的是 `blocks_fingerprint`（`selfcheck.py:2340`，与 derived 版本无关）⇒ **权重侧不用动**（与本次"不动 `net.bin`"的界一致） |
+| parity 脚本（S1 的判据①，**脚本名先确认**） | `tools/trainer-features-parity.mjs` = **sidecar 逐字节**（Java `--features` ↔ C++ `features`，七段全比）；端到端轨迹 = `tools/trainer-selfplay-parity.mjs`；标签侧 = `tools/trainer-aux-parity.mjs`；v4 前向/张量 = `tools/trainer-v4-parity.mjs` |
+| 判据③（列白名单） | `tools/selfplay-check.mjs:29-40` 的 `OBS_KEYS` 是 **obs 字段**白名单（防泄漏），**sidecar 加列不碰它**；反过来 —— 任何"隐藏真值"**都不能**走 obs（会当场被这条白名单判红），只能走 `*.aux.npz` |
+
+#### 五、训练侧最小标签集（明确建议）
+
+**建议 1（对原计划的判决）：`--danger-weight` 不做，标签一列都不加。**
+理由 = 上面三条：① 不是新信息（obs 可完整推出）；② 已是输入通道（复制自己）；
+③ 目标是**更差的**排序（0.50~0.54 vs 头的 0.64）⇒ 唯一可预期的效果是**把危险头训坏**。
+
+**建议 2（若还想要"稠密、反事实、低噪"的押し引き标签，换来源与换通道）：**
+
+| 项 | 建议 |
+| --- | --- |
+| 唯一的合法来源 | **隐藏真值**（"引擎真值里有、obs 里没有"这句话，只有这一族配得上） |
+| 最小列集 | 每候选 × 每家各 1 列：`opp_ron[c][j] = 1[对手 j 未振听 且 其真手牌 ⊕ 候选 c 的牌种构成和了形]`（`c=0..L-1`，`j=0..2`） |
+| 量纲 / 归一 | **uint8 0/1，不归一**（本来就在 [0,1]）；⚠ 它是"已知四家真手牌"下的**确定性事件**，**不是概率** —— 概率在头的输出侧，别把它当 probability 去标定 |
+| 为什么这几列就够表达押し引き | 押し引き = 「打这张会不会被罚」×「我这手值不值得推」。**前者**只需要"对每家、每个候选的放铳指示"（3 列/候选，且是反事实的 —— 对**每个**候选都有值，而不像 `aux_opp_dealin` 只在被选中的那一手有值）；**后者**已经在手里（`value_han` / `value_points` 在 A 段、`score_*` 的欠账在 `cand[96:99]`）。⛔ 危险度分数（0..100 的启发式）**不是**这个量：它连"这家是不是真听牌"都不知道 |
+| 通道 | **`g*.aux.npz`**（`auxlabels.AUX_SHAPES` + `AUX_VERSION 1 → 2`（`python/mahjong_ml/auxlabels.py:32`）；生产者 Java `TraceRecorder.writeAux` + C++ `trainer/src/trace.cpp`；判据 `tools/trainer-aux-parity.mjs`）—— **不走 sidecar、不动 `DERIVED_VERSION`、不动 `net.bin`、推理路径一个字节都不动**（防作弊闸门：`aux` 永不进推理，`FEATURES-V4.md` §5.2） |
+| 先量后改 | 引擎侧只多一次"用真手牌问听牌集合"的调用（`Agari.waits` 一路，`Danger` 之外）；**但先别改**：`aux_opp_hand` 已经在 `compact/v4-heads-g01` 里，可以先零改动量一版"隐藏真值能给出的上界"，再决定要不要接 `--danger-weight` |
+| 归属 | 这条路线改的是**标签通道与标签定义**（aux + `AUX_VERSION`），**不在 §14.13 现在的授权内**（本节写的是"sidecar 段 + `DERIVED_VERSION`"）⇒ 要用户/父 agent 重新决策，并且仍受 S4 的纪律约束：**贴标签的读数不是强弱判据**（§14.12.6 的教训） |
+
+**S0 结论：停。** 不启动 S1（不改 docs 的 sidecar 段定义、不动 `DERIVED_VERSION`、不动三端契约）。
