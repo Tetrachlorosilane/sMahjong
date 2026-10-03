@@ -29,7 +29,7 @@
 #   `-Label`：不传就用下面那个缺省标签（**换季不必改脚本** —— 改脚本正是"标签被复用"的来源之一）。
 # ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
-      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun)
+      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
@@ -245,6 +245,16 @@ for ($g = 1; $g -le $Generations; $g++) {
         continue
     }
 
+    # ⚠ 累积模式（-NoGate，2026-10-03 立）：单轮效应 ~+0.6 点在闸门 ±2.38 的分辨率下**测不出**
+    #   ⇒ 逐代把关必然零累积（历季 28 个候选无一被采纳）。`-NoGate` **无条件采纳**（仍做 SHA256 去重
+    #   与产物轮换），只在**最后判一次终点 vs 起点**（5 轮累积 ~3 点 ⇒ 越过分辨率）。
+    #   ⚠ 判据仍是闸门（多套新牌山配对、CI 排除 0 且为正），**不是**任何贴标签的读数。
+    if ($NoGate) {
+        $incumbent = $candidate
+        $pool.Add($candidate)
+        Log ("  ACCUM 累积模式：无条件采纳 {0} ⇒ 新现任 = {0}；对手池 {1} 个" -f $tag, $pool.Count)
+        continue
+    }
     # ---- 接受闸门：多套牌山集合的合并配对判决（CI 排除 0 且为正才采纳）
     $gateSeeds = & $gateSeedsFor $g
     Log ("  闸门：现任 vs {0}（2 套**新**牌山 {1} × {2} 场）" -f $tag, $gateSeeds, $GateBlock)
