@@ -203,6 +203,8 @@ def cmd_il_check(args: argparse.Namespace) -> int:
     @param data 可选的紧凑集目录：额外报"引擎标签 ↔ 行为标签"的一致率与随机基线
         （**不看权重**，所以它与 `pretrain` 的 `engine_top1` 是两把不同的尺子：
         这里量的是"引擎标签与行为标签有多合得来"，`pretrain` 量的是"网学会了没有"）。
+        ⛔ **两把尺子都不是强弱判据**（第六十三轮的实测：`engine_top1` +6.95pp 而闸门 −12.65）；
+        判强弱只能走闸门（多套新牌山配对、CI 排除 0 且为正）—— 见 `NOTES.md` §6.5 第六十三轮。
     """
     from . import dataset as v4ds
 

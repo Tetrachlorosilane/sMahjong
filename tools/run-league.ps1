@@ -14,7 +14,9 @@
 #     `[-9.50,-2.74]`，而逐代 200 场读数是纯噪声（±8~10 的 CI 摆动）⇒ 没有闸门，训练会把退步当推进。
 #   · **只跑缓存档**：固定 `--games 1000`（紧凑集实测 ≈14.8 GB < 0.8×31.6 GB = 25.3 GB）
 #     —— 刻意**不**用 `--target-minutes`，免得规划器为了凑时间把轮次顶到磁盘档（45 分钟那档）。
-#   · S 盘：每代成功后轮换删掉这一代的大件（raw/compact/eval）。
+#   · S 盘轮换：**每代判决之后**才删这一代的大件（`raw/<tag>`、`compact/<tag>`、`raw/eval-<tag>`、
+#     `gate/<tag>/**/*.jsonl`）—— 顺序很重要，见闸门轮换那一段的注释（第八季补的轮换插错了位置，
+#     整整两季**从未生效**）。
 #   · **W1b：`h0` 列随 `--student` 的网自动来** —— 数据集由 `mahjong_ml.v4 loop` 内部调
 #     `v4.dataset build --student <这一轮学生的确切策略串>` 生成，而 `h0`（窗口之前的整手 carry）
 #     就从这个 `--student` 串里的 `net:<路径>` 解析（剥掉 `@α`/`#T` 后缀）⇒ **这里不需要额外传
@@ -22,9 +24,12 @@
 #     所以训练与推理同源；缺 `h0` 列时 `pretrain` 会**硬拒**（不许静默退化成窗口冷启动）。
 #     本脚本自己**不建**数据集（没有别的 `dataset build` 调用点）—— 要改口径请改 `v4/loop.py`。
 #
-# 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000]
+# 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000] [-Label <季标签>]
+#   `-DryRun`：打印这一季真会跑的命令行（含 `--il-weight` / `--val-metric` 的实际取值）后退出，不训练。
+#   `-Label`：不传就用下面那个缺省标签（**换季不必改脚本** —— 改脚本正是"标签被复用"的来源之一）。
+# ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
-      [double]$IlWeight = 1.0)
+      [double]$IlWeight = 0.0, [string]$Label = '', [switch]$DryRun)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
@@ -48,13 +53,23 @@ if (Test-Path $trainerS) {
     $env:MAHJONG_TRAINER = $trainerS
 }
 $env:PYTHONPATH = (Join-Path $root 'python') + ';' + (Join-Path $root 'python\.venv\Lib\site-packages')
-$label = 'v4-league10'
+# ⚠⚠ **PowerShell 变量名大小写不敏感** ⇒ `$Seed`（参数）与下面派生的 `$seed` **是同一个变量**：
+#   第 69 行一算，`$Seed` 就被改成了派生值（永远 > 0）⇒ 之后任何"是不是显式给了 `-Seed`"的判断
+#   都会恒真（本次写标签占用闸门时实测踩到：闸门本该硬拦却放行）。所以**先把它记在另一个名字里**。
+$explicitSeed = ($Seed -gt 0)
+$label = if ($Label) { $Label } else { 'v4-league11' }
+# ⚠ 标签必须**未占用**（第八季的 `v4-league10` 已被 A 路的负对照用掉）：下面有**硬闸门**自动拦
+#   （`tools\build\<label>-*` 非空 ⇒ 报错退出），换季时不必再手工 `Test-Path` 六处。
 # ⚠ **季种子不能再是常数**（第八季审计）：采集 seed = `cfg.seed + 绝对代号`，而整条命令行也是
 #   同一批参数的确定函数 ⇒ 两个季只要 `--seed` 相同、"现任 + 对手池"相同，**同代号代就是逐字节
 #   同一次运行**（实测：`v4-league4-g04` 与 `_rejected\v4-league5-g04` 同 SHA256、同 5,446,406 B；
 #   league3/4/5 的 g01/g02、league6/7 的 g01 的逐套 Δ **逐位重复**）。后果有两条：
 #   ① 白跑一整代（含 33 分钟闸门）；② 把"N 个候选"当独立样本统计是**伪重复**（有效样本远小于 N）。
-#   现在按标签派生：`v4-league8` ⇒ 20261001 + 8×10000 = 20341001（需要复现旧季时显式 `-Seed`）。
+#   现在按标签派生（**取标签里的全部数字** —— `-replace '\D',''` 会把 `v4` 的 `4` 也算进去）：
+#   `v4-league8` ⇒ `'48'` ⇒ 20261001 + 480000 = **20741001**；`v4-league9` ⇒ `'49'` ⇒ **20751001**
+#   （实测它的闸门目录就是 `s20751002/3`）；`v4-league10` ⇒ `'410'` ⇒ **24361001**。
+#   ⚠ 第八季（`v4-league8`）当时是**显式** `-Seed 20261001` 跑的（它的闸门目录是 `s20261001/2`）
+#   ⇒ 复现旧季**必须**显式 `-Seed`；这里原来那句"`v4-league8` ⇒ 20341001"是**错的**（公式漏了 `v4` 的 4）。
 $seed  = if ($Seed -gt 0) { $Seed } else { 20261001 + 10000 * [int]($label -replace '\D', '') }
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
 $incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
@@ -65,10 +80,29 @@ $rejected = Join-Path $root 'tools\build\_rejected'
 #   5/5 为正 +1.32~+3.10，闸门固定牌山 5/5 为负/零 −2.26~−0.09）⇒ 判决只能读成
 #   "**条件于这两套牌山**"，不能读成"这一代普遍更好/更差"，更不能把历次判决当独立复现来统计。
 #   从现在起按代派生两套新牌山（同一代内仍是多套合并 + 每套一个 block）。
-$gateSeedsFor = { param($g) "$($seed + 2 * $g - 1),$($seed + 2 * $g)" }
+# ⚠ +1000 偏移（2026-10-03 修）：采集 seed = `cfg.seed + 绝对代号`（loop.py:194/209），而原来闸门 = `seed+2g-1, seed+2g`
+#   ⇒ **第 1 代的第一套闸门牌山（seed+1）正好是它自己的采集牌山**、g≥2 代则撞上一代的采集山 ⇒
+#   "判决条件于一套见过的牌山"（第八季的教训）其实没修掉。挪开 1000 保证两者不相交。
+$gateSeedsFor = { param($g) "$($seed + 1000 + 2 * $g - 1),$($seed + 1000 + 2 * $g)" }
 
 function Free-GB { (Get-PSDrive S).Free / 1GB }
 function Log($m) { Write-Output ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
+
+# ⚠ **标签占用闸门**（本次加）：标签既是 checkpoint 目录名、又**决定 `$seed` 与两套闸门牌山**
+#   ⇒ 复用一个已被占用的标签 = **静默重跑同一季**（同 seed、同牌山、覆盖 `tools\build\<tag>`
+#   与 S: 的 raw/compact/ckpt）—— 这正是第八季审计里"伪重复"的成因（`v4-league4-g04` 与
+#   `_rejected\v4-league5-g04` 同 SHA256）。所以这里**硬拦**：换标签，或显式 `-Seed`（复现旧季的合法路径）。
+$taken = @(Get-ChildItem (Join-Path $root 'tools\build') -Directory -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -like "$label-*" })
+if ($taken.Count -gt 0) {
+    # ⚠ 字符串末尾别让反引号紧贴收尾引号（`` `x `` 会吃掉 `` " `` ⇒ 解析器把后面整段当字符串）——
+    #   所以这句用「」而不是反引号包参数名。
+    $m = "⛔ 标签 {0} 已被占用：{1} —— 换一个未占用的标签（-Label）；复现旧季要显式 -Seed" -f `
+         $label, (($taken | ForEach-Object Name) -join ', ')
+    # 显式 `-Seed` = 明知要复现旧季（确定性重跑，覆盖原位产物）⇒ 只警告；`-DryRun` 同理（只读）。
+    # ⚠ 判据用 `$explicitSeed`（开头记下的那个）：**不能**用 `$Seed` —— 它已经被派生值改写了（见开头那条）。
+    if ($DryRun -or $explicitSeed) { Log $m } else { Log $m; exit 1 }
+}
 
 Log ("开始：{0} 代 × {1} 场（在线自对弈 + 对手池 + **接受闸门**）" -f $Generations, $Games)
 Log ("现任（incumbent）= {0}" -f (Split-Path $incumbent -Parent | Split-Path -Leaf))
@@ -79,13 +113,20 @@ Log ("闸门：每代 2 套**新**牌山（按代派生）× {0} 场/套；S 盘
 #   实测踩过：顺序写反 ⇒ **采纳判据整个反向**（把更差的候选采纳、把略好的拒掉），
 #   而**空对照（Δ=0）两种写法都判不采纳**，抓不出方向问题 ⇒ 必须跑强弱对照。
 $scLog = Join-Path $root 'release\gate-selfcheck.log'
-& $py -m mahjong_ml.v4.gate --self-check --workers 12 --out (Join-Path $S 'gate') *> $scLog
-if ($LASTEXITCODE -ne 0) {
-    Log '⛔ 闸门方向自证失败（弱现任 vs 强候选没能采纳）—— 不开始训练，先修闸门'
-    Get-Content $scLog | Select-String -Pattern 'PASS|FAIL|正确顺序|写反顺序' | ForEach-Object { Log ("  " + $_.Line.Trim()) }
-    exit 1
+# ⚠ `-DryRun`：**只打印**这一季真会跑的那条命令行（含 `$label` / `$seed` / `--il-weight` /
+#   `--val-metric` 的实际取值）然后退出 —— 空跑一遍是为了能**当场**看见"缺省配方是什么"，
+#   不用读脚本猜（这一季的配方本来就是被审计改过两次的地方）。
+if (-not $DryRun) {
+    & $py -m mahjong_ml.v4.gate --self-check --workers 12 --out (Join-Path $S 'gate') *> $scLog
+    if ($LASTEXITCODE -ne 0) {
+        Log '⛔ 闸门方向自证失败（弱现任 vs 强候选没能采纳）—— 不开始训练，先修闸门'
+        Get-Content $scLog | Select-String -Pattern 'PASS|FAIL|正确顺序|写反顺序' | ForEach-Object { Log ("  " + $_.Line.Trim()) }
+        exit 1
+    }
+    Log '闸门方向自证通过（弱现任 vs 强候选 ⇒ 采纳；反向 ⇒ 拒绝）'
+} else {
+    Log ("DRY-RUN：label={0} seed={1} IlWeight={2:g} 现任={3}" -f $label, $seed, $IlWeight, $incumbent)
 }
-Log '闸门方向自证通过（弱现任 vs 强候选 ⇒ 采纳；反向 ⇒ 拒绝）'
 for ($g = 1; $g -le $Generations; $g++) {
     $tag = "$label-g{0:D2}" -f $g
     $opp = @()
@@ -116,23 +157,41 @@ for ($g = 1; $g -le $Generations; $g++) {
                #   ⚠ 探针子集 ≥1024 行是刻意的（逐行 CE 重尾：256 行子集的噪声 ≈0.048，会盖掉 0.03~0.05 的趋势）
                #   ⇒ 探针的**绝对水位**不等于 epoch 行的全切分数，早停只看**趋势**。
                '--ref-beta', '0.5', '--val-every', '25', '--val-patience', '3',
-               # ---- (C2/W4-A) 引擎逐候选牌效标签（子任务已落地，这里接线）--------------------------
-               # `--il-weight $IlWeight`：`loss += w·CE(logits, 引擎最优候选)`（只在学生行；**缺省 0
-               #   时与旧代码逐位相同**）。为什么上它：实测纯 BC 会把"引擎一致率"**显著练低**
-               #   （−1.35pp，McNemar p=0.007）——"更贴合行为数据"与"更贴合引擎牌效"在这份带温采样的
-               #   数据上**反向**；而 IL 项把它抬高 **+9.71pp（p=7.3e-23）**，且这个判据**不需要闸门算力、
-               #   也不吃采样噪声**。⚠ 它与 `--ref-beta` 独立可调（β=0.5 把 KL(π‖init) 0.377→0.168，
-               #   一致率增益相应砍半）⇒ "能动 / 别乱动"两个旋钮分开拧。
-               # `--val-metric il`：IL 臂**必须**用它读早停 —— 否则行为口径的 val CE 会因为"策略被推向
-               #   引擎标签"而必然抬升，把正常训练误判成过拟合（实测在 step 300 误停，而那一刻引擎
-               #   CE 还在降、一致率还在涨）。
-               '--il-weight', "$IlWeight", '--val-metric', 'il',
+               # ---- (C2/W4-A) 引擎逐候选牌效标签 —— ⛔ **实测有害，缺省 0；不要改回 1** ---------------
+               # ⛔ 为什么**必须**是 0（第八季 W4-A 的负结果，实测数字，`NOTES.md` §6.5 第六十三轮）：
+               #   `-IlWeight 1` 起的那一季（`v4-league10`）**第 1 代就被闸门判死** ——
+               #   同代闸门 **Δ=−12.65 顺位点 CI[−14.92,−10.42] n=2000**（越界 5 倍），
+               #   回路自评（换牌山）**−10.66 CI[−17.63,−3.76] p=0.028**，两条独立读数同号。
+               #   机制：纯牌效标签**不含打点 / 押し引き**（`dora_count` 刻意不参与）⇒ 优化它必然
+               #   拿这两样去换进张：和了率 24.1%→20.8%、放铳率 15.7%→17.0%、**平均打点 7037→6010**；
+               #   而且 IL 项与 PPO 同在一个损失里、**不受 ratio clip 约束**（clip_frac 0.345 vs
+               #   上一季同位置 0.056）⇒ 60 步（KL 早停 0.114 > 0.10）就把策略拽出信任域。
+               # ⚠ 唯一会"变好"的读数是 `engine_top1`（0.6345 → 0.704，+6.95pp）—— 它与闸门
+               #   **符号相反且都显著** ⇒ ⛔ **它不是强弱判据**，只是"IL 项有没有接上"的探针。
+               #   **判强弱只能走闸门**（多套新牌山配对、CI 排除 0 且为正）。
+               # 历史：`--il-weight 0`（缺省）与加这个功能之前**逐位相同**；负对照权重留在
+               #   `tools\build\v4-league10-g01\net.bin`（+ `_rejected\` 副本）与
+               #   `release\v4-league10-g01.log` / `release\gate-v4-league10-g01.log`。
+               # `--val-metric` 跟着权重走（**不是**写死 `il`）：IL 臂必须读 `il` —— 否则行为口径的
+               #   val CE 会因为"策略被推向引擎标签"而必然抬升，把正常训练误判成过拟合（实测在 step 300
+               #   误停，而那一刻引擎 CE 还在降）；而 `--il-weight 0` 时训练目标**就是**行为标签，
+               #   再拿引擎 CE 当早停尺子就是**用错了尺子**（量的是一个没有任何损失项在优化的量）
+               #   ⇒ 那时按行为 `policy` 读。
+               '--il-weight', "$IlWeight",
+               '--val-metric', $(if ($IlWeight -gt 0) { 'il' } else { 'policy' }),
                # ---- 防过拟合（用户点名的要求）--------------------------------------------------------
                # `--val-every/--val-patience`（子任务落地后接上）会在**验证切分**上周期性量 policy CE，
                # 连续若干次不改善就**正常收尾**（打印 train/val 两条 CE，让人一眼看出"还在学"还是
                # "开始记数据"）；配合原有的 5% 验证切分 + grad-clip 0.5 + KL 锚，三件一起才算护栏。
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
+    if ($DryRun) {
+        # 空跑：把**真会跑的那条命令行**按 token 打印出来（`--il-weight` / `--val-metric` 一眼可见），
+        # 顺带报这一季的 `$label` / `$seed` / 闸门牌山，然后退出（不训练、不碰 S 盘）。
+        Log ("DRY-RUN 第 {0} 代命令：{1} {2}" -f $g, $py, ($largs -join ' '))
+        Log ("DRY-RUN 闸门牌山（第 {0} 代）= {1}" -f $g, (& $gateSeedsFor $g))
+        break
+    }
     Log ("=== 第 {0} 代（{1}）init={2} 对手池={3} ===" -f $g, $tag,
          (Split-Path $incumbent -Parent | Split-Path -Leaf),
          $(if ($opp.Count) { ($opp | ForEach-Object { Split-Path $_ -Parent | Split-Path -Leaf }) -join ',' } else { '（无）' }))
@@ -149,19 +208,15 @@ for ($g = 1; $g -le $Generations; $g++) {
             Log ("  轮换删除 {0}（{1:N0} MB）" -f $d, $sz)
         }
     }
-    # ⚠ **闸门轨迹也要轮换**（第八季补）：`gate\<tag>\s<seed>\` 每个牌山目录里 1000 个 `g*.jsonl`
-    #   约 2.7 GB ⇒ 每代 ~5.3 GB，而**历季从来不删**（第三~七季已堆到 138 GB，实测把 S 盘从
-    #   222 GB 压到 90 GB）。这些 jsonl 对**判决是冗余的**：`eval.load_run` 只读 `summary.json`
+    # ⚠ **闸门轨迹的轮换必须放在这一代的判决之后**（本次修，第八季补的那一版是**死代码**）：
+    #   它当时被插在"raw/compact/eval 轮换"之后、**闸门还没跑**的位置 ⇒ `gate\<tag>` 那时**还不存在**
+    #   ⇒ `Test-Path` 恒假 ⇒ 从未生效。证据：`v4-league9/10` 的日志里只有三条 raw/compact/eval
+    #   轮换行、**没有 gate 行**，而 `S:\mahjong-training\gate` 已经堆到 26+ GB。
+    #   现在它挪到 `$grc` 判决之后（同一 `$tag`、`gate\<tag>\s<seed>\` 这时才存在），并**保留
+    #   `summary.json` / `verdict.json`**：`eval.load_run` 只读 `summary.json`
     #   （`per_game[].rank_points/placement/final_scores/policies/seed`），实测整季 5 代复算只用 7 秒、
-    #   26 GB 的 jsonl 一个字节都没读 ⇒ **删轨迹、留摘要**：仍然可以随时用 `python regate_gate.py`
+    #   26 GB 的 jsonl 一个字节都没读 ⇒ **删轨迹、留摘要**：随时可以用 `python regate_gate.py`
     #   在当天的判据下重算历季判决（第八季就是靠它证明了"逐牌山打印符号"没有污染判决链）。
-    $gd = Join-Path $S "gate\$tag"
-    if (Test-Path $gd) {
-        $gf = Get-ChildItem $gd -Recurse -File -Filter '*.jsonl'
-        $mb = ($gf | Measure-Object Length -Sum).Sum / 1MB
-        foreach ($f in $gf) { Remove-Item $f.FullName -Force }
-        Log ("  轮换删除 gate\{0} 的 {1} 个 jsonl（{2:N0} MB；**保留 summary.json** 以便复判）" -f $tag, $gf.Count, $mb)
-    }
     $candidate = Join-Path $root "tools\build\$tag\net.bin"
     if (-not (Test-Path $candidate)) { Log "缺 $candidate，停止"; break }
 
@@ -210,6 +265,21 @@ for ($g = 1; $g -le $Generations; $g++) {
     } else {
         Log ("  ⛔ 闸门出错（退出码 {0}）—— 保留现场并停止" -f $grc)
         break
+    }
+    # ---- ⚠ **闸门轨迹轮换**：**必须**在判决之后（`gate\<tag>` 这时才存在；插在闸门之前 = 死代码）
+    #   `gate\<tag>\s<seed>\` 每个牌山目录里 1000 个 `g*.jsonl` ≈2.7 GB ⇒ 每代 ~5.3 GB。
+    #   ⛔ **只删 `*.jsonl`，绝不删 `summary.json` / `verdict.json`**：`eval.load_run` 只读
+    #   `summary.json`（`regate_gate.py` 的复算判据就靠它，见本段上方的长注释）。
+    $gd = Join-Path $S "gate\$tag"
+    if (Test-Path $gd) {
+        $gf = @(Get-ChildItem $gd -Recurse -File -Filter '*.jsonl')
+        if ($gf.Count -gt 0) {
+            $mb = ($gf | Measure-Object Length -Sum).Sum / 1MB
+            foreach ($f in $gf) { Remove-Item $f.FullName -Force }
+            Log ("  轮换删除 gate\{0} 的 {1} 个 jsonl（{2:N0} MB；**保留 summary.json / verdict.json** 以便复判）" -f $tag, $gf.Count, $mb)
+        }
+    } else {
+        Log ("  ⚠ 闸门目录 gate\{0} 不存在 —— 轮换没跑到（闸门是不是没落盘？）" -f $tag)
     }
     Log ("S 盘剩余 {0:N0} GB" -f (Free-GB))
 }
