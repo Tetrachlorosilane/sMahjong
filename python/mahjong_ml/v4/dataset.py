@@ -19,6 +19,7 @@ v3 的紧凑集存的是 **state 615 / cand 96**（特征 v3 的拼装结果）�
 | `nlegal` | int16 | 决策行的 `legal` 长度 |
 | `label` | int16 | **教师动作**：有 `teacher_index` 用它（DAgger），否则用 `chosen_index` |
 | `effect` | `[lmax,3]` float16 | sidecar 逐候选派生量的前 3 维（向听/进张种数/进张枚数）⇒ 牌效头的回归目标 |
+| （无新列）**引擎逐候选标签** | 由 `cand` / `effect` 现算 | `engine_best_indices()` ⇒ 每行一个"引擎最优候选"下标（W4 的模仿学习目标；`pretrain --il-weight`） |
 | `value` | float32 | `final_scores[seat] − 起点`（**千点**；值头的 HL-Gauss 目标） |
 | `rtg` | float32 | **逐决策** reward-to-go（千点）：`Σ_{本局及其后} 收支 + 终局余棒`（轨迹 `reward_to_go`）—— λ=1 的 GAE 目标；老轨迹写 NaN |
 | `placement` | int8 | 该座位终局顺位 − 1（0..3；缺字段填 −1） |
@@ -44,6 +45,9 @@ import numpy as np
 
 from .. import auxlabels as _aux
 from .. import dataset as _v3
+#: ⚠ 只为了 `DERIVED_CANDIDATE`（`cand.derived` 块的**实维数**）：`features` 是纯 numpy 模块，
+#: 没有 torch 依赖 ⇒ 不会把 torch 拖进 `dataset` 的构建路径。
+from .. import features as _f3
 from . import blocks, spec, traces
 #: ⚠ `cache` 只在模块层导入（它自己**惰性**引 torch，见 `cache.torch_encoder`）——
 #: `model` / `export` 是 torch 重依赖，只在**真的带 carry 构建**时才在 `build` 里导入。
@@ -114,6 +118,212 @@ def rows_for_label(row: dict) -> int:
     if "teacher_index" in row:
         return int(row["teacher_index"])
     return int(row.get("chosen_index", -1))
+
+
+# ==================================================================== 引擎逐候选标签
+#
+# W4 第一步（`docs/VALVES-AND-FIXTURES.md` §3 的 W4）：给策略灌一路**稠密、低噪、非采样**的
+# 监督信号。RL 那条路已证明"看不见自己的进步"（每轮只走 100~150 步、KL 预算用满也只有 0.05 nats，
+# 效应小于闸门在小算力下的分辨率 ±2.35 顺位点），而**引擎原本就在每一行给出逐候选的牌效量** ——
+# 它无采样噪声、无 critic、不花一格闸门算力，且**每一份现有紧凑集里都有**。
+#
+# 这一段的唯一职责：把"引擎的逐候选量"翻成**每行一个目标候选下标**（纯函数、确定性、可单测）。
+# 它**不**碰权重、不碰张量通道、不新增列（老紧凑集直接用）。
+
+#: 逐候选"引擎导航量"的列序 —— 与 `features.DERIVED_CANDIDATE` / Java `ObsFeatures.perCandidate`
+#: **同一份顺序**（`cand.derived` 块就是这些量按 `features.DERIVED_SCALE_CAND` 归一化后的结果；
+#: 老的 3 列 `effect` 是它的**前 3 维原值**）。除 `shanten_after` 外一律"越大越好"。
+ENGINE_FEATURE_NAMES: tuple[str, ...] = (
+    "shanten_after",     # 0：打完之后的向听（**听牌记 0**；只可能是 0..6）
+    "advance_types",     # 1：进张**种数**（只在未听牌时有值，否则 0）
+    "advance_tiles",     # 2：进张**枚数**（已扣掉可见牌；未听牌时有值）
+    "wait_types",        # 3：听牌种数（只在听牌时有值）
+    "wait_tiles",        # 4：听牌枚数
+    "good_wait_types",   # 5：良形听牌种数
+    "good_wait_tiles",   # 6：良形听牌枚数
+    "dora_count",        # 7：打后手牌里的宝牌数（⚠ 本函数**不消费**它，见 `engine_best_index`）
+)
+
+
+def _lex_best(keys: list[np.ndarray], valid: np.ndarray, idx0: np.ndarray) -> np.ndarray:
+    """按 `keys` 的顺序取**字典序最大**的候选下标（同分保留**更小下标**）。
+
+    实现口径（避免"两把尺子"）：维护"当前最优下标"`idx` `[n]` 与"还没被淘汰的候选"`alive` `[n, L]`，
+    逐个键比较 `key[row, i] > key[row, idx[row]]`；严格更大才改判（⇒ **平局时先到者胜**，
+    即 `legal` 顺序），比较完这个键就把**严格更小**的候选淘汰掉。
+
+    ⚠ **两个坑**（都是 2026-10-04 的边界单测抓出来的，别改回去）：
+
+    1. **必须淘汰**：只比较"当前最优"而不淘汰的话，已经在前一个键上输掉的候选会在下一个键上
+       跟"当前最优"**那个键的值**比较 —— 字典序于是变成"最后一个键说话"（`进张枚数 9 > 8` 的
+       胜者被 `进张种数 2 < 9` 的败者翻掉）。所以每个键比完就把**严格更小**的淘汰掉。
+    2. **取最大，不是取"第一个更大的"**：`better.argmax()` 给的是"第一个比当前最优大的候选"，
+       而字典序要的是"alive 里这一键最大的那个" —— 写成前者时，两个都优于当前最优的候选会
+       按**下标**而不是按**这一键的值**决出（上例里 `col4 = 2 vs 3` 会被判成 2 胜）。
+
+    @param valid `[n, L]` 合法掩码（非法的一律淘汰）
+    @param idx0  `[n]` 起步下标（只在 `keys` 为空时返回它 —— 正常路径每个键都会重算）
+    """
+    n, L = valid.shape
+    if L == 0:
+        # `L == 0`（这一行没有任何候选）是调用方的契约违反：这里必须炸而不是返回 0
+        raise ValueError("逐候选引擎量宽度为 0：这一行没有任何候选可评")
+    rows = np.arange(n)
+    alive = np.asarray(valid, dtype=bool).copy()
+    idx = np.asarray(idx0, dtype=np.int64).copy()
+    for k in keys:
+        kk = np.where(alive, k, -np.inf)
+        # 这一键上 alive 里的**最大者**（`argmax` 取第一个最大值 ⇒ 平局取最小下标 = 牌序）
+        idx = kk.argmax(axis=1)
+        best_val = kk[rows, idx]
+        alive &= kk >= best_val[:, None]
+    return idx
+
+
+def engine_best_indices(feats, nlegal, *, chunk: int = 65536) -> np.ndarray:
+    """`[n, L, k]` 逐候选引擎量 + `[n]` 合法数 → `[n]` **引擎最优候选下标**（int64）。
+
+    判据（刻意与 `ai/SearchPolicy.utility()` 同序，见它的类注释：`U = -1000·向听 + 2·进张枚数
+    + 1·进张种类`，听牌那一支换成听牌枚数/良形枚数 ⇒ 在 1000 的权重下就是"向听优先"的字典序）：
+
+    1. **全 0 行排第一**：`tsumo` / `ron` 这类**终局和牌**的派生行是**整行 0**
+       （`ObsFeatures.perCandidate` 对它们直接 `return new int[PER_CANDIDATE]`）——
+       引擎没给"打完之后"的形态，但"能和就和"是这一行唯一正确的答案。
+       ⚠ 反过来也成立：**真实候选不可能整行 0**（听牌行的 `wait_types ≥ 1`，未听牌行的
+       `shanten ≥ 1`），所以这条不会误吞普通候选 —— 这条不变量是 `cli il-check` 的判据之一。
+    2. 本行**最好向听 == 0**（有候选听牌）⇒ 键 `(听牌枚数, 良形枚数, 听牌种数, 良形种数)`；
+       键里带 `-向听` 打头是为了让"打完不听牌"的候选**永远输给**听牌候选。
+    3. 否则 ⇒ 键 `(-向听, 进张枚数, 进张种数)`。
+    4. 键全平 ⇒ **取最小下标**（下标就是 `legal` 顺序，`dataset` 在 build 期已硬校验两者对齐）
+       —— 这就是"同分按牌序确定性打破平局"，也是"同分时不下任何判断"的诚实写法。
+    5. ⚠ 只给 3 列（老 `effect` 列）时第 2 条的四个键里只剩 `-向听` ⇒ 听牌行**退化成下标序**
+       （引擎量里没有听牌形，谁也分不出好坏）。要真正的听牌比较就给 8 列
+       （`engine_feature_block` 从紧凑集的 `cand.derived` 块取）。
+       ⚠ `dora_count`（第 7 列）**不参与**排序：宝牌是"打点"不是"牌效"，把它塞进平局判据
+       会让这个标签的性质变掉（牌效标签应当只讲牌效）。
+
+    @param feats  `[n, L, k≥3]`（float16/float64 都行；逐列单调变换不影响任何比较）
+    @param nlegal 逐行合法数（**只评前 nlegal 个候选**；尾部的 padding 必须被排除）
+    @param chunk  每批处理多少行（内存：float64 的 `[chunk, L, k]`；不是性能开关）
+    """
+    F = np.asarray(feats)
+    if F.ndim != 3:
+        raise ValueError(f"逐候选引擎量必须是 [n, L, k]（收到 shape={F.shape}）")
+    n, L, k = F.shape
+    if k < 3:
+        raise ValueError(f"逐候选引擎量至少要 3 列（向听/进张种数/进张枚数），收到 {k} 列")
+    nl = np.asarray(nlegal, dtype=np.int64)
+    if nl.shape != (n,):
+        raise ValueError(f"nlegal 形状 {nl.shape} != ({n},)")
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    # ⚠ `nlegal ≤ 0` 是数据坏了（那一行没有任何合法动作）：不猜、当场报错。
+    #   注意 `nlegal > L` 同罪（候选比张量宽还多 ⇒ 下标会越界到 padding 之外）。
+    if nl.min() < 1 or nl.max() > L:
+        raise ValueError(f"nlegal 越界（min={int(nl.min())}, max={int(nl.max())}, L={L}）")
+    out = np.empty(n, dtype=np.int64)
+    cols = np.arange(L)
+    for i0 in range(0, n, int(chunk)):
+        blk = np.asarray(F[i0:i0 + int(chunk)], dtype=np.float64)
+        nn = blk.shape[0]
+        sub = nl[i0:i0 + nn]
+        valid = cols[None, :] < sub[:, None]
+        # ① 全 0 行（终局和牌）优先；`any` 沿候选维
+        zero = valid & ~np.any(blk != 0.0, axis=2)
+        idx0 = valid.argmax(axis=1)                     # 第一个合法候选（valid 至少一个 True）
+        sh = np.where(valid, blk[:, :, 0], np.inf)
+        tenpai = sh.min(axis=1) <= 0.0
+        adv = _lex_best([-blk[:, :, 0], blk[:, :, 2], blk[:, :, 1]], valid, idx0)
+        if k >= 7:
+            wait = _lex_best([-blk[:, :, 0], blk[:, :, 4], blk[:, :, 6],
+                              blk[:, :, 3], blk[:, :, 5]], valid, idx0)
+        else:
+            wait = adv                                 # 3 列口径：听牌行只能靠下标序（见 docstring ⑤）
+        tgt = np.where(tenpai, wait, adv)
+        win = zero.any(axis=1)
+        if bool(win.any()):
+            tgt = np.where(win, zero.argmax(axis=1), tgt)   # 第一个全 0 行 = 和牌动作
+        out[i0:i0 + nn] = tgt
+    return out
+
+
+def engine_best_index(effect_row, nlegal=None, legal=None) -> int:
+    """**一行的**引擎最优候选下标（`docs/VALVES-AND-FIXTURES.md` §3 W4 的纯函数）。
+
+    ★ 单一实现：它直接调 `engine_best_indices`（一行一批）—— 所以"标量口径"与"整表的
+    向量化口径"不可能漂移，判据只有一份。
+
+    @param effect_row `[L, k≥3]`：该行**逐候选**的引擎量。列序见 `ENGINE_FEATURE_NAMES`
+        （前 3 列 = 老的 `effect` 列：打后向听 / 进张种数 / 进张枚数；给到 7 列以上时
+        第 4~7 列参与听牌行的比较）。
+    @param nlegal 这一行的合法候选数（缺省 = `len(effect_row)`，即整行都合法）。
+        **尾部的 padding 必须靠它排除**（紧凑集是定长张量，尾部是 0）。
+    @param legal 这一行的动作键（`legal` 顺序 = 候选行顺序）—— **只用来核对长度**：
+        它是"牌序"的载体（平局取下标的依据），长度不符说明调用方拿错了行，必须报错。
+    """
+    row = np.asarray(effect_row)
+    if row.ndim != 2:
+        raise ValueError(f"effect_row 必须是 [L, k]（收到 shape={row.shape}）")
+    length = int(row.shape[0])
+    n = length if nlegal is None else int(nlegal)
+    if legal is not None:
+        keys = list(legal)
+        if len(keys) != n:
+            raise ValueError(f"legal 有 {len(keys)} 条 != nlegal {n}（拿错了行？）")
+    if not (1 <= n <= length):
+        raise ValueError(f"nlegal {n} 越界（这一行只有 {length} 个候选槽位）")
+    return int(engine_best_indices(row[None, :, :], np.array([n], dtype=np.int64))[0])
+
+
+def engine_feature_block(cand) -> np.ndarray:
+    """紧凑集的 `cand` 张量 → `[n, L, 8]` 逐候选引擎量（`cand.derived` 块的**实前 8 维**）。
+
+    为什么不是只读 `effect` 列（3 维）：那 3 维里没有听牌形 —— 听牌行（实测约占 20%，且是
+    最该打对的那一段）的 `(向听, 进张种数, 进张枚数)` 全是 `(0, 0, 0)`，标签会退化成下标序
+    = 往策略里灌噪声。`cand.derived` 块里**本来就有** `wait_*/good_wait_*`（同一个引擎调用产出，
+    也**已经在模型输入里**），所以这不是新增信息、不破坏"训练输入 == 推理输入"。
+
+    ⚠ 块的声明宽度是 11（`CAND_DERIVED`），但**实维只有 8**（`features.DERIVED_CANDIDATE`），
+    后 3 维是 v4 预留位、当前三端生产者恒写 0 ⇒ 这里只取实前 8 维（否则那 3 个恒 0 列会变成
+    "平局键"混进比较）。
+
+    ⚠ `block_slices()` 给的偏移是**通道**偏移（与 `blocks.zeroBlock` 的 `cand[:, 88:99] = 0` 同一套），
+    所以切的是**最后一维**：`cand[n, L, 88:96]` —— 别切成 `cand[n, 88:96, :]`（那个切的是候选维，
+    结果是空数组，而且**不报错**，只会静默给出 0 行候选）。
+    """
+    tensor, s0, w0 = spec.block_slices()["cand.derived"]
+    if tensor != "cand":
+        raise spec.ContractError(f"`cand.derived` 挂在 {tensor} 上（期望 cand）—— 注册表变了？")
+    n_real = int(_f3.DERIVED_CANDIDATE)
+    if w0 < n_real:
+        raise spec.ContractError(f"`cand.derived` 宽 {w0} < 实维 {n_real}：注册表与 features 脱节")
+    out = cand[:, :, s0:s0 + n_real]
+    if int(out.shape[1]) == 0:
+        raise spec.ContractError(
+            f"逐候选引擎量取出来是空的（shape={out.shape}）—— 通道偏移 {s0} 与候选维弄反了？")
+    return out
+
+
+def engine_targets(data: dict) -> np.ndarray:
+    """紧凑集（`load_split` 的返回）→ 逐行**引擎最优候选下标** `[n]`（int64）。
+
+    ⚠ **硬拒**"逐候选引擎量整块为 0"：那是 2026-09-27 那个静默坑（sidecar 没给 `cand`，
+    `cand[88:128]` 整块 0 而训练照跑）。这里若整块 0，"引擎标签"根本不存在 —— 继续跑就是
+    拿一个凭空造出来的下标去训策略，宁可当场报错（`train()` 在 `--il-weight 0` 时把它降级成
+    **一行醒目告警 + 读数不可用**，而不是静默）。
+    """
+    feats = engine_feature_block(data["cand"])
+    nleg = np.asarray(data["nlegal"], dtype=np.int64)
+    n = int(nleg.shape[0])
+    mx = 0.0
+    for i0 in range(0, n, 65536):
+        mx = max(mx, float(np.abs(np.asarray(feats[i0:i0 + 65536], dtype=np.float32)).max()))
+    if mx == 0.0:
+        raise spec.ContractError(
+            "紧凑集的 `cand.derived`（逐候选引擎量）**整块为 0** ⇒ 引擎标签不存在"
+            "（症状与 `compact/v4-bc-002` 同源：sidecar 缺逐候选段而构建期没拦）。"
+            "重新 `dataset build`，不要在这份数据上开 `--il-weight`")
+    return engine_best_indices(feats, nleg)
 
 
 #: 动作类型的固定表（诊断用：val 里"哪类动作学得像"）—— 与 `features.ACTION_TYPES` 同集合
