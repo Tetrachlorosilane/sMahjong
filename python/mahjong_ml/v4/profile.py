@@ -42,6 +42,16 @@
   点数近似会把数え役満算进"役満以上"，也会把"役满但只收到 <32000"（包牌/供托等）漏掉。
   两个口径都留着，轴名里点名了是哪一个。
 
+### 庄家怎么来（`round` 里**没有** `dealer`）
+
+`hand` 行的 `round` 子对象只有 `bakaze / kyoku / honba / riichi_sticks`（PROTOCOL §8.4），
+没有庄家座次 —— 而 `连庄率` 与**打点分档（亲 12000 / 子 8000）**都要它。所以：
+
+- **报文里有 `dealer` 就以它为准**（引擎真值，权威）；
+- 没有才**派生** `dealer = (kyoku − 1) % 4`（依据：每个风位恰好 4 个小局、引擎里
+  `kyoku = dealer + 1`；**连庄只加 `honba`、不动 `kyoku`/风位/庄家** ⇒ 连庄天然对）。
+  口径与 `v4/harness.py` 同一套。看不清的（`kyoku ∉ 1..4`）返回 `-1` = 未知，照旧画 `—`。
+
 ### 役种轴（2026-10 起）：数据来自 `hand` 行的 `yaku` / `han` / `fu` / `yakuman` / `limit`
 
 字段表与"何时缺省"见 `docs/PROTOCOL.md` §8.4；口径细节见 `docs/TRAINING-V4.md` §15.5。
@@ -212,6 +222,8 @@ class HandRow:
     round_wind: str
     kyoku: int
     honba: int
+    #: 庄家座次。**报文没这个字段** ⇒ 由 `dealer_of()` 按 `(kyoku − 1) % 4` 派生
+    #: （连庄只加 honba、不改 kyoku，所以派生对连庄成立）；`-1` = 未知（画 `—`，不猜）。
     dealer: int
     sticks_after: int
     delta: tuple[int, int, int, int]
@@ -299,11 +311,42 @@ class RunData:
 
 # ================================================================= 读盘
 
+def dealer_of(kyoku: int, honba: int, has_field: bool = False, field: Any = None) -> int:
+    """庄家座次：**轨迹里有 `dealer` 就用它（权威），没有才派生**。**纯函数**。
+
+    ⚠ 为什么会有"派生"这一支：这份轨迹的 `round` 子对象**只有**
+    `bakaze / kyoku / honba / riichi_sticks`（PROTOCOL §8.4；两个生产者逐字节对拍钉住），
+    **没有 `dealer`**。而 `连庄率`（本小局为亲且 `renchan`）与打点分档（亲 12000 / 子 8000）
+    **都**要它 —— 缺了就会"连庄率恒 `—`、并把亲家的 12000 当成跳満"（实测踩过）。
+
+    派生依据（三条，缺一条这个式子就不成立）：
+      ① **每个风位恰好 4 个小局**（东/南/西各 1~4），引擎里 `dealer` 恒 ≤ 3 且
+         `kyoku = dealer + 1`（`Table.playGame`：非连庄时 `nd = (dealer+1) % 4`，
+         `nd == 0` 换风且 `kyoku = 1`，否则 `kyoku = nd + 1`）⇒ `dealer = (kyoku − 1) % 4`
+         对**东/南/西任一风**都成立（南 1 的庄家仍是 0 号，不是"接着东 4 往后数"）；
+      ② **连庄不改 `kyoku`**（连庄只 `honba += 1`，风位/`kyoku`/庄家三样都不动）
+         ⇒ 同一个庄家连续几把手牌都用同一个 `kyoku`，派生天然对连庄成立
+         （所以 `honba` 不参与这个式子，它只是把"同一庄的第几把"记下来）；
+      ③ 口径与 `v4/harness.py`（`dealer_seat = (kyoku - 1) % 4`）**同一套** —— 不另立第二把尺子。
+
+    ⚠ **权威边界**：将来报文里真带上 `dealer` 时，**以报文里的为准**（那是引擎的真值，
+    能覆盖"某天风位不再是 4 个小局"这类规则改动）；派生值只是**缺字段时的兜底**，
+    并且 `kyoku ∉ 1..4`（形状不对/老数据缺键）时返回 `-1`（= 未知，下游照旧画 `—`，不猜）。
+    """
+    if has_field and isinstance(field, int) and not isinstance(field, bool):
+        return int(field)
+    if 1 <= int(kyoku) <= 4:
+        return (int(kyoku) - 1) % 4
+    return -1
+
+
 def parse_hand_row(o: Mapping[str, Any], policies: tuple[str, ...]) -> HandRow:
     """一条 `hand` JSON 对象 → `HandRow`。**纯函数**（自检直接喂合成对象，不读盘）。
 
     役种轴（2026-10 起，PROTOCOL §8.4）在这里的判据是 **"键在不在"**，不是"值是不是 0"：
     整块缺席（流局 / 途中流局 / 老轨迹）⇒ 五列一律 `None` —— 下游据此画 `—` 而不是 `0.00`。
+
+    庄家见 `dealer_of`：**报文有 `dealer` 就用它，没有才按 `(kyoku − 1) % 4` 派生**。
     """
     rnd = o.get("round") or {}
     # ⚠ 只要有 `yaku` 且是**非空**列表才算"有役种数据"：空列表在报文里不合法（和了一定有役），
@@ -312,10 +355,13 @@ def parse_hand_row(o: Mapping[str, Any], policies: tuple[str, ...]) -> HandRow:
     yaku = (tuple((str(y.get("code", "")), y.get("tile"), int(y.get("han", 0)),
                    int(y.get("yakuman", 0))) for y in yk)
             if isinstance(yk, list) and yk else None)
+    kyoku = int(rnd.get("kyoku", 0))
+    honba = int(rnd.get("honba", 0))
     return HandRow(
         game=int(o.get("game", -1)), hand_no=int(o.get("hand_no", -1)),
-        round_wind=str(rnd.get("bakaze", "")), kyoku=int(rnd.get("kyoku", 0)),
-        honba=int(rnd.get("honba", 0)), dealer=int(rnd.get("dealer", -1)),
+        round_wind=str(rnd.get("bakaze", "")), kyoku=kyoku,
+        honba=honba,
+        dealer=dealer_of(kyoku, honba, has_field="dealer" in rnd, field=rnd.get("dealer")),
         sticks_after=int(rnd.get("riichi_sticks", 0)),
         delta=tuple(int(x) for x in o.get("delta", [0, 0, 0, 0])),
         agari=bool(o.get("agari")), abortive=bool(o.get("abortive")),
@@ -919,7 +965,7 @@ def render_table(profiles: dict[str, list[Axes]], names: Sequence[str], *, width
 def _mk_hand(game: int, hand_no: int, delta, *, agari=True, winner=None, loser=None, tsumo=False,
              dealer=0, honba=0, renchan=False, tenpai=(False,) * 4, policies=("A", "A", "A", "A"),
              abortive=False, nagashi=False, sticks_after=0, yaku=None, han=None, fu=None,
-             yakuman=None, limit=None) -> HandRow:
+             yakuman=None, limit=None, kyoku=1, round_wind="E") -> HandRow:
     """合成一条 `hand` 行。
 
     ⚠ `winner` / `loser` 的默认值**随 `agari` 走**：流局真的发 `winner = -1`（实测轨迹如此），
@@ -941,7 +987,7 @@ def _mk_hand(game: int, hand_no: int, delta, *, agari=True, winner=None, loser=N
         fu = 30 if fu is None else fu
         yakuman = sum(y for *_x, y in yk) if yakuman is None else yakuman
         limit = "" if limit is None else limit
-    return HandRow(game=game, hand_no=hand_no, round_wind="E", kyoku=1, honba=honba,
+    return HandRow(game=game, hand_no=hand_no, round_wind=round_wind, kyoku=kyoku, honba=honba,
                    dealer=dealer, sticks_after=sticks_after,
                    delta=tuple(int(x) for x in delta), agari=agari, abortive=abortive, reason="",
                    renchan=renchan, winner=winner, loser=loser, tsumo=tsumo, nagashi=nagashi,
@@ -1118,6 +1164,44 @@ def self_check() -> int:
     ax_off = {x.name: x.value for x in axes_of(sC, {"hands": 1}, decisions_ok=False)}
     ok(ax_off["立直率"] is None and ax_off["副露率"] is None and ax_off["决策数"] is None,
        "没有决策行 ⇒ **整块行为轴**缺席（None）")
+
+    print("== 庄家：(kyoku,honba) → dealer 的边界（报文没有 dealer 字段 ⇒ 必须派生）==")
+    ok([dealer_of(k, 0) for k in (1, 2, 3, 4)] == [0, 1, 2, 3],
+       "东 1..4 ⇒ 庄家 0/1/2/3")
+    ok([dealer_of(1, h) for h in (0, 1, 2, 7)] == [0, 0, 0, 0],
+       "连庄（kyoku 不变、honba 递增）⇒ 同一个庄家（式子不含 honba）")
+    ok([dealer_of(k, 0) for k in (1, 2, 3, 4)] == [0, 1, 2, 3] == [dealer_of(k, 3) for k in (1, 2, 3, 4)],
+       "南场（bakaze=S）同样按 kyoku 轮转：南1 的庄家仍是 0 号，不接着东4 往后数")
+    ok(dealer_of(0, 0) == -1 and dealer_of(5, 0) == -1,
+       "kyoku 形状不对（0 / 5）⇒ -1 = 未知（画 `—`，⛔ 不猜成 3 号庄）")
+    ok(dealer_of(2, 0, has_field=True, field=3) == 3 and dealer_of(2, 0, has_field=True, field=None) == 1,
+       "**报文里带 dealer 时以它为准（权威）**；带了个 null 就退回派生")
+    ok(parse_hand_row({"round": {"bakaze": "E", "kyoku": 2}}, ()).dealer == 1
+       and parse_hand_row({"round": {"bakaze": "E", "kyoku": 2, "dealer": 3}}, ()).dealer == 3,
+       "解析路径：没有 dealer ⇒ 派生；有 ⇒ 用它")
+    # 这条是**踩过的坑**：老口径下 dealer 恒 -1 ⇒ 亲家 12000 被判成跳満
+    h_dealer = _mk_hand(0, 0, [-4000, 12000, -4000, -4000], winner=1, tsumo=True, dealer=1)
+    ok(base_points(h_dealer) == 12000 and score_tier(12000, dealer=(h_dealer.dealer == 1)) == "満貫"
+       and score_tier(12000, dealer=False) == "跳満",
+       "亲家自摸 4000 all = 12000 ⇒ **満貫**（按子家阈值算才会错成跳満 —— 这就是 dealer 修正的动因）")
+
+    print("== 修 dealer 解锁的两根轴：连庄率 不再 `—`、亲家打点不再按子家阈值 ==")
+    rd_dl = _mk_run([{"game": 0, "seed": 31, "policies": ["D"] * 4,
+                      "final_scores": [25000] * 4, "placement": [1, 2, 3, 4],
+                      "rank_points": [0.0] * 4}],
+                    [_mk_hand(0, 0, [-4000, 12000, -4000, -4000], winner=1, tsumo=True,
+                              dealer=1, renchan=True),
+                     _mk_hand(0, 1, [0, 0, 0, 0], agari=False, dealer=1, renchan=True, honba=1,
+                              tenpai=(True, False, True, True))],
+                    [])
+    st_dl, tab_dl = reduce_run([rd_dl])
+    sD = st_dl["D"]
+    ax_dl = {x.name: x.value for x in axes_of(sD, tab_dl, decisions_ok=False)}
+    ok(sD.dealer_hands == 2 and sD.dealer_renchan == 2 and abs(ax_dl["连庄率"] - 1.0) < 1e-12,
+       f"连庄率 = 2/2 = 100%（实得 {ax_dl['连庄率']}；dealer 恒 -1 时这里是 None/`—`）")
+    ok(abs(ax_dl["満貫以上率"] - 1.0) < 1e-12 and abs(ax_dl["跳満率"] - 0.0) < 1e-12
+       and sD.tier_counts.get("満貫") == 1,
+       f"亲家那手 12000 落「満貫」、跳満率 0（实得 tier_counts={sD.tier_counts}）")
 
     print("== 役种轴（`yaku`/`han`/`fu`/`yakuman`/`limit`；老轨迹必须画 —，不许画 0.00）==")
     # ① 解析：判据是**键在不在**，不是值是不是 0
