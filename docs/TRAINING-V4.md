@@ -1034,6 +1034,40 @@ v4 采集必须 `MAHJONG_PRODUCER=java`；C++ 侧遇到 obs v3 请求要**显式
 
 > 只记实测：服务端单线程 **22.50 ms/决策**（含特征；L2 增量缓存后，`tools.V4Probe --cache`）。
 
+### 10.1 `compact` 相（`python -m mahjong_ml.v4.dataset build`）：**3.7~5.2×**，产物逐字节不变（2026-10-05）
+
+`compact` 原本是训练回路里最大的一块（≈450 s/代，占 55%）。**四条纯提速**改造，判据是
+**同一份 raw / 同一组参数下 49 个列文件（+`meta.json`）的 SHA256 全同** —— 不是"看起来一样"：
+
+| # | 改哪（文件:函数） | 为什么 |
+| --- | --- | --- |
+| ① | `v4/dataset.py:_write_file` —— `tk.advance(evts[:max(0,n-K)])` | `h0(n) = carry(events[0, n-K))` 是**前缀函数** ⇒ 窗口内那 K 条对 `h0` 没有任何影响。原来每次决策都把整手事件重放一遍，于是 96% 的决策（一手事件数 ≤ `K_EVT`=60）白跑 `event_matrix`→`enc`→`GRUCell` |
+| ② | `v4/dataset.py:pin_torch_threads` + `_spawn(env=CHILD_ENV)` | 逐事件递推是 `[1,C]×[C,d]` 的小 GEMM：`num_threads=24` 实测 **115 µs/步**、`=1` **52 µs**；`--workers 12` 时是 12×24 个线程抢 32 个逻辑核（`compact` 的每个子进程都要跑 torch，`v3.dataset.CHILD_ENV` 那套纪律这里原来漏了） |
+| ③ | `v4/blocks.py`（`tile_matrix` / `event_matrix` / `cand_matrix`） | 7 列静态牌性提成模块级数组；牌码→kind、动作键→基础候选向量、dora 集合→列 **记忆化**；`put()` 闭包换成按 `TILE_OFF` 的直接切片；三家"打牌事件"**只筛一遍**（原来每家各扫一遍全事件流） |
+| ④ | `v4/dataset.py:_game_start_score` / `_rank_points_of` | 只读文件尾取 `start_score`；`summary.json` 按 **(路径, mtime, 大小)** 记忆（1000 场原来要把同一个 446 KB 的文件解析 1000 遍 ≈ 450 MB） |
+
+实测（i9-14900HX / 32 逻辑核；raw = `raw/v4-league8-g04`，`--aux --student net:<v4-league-g08>/net.bin@0#0.5`）：
+
+| 工况 | 改前 | 改后 | 倍数 |
+| --- | --- | --- | --- |
+| 20 场 × `--workers 1`（before/after **交错各 3 次**取中位） | 22.66 s | **5.96 s** | 3.80× |
+| 200 场 × `--workers 12` | 90.5 s | **21.9 s** | 4.13× |
+| 1000 场 × `--workers 12` | 453 s（2026-10-04 联赛实测） | **85.7 / 87.8 / 128.8 → 中位 87.8 s** | ≈5.2× |
+
+cProfile（20 场 / 1 worker）：函数调用 **2887 万 → 1599 万**；`torch.gru_cell` **44,789 → 1,378** 次
+（3.44 s → 0.07 s）、`torch._C._nn.linear` **89,578 → 2,756** 次（2.52 s → 0.04 s）、
+`dict.get` 943.7 万 → 880.5 万、`numpy.asarray` 95.2 万 → 49.0 万、`numpy.array` 11.7 万 → 掉出前 45（<0.06 s）。
+
+**判据（必须成对）**：① 49/49 个 `.npy` + `meta.json` 的 SHA256 **全同**（串行 20 场：交错 3 对比对
++ 另一组 `--student` 各一次；并行 200 场 ×1 组）；② `h0` 的**非全 0 行占比**不变
+（train 3.88% / val 0.95%，`meta.h0_nonzero_frac` 一致）。
+例：`train.h0.npy` = `CAD092FA…BCEBB1`、`val.h0.npy` = `FA4B2E9C…C760BB`（改前改后同一个哈希）。
+⛔ **没有改任何口径**：`h0` 仍是"**窗口之前**的整手 carry"、仍是**学生网**算、仍是构建期冻结 ——
+这一改只是**不再算用不上的那一段前缀**。谁要拿 `CarryTracker` 取"当前 carry"（`tracker.h`），
+就必须把 `advance` 的参数改回全量事件（`_write_file` 里那条注释写着同一句）。
+⚠ 测速**必须交错**（before/after 交替各 3 次）：raw 在 `S:` 上，页缓存被大文件挤掉时同样的一次
+构建会从 6 s 变成 **17 s**（实测踩到过，差点把 IO 抖动读成回归）。
+
 ---
 
 ## 11. 风险与未决问题

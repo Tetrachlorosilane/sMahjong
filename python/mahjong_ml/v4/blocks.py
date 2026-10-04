@@ -34,16 +34,99 @@ CTX_OFF = {name: (sum(w for _, w in CTX_LAYOUT[:i]), width)
 
 _AKA_CODE_KIND = {"0m": 4, "0p": 13, "0s": 22}
 
+# ------------------------------------------------------------------ 每行都要查的常量（缓存）
+#
+# 这一层是 2026-10-05 的**纯提速**改造：紧凑集构建（`dataset build`）是训练回路里最大的一块
+# CPU 开销，而它的热路径是"逐决策行"的——1170 万次 `dict.get` / 一百多万次 `np.asarray`
+# 全在这里。三条纪律（守住它们，产物就**逐位不变**）：
+#
+# ① **只缓存"输入相同 ⇒ 输出相同"的纯函数**（牌码→kind、动作键→基础候选向量、dora 集合→列）；
+# ② 缓存的是**值**不是"跳过"：命中时仍然写同样的浮点数（没有近似、没有稀疏化）；
+# ③ 计数器/位图一律**整数精确**（float32 里 0..136 的整数加法可交换）⇒ 与逐条累加逐位相同。
+
+#: `f3.tile_kind` 的**带缓存**版本。它一次构建被调用 165 万次（0.72 s），而牌码只有 ~40 种。
+_KIND_CACHE: dict[str, int] = {}
+
+
+def _kind(code: Any) -> int:
+    """`f3.tile_kind(str(code or ""))` 的缓存版（返回值与它**逐位相同**，见文件头纪律①）。"""
+    if type(code) is str:
+        k = _KIND_CACHE.get(code)
+        if k is None:
+            k = f3.tile_kind(code)
+            _KIND_CACHE[code] = k
+        return k
+    return f3.tile_kind(str(code or ""))
+
+
+def _kindv(v: Any) -> int:
+    """事件字段版：`f3.tile_kind(str(v or ""))`（`str` 的转换口径与原实现逐字一致）。"""
+    if type(v) is str:
+        k = _KIND_CACHE.get(v)
+        if k is None:
+            k = f3.tile_kind(v)
+            _KIND_CACHE[v] = k
+        return k
+    return f3.tile_kind(str(v or ""))
+
+
+def _counts_cached(codes: Sequence[str]) -> np.ndarray:
+    """`features._counts` 的**等价**实现：逐码 `+= 1.0`，只是牌码→kind 走 `_kind` 的记忆表。
+
+    ⚠ 为什么"逐条累加"可以原样留着：这里的计数上限是 4（同种牌只有 4 张），float32 里
+    0..136 的整数加法**精确可交换** ⇒ 与 `features._counts` 逐位相同（不需要改成 bincount）。
+    """
+    out = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+    for c in codes:
+        k = _kind(c)
+        if k >= 0:
+            out[k] += 1.0
+    return out
+
 
 def _counts(codes: Sequence[str]) -> np.ndarray:
-    return f3._counts(codes) if codes else np.zeros(f3.KIND_COUNT, dtype=np.float32)
+    return _counts_cached(codes) if codes else np.zeros(f3.KIND_COUNT, dtype=np.float32)
+
+
+#: 静态牌性通道（`is_aka .. suit_s`，7 列，**与行无关**）—— 原来每行用 7 次
+#: `np.array([[1.0 if pred(k) ...] for k in range(34)])` 现造（10 万次/次构建）。
+_STATIC_FLAGS: np.ndarray = np.array(
+    [[1.0 if pred(k) else 0.0 for k in range(f3.KIND_COUNT)] for pred in (
+        lambda k: k in _AKA_KINDS,
+        lambda k: k >= 27,                      # is_yakuhai
+        lambda k: k in (0, 8, 9, 17, 18, 26),   # is_terminal
+        lambda k: k >= 27,                      # is_honor
+        lambda k: k < 9,                        # suit_m
+        lambda k: 9 <= k < 18,                  # suit_p
+        lambda k: 18 <= k < 27,                 # suit_s
+    )], dtype=np.float32).T                     # [34, 7]
+
+#: `dora_kinds`（一手最多 5 个牌种）→ `[34]` 的 0/1 列。集合内容相同 ⇒ 列相同。
+_DORA_FLAG_CACHE: dict[frozenset, np.ndarray] = {}
+
+
+def _dora_flag(kinds) -> np.ndarray:
+    key = frozenset(kinds)
+    col = _DORA_FLAG_CACHE.get(key)
+    if col is None:
+        col = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+        for k in key:
+            col[k] = 1.0
+        _DORA_FLAG_CACHE[key] = col
+    return col
+
+
+#: 合法动作键 → `features.cand_vector(key)` 的**前 88 维基础段**。键只有几百种，
+#: 而一次构建要展开 11 万个候选 —— 每个都在 `cand_vector` 里现造一个 96 长零数组 + 字典/列表查找。
+#: 缓存的是**纯函数的值**（同一键永远同一向量），命中时照抄同样的浮点数。
+_BASE_CAND_CACHE: dict[str, np.ndarray] = {}
 
 
 def _dora_kinds(indicators: Sequence[str]) -> set[int]:
     """指示牌 → 宝牌牌种（数牌 +1、9→1；风 E→S→W→N→E；三元 白→発→中→白）。"""
     out: set[int] = set()
     for code in indicators or ():
-        k = f3.tile_kind(code)
+        k = _kind(code)
         if k < 0:
             continue
         if k < 27:                      # 数牌
@@ -63,7 +146,7 @@ def _meld_counts(melds: Any, seat_index: int) -> np.ndarray:
         return out
     for m in melds[seat_index] or ():
         for code in (m or {}).get("tiles", ()) or ():
-            k = f3.tile_kind(code)
+            k = _kind(code)
             if k >= 0:
                 out[k] += 1.0
     return out
@@ -72,51 +155,68 @@ def _meld_counts(melds: Any, seat_index: int) -> np.ndarray:
 # ------------------------------------------------------------------ tile
 def tile_matrix(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None,
                 *, degraded: set[str] | None = None) -> np.ndarray:
-    """`[34, C_TILE]` 逐牌种通道。四家块**旋转到自己为下标 0**。"""
+    """`[34, C_TILE]` 逐牌种通道。四家块**旋转到自己为下标 0**。
+
+    ⚠ 2026-10-05 起这里**不再用 `put()` 闭包**：原来每行 25 次 `put(name, col)` ⇒ 每次构建
+    32 万次"`np.asarray` + `reshape` + 切片赋值"的调用开销（实测 0.39 s self、0.85 s cum）。
+    现在直接按 `TILE_OFF` 的偏移写切片/单列 —— **赋值的目标与值一个字都没变**。
+    """
     degrad = degraded if degraded is not None else set()
     m = np.zeros((f3.KIND_COUNT, C_TILE), dtype=np.float32)
     seat = int(obs.get("seat", 0))
 
-    def put(name: str, col: np.ndarray) -> None:
-        s, w = TILE_OFF[name]
-        col = np.asarray(col, dtype=np.float32).reshape(f3.KIND_COUNT, w)
-        m[:, s:s + w] = col
-
     hand = np.asarray(obs.get("hand", np.zeros(f3.KIND_COUNT)), dtype=np.float32)
     hand_red = np.asarray(obs.get("hand_red", np.zeros(f3.KIND_COUNT)), dtype=np.float32)
-    drawn_kind = f3.tile_kind(obs.get("drawn") or "")
-    own_drawn = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+    drawn_kind = _kindv(obs.get("drawn"))
+    m[:, TILE_OFF["own_count"][0]] = hand * 0.25
+    m[:, TILE_OFF["own_aka"][0]] = hand_red
     if drawn_kind >= 0:
-        own_drawn[drawn_kind] = 1.0
-    put("own_count", (hand / 4.0).reshape(-1, 1))
-    put("own_aka", hand_red.reshape(-1, 1))
-    put("own_drawn", own_drawn.reshape(-1, 1))
+        m[drawn_kind, TILE_OFF["own_drawn"][0]] = 1.0
 
     discards = obs.get("discards") or [[], [], [], []]
     per = np.zeros((f3.KIND_COUNT, 18), dtype=np.float32)        # 6 组 × 3 家
     ev3 = int(obs.get("v", 2)) >= spec.OBS_VERSION_V4
+    events = obs.get("events") or ()
+    # ⚠ 三家各自的"打牌事件"**只筛一遍**（原来是每家都把整条事件流扫一遍 ⇒ 3× 的 `e.get`）。
+    #   筛出来的行**逐条相同**（同一批事件按演员分组），后面的计数口径一个字都没变。
+    by_actor: dict[int, list] = {}
+    if ev3:
+        for e in events:
+            if e.get("type") == "discard":
+                a = e.get("actor")
+                if a is not None:
+                    by_actor.setdefault(int(a), []).append(e)
     for j, s in enumerate(range(seat, seat + N_PLAYERS)):        # 下标 0 = 自己
         abs_s = s % N_PLAYERS
         if j == 0:
             continue                                            # 自家牌河在 evt 里，tile 不给
         col = j - 1
         river = list(discards[abs_s]) if abs_s < len(discards) else []
-        per[:, col] = _counts(river) / 4.0                       # river_all
+        per[:, col] = _counts(river) * 0.25                      # river_all
         if ev3:
-            rows = [e for e in (obs.get("events") or []) if int(e.get("actor", -1)) == abs_s
-                    and e.get("type") == "discard"]
-            before = [e.get("tile") for e in rows if not e.get("rip_phase")]
-            after = [e.get("tile") for e in rows if e.get("rip_phase")]
-            tsumo = [e.get("tile") for e in rows if e.get("tsumogiri")]
-            tedashi = [e.get("tile") for e in rows if not e.get("tsumogiri")]
+            rows = by_actor.get(abs_s)
+            if rows:
+                # 四组计数**一趟走完**（原来是 4 个列表推导 + 4 次 `_counts`）：计数是整数的
+                # float32 累加（≤18），与逐条累加**逐位相同**。
+                before_c = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+                after_c = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+                tsumo_c = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+                tedashi_c = np.zeros(f3.KIND_COUNT, dtype=np.float32)
+                for e in rows:
+                    k = _kindv(e.get("tile"))
+                    if k < 0:
+                        continue
+                    (after_c if e.get("rip_phase") else before_c)[k] += 1.0
+                    (tsumo_c if e.get("tsumogiri") else tedashi_c)[k] += 1.0
+                per[:, 3 + col] = before_c * 0.25
+                per[:, 6 + col] = after_c * 0.25
+                per[:, 9 + col] = tedashi_c * 0.25
+                per[:, 12 + col] = tsumo_c * 0.25
         else:
             before, after, tsumo, tedashi = river, [], [], []
             degrad.add("tile.per_opp")
-        per[:, 3 + col] = _counts(before) / 4.0
-        per[:, 6 + col] = _counts(after) / 4.0
-        per[:, 9 + col] = _counts(tedashi) / 4.0
-        per[:, 12 + col] = _counts(tsumo) / 4.0
-        per[:, 15 + col] = _meld_counts(obs.get("melds"), abs_s) / 4.0
+            per[:, 3 + col] = _counts(before) * 0.25
+        per[:, 15 + col] = _meld_counts(obs.get("melds"), abs_s) * 0.25
     # 三家的 safety / danger = **v4 派生量**（sidecar v3）；缺了就 0 + 记降级（不猜）
     safety = np.zeros((f3.KIND_COUNT, 6), dtype=np.float32)
     danger = np.zeros((f3.KIND_COUNT, 6), dtype=np.float32)
@@ -148,72 +248,110 @@ def tile_matrix(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None,
                 else:
                     danger[:, base + col] = (np.asarray(row, dtype=np.float32)[:f3.KIND_COUNT]
                                              / 100.0)
-    # 块 → 通道组（顺序与 TILE_LAYOUT 一致）；⚠ `put` 收的是**通道名**，不是块 id
+    # 块 → 通道组（顺序与 TILE_LAYOUT 一致）
     for name, chunk in (("river_all", per[:, 0:3]), ("river_before_riichi", per[:, 3:6]),
                         ("river_after_riichi", per[:, 6:9]), ("river_tedashi", per[:, 9:12]),
                         ("river_tsumogiri", per[:, 12:15]), ("meld_count", per[:, 15:18]),
                         ("safety_genbutsu", safety[:, 0:3]), ("safety_suji", safety[:, 3:6]),
                         ("danger_all", danger[:, 0:3]), ("danger_riichi", danger[:, 3:6])):
-        put(name, chunk)
+        s, w = TILE_OFF[name]
+        m[:, s:s + w] = chunk
 
     visible = np.asarray(obs.get("visible", np.zeros(f3.KIND_COUNT)), dtype=np.float32)
     unseen = np.maximum(0.0, 4.0 - visible)
     drawable = np.maximum(0.0, 4.0 - visible - hand)
     dora_kinds = _dora_kinds(obs.get("dora_indicators") or [])
 
-    def flag(pred) -> np.ndarray:
-        return np.array([[1.0 if pred(k) else 0.0] for k in range(f3.KIND_COUNT)], dtype=np.float32)
-
-    put("visible", (visible / 4.0).reshape(-1, 1))
-    put("unseen", (unseen / 4.0).reshape(-1, 1))
-    put("drawable", (drawable / 4.0).reshape(-1, 1))
-    put("dora_indicator", (_counts(obs.get("dora_indicators") or []) / 4.0).reshape(-1, 1))
-    put("is_dora", flag(lambda k: k in dora_kinds))
-    put("is_aka", flag(lambda k: k in _AKA_KINDS))
-    put("is_yakuhai", flag(lambda k: k >= 27))
-    put("is_terminal", flag(lambda k: k in (0, 8, 9, 17, 18, 26)))
-    put("is_honor", flag(lambda k: k >= 27))
-    put("suit_m", flag(lambda k: k < 9))
-    put("suit_p", flag(lambda k: 9 <= k < 18))
-    put("suit_s", flag(lambda k: 18 <= k < 27))
-    # 预留 3 列保持 0
+    m[:, TILE_OFF["visible"][0]] = visible * 0.25
+    m[:, TILE_OFF["unseen"][0]] = unseen * 0.25
+    m[:, TILE_OFF["drawable"][0]] = drawable * 0.25
+    m[:, TILE_OFF["dora_indicator"][0]] = _counts(obs.get("dora_indicators") or []) * 0.25
+    m[:, TILE_OFF["is_dora"][0]] = _dora_flag(dora_kinds)
+    # 7 列静态牌性一次写完（`is_aka .. suit_s` 在布局里连续）；预留 3 列保持 0
+    s_static = TILE_OFF["is_aka"][0]
+    m[:, s_static:s_static + _STATIC_FLAGS.shape[1]] = _STATIC_FLAGS
     return m
 
 
 # ------------------------------------------------------------------ evt
+#: `type` / `meld_kind` 的字符串 → 段内下标（原来是 `in` + `.index()` 的线性扫描）
+_EVT_TYPE_IDX = {t: i for i, t in enumerate(EVT_TYPES)}
+_MELD_KIND_IDX = {k: i for i, k in enumerate(f3.MELD_KINDS)}
+
+
 def event_matrix(obs: Mapping[str, Any], *, degraded: set[str] | None = None) -> np.ndarray:
-    """`[K, C_EVT]`：最近 K 条公开事件，**新的在尾部**（增量缓存按这个顺序追加）。"""
+    """`[K, C_EVT]`：最近 K 条公开事件，**新的在尾部**（增量缓存按这个顺序追加）。
+
+    ⚠ 这是紧凑集构建里**最热的一段**（一手 ~44 条事件、每条决策都要把窗口 ~24 行重新编码一遍）：
+    一次构建 5.3 万次调用 / 31 万个事件行。2026-10-05 的改造只做三件事，且都**不改值**：
+    ① `EVT_OFF[...]` 的偏移在循环外取一次（原来是每字段一次字典查找）；
+    ② 字符串 → 下标的查找换成 `dict`（`EVT_TYPES.index` / `MELD_KINDS.index` 是线性扫描）；
+    ③ 输出行是**零初始化**的，所以 `1.0 if 条件 else 0.0` 里"写 0.0"的那一半直接省掉
+       （只写 1.0 的那一半）—— 目标元素本来就恒为 0。
+    """
     degrad = degraded if degraded is not None else set()
     out = np.zeros((K_EVT, C_EVT), dtype=np.float32)
     events = obs.get("events")
     if events is None:
         degrad.add("evt.stream")
         return out
+    n = len(events)
+    if n <= 0:
+        return out
+    if n > K_EVT:
+        n = K_EVT
     seat = int(obs.get("seat", 0))
-    for row, e in zip(out[-len(events):], events[-K_EVT:]):
-        t = str(e.get("type", ""))
-        if t in EVT_TYPES:
-            row[EVT_OFF["type"][0] + EVT_TYPES.index(t)] = 1.0
-        for field_name, key, off in (("tile_kind", "tile", 0), ("called_kind", "called_tile", 0)):
-            k = f3.tile_kind(str(e.get(key) or ""))
-            if k >= 0:
-                row[EVT_OFF[field_name][0] + k] = 1.0
+    ev = events[-n:]
+    o_type = EVT_OFF["type"][0]
+    o_tile = EVT_OFF["tile_kind"][0]
+    o_tile_aka = EVT_OFF["tile_aka"][0]
+    o_called = EVT_OFF["called_kind"][0]
+    o_called_aka = EVT_OFF["called_aka"][0]
+    o_actor = EVT_OFF["actor"][0]
+    o_from = EVT_OFF["from"][0]
+    o_meld = EVT_OFF["meld_kind"][0]
+    o_turn = EVT_OFF["turn"][0]
+    o_tsumo = EVT_OFF["tsumogiri"][0]
+    o_side = EVT_OFF["sideways"][0]
+    o_rip = EVT_OFF["rip_phase"][0]
+    o_seq = EVT_OFF["seq_delta"][0]
+    type_idx = _EVT_TYPE_IDX
+    meld_idx = _MELD_KIND_IDX
+    # ⚠ `out[-len(events):]` 的左端会被 numpy 的切片规则**钳制到 0**（L > K 时整块都是窗口），
+    #   所以这里等价于 `out[K_EVT-n:]` —— 与原来逐字一致。
+    for row, e in zip(out[K_EVT - n:], ev):
+        ti = type_idx.get(str(e.get("type", "")))
+        if ti is not None:
+            row[o_type + ti] = 1.0
+        k = _kindv(e.get("tile"))
+        if k >= 0:
+            row[o_tile + k] = 1.0
+        k = _kindv(e.get("called_tile"))
+        if k >= 0:
+            row[o_called + k] = 1.0
         actor = e.get("actor")
         if actor is not None:
-            row[EVT_OFF["actor"][0] + (int(actor) - seat) % N_PLAYERS] = 1.0
+            row[o_actor + (int(actor) - seat) % N_PLAYERS] = 1.0
         src = e.get("from")
         if src is not None:
-            row[EVT_OFF["from"][0] + (int(src) - seat) % N_PLAYERS] = 1.0
+            row[o_from + (int(src) - seat) % N_PLAYERS] = 1.0
         mk = e.get("meld_kind")
-        if mk in f3.MELD_KINDS:
-            row[EVT_OFF["meld_kind"][0] + f3.MELD_KINDS.index(mk)] = 1.0
-        row[EVT_OFF["tile_aka"][0]] = 1.0 if str(e.get("tile", "")).startswith("0") else 0.0
-        row[EVT_OFF["called_aka"][0]] = 1.0 if str(e.get("called_tile", "")).startswith("0") else 0.0
-        row[EVT_OFF["turn"][0]] = float(e.get("turn", 0)) / 18.0
-        row[EVT_OFF["tsumogiri"][0]] = 1.0 if e.get("tsumogiri") else 0.0
-        row[EVT_OFF["sideways"][0]] = 1.0 if e.get("sideways") else 0.0
-        row[EVT_OFF["rip_phase"][0]] = 1.0 if e.get("rip_phase") else 0.0
-        row[EVT_OFF["seq_delta"][0]] = min(float(e.get("seq_delta", 1)), 8.0) / 8.0
+        if type(mk) is str:
+            mi = meld_idx.get(mk)
+            if mi is not None:
+                row[o_meld + mi] = 1.0
+        if str(e.get("tile", "")).startswith("0"):
+            row[o_tile_aka] = 1.0
+        if str(e.get("called_tile", "")).startswith("0"):
+            row[o_called_aka] = 1.0
+        row[o_turn] = float(e.get("turn", 0)) / 18.0
+        if e.get("tsumogiri"):
+            row[o_tsumo] = 1.0
+        if e.get("sideways"):
+            row[o_side] = 1.0
+        if e.get("rip_phase"):
+            row[o_rip] = 1.0
+        row[o_seq] = min(float(e.get("seq_delta", 1)), 8.0) / 8.0
     return out
 
 
@@ -314,12 +452,22 @@ def cand_matrix(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None,
     if base_dim != 88:
         raise ContractError(f"features._base_cand_dim() = {base_dim} != 88（v3 的候选基础段变了？）")
     per_cand = sidecar.get("cand") if sidecar else None      # [n, 8] 逐候选派生（v3 已有）
+    # ⚠ `DERIVED_SCALE_CAND` 原来在**每个候选**里现造一次 `np.asarray`（11 万次）：它是常量，
+    #   提到循环外 —— 逐元素除法与被除数/除数一个字都没变。
+    scale = np.asarray(f3.DERIVED_SCALE_CAND, dtype=np.float32)
+    nscale = scale.size
+    cache = _BASE_CAND_CACHE
     for i, key in enumerate(legal):
-        out[i, :base_dim] = f3.cand_vector(key)
+        base = cache.get(key) if type(key) is str else None
+        if base is None:
+            base = f3.cand_vector(key)
+            if type(key) is str:
+                cache[key] = base
+        out[i, :base_dim] = base
         if per_cand is not None and i < len(per_cand):
             d = np.asarray(per_cand[i], dtype=np.float32)[:f3.DERIVED_CANDIDATE]
-            out[i, base_dim:base_dim + d.size] = d / np.asarray(f3.DERIVED_SCALE_CAND[:d.size],
-                                                               dtype=np.float32)
+            ds = d.size
+            out[i, base_dim:base_dim + ds] = d / scale[:ds] if ds < nscale else d / scale
         else:
             degrad.add("cand.derived")
         # v4 新增 3 维（打点期望 / 打后危险度两种口径）在 sidecar v3 里；这里先留 0

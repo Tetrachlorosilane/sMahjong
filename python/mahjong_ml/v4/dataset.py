@@ -67,16 +67,37 @@ def trace_dir_files(directory: str | Path) -> list[Path]:
     return traces.trace_files(directory)
 
 
+#: `_rank_points_of` 的记忆表：**键 = (路径, mtime_ns, 大小)**（见它的 docstring —— 文件变了
+#: 键就变，不会把"当时还不存在/还是旧的"那个结果留在这里）。
+_RANK_POINTS_CACHE: dict[tuple, dict] = {}
+
+
 def _game_start_score(jsonl: Path) -> int:
-    """该场的起点分（`game` 行的 `start_score`；缺了就按 25000 —— M.League 默认）。"""
-    last = None
-    with jsonl.open(encoding="utf-8") as fh:
-        for line in fh:
-            if line.strip():
-                last = line
-    if last is None:
-        return 25000
-    row = json.loads(last)
+    """该场的起点分（`game` 行的 `start_score`；缺了就按 25000 —— M.League 默认）。
+
+    ⚠ 2026-10-05：只读**文件尾**（原来是 `for line in fh` 走完全文件——一场 1.9 MB、
+    1000 场就是 1.9 GB 的白读）。`start_score` 只在最后那条 `game` 行上，而一行 ≤ 几十 KB，
+    所以读尾部 1 MiB 足够；**读不出两行以上就退回整文件读**（不猜、不近似）。
+    """
+    size = jsonl.stat().st_size
+    take = min(size, 1 << 20)
+    tail = b""
+    with jsonl.open("rb") as fh:
+        if take:
+            fh.seek(size - take)
+            tail = fh.read(take)
+    lines = [ln for ln in tail.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+    if not lines or (take < size and len(lines) < 2):
+        # 尾部窗口里只有一行（说明最后一行超过了 1 MiB）⇒ 退回原来的整文件读法
+        last = None
+        with jsonl.open(encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    last = line
+        if last is None:
+            return 25000
+        lines = [last]
+    row = json.loads(lines[-1])
     return int(row.get("start_score", 25000)) if row.get("type") == "game" else 25000
 
 
@@ -418,19 +439,34 @@ def _rank_points_of(f: Path) -> dict[int, list[float]]:
 
     为什么读 summary 而不是自己算：uma/oka 在 `Payments`/`Settlement`（Java/C++）里，
     Python 重写一份必然漂移（v3 `rewards.py` 的同一条纪律）。缺文件就返回空表 ⇒ 列写 NaN。
+
+    ⚠ 2026-10-05 起**按 (路径, mtime, 大小) 记忆**：一场调一次、而 1000 场共用同一个
+    `summary.json`（实测 446 KB）—— 原来是"每场都重新读盘 + `json.loads` 一遍"，
+    1000 场白解析 ~450 MB。记忆的**键带 `st_mtime_ns`/`st_size`**（不是只按路径）：
+    `python/selfcheck.py` 会**先在同一个目录里跑一次没有 `summary.json` 的 build、之后再把
+    它写出来**（`v4-rt-src`）—— 只按路径记忆会命中那个"当时没有文件"的空表，
+    回填当场报"没有 summary.json"（第一次改动就踩到了，自检抓到）。
     """
     p = f.parent / "summary.json"
-    if not p.is_file():
-        return {}
     try:
-        s = json.loads(p.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
+        st = p.stat()
+        key = (str(p), int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        key = (str(p), -1, -1)
+    hit = _RANK_POINTS_CACHE.get(key)
+    if hit is not None:
+        return hit
     out: dict[int, list[float]] = {}
-    for g in s.get("per_game") or []:
-        rp = g.get("rank_points")
-        if isinstance(g.get("game"), int) and isinstance(rp, list) and len(rp) == 4:
-            out[int(g["game"])] = [float(x) for x in rp]
+    if p.is_file():
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            s = {}
+        for g in s.get("per_game") or []:
+            rp = g.get("rank_points")
+            if isinstance(g.get("game"), int) and isinstance(rp, list) and len(rp) == 4:
+                out[int(g["game"])] = [float(x) for x in rp]
+    _RANK_POINTS_CACHE[key] = out
     return out
 
 
@@ -550,9 +586,22 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
                 tk = trackers.get(seat_of_stream)
                 if tk is None:
                     tk = trackers[seat_of_stream] = carry(seat_of_stream)
+                # ★ **只重放"窗口之外"的那一段前缀**（2026-10-05；这是一行纯提速、不含任何近似）：
+                #   `h0(n) = carry(events[0, max(0, n-K)))` —— 递推是**前缀函数**，所以窗口内的
+                #   `events[n-K, n)` 对 `h0` **没有任何影响**。原先每次都把全部 n 条事件推一遍，
+                #   于是"窗口早就装得下"的那些决策（实测占 96%，一手事件数 ≤ K=60 的占绝大多数）
+                #   白跑 `EventStream.step` → `event_matrix` → `enc` → `GRUCell`。
+                #   截断到 `max(0, n-K)` 之后：`hist` 的末项恰好是 `count == want` ⇒ `h0()` 命中同一格。
+                #   ⚠ 三条不变量（改这里必须守住）：
+                #   ① 截断长度**单调不减**（同一手内事件只追加）⇒ `advance` 的前缀校验照旧成立；
+                #   ② 换手/换文件时长度会变短 ⇒ `_is_extension` 判 False ⇒ `reset()`（本来也要重置）；
+                #   ③ `_write_file` 里**只有** `tk.h0(len(evts))` 用得到状态，而
+                #      `h0` 只要 `[0, n-K]` 那一段 —— 谁要再拿这个 tracker 做别的事（例如需要
+                #      "当前 carry"、`CarryTracker.h`），**必须**改回推全量，否则语义就错了。
+                want_n = max(0, len(evts) - spec.K_EVT)
                 # `key` = 小局身份：`obs.events` **每小局清零**（`Round.events`）⇒ 换局必须重放，
                 # 不能靠"新流的前几条恰好等于旧流尾部"这种小概率去蒙（见 `CarryTracker.advance`）。
-                tk.advance(evts, key=(int(row.get("game", -1)), int(row.get("hand_no", -1))))
+                tk.advance(evts[:want_n], key=(int(row.get("game", -1)), int(row.get("hand_no", -1))))
                 h0 = tk.h0(len(evts))
                 if h0 is None:
                     mm["h0"][i] = 0.0                           # 窗口之前没有事件 ⇒ 全 0 冷启动
@@ -590,19 +639,55 @@ def _spawn(jobs: list[list[str]], log_dir: Path) -> None:
     ⚠ **为什么不用 `multiprocessing.Pool`**：本机沙箱禁**命名管道**（`Pool` 的队列就是命名管道，
     构造时即炸）。子进程 + 文件同样是真并行，且没有管道 —— 与 `mahjong_ml.dataset._spawn` 同一套做法
     （那边耦合在它自己的 argparse 上，所以这里各留一份二十行）。
+
+    ⚠ **子进程必须带 `_v3.CHILD_ENV`（BLAS/OMP 线程 = 1）**：compact 这一相每个子进程都要跑 torch
+    （`h0` 的 GRU 重放），而 torch 的 intra-op 线程数默认 = **物理核数**。`--workers 12` 时那就是
+    `12 × 24 = 288` 个线程抢 32 个逻辑核 —— 实测（同机、同 raw）`--workers 12` 相对串行只有
+    **~2.5× 的加速**（200 场：串行外推 230 s → 实测 90.5 s；1000 场联赛 453 s），
+    而钉到 1 之后同一份工作只要 21.9 s / 87.8 s。
+    数值上**逐字节不变**（每步 GEMM 的 M 极小、只沿输出列分块 ⇒ K 方向的求和顺序与线程数无关），
+    判据仍是 SHA256 逐文件对拍。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     procs = []
     for k, args in enumerate(jobs):
         log = (log_dir / f"job{k}.log").open("w", encoding="utf-8")
         procs.append((k, subprocess.Popen([sys.executable, "-m", "mahjong_ml.v4.dataset", *args],
-                                          stdout=log, stderr=subprocess.STDOUT), log))
+                                          stdout=log, stderr=subprocess.STDOUT,
+                                          env=_v3.CHILD_ENV), log))
     for k, p, log in procs:
         rc = p.wait()
         log.close()
         if rc != 0:
             tail = (log_dir / f"job{k}.log").read_text(encoding="utf-8", errors="replace")[-800:]
             raise RuntimeError(f"v4 数据集并行子进程 job{k} 退出码 {rc}：\n{tail}")
+
+
+def pin_torch_threads() -> int:
+    """把 torch 的 **intra-op 线程钉到 1**（返回原来的线程数，供日志）。**纯提速、不改数值**。
+
+    ## 为什么要钉（2026-10-05 实测）
+
+    `h0` 的递推是**逐事件**的（`CarryTracker.advance`），每次都是 `[1,C] × [C,d]` 的小 GEMM。
+    这种尺寸下 per-op 的线程唤醒/栅栏开销**远大于**计算本身：实测同一个 `enc+GRUCell` 步
+    在 `num_threads=24` 下 **115 µs**、`=1` 下 **52 µs**（2.2×）。串行构建因此白等一倍时间。
+
+    并行分支更糟：`--workers 12` 时是 `12 个子进程 × 24 线程 = 288` 个线程抢 32 个逻辑核
+    （子进程还各自持有一份 MKL/OpenMP 池）——实测同机同 raw 下 `--workers 12` 相对串行只有
+    ~2.5× 的加速（200 场：串行外推 230 s → 90.5 s；1000 场联赛 453 s）。
+
+    ## 为什么**逐字节不变**是构造出来的
+
+    线程数只决定"从哪一维切分工作"：这些算子的 M（行）极小、K（归约维）固定，
+    oneDNN/MKL 对 `M=1` 的 GEMM 只会沿 **N（输出列）** 分块 ⇒ 每个输出元素的
+    **K 方向求和顺序与线程数无关**，逐位结果不变。判据不靠这段推理，靠
+    **SHA256 逐文件对拍**（20 场构建产物与改动前完全相同）。
+    """
+    import torch
+    old = int(torch.get_num_threads())
+    if old != 1:
+        torch.set_num_threads(1)
+    return old
 
 
 def student_net_path(spec_or_path: str | None) -> str | None:
@@ -681,6 +766,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         # 不该因为环境里没有 torch 就跑不动。
         from . import export as v4export
         from . import model as M
+        nthr = pin_torch_threads()                  # 逐事件小 GEMM：线程 >1 只会更慢（见该函数）
         parsed = v4export.read_net(carry_spec)
         dims = {k: int(v) for k, v in parsed["dims"].items()}
         net = M.build(**dims)                       # `n_heads` 已在 `read_net` 的 dims 里
@@ -693,6 +779,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         if not quiet:
             print(f"长程 carry：`h0` 列用**学生网** {carry_spec} 算（d_model={dm}；"
                   f"逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）")
+            print(f"  torch intra-op 线程：{nthr} → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）")
     else:
         _encoder = None
     if carry_spec is None and not quiet:
@@ -993,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
         if carry_spec is not None:
             from . import export as v4export
             from . import model as M
+            pin_torch_threads()
             parsed = v4export.read_net(carry_spec)
             dims = {kk: int(v) for kk, v in parsed["dims"].items()}
             net = M.build(**dims)
