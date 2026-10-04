@@ -38,9 +38,10 @@ inline constexpr int kV4FormatVersion = 2;
 /** 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32）。 */
 inline constexpr int kV4HeaderBytes = 64;
 
+struct V4Scratch;
+
 /** 一份加载好的 v4 权重（字段与 Java `V4Policy` 同构）。 */
-struct V4Policy {
-    int dModel = 0;
+struct V4Policy {    int dModel = 0;
     int tileD = 0;
     int nHeads = 0;
     int valueBins = 0;
@@ -55,6 +56,18 @@ struct V4Policy {
         int rows = 0;
         int cols = 0;
         std::vector<float> data;
+        /**
+         * `data` 的**转置**：`dataT[c * rowsPad + r] == data[r * cols + c]`（行数补到 8 的倍数）。
+         *
+         * <p>为什么：热路径的 matvec 要**沿输出行**做 SIMD（8 个输出行一条指令），而沿归约维
+         * （`c`）做 SIMD 会改变求和顺序 ⇒ 改最后一位舍入 ⇒ argmax 可能翻（编译期已为同一条
+         * 理由开着 `-ffp-contract=off`）。转置之后：内层沿 `c` **升序**流式读，每个输出行仍是
+         * "单累加器、`c` 升序、mul+add 两步舍入" ⇒ **与标量路径逐位相同**。
+         * 加载期（`finishPolicy`）建一次，前向里只读。
+         */
+        std::vector<float> dataT;
+        /** `dataT` 的行距（= `rows` 补齐到 8 的倍数）。 */
+        int rowsPad = 0;
     };
 
     std::map<std::string, Mat> mats;
@@ -89,12 +102,73 @@ struct V4Policy {
      *           **整手 carry**（从 0 起重放 `obs.events[0, n-K)` 再喂窗口里的真实行）；
      *           给了 `h0` = 只从它起推进窗口里的真实行（golden 夹具那条路）。
      *           ⚠ 两者**不是**同一个量（W1 起 carry 被融合消费，混用 ⇒ 三端分叉）。
+     * @param scr 前向的中间缓冲（见 `V4Scratch`）。`nullptr` = 就地分配（CLI / 自检 / golden
+     *           那些一次性路径）；策略实例传自己那一份 ⇒ 热路径**零堆分配**。
      */
     bool forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &out,
-                    std::string &err, const std::vector<float> *h0 = nullptr) const;
+                    std::string &err, const std::vector<float> *h0 = nullptr,
+                    V4Scratch *scr = nullptr) const;
 
     /** 策略头 logits（逐候选，顺序 = `obs.legal`）= Java `V4Policy.logits`。 */
-    bool logits(const JVal &obs, std::vector<float> &out, std::string &err) const;
+    bool logits(const JVal &obs, std::vector<float> &out, std::string &err,
+                V4Scratch *scr = nullptr) const;
+};
+
+/**
+ * **一次前向的中间缓冲**（扁平 `float` + 步长；只增不缩）。
+ *
+ * <p>⛔ **不能放进 `V4Policy`**：一份权重是全进程（多 worker 线程）共享只读的，
+ * 往里塞可变缓冲就是数据竞争。所以缓冲跟着**策略实例**走 —— 一个实例只服务一个座位、
+ * 一场、一个线程（`policies.hpp` 的工厂语义）。
+ *
+ * <p>为什么要有它：改之前每决策要新建 ~800 个 `std::vector`（`vector<vector<float>>`
+ * 的中间量），实测那部分只占 ~5%，真正的收益是**它让"按 token 批处理"成为可能** ——
+ * 批处理把每决策的权重流量从 ~180 MB 压到 ~25 MB（见 `linearBatchFast`）。
+ */
+struct V4Scratch {
+    /** 一维缓冲（按需 `resize`，只增不缩）。 */
+    std::vector<float> tileH;      // kKindCount × tileD（tile.enc 输出）
+    std::vector<float> tileAt;     // kKindCount × tileD（tile.attn 输出）
+    std::vector<float> eRows;      // kKEvt × dModel（event.enc 输出 = GRU 输入）
+    std::vector<float> eTokens;    // kKEvt × dModel（Transformer 输出）
+    std::vector<float> carry;      // dModel（事件塔的 GRU 隐状态）
+    std::vector<float> tok;        // kCEvt（一条事件 token 行）
+    std::vector<float> rowTmp;     // dModel（单行事件编码输出）
+    std::vector<float> encTmp;     // 事件编码器第二层的别名中转
+    std::vector<float> aliasTmp;   // 任意"输出与输入同一块"的批量线性层的中转
+    std::vector<float> mlpHid;     // B × dModel（`mlp` 的中间层）
+    std::vector<float> ctxEmb;     // dModel（`ctx.net` 输出）
+    std::vector<float> xn;         // max(事件窗口, tile 行数) × dModel（norm 之后）
+    std::vector<float> att;        // 同上（注意力输出）
+    std::vector<float> yv;         // 同上（残差前的 y）
+    std::vector<float> hid;        // kKEvt × 2·dModel（FFN 中间）
+    std::vector<float> res;        // 同上（FFN 输出）
+    std::vector<float> candEmb;    // n × dModel
+    std::vector<float> kvTile;     // kKindCount × dModel
+    std::vector<float> uTile;      // n × dModel
+    std::vector<float> uEvt;       // n × dModel
+    std::vector<float> u;          // n × dModel
+    std::vector<float> danger;     // n × 4
+    std::vector<float> effect;     // n × 3
+    std::vector<float> qp;         // mha：q 投影
+    std::vector<float> kp;         // mha：k 投影
+    std::vector<float> vp;         // mha：v 投影
+    std::vector<float> ctx;        // mha：上下文
+    std::vector<float> scores;     // mha：注意力分数（长度 ≥ 最大 kv 行数）
+    std::vector<float> gates;      // 6·dModel（GRU 六路门，先 x 后 h）
+    std::vector<float> pool;       // tileD
+    std::vector<float> hTilePool;  // dModel
+    std::vector<float> gu;         // dModel
+    std::vector<float> memG;       // dModel
+    std::vector<float> gate;       // dModel
+    std::vector<float> state;      // dModel
+    std::vector<float> film;       // dModel
+    std::vector<float> write;      // dModel
+    std::vector<float> cat;        // 2·dModel
+    std::vector<float> cat3;       // 3·dModel
+    std::vector<float> btProb;     // 3
+    std::vector<float> policy;     // n
+    std::vector<float> meanU;      // dModel
 };
 
 /** 从文件加载（失败填 `err`）= Java `V4Policy.load`。 */
@@ -109,7 +183,8 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
  * <p>自由函数版接口（内部就是 `p.logits(...)`）：调用方拿一份 `const V4Policy&` 就能用，
  * 与 `policies.hpp` 的 `net:` 分派、`v4net` CLI 共用同一条路径。
  */
-bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::string &err);
+bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::string &err,
+              V4Scratch *scr = nullptr);
 
 /** 全部七个头（自检 / golden 对拍用）= Java `V4Policy.forwardAll`。 */
 bool v4ForwardAll(const V4Policy &p, const JVal &obs,
@@ -148,6 +223,12 @@ std::string v4Describe(const V4Policy &p);
  * 外加"一条决策都没有的文件"一行 `# <文件名> 0 条`。值用 `%.9g`。
  */
 int v4NetCli(int argc, char **argv);
+
+/**
+ * `trainer v4bench <net.bin> <轨迹.jsonl> [条数上限]`：把 JSON 解析 / 特征拼装 / 网络前向
+ * **分开计时**（与 Java `tools.V4Probe --bench` 同一件事）。只报实测，不写死验收数字。
+ */
+int v4BenchCli(int argc, char **argv);
 
 /**
  * `trainer v4golden <夹具> [--tol 1e-4]`：读 `tools/V4Probe.java --golden` 那一份夹具，
