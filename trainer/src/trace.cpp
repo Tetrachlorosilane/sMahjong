@@ -12,6 +12,7 @@
 #include "round.hpp"
 #include "seed.hpp"
 #include "shanten.hpp"
+#include "yaku_codes.hpp"
 
 namespace trainer {
 namespace {
@@ -39,6 +40,39 @@ std::string roundJson(int roundWind, int kyoku, int honba, int sticks) {
     o += std::to_string(sticks);
     o.push_back('}');
     return o;
+}
+
+/**
+ * 役列表 → 协议表示（与 Java `YakuCodes.yakuJson` **逐键、逐序、逐值**一致）。
+ *
+ * 键序 `code[,tile],han[,yakuman]` —— 三条既有口径原样保留：
+ *   ① 只发 ASCII 码；参数化役种（役牌/场风/自风）另带 ASCII 牌码 `tile`（中文名只活在 `Evaluator` 里）；
+ *   ② 役满按「13 × 倍数」折算番数（`equivalentHan()`）⇒ **逐役 `han` 之和 == 合计 `han`**；
+ *   ③ `yakuman` 只在役满役上出现（普通役没有这个键，免得读侧把它当成役满）。
+ */
+void yakuJson(std::string &o, const std::vector<Yaku> &yaku) {
+    o.push_back('[');
+    for (size_t i = 0; i < yaku.size(); i++) {
+        if (i > 0) {
+            o.push_back(',');
+        }
+        const Yaku &y = yaku[i];
+        o += "{\"code\":";
+        jsonStr(o, yakuCodeOf(y.name));
+        const std::string tile = yakuTileOf(y.name);
+        if (!tile.empty()) {
+            o += ",\"tile\":";
+            jsonStr(o, tile);
+        }
+        o += ",\"han\":";
+        o += std::to_string(y.equivalentHan());
+        if (y.yakuman > 0) {
+            o += ",\"yakuman\":";
+            o += std::to_string(y.yakuman);
+        }
+        o.push_back('}');
+    }
+    o.push_back(']');
 }
 
 }  // namespace
@@ -150,6 +184,11 @@ void TraceRecorder::onRoundEnd(const RoundEndEvent &ev) {
     } else {
         row.hasResult = false;             // Java：`res == null` → `tenpai` 是空数组
     }
+    // 役种轴（画像工具：平均役种数 / 复合役率 / 平均番数 / 役种 Top-N / 真·役满率）——
+    // 数据源是引擎已经算过的那一份（Java `Round.Result.winScore`，C++ `RoundResult.winScore`），
+    // ⛔ 记录器不重算役。没有和了者时 `hasWinScore = false` ⇒ 五列整块缺席（不写 0）。
+    row.winScore = ev.result != nullptr ? ev.result->winScore : HandScore{};
+    row.hasWinScore = ev.result != nullptr && ev.result->hasWinScore;
     hands_.push_back(std::move(row));
     // 标签侧回填（Java `TraceRecorder.onEvent` 同一件事）：放铳 / 和了 / 本小局收支
     if (auxEnabled_) {
@@ -293,6 +332,21 @@ void TraceRecorder::finish(const std::array<int, 4> &finalScores) {
             jsonBoolArray(o, h.tenpai.data(), 4);
         } else {
             o += "[]";
+        }
+        // ---- 役种轴：键追加在**行尾**（Java `TraceRecorder.onEvent` 同序）----
+        // 只在这一手真有和了者时写（`hasWinScore`）：流局 / 途中流局整块缺席，
+        // ⛔ 不写 0 —— 读侧必须能区分"取不到"与"真的是 0"。
+        if (h.hasWinScore) {
+            o += ",\"yaku\":";
+            yakuJson(o, h.winScore.yaku);
+            o += ",\"han\":";
+            o += std::to_string(h.winScore.totalHan());
+            o += ",\"fu\":";
+            o += std::to_string(h.winScore.fu);
+            o += ",\"yakuman\":";
+            o += std::to_string(h.winScore.yakuman);
+            o += ",\"limit\":";
+            jsonStr(o, limitCodeOf(h.winScore.limit));
         }
         o += "}\r\n";
         out += o;

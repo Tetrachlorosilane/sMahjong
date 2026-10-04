@@ -251,6 +251,18 @@ public final class Round {
         public int loser = -1;
         public boolean tsumo;
         /**
+         * **和了者**（{@code winner} 那一家）的评价结果 —— 役种 / 番 / 符 / 役满 / 打点档。
+         *
+         * <p>它是引擎**已经算过**的那一份：轨迹的 {@code hand} 行要这几列（画像工具的"役种轴"，
+         * `docs/TRAINING-V4.md` §15），而轨迹侧**绝不能自己重算役** —— 那会造出第二个实现，
+         * 与 {@code agari} 报文早晚漂移。所以出口是这里，不是记录器里的一段算法。
+         *
+         * <p>流局 / 途中流局 / 投票收工恒为 {@code null}（没有和了者）；多家荣和时只有
+         * {@code winners.get(0)}（= {@code winner}，离放铳者最近那家）那一手 —— 与
+         * `hand` 行的 {@code winner} 同口径，读侧不会把另一家的役算到这家头上。
+         */
+        public Evaluator.HandScore winScore;
+        /**
          * **投票通过结束对局**（见 PROTOCOL §2.5）：本局没打完就收工了。
          *
          * <p>调用方（{@code Table.playGame}）看到它就**不进**"下一局"的轮转逻辑，
@@ -2792,6 +2804,7 @@ public final class Round {
         r.winner = seat;
         r.loser = -1;
         r.tsumo = true;
+        r.winScore = sc;                 // 轨迹 `hand` 行的役种轴来源（见 Result.winScore）
         List<Payments.Pao> paos = paoPaysFor(seat, sc);
         Payments.Result pay = Payments.compute(sc, seat, -1, dealer, honba, sticks, true, paos);
         applyDelta(r, pay.delta);
@@ -2871,6 +2884,11 @@ public final class Round {
             sticksLeft -= useSticks;
             applyDelta(r, pay.delta);
             settled.add(new Object[]{w, sc, pay, paoSeats});
+            // 轨迹侧的役种轴只取**第一家**（= `r.winner`，离放铳者最近那家）：
+            // `hand` 行的 `winner` 就是它，取别人那一手会把役算到错的座位上。
+            if (i == 0) {
+                r.winScore = sc;
+            }
         }
         r.sticksLeft = Math.max(0, sticksLeft);
         r.dealerRenchan = RoundScoring.winBy(dealer, winners);
@@ -2910,28 +2928,9 @@ public final class Round {
                            Evaluator.HandScore sc, Payments.Result pay, List<Integer> pao,
                            int riichiVoid) {
         boolean showUra = (riichi[winner] || doubleRiichi[winner]) && rules.ura;
-        List<Object> yaku = new ArrayList<>();
-        for (Evaluator.Yaku y : sc.yaku) {
-            // ⚠ 报文里**不发中文**（PROTOCOL §0）：只发 ASCII 码 `code`，
-            //   参数化役种（役牌/场风/自风）另带一个 ASCII 牌码 `tile`，
-            //   显示文本由客户端查语言文件拼（`Evaluator` 内部仍用中文名，日志/自检可读）。
-            Map<String, Object> yj = Json.obj("code", YakuCodes.codeOf(y.name));
-            String ytile = YakuCodes.tileOf(y.name);
-            if (ytile != null) {
-                yj.put("tile", ytile);
-            }
-            if (y.yakuman > 0) {
-                // 役满役按「役满 = 13 番等价」折算番数（PROTOCOL §3.7）。
-                // ⚠ 这里**不能发 0**：老客户端会把 han 原样显示成「0 番」，
-                //   而役满的量纲根本不是番（结算界面写「n倍役满」）。
-                //   逐役 han 之和 == 合计 han（totalHan()），两边保持一致。
-                yj.put("han", y.equivalentHan());
-                yj.put("yakuman", y.yakuman);
-            } else {
-                yj.put("han", y.han);
-            }
-            yaku.add(yj);
-        }
+        // 役列表的协议表示只有**一份**实现（`YakuCodes.yakuJson`）—— 报文与轨迹 `hand` 行共用，
+        // 免得"轨迹里的役"与"结算界面上的役"成为两套会漂移的口径（AGENTS §6.5）。
+        List<Object> yaku = YakuCodes.yakuJson(sc.yaku);
         List<Object> meldList = new ArrayList<>();
         for (Meld m : melds[winner]) {
             meldList.add(m.toJson());

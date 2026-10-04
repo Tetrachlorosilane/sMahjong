@@ -52,6 +52,18 @@ struct RoundResult {
     int winner = -1;
     int loser = -1;
     bool tsumo = false;
+    /**
+     * **和了者**（`winner` 那一家）的评价结果 —— 役种 / 番 / 符 / 役满 / 打点档。
+     *
+     * 与 Java `Round.Result.winScore` **同字段同口径**：轨迹的 `hand` 行要这几列
+     * （画像工具的"役种轴"，`docs/TRAINING-V4.md` §15），而记录器**不重算役** ——
+     * 那就是第二个实现，早晚与引擎漂移。
+     *
+     * ⚠ `hasWinScore = false`（流局 / 途中流局 / 没有和了者 / 多家荣和时第一家没结算成）
+     * ⇒ `hand` 行那五列**整块缺席**，⛔ 不许填 0（读侧要区分"取不到"与"真的是 0"）。
+     */
+    HandScore winScore;
+    bool hasWinScore = false;
 };
 
 class Round : public RoundState {

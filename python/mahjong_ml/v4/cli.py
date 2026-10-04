@@ -482,11 +482,22 @@ def cmd_arena(argv: list[str]) -> int:
     return arena.main(argv)
 
 
+def cmd_profile(argv: list[str]) -> int:
+    """模型画像（`python -m mahjong_ml.v4 profile`）—— 把已有自对弈产物摊成多维统计表。
+
+    参数集自成一套（`--run` 可重复 + `--self-check`/`--cross-check`）⇒ 整段转走，
+    与 `loop`/`ablate`/`arena` 同一个套路。
+    """
+    from . import profile
+    return profile.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `loop` / `ablate` / `arena` 的参数集自成一套（见各自模块）：整段转走
-    if argv and argv[0] in ("loop", "ablate", "arena"):
-        return {"loop": cmd_loop, "ablate": cmd_ablate, "arena": cmd_arena}[argv[0]](argv[1:])
+    # `loop` / `ablate` / `arena` / `profile` 的参数集自成一套（见各自模块）：整段转走
+    if argv and argv[0] in ("loop", "ablate", "arena", "profile"):
+        return {"loop": cmd_loop, "ablate": cmd_ablate, "arena": cmd_arena,
+                "profile": cmd_profile}[argv[0]](argv[1:])
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="打印块清单与张量形状").set_defaults(fn=cmd_spec)
@@ -541,6 +552,9 @@ def main(argv: list[str] | None = None) -> int:
     #   进 argparse **之前**就把 `loop` 之后的参数整段转走；这里留一行是为了 `--help` 里能看到它。
     sub.add_parser("loop", help="v4 世代回路：采集(C++)/紧凑集/训练/评测/台账（不依赖 Java）")
     sub.add_parser("ablate", help="消融矩阵：逐头/逐块关掉，同一预算下出表")
+    # 同上：`profile` 的参数集在 `v4/profile.py`（`--run` 可重复 + `--self-check`/`--cross-check`），
+    # 也在进 argparse 之前整段转走；这里留一行只为 `--help` 里看得到它。
+    sub.add_parser("profile", help="模型画像：把已有自对弈产物摊成多维统计表（轴定义见 v4/profile.py）")
     args = ap.parse_args(argv)
     return args.fn(args)
 

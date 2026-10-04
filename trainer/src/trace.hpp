@@ -43,6 +43,14 @@ struct HandRow {
     bool nagashi = false;
     std::array<bool, 4> tenpai{};
     bool hasResult = true;                 // `res == null` → `tenpai` 写空数组
+    /**
+     * 和了者的役/番/符/役满/打点档（Java `Round.Result.winScore`）。
+     *
+     * `hasWinScore = false` ⇒ `hand` 行的 `yaku/han/fu/yakuman/limit` 五列**整块不写**
+     * （流局 / 途中流局 / 老数据）—— ⛔ 不写 0，否则"取不到"会被读成"真的是 0"。
+     */
+    HandScore winScore;
+    bool hasWinScore = false;
 };
 
 class TraceRecorder {

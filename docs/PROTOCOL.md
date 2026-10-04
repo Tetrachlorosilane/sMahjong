@@ -1188,8 +1188,30 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | 行 | 内容 |
 | --- | --- |
 | `decision` | `{game, hand_no, hand, step, seat, policy, kind, legal[], chosen, chosen_index, obs{...}, hand_delta, hand_winner, hand_loser, hand_agari, reward_to_go, final_scores, placement}`，`--teacher-label` 时**另带** `teacher` / `teacher_index` |
-| `hand` | `{hand_no, hand, round, scores_after, delta, agari, abortive, reason, renchan, winner, loser, tsumo, nagashi, tenpai}` |
+| `hand` | `{hand_no, hand, round, scores_after, delta, agari, abortive, reason, renchan, winner, loser, tsumo, nagashi, tenpai}`，**有和了者时另带** `yaku` / `han` / `fu` / `yakuman` / `limit`（见下） |
 | `game` | `{game, seed, policies, start_score, hands, decisions, sampled_every, final_scores, placement}` |
+
+`hand` 行的**役种轴五列**（2026-10 新增；画像工具 `python/mahjong_ml/v4/profile.py` 的
+`平均役种数 / 复合役率 / 平均番数 / 役种频次 Top-N / 真·役满率 / 満貫以上率（按 limit）` 全靠它们）：
+
+| 字段 | 类型 | 含义 / 口径 | 何时缺省 |
+| --- | --- | --- | --- |
+| `yaku` | 对象数组 | 和了者那一手的役列表，**与 `agari` 报文的 `yaku[]` 同一套 ASCII 码、同一个键序**：`{code}`、参数化役种另带 `tile`（`1z..7z`）、`{han}`、役满役另带 `{yakuman}` | 无和了者 |
+| `han` | int | **合计**番数（= `HandScore.totalHan()`，役满按「13 × 倍数」折算）⇒ **逐役 `han` 之和 == 它** | 同上 |
+| `fu` | int | 符数（按引擎口径：役满**恒 0**（没有"符"这个量纲）、七对子 25、普通和了 ≥ 20） | 同上 |
+| `yakuman` | int | 役满**倍数**（0 = 不是役满；「累计役满」也是 0 —— 量纲是番不是倍） | 同上 |
+| `limit` | str | 打点档**码**：`""` / `mangan` / `haneman` / `baiman` / `sanbaiman` / `kazoe_yakuman` / `yakuman`（只发码，PROTOCOL §0） | 同上 |
+
+- **数据源是引擎已经算过的那一份**（`Round.Result.winScore` ↔ C++ `RoundResult.winScore`）：
+  轨迹侧**不重算役**（那会造出第二个实现，与结算报文早晚漂移）；役列表的协议表示也只有一份
+  （Java `YakuCodes.yakuJson` ↔ C++ `yakuJson`）。**多家荣和**时只记 `winner` 那一手
+  （= `winners.get(0)`，离放铳者最近那家）——与 `hand.winner` 同口径，不会把别人家的役算到这家头上。
+- **无和了者时五列整块缺席**（流局 / 途中流局 / 投票收工）：⛔ **不写 0** ——
+  读侧必须能区分「取不到」与「真的是 0」（画像工具对缺席画 `—`，对 0 画 `0.00`）。
+  ⚠ **2026-10 之前的轨迹没有这五列**，读侧按同一规则处理（不许当成"0 番的手"）。
+- 判据（三处一起）：`tools/selfplay-check.mjs` 的**形状**校验 + `逐役 han 之和 == 合计 han` +
+  `yakuman > 0 ⇒ han == 13 × yakuman`；Java ↔ C++ **逐字节**（`tools/trainer-selfplay-parity.mjs`
+  / `trainer-aux-parity.mjs` / `trainer-features-parity.mjs`）。
 
 - `chosen_index` = 该动作在本次 `legal` 里的下标 —— 直接就是「枚举 + 掩码」策略头的监督信号。
 - `chosen` = **实际执行**的那个动作键：策略若回的是"部分指定"的包（裸 `pon`、不带 `tiles` 的
