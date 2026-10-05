@@ -20,6 +20,7 @@
 | **阀门与夹具的工作体系** | **`docs/VALVES-AND-FIXTURES.md`** | 开训前跑哪些自检 / 训练中只跑哪些阀门 / 各工作包 W1–W4 |
 | 训练端 C++ 引擎 | `docs/TRAINER-CPP.md` | `trainer/README.md` · `AGENTS.md` §6.5 末（生产者可切） |
 | **做 v4 特征 / 网络（下一步）** | **`docs/FEATURES-V4.md`**（规范） | **`docs/TRAINING-V4.md`**（设计：架构/多头/评价/阶段） |
+| **做 v4 特征 / 网络（下一步）** | **`docs/FEATURES-专家模型训练计划书（多专家 + 场景化权重：规格卡 / 判据 / 预算 / 陷阱 / 停止条件）
 | 打包 / 换机器人 AI | `docs/BOT-AI.md` | `AGENTS.md` §6.6 · `python -m mahjong_ml.packbot` |
 | 发一版 release | `NOTES.md` §9.5 | `tools/package-release.ps1` · `docs/DEPLOY.md` |
 | 牌谱导出 / 喂复盘器 | `docs/input-json.md` | `NOTES.md` §9.6 · `tools/tenhou-log-check.mjs` |

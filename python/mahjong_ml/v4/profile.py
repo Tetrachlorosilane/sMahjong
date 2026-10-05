@@ -25,7 +25,22 @@
 | 放铳 | 被自摸率 / 被自摸失点 | 座位·小局 / 被自摸的那几手 | 轨迹 `hand` 行 |
 | 行为 | 立直率 / 副露率 / 暗杠率 | **座位·小局**（与 `seat_hands` 同分母） | 轨迹 `decision` 行 |
 | 行为 | 追立率 | 立直宣言 | 轨迹 `decision` 行 |
-| 一致性 | 与现任同场的 `judge_pair` 读数 | 逐场配对（**复用 `v4/arena.judge_pair`**） | `summary.json` |
+| 一致性 | 与现任同场的 `judge_pair` 读数 | 逐场配对（**复用 `v4/arena.judge_pair`**），**配对域 = 同一个 run**（见下） | `summary.json` |
+
+### 配对域：**同一个 run 之内**（2026-10 修正，此前是静默错值）
+
+`per_game[i].seed` 是**墙 seed**，只由 `(seed_base, 场次下标)` 决定 —— 实测
+`gate/p1-17g24/s20261020` 与 `gate/p1-10g01/s20261020` 的 `game0.seed` **完全相同**。
+而"跨模型可比"的**前提**正是"共用同一批 seed" ⇒ 只按 seed 存逐场序列就是**后写覆盖**，
+**现任的序列会被最后一个 run 覆盖**，于是"候选在墙 i 的值"被拿去和"最后一个 run 里现任对
+**别的候选**在同一墙 i 的值"配对。数字看起来正常、事实错误（实测 17g24 的真值
+`rank_points −4.152` 被读成 `−8.067`）。所以：
+
+- 逐场序列的键 = **`(run 序号, 墙 seed)`**（`PolicyStat.add_series`）；
+- `eval.paired_test` 取交集 ⇒ **配对只在同一个 run 内成立**（该 run 里候选与现任同场同墙）；
+- 这**就是** `gate.pooled_diffs` 那套"**加键偏移 + 池化**"的同一个构造（偏移落在元组第一格），
+  统计量仍是 `eval.paired_test`（经 `arena.judge_pair`）—— **没有第二份统计实现**；
+- ⛔ 本模块**不做**跨 run 的台面合并（那件事归 `v4.gate`，它按 `--seed` 逐套墙判决）。
 
 ### 打点怎么"反推"（不依赖任何新字段）
 
@@ -513,6 +528,79 @@ def discover_runs(p: Path) -> list[Path]:
     return subs or [p]
 
 
+# ================================================================= 牌山可比性（**逐 run** 判据）
+
+@dataclass(frozen=True)
+class WallCheck:
+    """一个 run 的「墙对齐」体检（`problem == ""` = 对齐）。"""
+
+    run_index: int
+    name: str
+    labels: int          # 这个 run 里出现过的策略数
+    walls: int           # 这个 run 里各策略共同覆盖的墙 seed 数
+    problem: str = ""
+
+
+def check_walls(runs: Sequence[RunData]) -> list[WallCheck]:
+    """**逐 run** 体检「各策略是不是打了同一批墙 seed」—— 可比性的正确判据。**纯函数**。
+
+    ⚠ 原来的判据是 `all(set(rd.seeds) == set(runs[0].seeds))`（**跨 run** 比 seed 集合），
+    它在 gate 场景下**恒为假警报**：`gate/<tag>` 展开出的 8 个 `s<seed>/` 本来就各是一套**不同的墙**，
+    seed 集合**天然不同** —— 而"不同"根本不是错误（那 8 套墙要被池化才对）。
+    真正要问的是："**同一个 run 内部**，各策略打的是不是同一批墙"（同一个 run 里 X 与现任必须同场同墙，
+    配对才成立）；跨 run 的墙本来就不同，配对**不跨 run**（见 `add_series`）。
+
+    返回每个 run 一条 `WallCheck`；`problem` 非空 = 这个 run 的配对会漏场 / 张冠李戴，逐条点名。
+    """
+    out: list[WallCheck] = []
+    for i, rd in enumerate(runs):
+        cov: dict[str, set] = {}
+        bad_rows = 0
+        for g in rd.per_game:
+            sd = g.get("seed")
+            if sd is None:
+                continue
+            pols = g.get("policies") or ()
+            if len(pols) != 4:
+                # ⚠ `reduce_run` 里有一条 `if len(labels) != 4: continue` —— 这种场会被**静默丢掉**，
+                #   而"丢掉几场"在多 run 合并后根本看不出来 ⇒ 在这里点名。
+                bad_rows += 1
+                continue
+            for lab in pols:
+                cov.setdefault(str(lab), set()).add(int(sd))
+        name = str(rd.dir)
+        if not cov:
+            out.append(WallCheck(i, name, 0, len(rd.seeds),
+                                 "读不到 `per_game` 的墙 seed（这个 run 没有可配对的场次）"))
+            continue
+        ref = max(cov.values(), key=len)
+        probs: list[str] = []
+        miss = [(lab, len(v)) for lab, v in sorted(cov.items()) if v != ref]
+        if miss:
+            probs.append("；".join(f"{short_label(lab, 20)} 只打了 {n}/{len(ref)} 副墙"
+                                   for lab, n in miss))
+        if bad_rows:
+            probs.append(f"{bad_rows} 场没有 4 个策略标签（`reduce_run` 会把它们静默丢掉）")
+        out.append(WallCheck(i, name, len(cov), len(ref), "；".join(probs)))
+    return out
+
+
+def fmt_run_ids(ids: Iterable[int]) -> str:
+    """run 序号 → 压缩写法（`r0-7` / `r0,3-5`）—— "这次配对用了哪几个 run"一眼可见。**纯函数**。"""
+    xs = sorted({int(i) for i in ids})
+    if not xs:
+        return "—"
+    parts: list[str] = []
+    i = 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+            j += 1
+        parts.append(f"r{xs[i]}" if j == i else f"r{xs[i]}-{xs[j]}")
+        i = j + 1
+    return ",".join(parts)
+
+
 # ================================================================= 归约
 
 @dataclass
@@ -554,10 +642,26 @@ class PolicyStat:
     yakuman_wins: int = 0            # `yakuman > 0`（**真·役满**，数え役満不算）
     limit_counts: dict = field(default_factory=dict)
     yaku_freq: dict = field(default_factory=dict)
-    series: dict = field(default_factory=dict)      # 逐场（seed → 值），给 `judge_pair`
+    #: 逐场序列：`度量 → {(run 序号, 墙 seed): 值}`。⚠ **键里必须有 run**（见 `add_series`）——
+    #: 只按 seed 存会被后一个 run 覆盖，而"跨模型可比"的前提恰恰是各 run 共用同一批 seed。
+    series: dict = field(default_factory=dict)
 
-    def add_series(self, key: str, seed: int, value: float) -> None:
-        self.series.setdefault(key, {})[seed] = value
+    def add_series(self, key: str, run_index: int, seed: int, value: float) -> None:
+        """记一条逐场值：**键 = `(run 序号, 墙 seed)`**。
+
+        ⚠ 为什么键里必须有 run（2026-10 修正的**静默错值**）：`per_game[i].seed` 是墙 seed，只由
+        `(seed_base, 场次下标)` 决定 —— 实测 `gate/p1-17g24/s20261020` 与
+        `gate/p1-10g01/s20261020` 的 `game0.seed` **完全相同**。原来的写法是
+        `series[度量][seed] = 值`（**后写覆盖**）⇒ 一次 `profile --run A --run B …`
+        （跨模型可比的前提正是**共用同一批 seed**）时，**现任的逐场序列被最后一个 run 覆盖**，
+        `--incumbent` 就把"X 在墙 i 的值"与"最后一个 run 里现任**对别的候选**在同一墙 i 的值"
+        配成对 —— **数字看起来正常、事实错误**（实测 17g24 的 rank_points 真值 −4.152 被读成 −8.067）。
+
+        加上 run 序号后，`eval.paired_test` 的 `set(a) & set(b)` 自然只在**同一个 run 内**相交；
+        而"每个 run 的键各自加一段偏移再池化"正是 `v4/gate.pooled_diffs` 的同一个构造
+        （只是偏移落在元组第一格），统计量依旧是 `eval.paired_test` —— **没有第二份统计实现**。
+        """
+        self.series.setdefault(key, {})[(int(run_index), int(seed))] = value
 
 
 def reduce_run(runs: Sequence[RunData], label_filter: Sequence[str] | None = None
@@ -582,7 +686,11 @@ def reduce_run(runs: Sequence[RunData], label_filter: Sequence[str] | None = Non
              "win_turn_covered": 0, "win_turn_extra": 0,
              # 役种轴的"这批数据到底有没有这几列"判据：只要有一条 `hand` 行带 `yaku`，
              # 这一批就是 2026-10 之后采的；`0` ⇒ 老轨迹 ⇒ 六根轴一律画 `—`（⛔ 不画 0.00）。
-             "yaku_field": 0, "yaku_hands": 0}
+             "yaku_field": 0, "yaku_hands": 0,
+             # 逐场序列的键里那个 **run 序号 → 目录** 的图例（`--incumbent` 表用它说明"这次配对
+             # 用了哪几个 run"）。必须由这里给：`RunData.dir` 的名字会撞（`gate/<tag>` 展开出来的
+             # 8 个子 run 都叫 `s<seed>`），只有**在 `runs` 里的下标**是唯一的。
+             "run_names": [str(rd.dir) for rd in runs]}
     seen_riichi: set = set()
     seen_open: set = set()
     seen_ankan: set = set()
@@ -716,18 +824,18 @@ def reduce_run(runs: Sequence[RunData], label_filter: Sequence[str] | None = Non
                 if rd.eval_run is not None:
                     for metric in ml_eval.METRICS:
                         for sd, v in ml_eval.per_game_series(rd.eval_run, lab, metric).items():
-                            s.add_series(metric, int(sd), float(v))
+                            s.add_series(metric, rd_i, int(sd), float(v))
                 else:
                     if a["n"] > 0:
-                        s.add_series("rank_points", seed, a["rp"] / n)
-                        s.add_series("place", seed, -a["place"] / n)  # 取负：正 = 更好（`eval` 口径）
-                        s.add_series("score", seed, a["score"] / n)
+                        s.add_series("rank_points", rd_i, seed, a["rp"] / n)
+                        s.add_series("place", rd_i, seed, -a["place"] / n)  # 取负：正 = 更好（`eval` 口径）
+                        s.add_series("score", rd_i, seed, a["score"] / n)
                 # 后三个是"从轨迹重算的每场率"（`summary.json` 里没有逐场值）⇒ 只能这里算
                 if a["sh"] > 0:
-                    s.add_series("win_rate", seed, a["wins"] / sh)
-                    s.add_series("deal_in_rate", seed, a["di"] / sh)
+                    s.add_series("win_rate", rd_i, seed, a["wins"] / sh)
+                    s.add_series("deal_in_rate", rd_i, seed, a["di"] / sh)
                 if a["wn"]:
-                    s.add_series("avg_win_score", seed, a["ws"] / a["wn"])
+                    s.add_series("avg_win_score", rd_i, seed, a["ws"] / a["wn"])
         # ---- ③ 逐决策：行为轴 ----
         if rd.decisions is None:
             continue
@@ -1473,8 +1581,8 @@ def match_label(labels: Sequence[str], sub: str) -> str:
     return hit[0]
 
 
-def vs_incumbent(stats: dict[str, PolicyStat], incumbent: str, metrics: Sequence[str] = SERIES_KEYS
-                 ) -> tuple[list[str], int]:
+def vs_incumbent(stats: dict[str, PolicyStat], incumbent: str, metrics: Sequence[str] = SERIES_KEYS,
+                 run_names: Sequence[str] | None = None) -> tuple[list[str], int]:
     """与现任**同场**的配对对比：**复用 `v4/arena.judge_pair`**（不另写检验）。
 
     ⚠ **符号**（与 `gate.decide` 同一条陷阱）：`judge_pair(sa, sb, a, b)` 的约定是
@@ -1482,30 +1590,59 @@ def vs_incumbent(stats: dict[str, PolicyStat], incumbent: str, metrics: Sequence
     `judge_pair(该模型, 现任, 该模型, 现任)` 调（候选在前）。写成 `(现任, 该模型, …)`
     会把每一行都反号 —— 而"更强的那一侧"读起来照样像结论。
 
+    ⚠ **配对域 = 同一个 run**：序列的键是 `(run 序号, 墙 seed)`（`PolicyStat.add_series`），
+    所以 `judge_pair` 取到的交集**只含"同一个 run 里候选与现任同场同墙"的那些场**。
+    `run` 那一列打出这次配对用到的 run 序号（`[rN]` 见开头"读入 N 个 run"那张表），
+    免得"跑了 16 个 run、实际只有 8 个进了这一行"这件事看不出来。
+
     返回 `(报告行, 该模型"显著更好"的轴数)`；`metrics` 里每一个都是**逐场序列**。
     """
     lines = ["== 与现任同场的配对对比（`arena.judge_pair` 口径；**正 = 该模型更好**，即 候选 − 现任） ==",
              f"   现任 = {incumbent}",
-             f"   {'模型':<18}{'指标':<16}{'Δ':>12}{'95%CI':>24}{'p':>9}{'n':>7}  判定"]
+             f"   ⚠ 配对域 = **同一个 run**（该 run 里候选与现任同场同墙）；跨 run 的墙不配对、也不合并"
+             f"（要合并走 `v4.gate` 的加键偏移 + 池化 `gate.pooled_diffs`）",
+             f"   {'模型':<18}{'指标':<16}{'Δ':>12}{'95%CI':>24}{'p':>9}{'n':>7}{'run':>9}  判定"]
     n_better = 0
+    rows = 0
+    used_runs: set = set()
+    overlap: list[str] = []
     if incumbent not in stats:
         return lines + ["   （这批 run 里没有现任 ⇒ 跳过）"], 0
     for lab in sorted(stats):
         for metric in metrics:
             sa = stats[incumbent].series.get(metric) or {}
             sb = stats[lab].series.get(metric) or {}
-            if not (set(sa) & set(sb)):
+            keys = set(sa) & set(sb)
+            if not keys:
                 continue
+            rows += 1
+            rid = [k[0] for k in keys]
+            used_runs.update(rid)
+            # ⚠ 同一副墙在**多个 run** 里参与同一对配对 ⇒ 那些 run 若是重复跑（同 seed 基），
+            #   合并就把同一副牌数了两遍、CI 假窄（同 `gate.pooled_diffs` 的那条判据）。
+            #   现任自比那一行（Δ≡0 的退化对照）不算，否则多 tag 混跑时它必然满屏。
+            if lab != incumbent and len(rid) > len({k[1] for k in keys}):
+                overlap.append(f"{short_label(lab, 16)}·{metric}（{len(rid)} 场 / "
+                               f"{len({k[1] for k in keys})} 副墙）")
             r = arena.judge_pair(sb, sa, lab, incumbent, metric)   # 候选在前 ⇒ 正 = 该模型更好
             if lab != incumbent and r.verdict == "更好":
                 n_better += 1
             tag = "（现任自己：恒 0）" if lab == incumbent else ""
             lines.append(f"   {short_label(lab, 16):<18}{metric:<16}{r.delta:>+12.3f}"
-                         f"{f' [{r.lo:+.3f},{r.hi:+.3f}]':>24}{r.p:>9.3f}{r.games:>7}  "
-                         f"{r.verdict}{tag}")
+                         f"{f' [{r.lo:+.3f},{r.hi:+.3f}]':>24}{r.p:>9.3f}{r.games:>7}"
+                         f"{fmt_run_ids(rid):>9}  {r.verdict}{tag}")
+    if overlap:
+        lines.append("   ⚠ **同一副墙在多个 run 里进了同一对配对** ⇒ 那几行把同一副牌数了两遍"
+                     "（CI 假窄，同 `gate.pooled_diffs` 的判据）：" + "；".join(overlap))
     lines.append(f"   汇总：{n_better} 个 (模型, 轴) 组合**显著更好**（CI 排除 0 且为正）。")
+    if run_names:
+        lines.append(f"   配对用到 {len(used_runs)} 个 run（共读入 {len(run_names)} 个）："
+                     f"{fmt_run_ids(sorted(used_runs))}"
+                     f"　—— 序号 → 目录见开头「读入 N 个 run」那张表")
     lines.append("   读法：Δ 是与**同一批牌山**上现任的逐场配对差（`place` 已取负、正 = 更好）；"
                  "CI 跨 0 ⇒ 这一轴分不出（牌山方差大，别拿单次跑分下结论）。")
+    if rows == 0:
+        lines.append("   ⛔ 一行都配不上：候选与现任**没有任何同一个 run** —— 本模块不跨 run 配对")
     return lines, n_better
 
 
@@ -1570,11 +1707,13 @@ def main(argv: list[str] | None = None) -> int:
     dirs = _resolve_runs(args.run)
     print(f"读入 {len(dirs)} 个 run：")
     runs: list[RunData] = []
-    for d in dirs:
+    for i, d in enumerate(dirs):
         rd = load_run_data(d, with_decisions=not args.no_decisions, limit_files=args.limit_files)
         runs.append(rd)
         note = f"；{rd.trace_note}" if rd.trace_note else ""
-        print(f"  {d}：{len(rd.hands)} 小局 / {len(rd.per_game)} 场 / "
+        # `[rN]` 是**配对表的 run 列**用的序号（`RunData.dir` 的名字会撞：`gate/<tag>` 展开出来的
+        # 子 run 都叫 `s<seed>`），所以图例必须打在这里。
+        print(f"  [r{i}] {d}：{len(rd.hands)} 小局 / {len(rd.per_game)} 场 / "
               f"{0 if rd.decisions is None else len(rd.decisions)} 决策{note}")
 
     all_labels = _collect_labels(runs)
@@ -1591,14 +1730,28 @@ def main(argv: list[str] | None = None) -> int:
         print("没有可画像的策略。")
         return 1
 
-    seedsets = [set(rd.seeds) for rd in runs if rd.seeds]
-    same = bool(seedsets) and all(s == seedsets[0] for s in seedsets)
-    if len(runs) < 2:
-        print("\n牌山一致性：只有 1 个 run ⇒ 无「跨模型可比」可言（单模型画像）")
+    checks = check_walls(runs)
+    bad = [c for c in checks if c.problem]
+    same = bool(checks) and not bad
+    if not runs:
+        print("\n牌山一致性：没有 run。")
+    elif bad:
+        print(f"\n牌山一致性：**{len(bad)}/{len(checks)} 个 run 内部各策略没打同一批墙 seed**"
+              f" ⇒ 这些 run 的配对会漏场（不可比）：")
+        for c in bad:
+            print(f"   [r{c.run_index}] {c.name}：{c.problem}")
+    elif len(runs) == 1:
+        print(f"\n牌山一致性：只有 1 个 run ⇒ 无「跨模型可比」可言（单模型画像）；"
+              f"该 run 内部 {checks[0].labels} 个策略打的是同一批 {checks[0].walls} 副墙 ✓")
     else:
-        print(f"\n牌山一致性："
-              f"{'同一批 seed ⇒ 各模型画像可比 ✓' if same else '**seed 集合不同 ⇒ 画像不可比**'}"
-              f"（首个 run 的 seed 数 {len(seedsets[0]) if seedsets else 0}）")
+        walls = {int(s) for rd in runs for s in rd.seeds}
+        print(f"\n牌山一致性：**逐 run 对齐** ✓ —— 判据是「**同一个 run 内部**各策略打的是不是"
+              f"同一批墙 seed」，**不是**「各 run 的 seed 集合相不相同」：")
+        print(f"   {len(checks)} 个 run，每个 run {checks[0].walls} 副墙（各策略同场同墙）；"
+              f"全表不同的墙 seed 共 {len(walls)} 个。")
+        print("   ⚠ 跨 run 的 seed 批次**天然不同**（`gate/<tag>` 展开出的 `s<seed>/` 就是 8 套"
+              "**不同的墙**）——那不是错误。配对只在**同一个 run 内**成立（见 `--incumbent` 的 `run` 列）；"
+              "跨 run 的合并归 `v4.gate`（加键偏移 + 池化，`gate.pooled_diffs`）。")
 
     decisions_ok = all(rd.decisions is not None for rd in runs)
     if not decisions_ok:
