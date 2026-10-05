@@ -72,6 +72,19 @@ def trace_dir_files(directory: str | Path) -> list[Path]:
 _RANK_POINTS_CACHE: dict[tuple, dict] = {}
 
 
+def clear_rank_points_cache() -> None:
+    """清空 `_rank_points_of` 的记忆表（**判据/测试用**，生产路径不需要）。
+
+    ⚠ 为什么必须有一个**显式**的清空口（2026-10 实测）：记忆键是 `(路径, st_mtime_ns, st_size)`，
+    而 **Windows 的文件时间戳分辨率 ≈ 时钟 tick（~15.6 ms）** ⇒ "同一个 tick 内、**字节数不变**
+    地重写同一个 `summary.json`"会算出**完全一样的键** ⇒ `_rank_points_of` 读回旧表
+    （实测：背靠背两次 `write_text`，**90% 命中**；隔 >1 ms 才不命中）。
+    生产路径靠"`summary.json` 是采集时一次写成的、不会原地改"回避它，但 `python/selfcheck.py`
+    的**负向对照**恰恰要"改坏再读一次"—— 那时必须能看见新内容，**不能拿 sleep 赌 tick**。
+    """
+    _RANK_POINTS_CACHE.clear()
+
+
 def _game_start_score(jsonl: Path) -> int:
     """该场的起点分（`game` 行的 `start_score`；缺了就按 25000 —— M.League 默认）。
 
