@@ -29,7 +29,7 @@
 #   `-Label`：不传就用下面那个缺省标签（**换季不必改脚本** —— 改脚本正是"标签被复用"的来源之一）。
 # ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
-      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty, [string]$Opponents = [string]::Empty)
+      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty, [string]$PoolSeed = [string]::Empty)
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = 'utf-8'
 $ErrorActionPreference = 'Stop'
@@ -78,6 +78,10 @@ $seed  = if ($Seed -gt 0) { $Seed } else { 20261001 + 10000 * [int]($label -repl
 #   专家线的种子是**已认证的专家**（打点线 = `v4-league14-g05`），而不是 g08。
 $incumbent = if ($Incumbent) { $Incumbent } else { Join-Path $root 'tools\build\v4-league-g08\net.bin' }
 $pool  = New-Object System.Collections.Generic.List[string]
+# ⚠ 威胁源/风格对手预置（专家线用）：逗号分隔的 net.bin 绝对路径。
+#   为什么需要：池空时桌面只有 student×2 + teacher×2 ⇒ "结果奖励里关于通用强度的信息很少"（loop.py 原话），
+#   防守线要的是"高打点对手在桌上"的压力，不预置就造不出目标风格。
+if ($PoolSeed) { foreach ($p in $PoolSeed.Split(',')) { if ($p.Trim()) { $pool.Add($p.Trim()) } } }
 $rejected = Join-Path $root 'tools\build\_rejected'
 # ⚠ **牌山每代换新**（第八季审计的第二条）：原来历季 19 个候选都用同一对 `20261001/2`，
 #   而"牌山"这个误差分量是**共模**的 —— 同一个候选换成别的牌山会翻号（实测：回路自评换 seed
@@ -194,7 +198,6 @@ for ($g = 1; $g -le $Generations; $g++) {
                # 连续若干次不改善就**正常收尾**（打印 train/val 两条 CE，让人一眼看出"还在学"还是
                # "开始记数据"）；配合原有的 5% 验证切分 + grad-clip 0.5 + KL 锚，三件一起才算护栏。
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
-if ($Opponents) { $largs += @('--opponents', $Opponents) }
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
     if ($DryRun) {
         # 空跑：把**真会跑的那条命令行**按 token 打印出来（`--il-weight` / `--val-metric` 一眼可见），
