@@ -43,6 +43,14 @@
   统计量仍是 `eval.paired_test`（经 `arena.judge_pair`）—— **没有第二份统计实现**；
 - ⛔ 本模块**不做**跨 run 的台面合并（那件事归 `v4.gate`，它按 `--seed` 逐套墙判决）。
 
+### 方向：`Δ` 只是"谁大"，**哪边算好要看那根序列的方向**（2026-10 修正的同一类假结果）
+
+`vs_incumbent` 的 `Δ = 候选 − 现任`，而 `SERIES_KEYS` 里 **`deal_in_rate` 是放铳率本身**
+（越小越好）⇒ `Δ>0` 是**更差**。方向**只有一份**（`LOWER_BETTER` + `series_sign()` +
+`signed_verdict()`），`leader_report`（轴级领先者）与 `vs_incumbent`（配对表 + `n_better`）
+**都读它** —— 别再各写一把尺子（改前就是这么把 `+1.3pp 铳率` 印成"更好"的）。
+⚠ `place` 在序列里**已取负** ⇒ 它是"越大越好"；轴「平均顺位」(1..4) 才是"越小越好"。
+
 ### 打点怎么"反推"（不依赖任何新字段）
 
 `hand` 行的**打点**没有直接给，但四家收支 `delta` 是精确的，于是打点可**反解**：
@@ -114,7 +122,54 @@ MANGAN = {False: 8000, True: 12000}
 RP_TOL = 0.05
 #: 逐场序列的键（给 `judge_pair`）—— `rank_points`/`place`/`score` 是 `eval.METRICS` 的三个口径，
 #: 后三个是"从轨迹重算的每场率"（`summary.json` 里没有逐场值）。
+#: ⚠ 每根**方向**（越大越好 / 越小越好）只写在 `LOWER_BETTER` 一处，见 `series_sign()`。
 SERIES_KEYS = ("rank_points", "place", "score", "win_rate", "deal_in_rate", "avg_win_score")
+
+#: 「**越小越好**」的口径 —— **唯一数据源**：`vs_incumbent`（逐场配对的判定文字 / `n_better`）
+#: 与 `leader_report`（轴级领先者）都读它，**别再各写一份**。
+#: ⚠ 两套**键空间不同**，所以这里两套都列：
+#:   · 逐场序列名（`SERIES_KEYS`）⇒ 由 `series_sign()` 读；
+#:   · 轴名（`axes_of` 的行名）⇒ 由 `leader_report()` 读（`lower_better()`）。
+#: ⚠ 6 根序列里**只有 `deal_in_rate` 向下**：`place` 在序列里**已经取负**
+#:   （`eval.seat_values` / `add_series` 都写 `-placement`）⇒ 序列口径是"越大越好"，
+#:   而**轴**"平均顺位"（1..4）才是"越小越好" —— 这两件事很容易被写反，别照字面类推。
+LOWER_BETTER = (
+    # ① 逐场序列
+    "deal_in_rate",
+    # ② 轴
+    "平均顺位", "铳率", "平均铳点", "被自摸率", "被自摸失点", "二位率", "三位率", "四位率",
+)
+
+
+def lower_better(key: str) -> bool:
+    """该口径是不是「越小越好」（读 `LOWER_BETTER`，**唯一判据**）。"""
+    return key in LOWER_BETTER
+
+
+def series_sign(metric: str) -> int:
+    """逐场序列的方向：`+1` = 越大越好，`-1` = 越小越好。**不认识的序列名直接报错**（不猜）。
+
+    ⚠ 为什么必须有这个函数（2026-10 修的**同一类"数字对、结论反"**的 bug）：方向原来只活在
+    `leader_report` 的 `LOWER_BETTER` 里，而 `vs_incumbent` 直接拿 `arena.verdict` 的
+    `lo > 0 ⇒ 更好` ⇒ **同一个文件两把尺子**：`deal_in_rate`（放铳率本身）在速览里按
+    "越低越好"、在配对表里按"Δ>0 更好" —— 实测把 17g24 的 `+1.3pp 铳率` 印成"**更好**"，
+    还被计进 `n_better` 的"显著更好"汇总（而 `§15.7` 的结论又要人工把它读回"更差"）。
+    """
+    if metric not in SERIES_KEYS:
+        raise KeyError(f"未知逐场序列 {metric!r}：新增序列必须先在 `LOWER_BETTER` 里定方向")
+    return -1 if lower_better(metric) else +1
+
+
+def signed_verdict(lo: float, hi: float, sign: int) -> str:
+    """按**方向**判读一份 CI（**纯函数**）：`sign=+1` 越大越好、`sign=-1` 越小越好。
+
+    镜像写法：`越小越好` ⇒ "更好" 当且仅当 `hi < 0` ⇔ `(-lo) > 0` ⇒ 把 `(lo, hi)` 换成
+    `(-hi, -lo)` 再交给 `arena.verdict` —— **CI 规则仍然只有 `arena.verdict` 那一份**，
+    这里只加一次镜像，不另写一套判据。
+    """
+    if sign > 0:
+        return arena.verdict(0.0, float(lo), float(hi))
+    return arena.verdict(0.0, -float(hi), -float(lo))
 
 
 # ================================================================= 纯函数
@@ -922,8 +977,8 @@ class Axes:
 
 #: 各块的轴顺序（表按它出行；**取不到的轴也占一行**，免得"没有"被读成"没问题"）
 MISSING_AXES = ("默听率",)
-#: 「越小越好」的轴（其余非中性轴一律「越大越好」）—— 只用于**轴级领先者**那张速览
-LOWER_BETTER = ("平均顺位", "铳率", "平均铳点", "被自摸率", "被自摸失点", "二位率", "三位率", "四位率")
+# ⚠ 「越小越好」的那张表**只有一份**：`LOWER_BETTER`（见文件上方）。轴名那侧由 `lower_better()` 读，
+#   这里**不再**另列一份"轴名元组"（两把尺子就是这么长出来的）。
 #: 中性轴（不参与"谁领先"：结构量 / 派生分母 / **风格与运气**（役种多不多、有没有役满都不是强弱））
 NEUTRAL_AXES = ("场数", "座位·小局", "决策数", "流局率", "途中流局率", "和了巡目覆盖",
                 "平均得点", "平均得点收支", "平均和点",
@@ -1045,8 +1100,9 @@ def leader_report(profiles: dict[str, list[Axes]], colnames: Sequence[str],
         if len(vals) < 2:
             continue
         vals.sort()
-        best = vals[0] if ax0.name in LOWER_BETTER else vals[-1]
-        second = vals[1] if ax0.name in LOWER_BETTER else vals[-2]
+        low = lower_better(ax0.name)          # ⚠ 方向唯一来源 = `LOWER_BETTER`（与 `--incumbent` 同一份）
+        best = vals[0] if low else vals[-1]
+        second = vals[1] if low else vals[-2]
         margin = abs(second[0] - best[0])
         scale = max(abs(best[0]), abs(second[0]), 1e-9)
         winners = [c for v, c in vals if abs(v - best[0]) <= 1e-6 * scale]
@@ -1544,6 +1600,92 @@ def self_check() -> int:
        f"红证：把 `judge_pair(现任, 候选, …)` 写反 ⇒ Δ={wrong.delta:+.1f}、判「更差」"
        f"（所以顺序不许改）")
 
+    print("== 6 根逐场序列的**方向**（`LOWER_BETTER` 是唯一数据源；两处都读它）==")
+    # ⚠ 下面是**手写**的期望值：谁把某根标反，逐条断言立刻红。
+    expect_dir = {"rank_points": +1, "place": +1, "score": +1,
+                  "win_rate": +1, "deal_in_rate": -1, "avg_win_score": +1}
+    for m in SERIES_KEYS:
+        sg = series_sign(m)
+        ok(sg == expect_dir[m],
+           f"`{m}` 的方向 = **{'越大越好' if expect_dir[m] > 0 else '越小越好'}**（实得 {sg:+d}）")
+    ok([m for m in SERIES_KEYS if series_sign(m) < 0] == ["deal_in_rate"],
+       "6 根里**只有** `deal_in_rate` 越小越好；⚠ `place` 在序列里**已取负** ⇒ 它是越大越好"
+       "（轴「平均顺位」才是越小越好 —— 这两件事别照字面类推）")
+    ok(lower_better("铳率") and lower_better("平均顺位") and lower_better("平均铳点")
+       and lower_better("被自摸率") and lower_better("被自摸失点")
+       and not lower_better("和率") and not lower_better("rank_points"),
+       "轴名那侧读**同一份**：铳率/平均顺位/平均铳点/被自摸率/被自摸失点 越低越好，"
+       "和率 越高越好")
+    try:
+        series_sign("deal_in")
+        ok(False, "未知序列名必须报错（不猜方向）")
+    except KeyError:
+        ok(True, "未知序列名必须报错 —— 新增序列必须先在 `LOWER_BETTER` 里定方向")
+
+    def _ci(sign: int, better: bool) -> tuple[float, float]:
+        """给某个方向造一对 CI：`better=True` 指向"按方向算更好"的那一侧。"""
+        lo, hi = (0.2 * sign, 1.0 * sign) if better else (-0.2 * sign, -1.0 * sign)
+        return (min(lo, hi), max(lo, hi))
+
+    bad_v = [(m, signed_verdict(*_ci(series_sign(m), True), series_sign(m)),
+              signed_verdict(*_ci(series_sign(m), False), series_sign(m)))
+             for m in SERIES_KEYS
+             if (signed_verdict(*_ci(series_sign(m), True), series_sign(m)),
+                 signed_verdict(*_ci(series_sign(m), False), series_sign(m))) != ("更好", "更差")]
+    ok(not bad_v, f"`signed_verdict` 逐根判读：顺方向 ⇒ 更好、反方向 ⇒ 更差（实得例外 {bad_v}）")
+    ok(all(signed_verdict(-0.5, 0.5, series_sign(m)) == "分不出" for m in SERIES_KEYS),
+       "CI 跨 0 ⇒ 一律「分不出」（**方向只翻语义，不翻显著性**）")
+    flip_bad = [m for m in SERIES_KEYS
+                if signed_verdict(*_ci(series_sign(m), True), -series_sign(m)) != "更差"]
+    ok(flip_bad == [],
+       f"红证：把某根的方向**标反** ⇒ 它在「按方向更好」的那对 CI 上会被读成**更差**"
+       f"（6 根全中，实得例外 {flip_bad}）—— 方向表是**载荷**，不是注释")
+
+    print("== `--incumbent` 的判定文字必须走方向表（改前 `deal_in_rate` 印「更好」并计入 n_better）==")
+    inc_r, worse, better = PolicyStat(label="INC"), PolicyStat(label="WORSE"), PolicyStat(label="BETTER")
+    for sd in range(200):
+        inc_r.add_series("deal_in_rate", 0, sd, 0.170)
+        worse.add_series("deal_in_rate", 0, sd, 0.183)      # 铳得更多 ⇒ 更差
+        better.add_series("deal_in_rate", 0, sd, 0.157)     # 铳得更少 ⇒ 更好
+    lines_d, n_b_d = vs_incumbent({"INC": inc_r, "WORSE": worse, "BETTER": better}, "INC",
+                                  metrics=("deal_in_rate",))
+    # ⚠ 取行必须用 `startswith`，**不能**用 `"BETTER" in x`：报头那行写着 `LOWER_BETTER`
+    #   ⇒ 子串会先命中报头（自检第一版就这么假红了一次）。
+    row_w = next((x for x in lines_d if x.strip().startswith("WORSE ")), "")
+    row_b = next((x for x in lines_d if x.strip().startswith("BETTER ")), "")
+    ok("更差" in row_w and "更好" not in row_w,
+       f"铳率 **+1.3pp**（Δ>0 = 铳得更多）必须印「更差」（实得 …{row_w.strip()[-46:]}）")
+    ok("更好" in row_b and n_b_d == 1,
+       f"铳率 **−1.3pp** 才是「更好」，且 `n_better` 只数它（实得 n_better={n_b_d}）")
+    ok(all("越小越好" in x for x in (row_w, row_b)) and "方向" in lines_d[4],
+       "表里必须看得见「这根是越小越好」（`方向` 列 + 报头一行）")
+
+    print("== 两处（配对表 / 轴级速览）必须读**同一份**方向表 ==")
+    prof_low = {"A": [Axes("放铳", "铳率", 0.150)], "B": [Axes("放铳", "铳率", 0.170)]}
+    line_low = next((x for x in leader_report(prof_low, ["A", "B"], ["A", "B"]) if "铳率" in x), "")
+    prof_high = {"A": [Axes("和了", "和率", 0.250)], "B": [Axes("和了", "和率", 0.200)]}
+    line_high = next((x for x in leader_report(prof_high, ["A", "B"], ["A", "B"])
+                      if "和率" in x and "平均和点" not in x), "")
+    ok(line_low.split()[1] == "A",
+       f"轴级速览：铳率 15% vs 17% ⇒ 领先者必须是低的那个（实得 {line_low.split()[:2]}）")
+    ok(line_high.split()[1] == "A",
+       f"轴级速览：和率 25% vs 20% ⇒ 领先者必须是高的那个（实得 {line_high.split()[:2]}）")
+    global LOWER_BETTER
+    keep_lb = LOWER_BETTER
+    try:
+        LOWER_BETTER = tuple(x for x in keep_lb if x not in ("铳率", "deal_in_rate"))
+        flip_lead = next((x for x in leader_report(prof_low, ["A", "B"], ["A", "B"]) if "铳率" in x),
+                         "").split()[1]
+        _, n_b_flip = vs_incumbent({"INC": inc_r, "WORSE": worse}, "INC",
+                                   metrics=("deal_in_rate",))
+        sign_flip = series_sign("deal_in_rate")
+    finally:
+        LOWER_BETTER = keep_lb
+    ok(flip_lead == "B" and n_b_flip == 1 and sign_flip == +1 and LOWER_BETTER == keep_lb,
+       f"红证：把 `LOWER_BETTER` 里的「铳率/`deal_in_rate`」拿掉 ⇒ **两处同时翻车**"
+       f"（速览领先者 {flip_lead}、n_better={n_b_flip}、方向 {sign_flip:+d}）"
+       f"—— 说明两处读的确实是同一份（谁各写一份，这条就抓不住）")
+
     print("== 显示格式（取不到必须画 `—`，不能画 0）==")
     ok(_fmt_value("役", "平均番数", None) == "—", "None ⇒ —")
     ok(_fmt_value("和了", "和率", 0.2304) == "23.04%", "率 ⇒ 百分比两位")
@@ -1699,13 +1841,24 @@ def vs_incumbent(stats: dict[str, PolicyStat], incumbent: str, metrics: Sequence
     `run` 那一列打出这次配对用到的 run 序号（`[rN]` 见开头"读入 N 个 run"那张表），
     免得"跑了 16 个 run、实际只有 8 个进了这一行"这件事看不出来。
 
+    ⚠ **方向**（2026-10 修的第二类"数字对、结论反"）：`Δ = 候选 − 现任` 只是"谁大"，
+    **哪一边算好要看这根序列的方向** —— `deal_in_rate`（放铳率本身）**越小越好**，
+    于是 `Δ>0` 是**更差**。方向一律由 `series_sign()`（读 `LOWER_BETTER`）给，
+    判定文字由 `signed_verdict()` 出；**6 根逐场序列的方向见报头那行**。
+    改前这里直接用 `arena.verdict(r.lo, r.hi)`（"CI 为正 ⇒ 更好"）⇒ 把 17g24 的
+    `+1.3pp 铳率` 印成"更好"、还计进 `n_better`（而 `leader_report` 那边是"越低越好"）。
+
     返回 `(报告行, 该模型"显著更好"的轴数)`；`metrics` 里每一个都是**逐场序列**。
     """
-    lines = ["== 与现任同场的配对对比（`arena.judge_pair` 口径；**正 = 该模型更好**，即 候选 − 现任） ==",
+    lines = ["== 与现任同场的配对对比（`arena.judge_pair` 口径；Δ = 候选 − 现任，方向见下表） ==",
              f"   现任 = {incumbent}",
              f"   ⚠ 配对域 = **同一个 run**（该 run 里候选与现任同场同墙）；跨 run 的墙不配对、也不合并"
              f"（要合并走 `v4.gate` 的加键偏移 + 池化 `gate.pooled_diffs`）",
-             f"   {'模型':<18}{'指标':<16}{'Δ':>12}{'95%CI':>24}{'p':>9}{'n':>7}{'run':>9}  判定"]
+             "   方向（**唯一来源 = `LOWER_BETTER`**，与「轴级领先者速览」同一份）："
+             + "、".join(f"`{m}` {'越小越好' if series_sign(m) < 0 else '越大越好'}"
+                        for m in metrics if m in SERIES_KEYS),
+             f"   {'模型':<18}{'指标':<16}{'Δ':>12}{'95%CI':>24}{'p':>9}{'n':>7}{'run':>9}"
+             f"  {'方向':<8}判定"]
     n_better = 0
     rows = 0
     used_runs: set = set()
@@ -1728,22 +1881,25 @@ def vs_incumbent(stats: dict[str, PolicyStat], incumbent: str, metrics: Sequence
             if lab != incumbent and len(rid) > len({k[0] for k in keys}):
                 overlap.append(f"{short_label(lab, 16)}·{metric}（{len(rid)} 场 / "
                                f"{len({k[0] for k in keys})} 副墙）")
-            r = arena.judge_pair(sb, sa, lab, incumbent, metric)   # 候选在前 ⇒ 正 = 该模型更好
-            if lab != incumbent and r.verdict == "更好":
+            sign = series_sign(metric)                             # −1 = 越小越好（如放铳率）
+            r = arena.judge_pair(sb, sa, lab, incumbent, metric)   # 候选在前 ⇒ Δ = 候选 − 现任
+            v = signed_verdict(r.lo, r.hi, sign)                   # ⚠ 判定必须走方向
+            if lab != incumbent and v == "更好":
                 n_better += 1
             tag = "（现任自己：恒 0）" if lab == incumbent else ""
             lines.append(f"   {short_label(lab, 16):<18}{metric:<16}{r.delta:>+12.3f}"
                          f"{f' [{r.lo:+.3f},{r.hi:+.3f}]':>24}{r.p:>9.3f}{r.games:>7}"
-                         f"{fmt_run_ids(rid):>9}  {r.verdict}{tag}")
+                         f"{fmt_run_ids(rid):>9}  {'越小越好' if sign < 0 else '越大越好':<8}{v}{tag}")
     if overlap:
         lines.append("   ⚠ **同一副墙在多个 run 里进了同一对配对** ⇒ 那几行把同一副牌数了两遍"
                      "（CI 假窄，同 `gate.pooled_diffs` 的判据）：" + "；".join(overlap))
-    lines.append(f"   汇总：{n_better} 个 (模型, 轴) 组合**显著更好**（CI 排除 0 且为正）。")
+    lines.append(f"   汇总：{n_better} 个 (模型, 轴) 组合**显著更好**（CI 排除 0 **且按方向算更好**）。")
     if run_names:
         lines.append(f"   配对用到 {len(used_runs)} 个 run（共读入 {len(run_names)} 个）："
                      f"{fmt_run_ids(sorted(used_runs))}"
                      f"　—— 序号 → 目录见开头「读入 N 个 run」那张表")
-    lines.append("   读法：Δ 是与**同一批牌山**上现任的逐场配对差（`place` 已取负、正 = 更好）；"
+    lines.append("   读法：Δ 是与**同一批牌山**上现任的逐场配对差；判定按「方向」列 "
+                 "（`place` 在序列里已取负 ⇒ 它是越大越好；放铳率是越小越好）。"
                  "CI 跨 0 ⇒ 这一轴分不出（牌山方差大，别拿单次跑分下结论）。")
     if rows == 0:
         lines.append("   ⛔ 一行都配不上：候选与现任**没有任何同一个 run** —— 本模块不跨 run 配对")
