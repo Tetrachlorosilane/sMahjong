@@ -1225,7 +1225,8 @@ def self_check() -> int:
     ok(sA.place_counts == [1, 1, 1, 1], f"单场：顺位分布 [1,1,1,1]（实得 {sA.place_counts}）")
     ok(abs(sA.rank_point_sum - 0.0) < 1e-12, "单场：顺位点之和 = 0（马点为 0 的那套合成数）")
     ok(tab["hands"] == 1 and tab["ryukyoku"] == 0, "单场：1 小局 / 0 流局")
-    ok(sA.series["win_rate"][1] == 0.25, "单场：逐场序列 win_rate = 0.25")
+    ok(sA.series["win_rate"][(0, 1)] == 0.25,
+       "单场：逐场序列 `win_rate[(run 0, seed 1)]` = 0.25（**键里带 run**）")
 
     print("== ryukyoku 行 与 无和了的场次 ==")
     rd2 = _mk_run([{"game": 0, "seed": 2, "policies": ["B"] * 4,
@@ -1428,8 +1429,8 @@ def self_check() -> int:
     inc = PolicyStat(label="INC")
     mod = PolicyStat(label="MOD")
     for sd in range(200):
-        inc.add_series("rank_points", sd, -5.0)
-        mod.add_series("rank_points", sd, +5.0)
+        inc.add_series("rank_points", 0, sd, -5.0)
+        mod.add_series("rank_points", 0, sd, +5.0)
     lines_v, n_better = vs_incumbent({"INC": inc, "MOD": mod}, "INC", metrics=("rank_points",))
     row = next((x for x in lines_v if "rank_points" in x and "MOD" in x), "")
     ok(n_better == 1 and "+10.000" in row,
@@ -1731,14 +1732,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     checks = check_walls(runs)
-    bad = [c for c in checks if c.problem]
-    same = bool(checks) and not bad
+    wall_bad = [c for c in checks if c.problem]
+    same = bool(checks) and not wall_bad
     if not runs:
         print("\n牌山一致性：没有 run。")
-    elif bad:
-        print(f"\n牌山一致性：**{len(bad)}/{len(checks)} 个 run 内部各策略没打同一批墙 seed**"
+    elif wall_bad:
+        print(f"\n牌山一致性：**{len(wall_bad)}/{len(checks)} 个 run 内部各策略没打同一批墙 seed**"
               f" ⇒ 这些 run 的配对会漏场（不可比）：")
-        for c in bad:
+        for c in wall_bad:
             print(f"   [r{c.run_index}] {c.name}：{c.problem}")
     elif len(runs) == 1:
         print(f"\n牌山一致性：只有 1 个 run ⇒ 无「跨模型可比」可言（单模型画像）；"
@@ -1802,13 +1803,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.incumbent:
         inc = match_label(all_labels, args.incumbent)
         print()
-        lines, n_better = vs_incumbent(stats, inc)
+        lines, n_better = vs_incumbent(stats, inc, run_names=table.get("run_names"))
         print("\n".join(lines))
 
     if args.json_out:
         payload = {
             "runs": [str(d) for d in dirs],
-            "same_walls": bool(same),
+            # ⚠ 判据是**逐 run**的（同一个 run 内部各策略同场同墙）；**不是**"各 run 的 seed 集合相同"。
+            #   旧名字 `same_walls` 装的是后者 ⇒ 换成 `run_aligned`（语义变了，名字也得换）。
+            "run_aligned": bool(same),
+            "run_walls": [{"run": c.run_index, "dir": c.name, "labels": c.labels,
+                           "walls": c.walls, "problem": c.problem} for c in checks],
             "axes": {n: [{"block": a.block, "name": a.name, "value": a.value, "note": a.note}
                          for a in profiles[n]] for n in names},
             "raw": {n: {k: getattr(stats[n], k) for k in
