@@ -30,6 +30,8 @@
 # ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
       [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$env:PYTHONIOENCODING = 'utf-8'
 $ErrorActionPreference = 'Stop'
 $root = 'C:\Users\HP\source\games\mahjong'
 $S    = 'S:\mahjong-training'
