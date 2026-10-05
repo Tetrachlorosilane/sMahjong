@@ -29,7 +29,7 @@
 #   `-Label`：不传就用下面那个缺省标签（**换季不必改脚本** —— 改脚本正是"标签被复用"的来源之一）。
 # ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
-      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty)
+      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty, [string]$Opponents = [string]::Empty)
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = 'utf-8'
 $ErrorActionPreference = 'Stop'
@@ -194,6 +194,7 @@ for ($g = 1; $g -le $Generations; $g++) {
                # 连续若干次不改善就**正常收尾**（打印 train/val 两条 CE，让人一眼看出"还在学"还是
                # "开始记数据"）；配合原有的 5% 验证切分 + grad-clip 0.5 + KL 锚，三件一起才算护栏。
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
+if ($Opponents) { $largs += @('--opponents', $Opponents) }
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
     if ($DryRun) {
         # 空跑：把**真会跑的那条命令行**按 token 打印出来（`--il-weight` / `--val-metric` 一眼可见），
