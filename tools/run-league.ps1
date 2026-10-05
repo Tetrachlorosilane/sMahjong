@@ -72,7 +72,9 @@ $label = if ($Label) { $Label } else { 'v4-league11' }
 #   ⇒ 复现旧季**必须**显式 `-Seed`；这里原来那句"`v4-league8` ⇒ 20341001"是**错的**（公式漏了 `v4` 的 4）。
 $seed  = if ($Seed -gt 0) { $Seed } else { 20261001 + 10000 * [int]($label -replace '\D', '') }
 # 现任 = **第一季终点 g08**（第五十四轮三个配对里 2 胜 0 负的那个）。
-$incumbent = Join-Path $root 'tools\build\v4-league-g08\net.bin'
+# ⚠ 现任可换（多专家路线）：`-Incumbent <net.bin 绝对路径>`；缺省仍是第一季终点 g08。
+#   专家线的种子是**已认证的专家**（打点线 = `v4-league14-g05`），而不是 g08。
+$incumbent = if ($Incumbent) { $Incumbent } else { Join-Path $root 'tools\build\v4-league-g08\net.bin' }
 $pool  = New-Object System.Collections.Generic.List[string]
 $rejected = Join-Path $root 'tools\build\_rejected'
 # ⚠ **牌山每代换新**（第八季审计的第二条）：原来历季 19 个候选都用同一对 `20261001/2`，
