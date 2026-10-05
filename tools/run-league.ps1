@@ -141,7 +141,7 @@ for ($g = 1; $g -le $Generations; $g++) {
     if ($pool.Count -gt 0) { $opp = $pool | Select-Object -Last 2 }
     $largs = @('-m', 'mahjong_ml.v4', 'loop', '--label', $label, '--init', $incumbent,
                '--generations', '1', '--gen-offset', "$($g - 1)",
-               '--games', "$Games", '--workers', '16', '--eval-workers', '16',
+               '--games', "$Games", '--workers', '12', '--eval-workers', '12',
                '--objective', 'ppo', '--value-target', 'delta', '--advantage', 'hand',
                '--rank-weight', '0.2',
                # ---- 方案 (B)：**让一轮真的能动**（2026-10-03 审计后放宽）--------------------------------
@@ -268,7 +268,7 @@ for ($g = 1; $g -le $Generations; $g++) {
     Log ("  闸门：现任 vs {0}（2 套**新**牌山 {1} × {2} 场）" -f $tag, $gateSeeds, $GateBlock)
     $gateLog = Join-Path $root "release\gate-$tag.log"
     & $py -m mahjong_ml.v4.gate --incumbent $incumbent --candidate $candidate `
-        --seeds $gateSeeds --games $GateBlock --block $GateBlock --workers 16 `
+        --seeds $gateSeeds --games $GateBlock --block $GateBlock --workers 12 `
         --out (Join-Path $S 'gate') --tag $tag *> $gateLog
     $grc = $LASTEXITCODE
     Get-Content $gateLog | Select-String -Pattern '牌山 |合并判决|套间' | ForEach-Object { Log ("    " + $_.Line.Trim()) }
