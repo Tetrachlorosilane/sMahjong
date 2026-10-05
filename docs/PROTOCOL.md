@@ -1198,7 +1198,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | --- | --- | --- | --- |
 | `yaku` | 对象数组 | 和了者那一手的役列表，**与 `agari` 报文的 `yaku[]` 同一套 ASCII 码、同一个键序**：`{code}`、参数化役种另带 `tile`（`1z..7z`）、`{han}`、役满役另带 `{yakuman}` | 无和了者 |
 | `han` | int | **合计**番数（= `HandScore.totalHan()`，役满按「13 × 倍数」折算）⇒ **逐役 `han` 之和 == 它** | 同上 |
-| `fu` | int | 符数（按引擎口径：役满**恒 0**（没有"符"这个量纲）、七对子 25、普通和了 ≥ 20） | 同上 |
+| `fu` | int | 符数（按引擎口径）。**`0` 有两种合法情形**：① `yakuman > 0` —— 役满**没有"符"这个量纲** ⇒ **恒 0**；② **档次由番数决定**（`limit ∈ {mangan, haneman, baiman, sanbaiman, kazoe_yakuman, yakuman}`）—— 符数**不参与计分** ⇒ 引擎报 **`0`**（例：16 番 + M.League `kazoeYakuman=false` ⇒ 封三倍満、`limit="sanbaiman"`、`fu=0`；源码 `trainer/src/evaluator.cpp:633` 那一支）。其余（`limit == ""` 的普通和了）**必 ≥ 20**（平和自摸 20、七对子 25）。⚠ 5~12 番**也是**"番数定档"，但引擎在那里**仍报真实符数**（实测 `han=7`+`haneman ⇒ fu=30`、`han=5`+`mangan ⇒ fu=20/40`）⇒ **能不能是 0 只能看档位码，⛔ 不能用 `han >= 13` 去推** | 同上 |
 | `yakuman` | int | 役满**倍数**（0 = 不是役满；「累计役满」也是 0 —— 量纲是番不是倍） | 同上 |
 | `limit` | str | 打点档**码**：`""` / `mangan` / `haneman` / `baiman` / `sanbaiman` / `kazoe_yakuman` / `yakuman`（只发码，PROTOCOL §0） | 同上 |
 
@@ -1212,6 +1212,12 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 - 判据（三处一起）：`tools/selfplay-check.mjs` 的**形状**校验 + `逐役 han 之和 == 合计 han` +
   `yakuman > 0 ⇒ han == 13 × yakuman`；Java ↔ C++ **逐字节**（`tools/trainer-selfplay-parity.mjs`
   / `trainer-aux-parity.mjs` / `trainer-features-parity.mjs`）。
+- **符数判据**（`tools/selfplay-check.mjs`，与上表一一对应）：
+  `yakuman > 0 ⇒ fu == 0`；`limit ∈ {mangan, haneman, baiman, sanbaiman, kazoe_yakuman, yakuman}
+  ⇒ fu ∈ {0} ∪ [20, ∞)`（档位由番数决定，符数不参与计分，**允许** 0）；`limit == "" ⇒ fu >= 20`。
+  ⚠ **2026-10 修正的一处误报**：旧判据只认"役满恒 0"，于是把第②种合法形态（16 番封三倍満 ⇒ `fu=0`）
+  报成"普通和了 `fu < 20`" ⇒ 打点线第 2 代整条被卡住（实测 `raw/v4-expert-atk-g02` 全目录**唯一**一处，
+  `g921.jsonl:642`）。红证见 `NOTES.md` §6.5（档位码是判据、`han >= 13` 是间接代理）。
 
 - `chosen_index` = 该动作在本次 `legal` 里的下标 —— 直接就是「枚举 + 掩码」策略头的监督信号。
 - `chosen` = **实际执行**的那个动作键：策略若回的是"部分指定"的包（裸 `pon`、不带 `tiles` 的

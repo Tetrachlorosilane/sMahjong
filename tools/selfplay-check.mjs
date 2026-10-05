@@ -70,6 +70,25 @@ const YAKU_ITEM_KEYS = ['code', 'tile', 'han', 'yakuman'];
 const LIMIT_CODES = new Set(['', 'mangan', 'haneman', 'baiman', 'sanbaiman', 'kazoe_yakuman',
   'yakuman']);
 
+/**
+ * **档次由番数决定**的档位码 —— 这些档次下符数**不参与计分**，所以引擎允许报 `fu == 0`
+ * （2026-10 起 `hand` 行的合法形态，见 `docs/PROTOCOL.md` §8.4）。
+ *
+ * ⚠ 两个"别写错"：
+ *   ① 判据必须是**档位码本身**，⛔ 不许写成 `han >= 13` —— 那是间接代理，而且**会判错**：
+ *      引擎里 5~12 番（`mangan`/`haneman`/`baiman`）同样是"番数定档"，但那些分支**仍报真实符数**
+ *      （实测 `han=7/limit=haneman → fu=30`、`han=5/limit=mangan → fu=20/40`）；真正把 `fu` 记 0 的是
+ *      **累计役满支**（`trainer/src/evaluator.cpp:633`：`s.han >= 13` ⇒ `s.fu = 0`，M.League
+ *      `kazoeYakuman=false` 时 `limit` 记 `sanbaiman`）与**役满支**。
+ *   ② `""`（未达満貫）**不在**这张表里 ⇒ 普通和了仍要求 `fu >= 20`（平和自摸 / 七对子也满足）。
+ */
+const FU_OPTIONAL_LIMITS = new Set(['mangan', 'haneman', 'baiman', 'sanbaiman',
+  'kazoe_yakuman', 'yakuman']);
+// 防第二份码表漂移：这张表的每一项都必须是登记过的档位码（加码时先改 `LIMIT_CODES`）。
+for (const c of FU_OPTIONAL_LIMITS) {
+  if (!LIMIT_CODES.has(c)) throw new Error(`FU_OPTIONAL_LIMITS 里的 ${c} 不是登记的档位码`);
+}
+
 const problems = [];
 const warnings = [];
 const stats = { games: 0, hands: 0, decisions: 0, turn: 0, claim: 0, byKind: {} };
@@ -373,10 +392,27 @@ for (const f of files) {
         if (ykSum !== row.yakuman) add(file, ln, `逐役 yakuman 之和 ${ykSum} != 合计 yakuman ${row.yakuman}`);
       }
       if (!Number.isInteger(row.han) || row.han <= 0) add(file, ln, `han 应为正整数：${JSON.stringify(row.han)}`);
-      // 符数：役满**没有符这个量纲**（引擎里 `s.fu = 0`），普通和了恒 ≥ 20（平和自摸 / 七对子也满足）
-      if (!Number.isInteger(row.fu) || row.fu < 0) add(file, ln, `fu 形状可疑：${JSON.stringify(row.fu)}`);
-      else if (row.yakuman > 0 ? row.fu !== 0 : row.fu < 20) {
-        add(file, ln, `fu 与役满不匹配（yakuman=${row.yakuman} / fu=${row.fu}）：役满恒 0，普通和了 ≥ 20`);
+      // 符数：**两种**合法的 `fu == 0`，加一种"必 ≥ 20"（契约见 PROTOCOL §8.4）——
+      //   ① 役满（`yakuman > 0`）：没有"符"这个量纲 ⇒ **恒 0**（⛔ 不许 ≥ 20）；
+      //   ② **档次由番数决定**（`limit ∈ FU_OPTIONAL_LIMITS`）：符数不参与计分 ⇒ **允许 0**
+      //      （实测 `S:\…\raw\v4-expert-atk-g02\g921.jsonl:642`：16 番、`limit=sanbaiman`、`fu=0`——
+      //       M.League `kazoeYakuman=false` 封三倍満，这就是引擎的合法约定，**不是记录器 bug**）；
+      //      同一档位下也允许真实符数（5~12 番那几支仍报 `fu`），但 1..19 是坏形状。
+      //   ③ 其余（`limit == ""` 的普通和了）：必 ≥ 20（平和自摸 / 七对子 25 也满足）。
+      // ⚠ 2026-10 修的是**误报**：旧判据只认情形①，于是把情形②（§8.4 白纸黑字的合法形态）
+      //   判红，整条打点线在第 2 代被卡住（`g921.jsonl:642` 唯一一处）。
+      if (!Number.isInteger(row.fu) || row.fu < 0) {
+        add(file, ln, `fu 形状可疑：${JSON.stringify(row.fu)}`);
+      } else if (row.yakuman > 0) {
+        if (row.fu !== 0) {
+          add(file, ln, `役满的 fu 必须为 0（yakuman=${row.yakuman} / fu=${row.fu}）—— 役满没有符这个量纲`);
+        }
+      } else if (FU_OPTIONAL_LIMITS.has(row.limit)) {
+        if (row.fu !== 0 && row.fu < 20) {
+          add(file, ln, `档次由番数决定（limit=${JSON.stringify(row.limit)}）时 fu 只能是 0 或 ≥ 20，实际 ${row.fu}`);
+        }
+      } else if (row.fu < 20) {
+        add(file, ln, `普通和了（limit=${JSON.stringify(row.limit)}）的 fu 必须 ≥ 20，实际 ${row.fu}`);
       }
       if (!Number.isInteger(row.yakuman) || row.yakuman < 0) add(file, ln, `yakuman 形状可疑：${JSON.stringify(row.yakuman)}`);
       if (!LIMIT_CODES.has(row.limit)) add(file, ln, `limit 不是登记的档位码：${JSON.stringify(row.limit)}`);

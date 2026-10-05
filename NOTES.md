@@ -3269,6 +3269,32 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
    ⇒ 它的 I/O 来自它们（外加索引/Defender）。训练端只碰 `S:` 与仓库内 `tools\build\<tag>\net.bin`。
 4. **联赛未受影响**：最近 20 分钟内 `python\.tmp` 零改动；联赛产物全在 `S:`，当时已到第 3 代。
 
+**⚠ `hand` 行的 `fu` 判据修过一处**误报**（2026-10-05；契约见 `docs/PROTOCOL.md` §8.4）**
+
+- **事实**：`fu == 0` **有两种**合法情形 —— ① `yakuman > 0`（役满没有"符"这个量纲）；
+  ② **档次由番数决定**（`limit ∈ {mangan, haneman, baiman, sanbaiman, kazoe_yakuman, yakuman}`）：
+  符数不参与计分，引擎在**累计役满那一支**把它记 0（`trainer/src/evaluator.cpp:633`：
+  `s.han >= 13` ⇒ `s.limit = kazoeYakuman ? "累计役满" : "三倍满"`、`s.fu = 0`）。
+  ⚠ **5~12 番同样是"番数定档"，但引擎仍报真实符数**（实测 `han=7`+`haneman ⇒ 30`、
+  `han=5`+`mangan ⇒ 20/40`）⇒ **判据只能看档位码，⛔ 不能写成 `han >= 13` 这种间接代理**。
+- **误报的代价**：`tools/selfplay-check.mjs` 旧判据只认情形①（`yakuman > 0 ? fu === 0 : fu >= 20`）⇒
+  把 16 番封三倍満的那手判红。实测 `S:\mahjong-training\raw\v4-expert-atk-g02` **整整 1000 场里唯一
+  一处**就是 `g921.jsonl:642`（`han=16` / `limit="sanbaiman"` / `fu=0`）—— 它让**打点线第 2 代整条卡住**，
+  差点被当成"记录器写坏了"。⇒ 教训同 §6.5 的老规矩：**"引擎真值"要和源码那一支对上再判红**。
+- **修法**：新增 `FU_OPTIONAL_LIMITS`（那 6 个档位码，逐项断言都在 `LIMIT_CODES` 里，防第二份码表漂移），
+  判据拆成三支：`yakuman > 0 ⇒ fu === 0`；`limit ∈ FU_OPTIONAL_LIMITS ⇒ fu ∈ {0} ∪ [20,∞)`；
+  `limit === "" ⇒ fu >= 20`。
+- **红证（四条，改前/改后各跑一遍；夹具 = `g921.jsonl` 整份拷贝、只改那一行，`python\.tmp\fix3\`）**：
+
+  | 输入 | 改前 | 改后 |
+  | --- | --- | --- |
+  | ① 真实那一行原样（`sanbaiman`+`fu=0`） | **FAIL**（误报） | **PASS** |
+  | ② 同一行只把 `limit` 改成 `""` | FAIL | **FAIL**（`普通和了（limit=""）的 fu 必须 ≥ 20，实际 0`） |
+  | ③ 改成自洽真役满但 `fu=20` | FAIL | **FAIL**（`役满的 fu 必须为 0（yakuman=1 / fu=20）`） |
+  | ④ 老轨迹（`hand` 行没有五列，`raw/v4-golden`） | PASS | **PASS**（缺席仍按取不到处理） |
+
+  整目录：`node tools\selfplay-check.mjs S:\mahjong-training\raw\v4-expert-atk-g02` ⇒ `DATASET PASS`。
+
 
 
 
