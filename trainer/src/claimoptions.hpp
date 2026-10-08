@@ -246,9 +246,29 @@ inline std::vector<Option> claimOptionsOf(const ClaimAsk &a) {
             opts.push_back(o);
         }
     }
-    // ⑥ 吃（只有下家；组合枚举与自家回合的 `chiSets` 同源）
+    // ⑥ 吃（只有下家；组合枚举与自家回合的 `chiKinds` 同源；**每种赤宝取法一条**，与碰/大明杠同口径）
     if (a.from >= 0 && a.seat == (a.from + 1) % 4) {
-        const auto sets = chiSets(a.hand, a.calledKind);
+        std::vector<std::array<std::string, 2>> sets;
+        for (const auto &kp : chiKinds(a.hand, a.calledKind)) {
+            std::array<bool, 2> hasPlain{false, false};
+            std::array<bool, 2> hasRed{false, false};
+            for (int id : a.handIds) {
+                const int k = kindOf(id);
+                for (size_t i = 0; i < 2; i++) {
+                    if (k != kp[i]) {
+                        continue;
+                    }
+                    if (isRedId(id)) {
+                        hasRed[i] = true;
+                    } else {
+                        hasPlain[i] = true;
+                    }
+                }
+            }
+            for (const auto &v : chiVariants(kp, hasPlain, hasRed)) {
+                sets.push_back(v);
+            }
+        }
         if (!sets.empty()) {
             Option o;
             o.type = kActChi;

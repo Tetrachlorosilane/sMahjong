@@ -144,8 +144,9 @@ inline bool kanAllowedAfterRiichi(const std::vector<int> &waitsBefore, const Cou
  * 吃：给定被吃的那张与暗牌计数，列出所有可行搭子（顺序 = Java 的三种组合 {-2,-1} {-1,1} {1,2}）。
  * 越界检查用**花色区间**，不会串到相邻花色。
  */
-inline std::vector<std::array<std::string, 2>> chiSets(const Counts &concealed, int calledKind) {
-    std::vector<std::array<std::string, 2>> sets;
+/** 吃：可行的搭子**按牌种**给出（Java `RoundOptions.chiKinds` 的镜像）。 */
+inline std::vector<std::array<int, 2>> chiKinds(const Counts &concealed, int calledKind) {
+    std::vector<std::array<int, 2>> sets;
     if (calledKind >= 27) {
         return sets;                                  // 字牌
     }
@@ -161,10 +162,42 @@ inline std::vector<std::array<std::string, 2>> chiSets(const Counts &concealed, 
             continue;
         }
         if (concealed[static_cast<size_t>(a)] > 0 && concealed[static_cast<size_t>(b)] > 0) {
-            sets.push_back({kindToStr(a, false), kindToStr(b, false)});
+            sets.push_back({a, b});
         }
     }
     return sets;
+}
+
+/** 吃：可行的搭子（普通牌码；不关心赤宝的调用方用这个）。 */
+inline std::vector<std::array<std::string, 2>> chiSets(const Counts &concealed, int calledKind) {
+    std::vector<std::array<std::string, 2>> sets;
+    for (const auto &kp : chiKinds(concealed, calledKind)) {
+        sets.push_back({kindToStr(kp[0], false), kindToStr(kp[1], false)});
+    }
+    return sets;
+}
+
+/**
+ * 吃的**赤宝取法**（Java `RoundOptions.chiVariants` 的镜像）：普通在前、用赤在后，最多两条。
+ * ⚠ 只有赤五可用时基准那条要写赤牌码（`0p`）—— 写 `5p` 靠服务端回退，客户端就看不到"要吃赤五"。
+ */
+inline std::vector<std::array<std::string, 2>> chiVariants(const std::array<int, 2> &kinds,
+                                                          const std::array<bool, 2> &hasPlain,
+                                                          const std::array<bool, 2> &hasRed) {
+    std::vector<std::array<std::string, 2>> out;
+    std::array<std::string, 2> base{};
+    for (size_t i = 0; i < 2; i++) {
+        base[i] = kindToStr(kinds[i], hasRed[i] && !hasPlain[i]);
+    }
+    out.push_back(base);
+    for (size_t i = 0; i < 2; i++) {
+        if (hasRed[i] && hasPlain[i]) {
+            std::array<std::string, 2> v = base;
+            v[i] = kindToStr(kinds[i], true);
+            out.push_back(v);
+        }
+    }
+    return out;
 }
 
 }  // namespace trainer
