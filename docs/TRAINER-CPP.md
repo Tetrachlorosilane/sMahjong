@@ -8,7 +8,9 @@
 > 训练侧要换，就换"谁在采数据"，不换"线上跑什么"。
 
 状态：**M0（牌山/洗牌）与 M1（向听/进张/听牌形）已落地**，均与 Java 逐字节/逐字段对拍通过；
-**M2 进行中**（打点内核已完成：役种/符数/点数/授受）；其余见 §5。
+**M2（规则与牌局流程）已完成**（打点内核 + `Round` 的摸打/鸣牌/立直/杠/流局循环，判据见 §5/§6）；
+M3 **大部分完成**（只差 `net:…@<α>` 先验），M5（标签侧与 v4 回路）已完成。
+⚠ **本节只给一句话概览：里程碑的真实状态以下方 §5 的里程碑表为准**（那张表逐条带完成判据）。
 
 ---
 
@@ -65,7 +67,7 @@ JFR（`-XX:StartFlightRecording=…,settings=profile`，JDK 21）跑 40 场 teac
 | --- | --- |
 | `tools/selfplay-check.mjs <dir>` | 轨迹格式/观测白名单/动作键文法/张数账/点数守恒（**独立实现**，与 Java 无关） |
 | `python/selfcheck.py` + `dataset.py` | 紧凑集契约（列、切分、`max_legal`、teacher 标注） |
-| `SelfTest`（L1，1370 项） | 规则语义的**权威口径**：C++ 侧遇到不一致时，用它判谁对 |
+| `SelfTest`（L1，项数见 `AGENTS.md` §4） | 规则语义的**权威口径**：C++ 侧遇到不一致时，用它判谁对 |
 | **新增** `tools/trainer-parity-check.mjs` | Java 与 C++ 的**差分对拍**（本工程的核心判据） |
 | **新增** `tools/WallProbe.java` | Java 侧牌山/配牌的**只读探针**（`Wall.debugAllTiles()`），供差分对拍取真值 |
 | **新增** `tools/RuleProbe.java` | Java 侧向听/进张/听牌形的**只读探针**（`Shanten.min` / `HandEval.of` / `afterDiscard`） |
@@ -763,7 +765,7 @@ Java 24 workers **17.9 s 墙钟**（自身计时 17.61 s，8,827 决策/秒）vs
 | **端到端（贪心）** `--policy net:<ckpt>` | **100 场完整半庄：Java 24w vs C++ 24w 逐字节 100/100**；Java 85.6 s vs C++ **4.2 s = 20.1×** |
 | **端到端（采样）** `net:<ckpt>@0#1.0`（世代采集的形状） | **20 场完整半庄逐字节 20/20**（`exp` / `nextDouble` / CDF 累积全部一致） |
 | `--sample` 组合（世代采集的另一半形状） | `50 场 first --sample 7`、`50 场 net:<ckpt> --sample 7` 均逐字节 PASS |
-| `@α`（P5b 的 teacher 先验） | **显式报错**：先验要调 `Bot.decide(Round, …)`，而 teacher 未移植 —— **不静默降级** |
+| `@α`（P5b 的 teacher 先验） | **显式报错**（`trainer/src/policies.hpp:318-323`）：`teacher` 本体**已移植**（§5 M3 ⑤ / §6.17），缺的是"按 Java `Policies.hybrid` 把老师动作落位到本次 legal 再改 logit"那一支 —— **不静默降级** |
 | 闸门自身 | `--selfcheck` 3/3（未改坏 → PASS；某 logit +1e-3 → FAIL；argmax 6→0 → FAIL），另用假 C++ 验过全链路出口码 |
 
 **本轮的坑（都值得记）**：
@@ -773,8 +775,9 @@ Java 24 workers **17.9 s 墙钟**（自身计时 17.61 s，8,827 决策/秒）vs
 - **Windows 命令行上限 32,767 字符**：整个 `bc-001`（800 个路径）一次传给探针会**根本起不来**
   （Node 报 `status=null`，看着像被信号杀）→ 闸门按长度自动分批（`NET_PARITY_MAX_ARG_CHARS` 可强制小批）。
 - Java 探针成本 ≈ **5.9 ms/条**（瓶颈是 Java 侧的特征拼装，不是前向本身）：整目录 29 万条 ≈ 28 分钟。
-- **`teacher` 仍未移植 ⇒ 含 teacher 席的 P5 世代仍只能在 Java 生产者上跑**（联赛设计里老师常驻一席）。
-  这是"对抗训练完全走 C++"的**最后一块**，见 §5 M3 的 ⏳。
+- ~~**`teacher` 仍未移植 ⇒ 含 teacher 席的 P5 世代仍只能在 Java 生产者上跑**~~ —— **这句已作废**：
+  `teacher` 已逐句移植（§6.17：200 场完整半庄 **0/200 不一致**、13 个取舍计数器逐项相等、24 核约 **91×**），
+  含 teacher 席的 P5 世代**已能整条走 C++**（§6.18）。这一轮当时剩下的是 `net:…@<α>` 先验（见上表）。
 - `producer.py` 的 `CPP_MISSING` 里曾挂着 `--sample`（其实早就支持且逐字节验过）—— 那条多余的门
   正好挡住世代采集（`online.py` 阶梯/评测默认 `--sample 64`），已删除。
 
@@ -1092,12 +1095,14 @@ v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个�
 | `net:g08 ×4`（**改动前**） | **311 s** | 0.64 | **≈18.2 ms** |
 | `net:g08 ×4`（**改动后**） | **47.2 / 54.5 / 53.8 s**（中位 **53.8 s**） | 3.7–4.3 | ≈3.1 ms |
 
-⇒ **5.8×**（中位 53.8 s vs 基线 311 s；同一台机、同一条命令），且 **200 个 `g*.jsonl` 与改动前
-逐字节相同（0/200 差异）**。
+⇒ **5.8×**（**口径：200 场 `net:g08 ×4`、改动后三次 47.2 / 54.5 / 53.8 s 取中位、基线 311 s 是同机同命令的
+单次读数；2026-10-05**），且 **200 个 `g*.jsonl` 与改动前逐字节相同（0/200 差异）**。
 
 **同机同批 A/B**（50 场，基线与优化**交替**各跑 3 次，避免机器漂移）：
 基线 **79.4 / 83.3 / 81.8 s → 中位 81.8 s**；优化 **13.28 / 13.41 / 13.42 s → 中位 13.41 s**
-⇒ **6.10×**（优化侧三次极差 1.1%，基线侧 4.9%）。基线二进制留在 `trainer/build/trainer-baseline.exe`
+⇒ **6.10×**（**口径：50 场，基线与优化「交替」各 3 次，取中位 81.8 → 13.41 s，同机同批；2026-10-05**；
+优化侧三次极差 1.1%，基线侧 4.9%）。⚠ 它**与上面的 5.8× 不是同一把尺子**（200 场单次中位 vs 50 场交替三次），
+引用时必须带上口径。基线二进制留在 `trainer/build/trainer-baseline.exe`
 （`build/` 已 gitignore），要重测直接跑它、与 `trainer/build/base200/` 的轨迹对哈希。
 
 **前向为什么这么贵（`trainer v4bench` 拆解）**：改动前单线程 17.34 ms/决策 —— JSON 解析
@@ -1172,6 +1177,67 @@ matvec 在改动前是**纯标量**（汇编里只有 `vaddss`/`vmulss`：一个
 特征拼装 / 前向**分开计时**（与 Java `tools.V4Probe --bench` 同一件事，只报实测、不写死验收数字）。
 `TRAINER_V4_SCALAR=1` 则是同一份二进制的分档开关。
 
+### 6.25 两张头表：**推理必需** vs **训练与契约必需**（2026-10-07 立）
+
+> **为什么单独立一节**：这两个概念**不能合并**（用户裁决）—— "训练过"**推导不出**"影响决策"。
+> 旧文档用一个词"上线必需"把两者混着说（`docs/TRAINING-V4.md:281/294/595` 三处口径不一），
+> 结果谁也说不清"到底哪些头在决定打哪张"。现在拆成两张表，且**推理那张由实测决定**。
+
+| 表 | 内容 | 用途 | 由谁定 |
+| --- | --- | --- | --- |
+| **`ONLINE_HEADS`（推理必需）** | **前向路径实际读取**的头。当前实测 = **`('policy', 'belief_tenpai')`** | 决定"能不能影响一手牌" | **机械判据**（见下），⛔ 不靠文档声明 |
+| **`TRAIN_HEADS`（训练与契约必需）** | **`('policy', 'value', 'belief_tenpai', 'danger')`** | 训练损失 / parity / 加载器契约 / 消融 | `model.HEAD_SPECS` 的 `contract` 字段 |
+
+**⚠ 实测推翻了"只消费策略头"这句话**：`Heads.forward` 里
+`gate = 1 + tanh(policy_gate(sigmoid(bt)))`、`bt = belief_tenpai(state)`，门控**乘在逐候选表示上**
+⇒ `belief_tenpai` **经 `policy_gate` 真的参与决定 argmax**（这是逐候选门控的设计意图；见 `model.py`
+的注释与 `NOTES.md` §6.5 第五十五轮）。所以：
+`docs/TRAINING-V4.md:294`「推理端只消费策略头」**在 `policy_gate` 非退化时是错的**；
+`TRAINING-V4.md:281`（策略+价值）也不是"推理必需"的口径。
+
+**唯一权威判据（红/绿，`python -m mahjong_ml.v4 check` 的第 ⑦ 条）**：
+
+> 把某个头的参数**清零**后重跑同一次前向 ⇒ 动作 logits **逐位不变** ⇔ 它不在推理路径上。
+> · **逐位不变** ⇒ 它确实不在推理路径上（可以不进 `ONLINE_HEADS`）；
+> · **变了** ⇒ 存在**隐藏消费点**（融合 / 门控 / 特征在读它），必须查清并把它并入 `ONLINE_HEADS`。
+> ⚠ **两个必带对照**（缺任一条就假绿或空转）：
+
+1. **正向控制**：清零 `heads.policy.*` **必须**让 logits 变化（否则判据没测到东西）；
+2. **非退化门控**：`policy_gate` 是**零初始化**的 ⇒ 新网上 `gate ≡ 1`，会把"`belief_tenpai` 被
+   policy 消费"测成**绿的**。实测对照（**已常驻**在 `v4 check` 的 ⑦ 与 ⑦′ 两条里，可复跑）：
+   `gate 零初始化 ⇒ ONLINE_HEADS = ('policy',)`（假绿）· `gate 非退化 ⇒ ('policy','belief_tenpai')`（真相）；
+   所以判据里**必须**先把 `policy_gate` 抬离 0（或用训练过的网），且**必须**保留那条假绿对照
+   （否则以后有人把门控写回零初始化，判据会静默失效）。
+
+**⚠ `ONLINE_HEADS` 是"每个 checkpoint 的性质"，不是代码常量**：`heads.policy_gate.*` 属于
+**可缺张量**（`normalize_state` 缺则补 0）⇒ **老网（无 `policy_gate`）的门控恒等，
+`belief_tenpai` 不进推理**；载了 `policy_gate` 的新网才进。所以导出/meta 必须记下当前集合
+（`export.py` 的 `contract_heads` 字段 + 本节表格），换 checkpoint 要重跑判据。
+
+**升级规则（唯一入口，必须写死）**：任何头**或其输出**只要被**融合 / `policy_gate` / 特征**消费 ⇒
+**立即并入 `ONLINE_HEADS`**，并**照 W1 模板**补两条**逐位**判据（缓存 carry == 整手重放；
+前缀 carry + 窗口 == 整手重放）+ 训练侧缺列**硬拒**（W1 的 `h_evt` 就是先例：它被融合消费之后，
+判据立刻从"相等"升级成"逐位 + 真命中"）。⛔ **不允许"进了推理路径却仍按训练头管理"**。
+
+**三端与文档的机械判据**（这三条一起才叫"统一"，缺一条都会再漂）：
+
+| 判据 | 命令 | 现在的实测 |
+| --- | --- | --- |
+| 三端源码 + 本节文本**同名同值** | `node tools/head-tables-check.mjs` | Python 实跑取真值；Java `V4Policy`、C++ `v4policy.hpp` 的字面量逐一比对 |
+| **Python** 行为判据（清零后动作是否变 + 假绿对照） | `python -m mahjong_ml.v4 check`（⑦/⑦′） | `ONLINE_HEADS=('policy','belief_tenpai')`；零初始化门控下退化成 `('policy',)` ⇒ 必须带非退化门控 |
+| **Java / C++** 行为判据（同一 golden 夹具） | `node tools/trainer-v4-parity.mjs --golden` | 打印 `dValue / dBelief / dGate`：`dValue` 必须**恰好 0**（离线头），`dBelief`、`dGate` 必须 **> 0**（在线）。实测（Java，2026-10-07）：`dValue=0.00 dBelief=0.0248 dGate=0.359` |
+
+**⚠ 门控恒等时的口径（2026-10-07 裁决，三端一致）**：`heads.policy_gate.*` 是**可缺张量**，
+所以"Δ=0"有两种完全不同的原因，⛔ 别混成一句"没测到"：
+
+| 情形 | 含义 | 判据 |
+| --- | --- | --- |
+| `heads.policy_gate.weight` **不存在** | **老网**（`normalize_state` 补 0 ⇒ 恒等门控）⇒ `belief_tenpai` 不在推理路径上 | **不算红**：②③ 不参与判红，但必须断言 `dBelief == 0`（恒等门控下它**必须**恰好为 0），且 `heads online=` **按本 checkpoint 打印 `policy`**（不是常量值 —— 否则就是说谎，两端也会对不上） |
+| 张量**存在但全 0** | 夹具**空转**（`export.py` 的"零初始化张量一律扰动"没生效）⇒ ② 会假绿 | **判红**（重新生成夹具） |
+
+⇒ 三端实现已按此对齐：Java `V4Probe --golden` 与 C++ `trainer v4golden` 用**同一把尺子**
+（`gatePresent` 分支 + 逐字符可比的汇总行），Python 侧对应的是 `v4 check` ⑦′ 的"假绿对照"。
+
 ---
 
 ## 7. 目录与构建
@@ -1210,8 +1276,8 @@ trainer/
 │  │                    唯一允许"绕过内置 Bot"的例外见 §6.15）
 │  ├─ observation.hpp   观测（只含合法信息；字段白名单 = `PROTOCOL.md` §8.2）
 │  ├─ options.hpp       询问内容 → 动作空间的展开（= Java `Action.enumerate`）
-│  ├─ policies.hpp      `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（= Java `Policies`；
-│  │                    `@α` 先验与 `teacher` 未实现 → 显式报错）
+│  ├─ policies.hpp      `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`** / **`teacher`**
+│  │                    （= Java `Policies`；只有 `@α` 先验未接线 → 显式报错，见 §6.16 / §6.17）
 │  ├─ net.hpp/.cpp      **网络前向**：`net.bin` 加载 + `Features.state(615)`/`candidate(96)` 拼装 +
 │  │                    argmax/温度采样（= Java `NeuralPolicy` + `Features`；`net` 子命令供对拍，§6.16）
 │  ├─ jsonw.hpp         手写 JSON 写出器（键序 = 插入序、整数/定点、无浮点噪声）

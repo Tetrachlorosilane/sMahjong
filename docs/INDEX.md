@@ -9,7 +9,7 @@
 
 | 我要…… | 入口 | 关键锚点 |
 | --- | --- | --- |
-| **新会话接上 / 看当前进度** | **`docs/HANDOVER.md`** | 十秒速览 · 已完成（带判据）· 下一步（obs v3 六步）· 环境命令 · 操作纪律 · 待决问题 |
+| **新会话接上 / 看当前进度** | **`docs/HANDOVER.md`** | 十秒速览（**§1 是唯一的"当前下一步"**）· 环境命令 · 操作纪律 · 待决问题；⚠ §3 是**历史规划快照**，不是当前下一步；⚠ §2 与 §7 的**会话日志已搬进 `NOTES.md` §13**（HANDOVER 只留状态与唯一下一步） |
 | 动任何代码 | `AGENTS.md` | §2 铁律 → §3 构建 → §4 验证五层 → §6 约定 |
 | 改协议字段 / 报文 | `docs/PROTOCOL.md`（★ **先改它**） | `AGENTS.md` §2.2（字段判据）· §6.4（文案/结算纪律） |
 | 改规则判定（役种/符/点/振听/流局…） | `server/src/main/java/mahjong/rules/` + `docs/日本麻将.md` | `AGENTS.md` §2.1 · §6.3 · `server/.../test/SelfTest.java` |
@@ -36,7 +36,7 @@
 | 入口 | `server/src/main/java/mahjong/{core,rules,game}/` · `docs/日本麻将.md`（规则原文，**权威依据**） |
 | 文档 | `docs/DESIGN.md`（架构与规则取舍）· `docs/AUDIT.md`（审计条目 `S-nn`） |
 | 判据锚点 | `AGENTS.md` §2.1（规则只在服务端）· §6.3（牌桌行为与资源上限）· §6.4⑤（王牌/岭上/杠） |
-| 回归 | L1 `--selftest`（当前 **1370** 项）；`AGENTS.md` §4 L1 |
+| 回归 | L1 `--selftest`（项数见 `AGENTS.md` §4）；`AGENTS.md` §4 L1 |
 | 细节 | `NOTES.md` §6.4（并发/时序/探针）· §7（症状表） |
 
 ### 板块 ② 协议与两端契约
@@ -58,7 +58,7 @@
 | 入口 | `client/src/`（`ui/` `model/` `net/`）· `client/README.md`（构建与链接方式） |
 | 文档 | `docs/THEME.md`（材质包/设置文件）· `docs/THIRD-PARTY.md`（LGPLv3 分发义务） |
 | 判据锚点 | `AGENTS.md` §6.2（**布局不变量**：固定左缘/区带/副露几何/牌河行数…）· §6.3（三个自动开关）· §9（素材/字体/音效/打包） |
-| 回归 | L2 `--selftest`（当前 **854** 项，**必须看图**）· L4 `mock-server` 定点截图 · L5 `--autoplay` |
+| 回归 | L2 `--selftest`（**必须看图**；⚠ 项数只在 `AGENTS.md` §4 记一处，本索引不重复数字）· L4 `mock-server` 定点截图 · L5 `--autoplay` |
 | 细节 | `NOTES.md` §6.2（几何推导）· §6.3 · §9（素材管线） |
 
 ### 板块 ④ 训练（v3 现状 → v4 目标）
@@ -72,7 +72,7 @@
 | 训练端引擎（C++） | `docs/TRAINER-CPP.md`（与 Java 逐字节同源）· `trainer/README.md` |
 | 机器人 AI 包 | `docs/BOT-AI.md`（包格式/清单/α 口径）· `AGENTS.md` §6.6 |
 | 判据锚点 | `AGENTS.md` §6.5（红线：唯一漏斗/可复现/观测白名单/`is_student` 掩码…）· §6.6（teacher 五层取舍） |
-| 回归 | `tools/selfplay-check.mjs` · `tools/trainer-*-parity.mjs` · `python/selfcheck.py`（当前 **528** 项） |
+| 回归 | `tools/selfplay-check.mjs` · `tools/trainer-*-parity.mjs` · `python/selfcheck.py`（项数见 `AGENTS.md` §4） |
 | 数据与配额 | `NOTES.md` §6.5（时间预算/缓存档/配额回收 `S:\mahjong-training`） |
 
 ### 板块 ⑤ 运维与发布
@@ -92,7 +92,7 @@
 | 验证五层 | `AGENTS.md` §4（L1 规则引擎 → L2 客户端 → L3 协议 e2e → L4 GUI 定点 → L5 真机联调）· 注解 `NOTES.md` §4 |
 | 训练/对拍 | `tools/trainer-*-parity.mjs` · `tools/selfplay-check.mjs` · `python/selfcheck.py` |
 | 文档纪律 | `AGENTS.md` §8（判据/命令/不变量 ↔ 案例/注解/推导）· 本索引 |
-| 文档自检 | `node tools/doc-refs-check.mjs`：AGENTS **字节预算**（硬上限 64 KB）· 章节号完整 · 全仓 `§引用`可解 · **本索引完整性** |
+| 文档自检 | `node tools/doc-refs-check.mjs`：AGENTS **字节预算**（⚠ 实测截断点 65,244 B）· 章节号完整 · 全仓 `§引用`可解 · **本索引完整性**；另两条同类：`tools/handover-facts.mjs --check`（HANDOVER §1 的 git 事实）、`tools/round-index.mjs --check`（NOTES §6.5 轮次索引表）；**训练侧头表**：`tools/head-tables-check.mjs`（三端 + 文档同名同值，规格见 `docs/TRAINER-CPP.md` §6.25） |
 | 人工手册 | `AGENTS.md`（每次会话自动加载）· `NOTES.md`（细节分册，章节号与 AGENTS 一一对应） |
 
 ## 2. 按角色查
@@ -124,37 +124,41 @@ mahjong/
 ├─ trainer/       板块④ 训练端 C++ 自对弈引擎（与 Java 逐字节同源；build/ 不进仓库）
 ├─ tools/         板块⑥ 验证与打包：*-test.mjs（真 socket）· i18n-*（文案三件套）· mock-server（L4）·
 │                  trainer-*-parity.mjs（对拍）· selfplay-check.mjs · tenhou-log-check.mjs ·
-│                  doc-refs-check.mjs（文档自检）· package-release.ps1 + make-zip.mjs
+│                  doc-refs-check.mjs / handover-facts.mjs / round-index.mjs / head-tables-check.mjs（文档与头表自检）· package-release.ps1 + make-zip.mjs
 └─ 运行时数据（都不进仓库，见 .gitignore）：replays/ · players/ · bot-ai/（与 jar/start.sh 同层）
 ```
 
 ## 4. 文档清单（谁该读、什么时候更新）
 
-| 文件 | 体量 | 定位 | 什么时候必须更新 |
-| --- | --- | --- | --- |
-| `AGENTS.md` | ~61 KB | **手册**：铁律/命令/不变量/速查（每次会话自动加载，**硬上限 64 KB**） | 新坑、新命令、新不变量；**加内容前先想能不能进 NOTES** |
-| `NOTES.md` | ~268 KB | **细节分册**：案例/红证/推导/全量症状/已知限制（章节号与 AGENTS 一一对应） | 判据背后的**理由与数据**；新坑的详情 |
-| `README.md` | 21 KB | **面向玩家**：操作、规则取舍、常见问题（**不含技术细节**） | 玩家看得见的行为变了 |
-| `AGENTS.md`→`docs/` | — | 技术文档区（下列各份） | 见各行 |
-| `docs/PROTOCOL.md` | 90 KB | **两端唯一契约**（报文/字段/CLI/训练接口 §8） | **改协议先改它** |
-| `docs/日本麻将.md` | 126 KB | 规则原文（逐节标注 雀魂/天凤/M.League 差异） | 规则取舍新增项 |
-| `docs/DESIGN.md` | 72 KB | 架构与规则取舍（含 AI 取舍、回放设计） | 架构/取舍变化 |
-| `docs/AUDIT.md` | 121 KB | 审计与修复清单（条目 `S-nn`） | 每轮审计后 |
-| `docs/TRAINING.md` | 120 KB | 训练方案 **v3 现状**（P0–P4/P5b，含全部实测） | 训练工作流或判据变化 |
-| `docs/FEATURES-V4.md` | 24 KB | **特征 v4 规范**（信息边界/维度/版本/消融/验收） | 张量布局或信息边界变化（**五处一起改**） |
-| `docs/TRAINING-V4.md` | 37 KB | **v4 设计**（架构/多头/评价/阶段 P0–P5/风险） | 架构或评价体系变化 |
-| `docs/HANDOVER.md` | 8 KB | **会话交接**：状态 / 已完成（带判据）/ 下一步 / 环境命令 / 待决问题（**每次交接整段重写**） | 每次会话收尾 |
-| `docs/TRAINER-CPP.md` | 82 KB | 训练端 C++ 引擎：设计、口径、全部实测 | 训练端引擎变化 |
-| `docs/BOT-AI.md` | 16 KB | 机器人 AI **包格式**与随发布清单 | 包格式/清单/发布口径变化 |
-| `docs/input-json.md` | 17 KB | 牌谱导出 JSON 格式（喂复盘器） | 导出格式变化 |
-| `docs/THEME.md` | 8 KB | 材质包与设置文件格式 | 素材/设置格式变化 |
-| `docs/DEPLOY.md` | 16 KB | Ubuntu 部署 | 部署方式变化 |
-| `docs/THIRD-PARTY.md` | 9 KB | 第三方许可与分发义务 | 新增 Qt 模块/第三方库 |
-| `docs/EXPERT-PLAN.md` | 51 KB | **多风格路线实验的完整记录 + 下一步规划 + 玩家体验维度**（§0–§10 计划原文 / §11 三线终点结论 / §12 架构与算力效率规划 / §13 一页简报 / §14 肯定性审计与翻盘条件 / **§15 玩家体验评价体系** / **§16 风格候选与体验画像**） | 多风格路线推进、判据口径变化或做体验评价时 |
-| `client/README.md` | 25 KB | 客户端构建与链接（Qt 自动获取） | 构建方式变化 |
-| `python/README.md` | 31 KB | 训练侧跑法（环境/命令/复现） | 训练 CLI 变化 |
-| `trainer/README.md` | 20 KB | 训练端引擎构建与对拍 | 引擎构建变化 |
-| `tools/upstream-parse-check/README.md` | 3 KB | 上游解析器探针（导出格式验收） | 探针用法变化 |
+| 文件 | 定位 | 什么时候必须更新 |
+| --- | --- | --- |
+| `AGENTS.md` | **手册**：铁律/命令/不变量/速查（每次会话自动加载，**实测截断点 65,244 B** —— 见 `tools/doc-refs-check.mjs` 的 `BUDGET`） | 新坑、新命令、新不变量；**加内容前先想能不能进 NOTES** |
+| `NOTES.md` | **细节分册**：案例/红证/推导/全量症状/已知限制（章节号与 AGENTS 一一对应） | 判据背后的**理由与数据**；新坑的详情 |
+| `README.md` | **面向玩家**：操作、规则取舍、常见问题（**不含技术细节**） | 玩家看得见的行为变了 |
+| `AGENTS.md`→`docs/` | 技术文档区（下列各份） | 见各行 |
+| `docs/PROTOCOL.md` | **两端唯一契约**（报文/字段/CLI/训练接口 §8） | **改协议先改它** |
+| `docs/日本麻将.md` | 规则原文（逐节标注 雀魂/天凤/M.League 差异） | 规则取舍新增项 |
+| `docs/DESIGN.md` | 架构与规则取舍（含 AI 取舍、回放设计） | 架构/取舍变化 |
+| `docs/AUDIT.md` | 审计与修复清单（条目 `S-nn`） | 每轮审计后 |
+| `docs/TRAINING.md` | 训练方案 **v3 现状**（P0–P4/P5b，含全部实测） | 训练工作流或判据变化 |
+| `docs/FEATURES-V4.md` | **特征 v4 规范**（信息边界/维度/版本/消融/验收） | 张量布局或信息边界变化（**五处一起改**） |
+| `docs/TRAINING-V4.md` | **v4 设计**（架构/多头/评价/阶段 P0–P5/风险） | 架构或评价体系变化 |
+| `docs/HANDOVER.md` | **会话交接**：状态（§1，含**唯一下一步**那一行）/ 历史规划快照（§3）/ 环境命令 / 操作纪律 / 待决问题；⚠ **§2 与 §7 的会话日志已整段搬进 `NOTES.md` §13**（原文一字未改），HANDOVER 只留**状态 + 唯一下一步**（**每次交接整段重写**） | 每次会话收尾 |
+| `docs/TRAINER-CPP.md` | 训练端 C++ 引擎：设计、口径、全部实测 | 训练端引擎变化 |
+| `docs/BOT-AI.md` | 机器人 AI **包格式**与随发布清单 | 包格式/清单/发布口径变化 |
+| `docs/VALVES-AND-FIXTURES.md` | **阀门与夹具的工作体系**：开训前跑哪些自检、训练中只跑哪些阀门、工作包怎么切 | 自检清单或工作包划分变化 |
+| `docs/input-json.md` | 牌谱导出 JSON 格式（喂复盘器） | 导出格式变化 |
+| `docs/THEME.md` | 材质包与设置文件格式 | 素材/设置格式变化 |
+| `docs/DEPLOY.md` | Ubuntu 部署 | 部署方式变化 |
+| `docs/THIRD-PARTY.md` | 第三方许可与分发义务 | 新增 Qt 模块/第三方库 |
+| `docs/EXPERT-PLAN.md` | **多风格路线实验的完整记录 + 下一步规划 + 玩家体验维度**（§0–§10 计划原文 / §11 三线终点结论 / §12 架构与算力效率规划 / §13 一页简报 / §14 肯定性审计与翻盘条件 / **§15 玩家体验评价体系** / **§16 风格候选与体验画像**） | 多风格路线推进、判据口径变化或做体验评价时 |
+| `client/README.md` | 客户端构建与链接（Qt 自动获取） | 构建方式变化 |
+| `python/README.md` | 训练侧跑法（环境/命令/复现） | 训练 CLI 变化 |
+| `trainer/README.md` | 训练端引擎构建与对拍 | 引擎构建变化 |
+| `tools/upstream-parse-check/README.md` | 上游解析器探针（导出格式验收） | 探针用法变化 |
+
+> ⚠ 本表**不记体量**：体积是**必然腐坏**的元数据（改一次内容就过期），检查器也不该为它增加维护面。
+> 这里只有两条可机械校验的判据 —— **路径存在** 与 **`docs/` 下每份 `.md` 都被登记**（见 §5）。
 
 ## 5. 本索引的自动校验
 

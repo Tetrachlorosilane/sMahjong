@@ -20,7 +20,7 @@
 | 阀门 | 实现 | 时机 | 判据 | 不过怎么办 |
 | --- | --- | --- | --- | --- |
 | **方向自证** | `python -m mahjong_ml.v4.gate --self-check` | **开训前**（`tools/run-league.ps1` 已内置，不过就不开跑） | 弱现任（`first`）vs 强候选（`teacher`）⇒ **必须采纳**（实测 Δ≈+91.7）；反向 ⇒ 必须拒绝；并把"顺序写反"跑一遍确认会被抓 | ⛔ 停止，先修闸门 |
-| **接受闸门** | `python -m mahjong_ml.v4.gate --incumbent … --candidate …`（多套牌山集合的**合并**配对检验） | **每代训练后 1 次** | 候选 − 现任的 **CI 排除 0 且为正** ⇒ 采纳；否则回滚（现在的门槛：2 套牌山 × 1000 场 = n=2000，可测 Δ≈2.2） | 回滚到现任；候选副本进 `tools/build/_rejected/`（⚠ 用 **Copy**，池里还指着原位） |
+| **接受闸门** | `python -m mahjong_ml.v4.gate --incumbent … --candidate …`（多套牌山集合的**合并**配对检验） | **每代训练后 1 次** | 候选 − 现任的 **CI 排除 0 且为正** ⇒ 采纳；否则回滚（现在的门槛：2 套牌山 × 1000 场 = n=2000，可测 Δ≈2.2）⚠ **这是"筛查级"门槛**（便宜、能挡明显退化），**不是采纳判据**：采纳 / 进度结论必须按 `docs/EXPERT-PLAN.md` §12.5 的**闸门**（多套新牌山配对 + **≥24,000 场池化** + 超出桶内标签置换零分布 + **事先登记**）| 回滚到现任；候选副本进 `tools/build/_rejected/`（⚠ 用 **Copy**，池里还指着原位） |
 | **值头审计** | `v4 loop` 的 `value-audit --strict` 相位 | **每代 1 次**（回路内置） | `EV ≥ 0.7 × 同轮合法天花板` + 覆盖率达 标称±3pp + CE < 边缘 | **只报不拦**（诊断项）。⚠ 步数 <3000 时回路会打印"结论不可读"——那是门槛提示，不是失败 |
 
 补充（不是阀门，但决定训练形状）：
@@ -30,7 +30,8 @@
   把第一季赖以起效的多样性掐掉）。
 - **磁盘/轮换**：每代**判决之后**删 `raw/<tag>`、`compact/<tag>`、`raw/eval-<tag>`，**以及
   `gate/<tag>/**/*.jsonl`（只删 jsonl，`summary.json` / `verdict.json` 必须留 —— `regate_gate.py`
-  的复算判据只读 `summary.json`）**。⚠ 闸门那一条**必须**放在判决之后：第八季曾把它插在闸门之前，
+  的复算判据只读 `summary.json`）**。⚠ **跑判决前先看 `S:` 余量 ≥ 40 GB**（1000 场配方峰值 ≈19 GB；
+  一次 12,000 场判决的轨迹 ≈18 GB）。⚠ 闸门那一条**必须**放在判决之后：第八季曾把它插在闸门之前，
   那时 `gate/<tag>` 还不存在 ⇒ `Test-Path` 恒假 ⇒ **两季从未生效**（`gate` 堆到 26+ GB）。
   实测：清 `v4-league8/9/10` 的 jsonl 释放 **46.9 GB**（S 盘空闲 122→169 GB），
   清完 `regate_gate.py` 复算这 8 代判决与 `verdict.json` **逐位一致**。
@@ -41,8 +42,8 @@
 | --- | --- | --- | --- |
 | **golden 前向夹具** | `python/tests/golden/forward-v4.bin`（生成器 `v4/export.py:build_golden`） | Python ↔ **Java** ↔ **C++** 三端前向**逐位相同**（唯一输入格式） | 三端不同源 ⇒ 训练端看到的网与上线的不一样 |
 | **接线审计** | `python/wiring_audit.py` | ① **梯度可达性**（只用 policy 损失反传，列出梯度恒 0 的参数；白名单外 = **假接入**）② 零初始化张量清单 ③ **门控非零**时的导出往返 | 有"接上了但收不到梯度"的路径（第五十轮拼接、第五十七轮 GRU 都是这里抓出来的） |
-| **Python 自检** | `python/selfcheck.py` | 导出契约、跨代权重归一、闸门纯判据、arena 计划、缓存/标签不变式……（当前 ~651 项） | 纯 Python 侧的契约漂移 |
-| **服务端自检** | `java -jar server/build/mahjong-server.jar --selftest` | 规则引擎 + **v4 前向对拍夹具** + 增量缓存判据（当前 1443 项，必须全绿） | Java 前向/加载与夹具不符 |
+| **Python 自检** | `python/selfcheck.py` | 导出契约、跨代权重归一、闸门纯判据、arena 计划、缓存/标签不变式……（项数见 `AGENTS.md` §4） | 纯 Python 侧的契约漂移 |
+| **服务端自检** | `java -jar server/build/mahjong-server.jar --selftest` | 规则引擎 + **v4 前向对拍夹具** + 增量缓存判据（项数见 `AGENTS.md` §4，必须全绿） | Java 前向/加载与夹具不符 |
 | **训练端自检** | `trainer/build/trainer.exe --selftest` | C++ 引擎 + v4 前向对拍 | 同上（C++ 侧） |
 | **增量缓存检查** | `node tools/v4-cache-check.mjs`（+ `SelfTest.v4CacheTests`） | 同种子开/关缓存 ⇒ **轨迹逐字节相同** | 缓存算错；⚠ W1 之后这条**第一次非平凡**（`h` 被融合消费了 —— 在此之前它是"假绿"） |
 | **文档自检** | `node tools/doc-refs-check.mjs` | AGENTS 预算、章节号、全仓 `§引用`、`docs/INDEX.md` 完整性 | 文档漂移 |
