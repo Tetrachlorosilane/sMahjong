@@ -19,6 +19,7 @@ v3 的紧凑集存的是 **state 615 / cand 96**（特征 v3 的拼装结果）�
 | `nlegal` | int16 | 决策行的 `legal` 长度 |
 | `label` | int16 | **教师动作**：有 `teacher_index` 用它（DAgger），否则用 `chosen_index` |
 | `effect` | `[lmax,3]` float16 | sidecar 逐候选派生量的前 3 维（向听/进张种数/进张枚数）⇒ 牌效头的回归目标 |
+| （无新列）**引擎逐候选标签** | 由 `cand` / `effect` 现算 | `engine_best_indices()` ⇒ 每行一个"引擎最优候选"下标（W4 的模仿学习目标；`pretrain --il-weight`） |
 | `value` | float32 | `final_scores[seat] − 起点`（**千点**；值头的 HL-Gauss 目标） |
 | `rtg` | float32 | **逐决策** reward-to-go（千点）：`Σ_{本局及其后} 收支 + 终局余棒`（轨迹 `reward_to_go`）—— λ=1 的 GAE 目标；老轨迹写 NaN |
 | `placement` | int8 | 该座位终局顺位 − 1（0..3；缺字段填 −1） |
@@ -44,6 +45,9 @@ import numpy as np
 
 from .. import auxlabels as _aux
 from .. import dataset as _v3
+#: ⚠ 只为了 `DERIVED_CANDIDATE`（`cand.derived` 块的**实维数**）：`features` 是纯 numpy 模块，
+#: 没有 torch 依赖 ⇒ 不会把 torch 拖进 `dataset` 的构建路径。
+from .. import features as _f3
 from . import blocks, spec, traces
 #: ⚠ `cache` 只在模块层导入（它自己**惰性**引 torch，见 `cache.torch_encoder`）——
 #: `model` / `export` 是 torch 重依赖，只在**真的带 carry 构建**时才在 `build` 里导入。
@@ -63,16 +67,50 @@ def trace_dir_files(directory: str | Path) -> list[Path]:
     return traces.trace_files(directory)
 
 
+#: `_rank_points_of` 的记忆表：**键 = (路径, mtime_ns, 大小)**（见它的 docstring —— 文件变了
+#: 键就变，不会把"当时还不存在/还是旧的"那个结果留在这里）。
+_RANK_POINTS_CACHE: dict[tuple, dict] = {}
+
+
+def clear_rank_points_cache() -> None:
+    """清空 `_rank_points_of` 的记忆表（**判据/测试用**，生产路径不需要）。
+
+    ⚠ 为什么必须有一个**显式**的清空口（2026-10 实测）：记忆键是 `(路径, st_mtime_ns, st_size)`，
+    而 **Windows 的文件时间戳分辨率 ≈ 时钟 tick（~15.6 ms）** ⇒ "同一个 tick 内、**字节数不变**
+    地重写同一个 `summary.json`"会算出**完全一样的键** ⇒ `_rank_points_of` 读回旧表
+    （实测：背靠背两次 `write_text`，**90% 命中**；隔 >1 ms 才不命中）。
+    生产路径靠"`summary.json` 是采集时一次写成的、不会原地改"回避它，但 `python/selfcheck.py`
+    的**负向对照**恰恰要"改坏再读一次"—— 那时必须能看见新内容，**不能拿 sleep 赌 tick**。
+    """
+    _RANK_POINTS_CACHE.clear()
+
+
 def _game_start_score(jsonl: Path) -> int:
-    """该场的起点分（`game` 行的 `start_score`；缺了就按 25000 —— M.League 默认）。"""
-    last = None
-    with jsonl.open(encoding="utf-8") as fh:
-        for line in fh:
-            if line.strip():
-                last = line
-    if last is None:
-        return 25000
-    row = json.loads(last)
+    """该场的起点分（`game` 行的 `start_score`；缺了就按 25000 —— M.League 默认）。
+
+    ⚠ 2026-10-05：只读**文件尾**（原来是 `for line in fh` 走完全文件——一场 1.9 MB、
+    1000 场就是 1.9 GB 的白读）。`start_score` 只在最后那条 `game` 行上，而一行 ≤ 几十 KB，
+    所以读尾部 1 MiB 足够；**读不出两行以上就退回整文件读**（不猜、不近似）。
+    """
+    size = jsonl.stat().st_size
+    take = min(size, 1 << 20)
+    tail = b""
+    with jsonl.open("rb") as fh:
+        if take:
+            fh.seek(size - take)
+            tail = fh.read(take)
+    lines = [ln for ln in tail.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+    if not lines or (take < size and len(lines) < 2):
+        # 尾部窗口里只有一行（说明最后一行超过了 1 MiB）⇒ 退回原来的整文件读法
+        last = None
+        with jsonl.open(encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    last = line
+        if last is None:
+            return 25000
+        lines = [last]
+    row = json.loads(lines[-1])
     return int(row.get("start_score", 25000)) if row.get("type") == "game" else 25000
 
 
@@ -114,6 +152,212 @@ def rows_for_label(row: dict) -> int:
     if "teacher_index" in row:
         return int(row["teacher_index"])
     return int(row.get("chosen_index", -1))
+
+
+# ==================================================================== 引擎逐候选标签
+#
+# W4 第一步（`docs/VALVES-AND-FIXTURES.md` §3 的 W4）：给策略灌一路**稠密、低噪、非采样**的
+# 监督信号。RL 那条路已证明"看不见自己的进步"（每轮只走 100~150 步、KL 预算用满也只有 0.05 nats，
+# 效应小于闸门在小算力下的分辨率 ±2.35 顺位点），而**引擎原本就在每一行给出逐候选的牌效量** ——
+# 它无采样噪声、无 critic、不花一格闸门算力，且**每一份现有紧凑集里都有**。
+#
+# 这一段的唯一职责：把"引擎的逐候选量"翻成**每行一个目标候选下标**（纯函数、确定性、可单测）。
+# 它**不**碰权重、不碰张量通道、不新增列（老紧凑集直接用）。
+
+#: 逐候选"引擎导航量"的列序 —— 与 `features.DERIVED_CANDIDATE` / Java `ObsFeatures.perCandidate`
+#: **同一份顺序**（`cand.derived` 块就是这些量按 `features.DERIVED_SCALE_CAND` 归一化后的结果；
+#: 老的 3 列 `effect` 是它的**前 3 维原值**）。除 `shanten_after` 外一律"越大越好"。
+ENGINE_FEATURE_NAMES: tuple[str, ...] = (
+    "shanten_after",     # 0：打完之后的向听（**听牌记 0**；只可能是 0..6）
+    "advance_types",     # 1：进张**种数**（只在未听牌时有值，否则 0）
+    "advance_tiles",     # 2：进张**枚数**（已扣掉可见牌；未听牌时有值）
+    "wait_types",        # 3：听牌种数（只在听牌时有值）
+    "wait_tiles",        # 4：听牌枚数
+    "good_wait_types",   # 5：良形听牌种数
+    "good_wait_tiles",   # 6：良形听牌枚数
+    "dora_count",        # 7：打后手牌里的宝牌数（⚠ 本函数**不消费**它，见 `engine_best_index`）
+)
+
+
+def _lex_best(keys: list[np.ndarray], valid: np.ndarray, idx0: np.ndarray) -> np.ndarray:
+    """按 `keys` 的顺序取**字典序最大**的候选下标（同分保留**更小下标**）。
+
+    实现口径（避免"两把尺子"）：维护"当前最优下标"`idx` `[n]` 与"还没被淘汰的候选"`alive` `[n, L]`，
+    逐个键比较 `key[row, i] > key[row, idx[row]]`；严格更大才改判（⇒ **平局时先到者胜**，
+    即 `legal` 顺序），比较完这个键就把**严格更小**的候选淘汰掉。
+
+    ⚠ **两个坑**（都是 2026-10-04 的边界单测抓出来的，别改回去）：
+
+    1. **必须淘汰**：只比较"当前最优"而不淘汰的话，已经在前一个键上输掉的候选会在下一个键上
+       跟"当前最优"**那个键的值**比较 —— 字典序于是变成"最后一个键说话"（`进张枚数 9 > 8` 的
+       胜者被 `进张种数 2 < 9` 的败者翻掉）。所以每个键比完就把**严格更小**的淘汰掉。
+    2. **取最大，不是取"第一个更大的"**：`better.argmax()` 给的是"第一个比当前最优大的候选"，
+       而字典序要的是"alive 里这一键最大的那个" —— 写成前者时，两个都优于当前最优的候选会
+       按**下标**而不是按**这一键的值**决出（上例里 `col4 = 2 vs 3` 会被判成 2 胜）。
+
+    @param valid `[n, L]` 合法掩码（非法的一律淘汰）
+    @param idx0  `[n]` 起步下标（只在 `keys` 为空时返回它 —— 正常路径每个键都会重算）
+    """
+    n, L = valid.shape
+    if L == 0:
+        # `L == 0`（这一行没有任何候选）是调用方的契约违反：这里必须炸而不是返回 0
+        raise ValueError("逐候选引擎量宽度为 0：这一行没有任何候选可评")
+    rows = np.arange(n)
+    alive = np.asarray(valid, dtype=bool).copy()
+    idx = np.asarray(idx0, dtype=np.int64).copy()
+    for k in keys:
+        kk = np.where(alive, k, -np.inf)
+        # 这一键上 alive 里的**最大者**（`argmax` 取第一个最大值 ⇒ 平局取最小下标 = 牌序）
+        idx = kk.argmax(axis=1)
+        best_val = kk[rows, idx]
+        alive &= kk >= best_val[:, None]
+    return idx
+
+
+def engine_best_indices(feats, nlegal, *, chunk: int = 65536) -> np.ndarray:
+    """`[n, L, k]` 逐候选引擎量 + `[n]` 合法数 → `[n]` **引擎最优候选下标**（int64）。
+
+    判据（刻意与 `ai/SearchPolicy.utility()` 同序，见它的类注释：`U = -1000·向听 + 2·进张枚数
+    + 1·进张种类`，听牌那一支换成听牌枚数/良形枚数 ⇒ 在 1000 的权重下就是"向听优先"的字典序）：
+
+    1. **全 0 行排第一**：`tsumo` / `ron` 这类**终局和牌**的派生行是**整行 0**
+       （`ObsFeatures.perCandidate` 对它们直接 `return new int[PER_CANDIDATE]`）——
+       引擎没给"打完之后"的形态，但"能和就和"是这一行唯一正确的答案。
+       ⚠ 反过来也成立：**真实候选不可能整行 0**（听牌行的 `wait_types ≥ 1`，未听牌行的
+       `shanten ≥ 1`），所以这条不会误吞普通候选 —— 这条不变量是 `cli il-check` 的判据之一。
+    2. 本行**最好向听 == 0**（有候选听牌）⇒ 键 `(听牌枚数, 良形枚数, 听牌种数, 良形种数)`；
+       键里带 `-向听` 打头是为了让"打完不听牌"的候选**永远输给**听牌候选。
+    3. 否则 ⇒ 键 `(-向听, 进张枚数, 进张种数)`。
+    4. 键全平 ⇒ **取最小下标**（下标就是 `legal` 顺序，`dataset` 在 build 期已硬校验两者对齐）
+       —— 这就是"同分按牌序确定性打破平局"，也是"同分时不下任何判断"的诚实写法。
+    5. ⚠ 只给 3 列（老 `effect` 列）时第 2 条的四个键里只剩 `-向听` ⇒ 听牌行**退化成下标序**
+       （引擎量里没有听牌形，谁也分不出好坏）。要真正的听牌比较就给 8 列
+       （`engine_feature_block` 从紧凑集的 `cand.derived` 块取）。
+       ⚠ `dora_count`（第 7 列）**不参与**排序：宝牌是"打点"不是"牌效"，把它塞进平局判据
+       会让这个标签的性质变掉（牌效标签应当只讲牌效）。
+
+    @param feats  `[n, L, k≥3]`（float16/float64 都行；逐列单调变换不影响任何比较）
+    @param nlegal 逐行合法数（**只评前 nlegal 个候选**；尾部的 padding 必须被排除）
+    @param chunk  每批处理多少行（内存：float64 的 `[chunk, L, k]`；不是性能开关）
+    """
+    F = np.asarray(feats)
+    if F.ndim != 3:
+        raise ValueError(f"逐候选引擎量必须是 [n, L, k]（收到 shape={F.shape}）")
+    n, L, k = F.shape
+    if k < 3:
+        raise ValueError(f"逐候选引擎量至少要 3 列（向听/进张种数/进张枚数），收到 {k} 列")
+    nl = np.asarray(nlegal, dtype=np.int64)
+    if nl.shape != (n,):
+        raise ValueError(f"nlegal 形状 {nl.shape} != ({n},)")
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    # ⚠ `nlegal ≤ 0` 是数据坏了（那一行没有任何合法动作）：不猜、当场报错。
+    #   注意 `nlegal > L` 同罪（候选比张量宽还多 ⇒ 下标会越界到 padding 之外）。
+    if nl.min() < 1 or nl.max() > L:
+        raise ValueError(f"nlegal 越界（min={int(nl.min())}, max={int(nl.max())}, L={L}）")
+    out = np.empty(n, dtype=np.int64)
+    cols = np.arange(L)
+    for i0 in range(0, n, int(chunk)):
+        blk = np.asarray(F[i0:i0 + int(chunk)], dtype=np.float64)
+        nn = blk.shape[0]
+        sub = nl[i0:i0 + nn]
+        valid = cols[None, :] < sub[:, None]
+        # ① 全 0 行（终局和牌）优先；`any` 沿候选维
+        zero = valid & ~np.any(blk != 0.0, axis=2)
+        idx0 = valid.argmax(axis=1)                     # 第一个合法候选（valid 至少一个 True）
+        sh = np.where(valid, blk[:, :, 0], np.inf)
+        tenpai = sh.min(axis=1) <= 0.0
+        adv = _lex_best([-blk[:, :, 0], blk[:, :, 2], blk[:, :, 1]], valid, idx0)
+        if k >= 7:
+            wait = _lex_best([-blk[:, :, 0], blk[:, :, 4], blk[:, :, 6],
+                              blk[:, :, 3], blk[:, :, 5]], valid, idx0)
+        else:
+            wait = adv                                 # 3 列口径：听牌行只能靠下标序（见 docstring ⑤）
+        tgt = np.where(tenpai, wait, adv)
+        win = zero.any(axis=1)
+        if bool(win.any()):
+            tgt = np.where(win, zero.argmax(axis=1), tgt)   # 第一个全 0 行 = 和牌动作
+        out[i0:i0 + nn] = tgt
+    return out
+
+
+def engine_best_index(effect_row, nlegal=None, legal=None) -> int:
+    """**一行的**引擎最优候选下标（`docs/VALVES-AND-FIXTURES.md` §3 W4 的纯函数）。
+
+    ★ 单一实现：它直接调 `engine_best_indices`（一行一批）—— 所以"标量口径"与"整表的
+    向量化口径"不可能漂移，判据只有一份。
+
+    @param effect_row `[L, k≥3]`：该行**逐候选**的引擎量。列序见 `ENGINE_FEATURE_NAMES`
+        （前 3 列 = 老的 `effect` 列：打后向听 / 进张种数 / 进张枚数；给到 7 列以上时
+        第 4~7 列参与听牌行的比较）。
+    @param nlegal 这一行的合法候选数（缺省 = `len(effect_row)`，即整行都合法）。
+        **尾部的 padding 必须靠它排除**（紧凑集是定长张量，尾部是 0）。
+    @param legal 这一行的动作键（`legal` 顺序 = 候选行顺序）—— **只用来核对长度**：
+        它是"牌序"的载体（平局取下标的依据），长度不符说明调用方拿错了行，必须报错。
+    """
+    row = np.asarray(effect_row)
+    if row.ndim != 2:
+        raise ValueError(f"effect_row 必须是 [L, k]（收到 shape={row.shape}）")
+    length = int(row.shape[0])
+    n = length if nlegal is None else int(nlegal)
+    if legal is not None:
+        keys = list(legal)
+        if len(keys) != n:
+            raise ValueError(f"legal 有 {len(keys)} 条 != nlegal {n}（拿错了行？）")
+    if not (1 <= n <= length):
+        raise ValueError(f"nlegal {n} 越界（这一行只有 {length} 个候选槽位）")
+    return int(engine_best_indices(row[None, :, :], np.array([n], dtype=np.int64))[0])
+
+
+def engine_feature_block(cand) -> np.ndarray:
+    """紧凑集的 `cand` 张量 → `[n, L, 8]` 逐候选引擎量（`cand.derived` 块的**实前 8 维**）。
+
+    为什么不是只读 `effect` 列（3 维）：那 3 维里没有听牌形 —— 听牌行（实测约占 20%，且是
+    最该打对的那一段）的 `(向听, 进张种数, 进张枚数)` 全是 `(0, 0, 0)`，标签会退化成下标序
+    = 往策略里灌噪声。`cand.derived` 块里**本来就有** `wait_*/good_wait_*`（同一个引擎调用产出，
+    也**已经在模型输入里**），所以这不是新增信息、不破坏"训练输入 == 推理输入"。
+
+    ⚠ 块的声明宽度是 11（`CAND_DERIVED`），但**实维只有 8**（`features.DERIVED_CANDIDATE`），
+    后 3 维是 v4 预留位、当前三端生产者恒写 0 ⇒ 这里只取实前 8 维（否则那 3 个恒 0 列会变成
+    "平局键"混进比较）。
+
+    ⚠ `block_slices()` 给的偏移是**通道**偏移（与 `blocks.zeroBlock` 的 `cand[:, 88:99] = 0` 同一套），
+    所以切的是**最后一维**：`cand[n, L, 88:96]` —— 别切成 `cand[n, 88:96, :]`（那个切的是候选维，
+    结果是空数组，而且**不报错**，只会静默给出 0 行候选）。
+    """
+    tensor, s0, w0 = spec.block_slices()["cand.derived"]
+    if tensor != "cand":
+        raise spec.ContractError(f"`cand.derived` 挂在 {tensor} 上（期望 cand）—— 注册表变了？")
+    n_real = int(_f3.DERIVED_CANDIDATE)
+    if w0 < n_real:
+        raise spec.ContractError(f"`cand.derived` 宽 {w0} < 实维 {n_real}：注册表与 features 脱节")
+    out = cand[:, :, s0:s0 + n_real]
+    if int(out.shape[1]) == 0:
+        raise spec.ContractError(
+            f"逐候选引擎量取出来是空的（shape={out.shape}）—— 通道偏移 {s0} 与候选维弄反了？")
+    return out
+
+
+def engine_targets(data: dict) -> np.ndarray:
+    """紧凑集（`load_split` 的返回）→ 逐行**引擎最优候选下标** `[n]`（int64）。
+
+    ⚠ **硬拒**"逐候选引擎量整块为 0"：那是 2026-09-27 那个静默坑（sidecar 没给 `cand`，
+    `cand[88:128]` 整块 0 而训练照跑）。这里若整块 0，"引擎标签"根本不存在 —— 继续跑就是
+    拿一个凭空造出来的下标去训策略，宁可当场报错（`train()` 在 `--il-weight 0` 时把它降级成
+    **一行醒目告警 + 读数不可用**，而不是静默）。
+    """
+    feats = engine_feature_block(data["cand"])
+    nleg = np.asarray(data["nlegal"], dtype=np.int64)
+    n = int(nleg.shape[0])
+    mx = 0.0
+    for i0 in range(0, n, 65536):
+        mx = max(mx, float(np.abs(np.asarray(feats[i0:i0 + 65536], dtype=np.float32)).max()))
+    if mx == 0.0:
+        raise spec.ContractError(
+            "紧凑集的 `cand.derived`（逐候选引擎量）**整块为 0** ⇒ 引擎标签不存在"
+            "（症状与 `compact/v4-bc-002` 同源：sidecar 缺逐候选段而构建期没拦）。"
+            "重新 `dataset build`，不要在这份数据上开 `--il-weight`")
+    return engine_best_indices(feats, nleg)
 
 
 #: 动作类型的固定表（诊断用：val 里"哪类动作学得像"）—— 与 `features.ACTION_TYPES` 同集合
@@ -208,19 +452,34 @@ def _rank_points_of(f: Path) -> dict[int, list[float]]:
 
     为什么读 summary 而不是自己算：uma/oka 在 `Payments`/`Settlement`（Java/C++）里，
     Python 重写一份必然漂移（v3 `rewards.py` 的同一条纪律）。缺文件就返回空表 ⇒ 列写 NaN。
+
+    ⚠ 2026-10-05 起**按 (路径, mtime, 大小) 记忆**：一场调一次、而 1000 场共用同一个
+    `summary.json`（实测 446 KB）—— 原来是"每场都重新读盘 + `json.loads` 一遍"，
+    1000 场白解析 ~450 MB。记忆的**键带 `st_mtime_ns`/`st_size`**（不是只按路径）：
+    `python/selfcheck.py` 会**先在同一个目录里跑一次没有 `summary.json` 的 build、之后再把
+    它写出来**（`v4-rt-src`）—— 只按路径记忆会命中那个"当时没有文件"的空表，
+    回填当场报"没有 summary.json"（第一次改动就踩到了，自检抓到）。
     """
     p = f.parent / "summary.json"
-    if not p.is_file():
-        return {}
     try:
-        s = json.loads(p.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
+        st = p.stat()
+        key = (str(p), int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        key = (str(p), -1, -1)
+    hit = _RANK_POINTS_CACHE.get(key)
+    if hit is not None:
+        return hit
     out: dict[int, list[float]] = {}
-    for g in s.get("per_game") or []:
-        rp = g.get("rank_points")
-        if isinstance(g.get("game"), int) and isinstance(rp, list) and len(rp) == 4:
-            out[int(g["game"])] = [float(x) for x in rp]
+    if p.is_file():
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            s = {}
+        for g in s.get("per_game") or []:
+            rp = g.get("rank_points")
+            if isinstance(g.get("game"), int) and isinstance(rp, list) and len(rp) == 4:
+                out[int(g["game"])] = [float(x) for x in rp]
+    _RANK_POINTS_CACHE[key] = out
     return out
 
 
@@ -340,9 +599,22 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
                 tk = trackers.get(seat_of_stream)
                 if tk is None:
                     tk = trackers[seat_of_stream] = carry(seat_of_stream)
+                # ★ **只重放"窗口之外"的那一段前缀**（2026-10-05；这是一行纯提速、不含任何近似）：
+                #   `h0(n) = carry(events[0, max(0, n-K)))` —— 递推是**前缀函数**，所以窗口内的
+                #   `events[n-K, n)` 对 `h0` **没有任何影响**。原先每次都把全部 n 条事件推一遍，
+                #   于是"窗口早就装得下"的那些决策（实测占 96%，一手事件数 ≤ K=60 的占绝大多数）
+                #   白跑 `EventStream.step` → `event_matrix` → `enc` → `GRUCell`。
+                #   截断到 `max(0, n-K)` 之后：`hist` 的末项恰好是 `count == want` ⇒ `h0()` 命中同一格。
+                #   ⚠ 三条不变量（改这里必须守住）：
+                #   ① 截断长度**单调不减**（同一手内事件只追加）⇒ `advance` 的前缀校验照旧成立；
+                #   ② 换手/换文件时长度会变短 ⇒ `_is_extension` 判 False ⇒ `reset()`（本来也要重置）；
+                #   ③ `_write_file` 里**只有** `tk.h0(len(evts))` 用得到状态，而
+                #      `h0` 只要 `[0, n-K]` 那一段 —— 谁要再拿这个 tracker 做别的事（例如需要
+                #      "当前 carry"、`CarryTracker.h`），**必须**改回推全量，否则语义就错了。
+                want_n = max(0, len(evts) - spec.K_EVT)
                 # `key` = 小局身份：`obs.events` **每小局清零**（`Round.events`）⇒ 换局必须重放，
                 # 不能靠"新流的前几条恰好等于旧流尾部"这种小概率去蒙（见 `CarryTracker.advance`）。
-                tk.advance(evts, key=(int(row.get("game", -1)), int(row.get("hand_no", -1))))
+                tk.advance(evts[:want_n], key=(int(row.get("game", -1)), int(row.get("hand_no", -1))))
                 h0 = tk.h0(len(evts))
                 if h0 is None:
                     mm["h0"][i] = 0.0                           # 窗口之前没有事件 ⇒ 全 0 冷启动
@@ -380,19 +652,55 @@ def _spawn(jobs: list[list[str]], log_dir: Path) -> None:
     ⚠ **为什么不用 `multiprocessing.Pool`**：本机沙箱禁**命名管道**（`Pool` 的队列就是命名管道，
     构造时即炸）。子进程 + 文件同样是真并行，且没有管道 —— 与 `mahjong_ml.dataset._spawn` 同一套做法
     （那边耦合在它自己的 argparse 上，所以这里各留一份二十行）。
+
+    ⚠ **子进程必须带 `_v3.CHILD_ENV`（BLAS/OMP 线程 = 1）**：compact 这一相每个子进程都要跑 torch
+    （`h0` 的 GRU 重放），而 torch 的 intra-op 线程数默认 = **物理核数**。`--workers 12` 时那就是
+    `12 × 24 = 288` 个线程抢 32 个逻辑核 —— 实测（同机、同 raw）`--workers 12` 相对串行只有
+    **~2.5× 的加速**（200 场：串行外推 230 s → 实测 90.5 s；1000 场联赛 453 s），
+    而钉到 1 之后同一份工作只要 21.9 s / 87.8 s。
+    数值上**逐字节不变**（每步 GEMM 的 M 极小、只沿输出列分块 ⇒ K 方向的求和顺序与线程数无关），
+    判据仍是 SHA256 逐文件对拍。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     procs = []
     for k, args in enumerate(jobs):
         log = (log_dir / f"job{k}.log").open("w", encoding="utf-8")
         procs.append((k, subprocess.Popen([sys.executable, "-m", "mahjong_ml.v4.dataset", *args],
-                                          stdout=log, stderr=subprocess.STDOUT), log))
+                                          stdout=log, stderr=subprocess.STDOUT,
+                                          env=_v3.CHILD_ENV), log))
     for k, p, log in procs:
         rc = p.wait()
         log.close()
         if rc != 0:
             tail = (log_dir / f"job{k}.log").read_text(encoding="utf-8", errors="replace")[-800:]
             raise RuntimeError(f"v4 数据集并行子进程 job{k} 退出码 {rc}：\n{tail}")
+
+
+def pin_torch_threads() -> int:
+    """把 torch 的 **intra-op 线程钉到 1**（返回原来的线程数，供日志）。**纯提速、不改数值**。
+
+    ## 为什么要钉（2026-10-05 实测）
+
+    `h0` 的递推是**逐事件**的（`CarryTracker.advance`），每次都是 `[1,C] × [C,d]` 的小 GEMM。
+    这种尺寸下 per-op 的线程唤醒/栅栏开销**远大于**计算本身：实测同一个 `enc+GRUCell` 步
+    在 `num_threads=24` 下 **115 µs**、`=1` 下 **52 µs**（2.2×）。串行构建因此白等一倍时间。
+
+    并行分支更糟：`--workers 12` 时是 `12 个子进程 × 24 线程 = 288` 个线程抢 32 个逻辑核
+    （子进程还各自持有一份 MKL/OpenMP 池）——实测同机同 raw 下 `--workers 12` 相对串行只有
+    ~2.5× 的加速（200 场：串行外推 230 s → 90.5 s；1000 场联赛 453 s）。
+
+    ## 为什么**逐字节不变**是构造出来的
+
+    线程数只决定"从哪一维切分工作"：这些算子的 M（行）极小、K（归约维）固定，
+    oneDNN/MKL 对 `M=1` 的 GEMM 只会沿 **N（输出列）** 分块 ⇒ 每个输出元素的
+    **K 方向求和顺序与线程数无关**，逐位结果不变。判据不靠这段推理，靠
+    **SHA256 逐文件对拍**（20 场构建产物与改动前完全相同）。
+    """
+    import torch
+    old = int(torch.get_num_threads())
+    if old != 1:
+        torch.set_num_threads(1)
+    return old
 
 
 def student_net_path(spec_or_path: str | None) -> str | None:
@@ -471,6 +779,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         # 不该因为环境里没有 torch 就跑不动。
         from . import export as v4export
         from . import model as M
+        nthr = pin_torch_threads()                  # 逐事件小 GEMM：线程 >1 只会更慢（见该函数）
         parsed = v4export.read_net(carry_spec)
         dims = {k: int(v) for k, v in parsed["dims"].items()}
         net = M.build(**dims)                       # `n_heads` 已在 `read_net` 的 dims 里
@@ -483,6 +792,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         if not quiet:
             print(f"长程 carry：`h0` 列用**学生网** {carry_spec} 算（d_model={dm}；"
                   f"逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）")
+            print(f"  torch intra-op 线程：{nthr} → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）")
     else:
         _encoder = None
     if carry_spec is None and not quiet:
@@ -783,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
         if carry_spec is not None:
             from . import export as v4export
             from . import model as M
+            pin_torch_threads()
             parsed = v4export.read_net(carry_spec)
             dims = {kk: int(v) for kk, v in parsed["dims"].items()}
             net = M.build(**dims)

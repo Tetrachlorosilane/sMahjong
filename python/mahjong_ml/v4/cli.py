@@ -193,6 +193,178 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_il_check(args: argparse.Namespace) -> int:
+    """**引擎逐候选标签**的纯函数单测 + （可选）在一份紧凑集上的一致率读数。
+
+    为什么单独一个子命令（而不是塞进 `python/selfcheck.py`）：`selfcheck.py` 由用户维护、
+    本轮的改动范围不含它 —— 这个纯函数的边界（全 0 列 / 并列 / nlegal=1 / padding）必须
+    **可复现地跑**，所以判据挂在 v4 自己的 CLI 上（`python -m mahjong_ml.v4 il-check`）。
+
+    @param data 可选的紧凑集目录：额外报"引擎标签 ↔ 行为标签"的一致率与随机基线
+        （**不看权重**，所以它与 `pretrain` 的 `engine_top1` 是两把不同的尺子：
+        这里量的是"引擎标签与行为标签有多合得来"，`pretrain` 量的是"网学会了没有"）。
+        ⛔ **两把尺子都不是强弱判据**（第六十三轮的实测：`engine_top1` +6.95pp 而闸门 −12.65）；
+        判强弱只能走闸门（多套新牌山配对、CI 排除 0 且为正）—— 见 `NOTES.md` §6.5 第六十三轮。
+    """
+    from . import dataset as v4ds
+
+    fails: list[str] = []
+    n_ok = 0
+
+    def ok(cond: bool, msg: str) -> None:
+        nonlocal n_ok
+        print(f"  [{'ok' if cond else 'FAIL'}] {msg}")
+        if cond:
+            n_ok += 1
+        else:
+            fails.append(msg)
+
+    def raises(fn, exc, msg: str) -> None:
+        try:
+            fn()
+            ok(False, msg + "（应当报错却返回了）")
+        except exc:
+            ok(True, msg + " ✓")
+        except Exception as e:                                # noqa: BLE001 —— 别的异常也算没报对
+            ok(False, f"{msg}（报的是 {type(e).__name__}: {e}）")
+
+    ebi = v4ds.engine_best_index
+    ebis = v4ds.engine_best_indices
+
+    print("== 引擎逐候选标签（W4）：纯函数边界 ==")
+    # ---- ① nlegal=1 / 全 0 列 ---------------------------------------------------------------
+    eq_row = np.zeros((1, 8), dtype=np.float32)
+    ok(ebi(eq_row, 1) == 0, "nlegal=1 ⇒ 0（唯一候选，不看不猜）")
+    ok(ebi(np.zeros((4, 8), dtype=np.float32), 4) == 0, "全 0 列（4 个候选全 0）⇒ 0（全平取下标序）")
+    # ---- ② 并列：键完全相同时取**最小下标**（"牌序确定性打破平局"）-------------------------
+    tie = np.array([[1, 2, 30, 0, 0, 0, 0, 0],
+                    [1, 2, 30, 0, 0, 0, 0, 0],
+                    [1, 2, 30, 0, 0, 0, 0, 0]], dtype=np.float32)
+    ok(ebi(tie, 3) == 0, "三个候选的引擎量逐列相同 ⇒ 取最小下标 0")
+    # 只有**最后一个**候选更好 ⇒ 必须改判（否则"取最小下标"就退化成"永远 0"）
+    better_last = tie.copy()
+    better_last[2, 2] = 31
+    ok(ebi(better_last, 3) == 2, "末位候选的进张枚数更大 ⇒ 改判到 2（不是无脑取 0）")
+    # ---- ③ padding 必须被 nlegal 排除 -------------------------------------------------------
+    pad = np.array([[2, 0, 1, 0, 0, 0, 0, 0],          # 真实候选：向听 2、进张 1 枚
+                    [0, 9, 99, 0, 0, 0, 0, 0]],        # padding：看起来"最好"，但不在 legal 里
+                   dtype=np.float32)
+    ok(ebi(pad, 1) == 0, "nlegal=1 时尾部的 padding（向听 0/进张 99）不参与 ⇒ 0")
+    ok(ebi(pad, 2) == 1, "nlegal=2 时第二个候选确实更好 ⇒ 1（同一行的两种读法都对）")
+    # ---- ④ 向听优先 / 进张枚数次之 -----------------------------------------------------------
+    sh = np.array([[1, 3, 8, 0, 0, 0, 0, 0],          # 向听 1、进张 8 枚
+                   [0, 1, 2, 0, 0, 0, 0, 0]],          # 向听 0（听牌）但进张列不适用
+                  dtype=np.float32)
+    ok(ebi(sh, 2) == 1, "向听优先：听牌（0）压过「打后 1 向听但进张更多」")
+    adv = np.array([[1, 2, 9, 0, 0, 0, 0, 0],
+                    [1, 9, 8, 0, 0, 0, 0, 0]], dtype=np.float32)
+    ok(ebi(adv, 2) == 0, "同向听 ⇒ 比**进张枚数**（9 > 8），不是比进张种数")
+    # ---- ⑤ 听牌行（8 列）：听牌枚数 → 良形枚数 ----------------------------------------------
+    wait = np.array([[0, 0, 0, 2, 4, 1, 4, 0],
+                     [0, 0, 0, 3, 6, 0, 0, 0]], dtype=np.float32)
+    ok(ebi(wait, 2) == 1, "听牌行 ⇒ 听牌枚数大的赢（6 > 4）")
+    good = np.array([[0, 0, 0, 2, 4, 2, 4, 0],
+                     [0, 0, 0, 2, 4, 0, 0, 0]], dtype=np.float32)
+    ok(ebi(good, 2) == 0, "听牌枚数相同 ⇒ 良形枚数大的赢（4 > 0）")
+    # ---- ⑥ 3 列口径（老 `effect` 列）：听牌行**退化成下标序**（已写进 docstring ⑤）------------
+    eff3 = np.array([[0, 0, 0], [0, 0, 0]], dtype=np.float32)
+    ok(ebi(eff3, 2) == 0, "3 列口径下听牌行只能按下标序 ⇒ 0（口径已在 docstring 里写明）")
+    ok(ebi(np.array([[1, 0, 5], [1, 0, 3]], dtype=np.float32), 2) == 0,
+       "3 列口径下未听牌行照常比进张枚数（5 > 3）")
+    # ---- ⑦ 终局和牌（整行 0）排第一 ---------------------------------------------------------
+    win = np.array([[0, 0, 0, 2, 6, 2, 6, 0],      # 一个很好的听牌候选
+                    [0, 0, 0, 0, 0, 0, 0, 0]],     # tsumo/ron：引擎不给"之后的形态"
+                   dtype=np.float32)
+    ok(ebi(win, 2) == 1, "整行 0 的候选（能和）= 引擎最优（赢了就没有「更好的候选」）")
+    # ---- ⑧ 与**独立参考实现**逐位一致（"只有一把尺子"之外的交叉检查）------------------------
+    def _ref_target(row: np.ndarray, n: int) -> int:
+        """测试用的参考实现：纯 Python 元组比较，只按 `engine_best_index` 的 docstring 写。
+
+        ⚠ 为什么需要它：被测实现是**唯一**一份（标量与向量化同源），所以"自己跟自己比"证明不了
+        排序对；这一份是独立重写的判据（2026-10-04 就是它那个口径抓出了"字典序变成最后一个键
+        说话"的 bug）。
+        """
+        cand = [[float(v) for v in row[i]] for i in range(n)]
+        z = [i for i in range(n) if all(v == 0.0 for v in cand[i])]
+        if z:
+            return z[0]                                     # 终局和牌（整行 0）优先
+        best_sh = min(cand[i][0] for i in range(n))
+        wide = len(cand[0]) >= 7
+        if best_sh <= 0.0 and wide:
+            keys = [(0.0 if cand[i][0] <= 0.0 else -1.0, cand[i][4], cand[i][6],
+                     cand[i][3], cand[i][5], -i) for i in range(n)]
+        else:
+            keys = [(-cand[i][0], cand[i][2], cand[i][1], -i) for i in range(n)]
+        return max(range(n), key=lambda i: keys[i])
+
+    rng = np.random.default_rng(7)
+    L = 9
+    for wide in (True, False):
+        kdim = 8 if wide else 3
+        bad = 0
+        for trial in range(5):
+            nlegs = rng.integers(1, L + 1, size=40).astype(np.int64)
+            raw = rng.integers(0, 4, size=(40, L, kdim)).astype(np.float32)
+            raw[:, :, 0] = raw[:, :, 0] % 4                 # 向听 0..3
+            raw[rng.random((40, L, kdim)) < 0.2] = 0.0      # 混进整行 0 的「和牌」候选
+            vec = ebis(raw, nlegs)
+            ref = np.array([_ref_target(raw[i], int(nlegs[i])) for i in range(40)], dtype=np.int64)
+            if not np.array_equal(vec, ref):
+                bad = int(np.argmax(vec != ref))
+                ok(False, f"{kdim} 列口径 vs 独立参考实现不一致（第 {trial} 次，行 {bad}："
+                          f"实现 {int(vec[bad])} / 参考 {int(ref[bad])}）")
+                break
+        if not bad:
+            ok(True, f"{kdim} 列口径 == 独立参考实现（5×40 行随机对拍，含整行 0/并列/听牌行）")
+    # ---- ⑨ 确定性：同输入跑两次逐位相同 -----------------------------------------------------
+    ok(np.array_equal(ebis(raw, nlegs), ebis(raw, nlegs)), "确定性：同一份输入跑两次结果逐位相同")
+    # ---- ⑩ 契约违反必须报错（不猜）----------------------------------------------------------
+    raises(lambda: ebi(tie, 4), ValueError, "nlegal 超过这一行的候选槽位")
+    raises(lambda: ebi(tie, 0), ValueError, "nlegal=0")
+    raises(lambda: ebi(tie, 3, legal=["discard:1m"]), ValueError, "legal 长度与 nlegal 不符")
+    raises(lambda: ebi(np.zeros((3, 2), dtype=np.float32), 3), ValueError, "只有 2 列（<3）")
+    raises(lambda: ebis(np.zeros((2, 3, 8), dtype=np.float32), np.array([0, 3])), ValueError,
+           "nlegal 里有 0")
+
+    if args.data:
+        from . import traces as _traces                       # noqa: F401 —— 只为路径约定一致
+        ds = args.data
+        data = v4ds.load_split(ds, args.split)
+        tgt = v4ds.engine_targets(data)
+        nleg = np.asarray(data["nlegal"], dtype=np.int64)
+        lab = np.asarray(data["label"], dtype=np.int64)
+        ltyp = np.asarray(data["label_type"], dtype=np.int64) if data.get("label_type") is not None \
+            else None
+        feats = np.asarray(v4ds.engine_feature_block(data["cand"]), dtype=np.float32)
+        rows = np.arange(tgt.size)
+        zero_tgt = ~np.any(feats[rows, tgt] != 0.0, axis=1)
+        student = np.asarray(data["is_student"], dtype=np.int64) > 0 \
+            if data.get("is_student") is not None else np.ones(tgt.size, bool)
+        print(f"\n== 紧凑集上的引擎标签体检：{ds}（split={args.split}）==")
+        print(f"  {tgt.size} 行 / 平均候选 {float(nleg.mean()):.2f} / 学生行 "
+              f"{int(student.sum())}（{float(student.mean()):.1%}）")
+        print(f"  引擎最优 == 行为标签：全部 {float((tgt == lab).mean()):.4f}"
+              f" | 学生行 {float((tgt[student] == lab[student]).mean()):.4f}"
+              f" ⇒ **随机基线 1/平均候选数 = {float((1.0 / nleg).mean()):.4f}**")
+        print(f"  引擎最优落在「整行 0」的候选上（= 能和就和）：{float(zero_tgt.mean()):.4f}"
+              f" | 落在听牌候选上：{float((feats[rows, tgt, 0] == 0).mean()):.4f}")
+        if ltyp is not None:
+            win_types = (ltyp == 5) | (ltyp == 6)                # tsumo / ron（`ACTION_TYPES`）
+            both = zero_tgt & win_types
+            print(f"  交叉核对：引擎目标=和牌 **且** 行为标签也是和牌的行 {int(both.sum())}"
+                  f" / 引擎目标=和牌的行 {int(zero_tgt.sum())}"
+                  f"（行为侧采样可能放过和牌，所以这不是判据）")
+
+    print()
+    if fails:
+        print(f"v4 il-check FAIL（{len(fails)}/{n_ok + len(fails)} 项）：")
+        for f in fails:
+            print("   -", f)
+        return 1
+    print(f"v4 il-check PASS —— {n_ok} 项（纯函数边界 + 确定性 + 向量化==标量）")
+    return 0
+
+
 def cmd_balance(args: argparse.Namespace) -> int:
     expect = {}
     for item in (args.expect or "").split(","):
@@ -310,17 +482,32 @@ def cmd_arena(argv: list[str]) -> int:
     return arena.main(argv)
 
 
+def cmd_profile(argv: list[str]) -> int:
+    """模型画像（`python -m mahjong_ml.v4 profile`）—— 把已有自对弈产物摊成多维统计表。
+
+    参数集自成一套（`--run` 可重复 + `--self-check`/`--cross-check`）⇒ 整段转走，
+    与 `loop`/`ablate`/`arena` 同一个套路。
+    """
+    from . import profile
+    return profile.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `loop` / `ablate` / `arena` 的参数集自成一套（见各自模块）：整段转走
-    if argv and argv[0] in ("loop", "ablate", "arena"):
-        return {"loop": cmd_loop, "ablate": cmd_ablate, "arena": cmd_arena}[argv[0]](argv[1:])
+    # `loop` / `ablate` / `arena` / `profile` 的参数集自成一套（见各自模块）：整段转走
+    if argv and argv[0] in ("loop", "ablate", "arena", "profile"):
+        return {"loop": cmd_loop, "ablate": cmd_ablate, "arena": cmd_arena,
+                "profile": cmd_profile}[argv[0]](argv[1:])
     ap = argparse.ArgumentParser(prog="python -m mahjong_ml.v4", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="打印块清单与张量形状").set_defaults(fn=cmd_spec)
     sub.add_parser("fingerprint", help="块清单指纹（写进 net.bin 格式 2）").set_defaults(fn=cmd_fingerprint)
     sub.add_parser("check", help="训练准备体检（P0 出口判据）").set_defaults(fn=cmd_check)
     sub.add_parser("plan", help="P0 状态表").set_defaults(fn=cmd_plan)
+    il = sub.add_parser("il-check", help="W4：引擎逐候选标签的纯函数单测（+ 可选的一致率读数）")
+    il.add_argument("--data", default=None, help="（可选）v4 紧凑集目录：额外报引擎/行为标签一致率")
+    il.add_argument("--split", default="val", choices=["train", "val"])
+    il.set_defaults(fn=cmd_il_check)
     b = sub.add_parser("balance", help="场外均衡审计（读一轮采集轨迹）")
     b.add_argument("--dir", required=True)
     b.add_argument("--out", default=None)
@@ -365,6 +552,9 @@ def main(argv: list[str] | None = None) -> int:
     #   进 argparse **之前**就把 `loop` 之后的参数整段转走；这里留一行是为了 `--help` 里能看到它。
     sub.add_parser("loop", help="v4 世代回路：采集(C++)/紧凑集/训练/评测/台账（不依赖 Java）")
     sub.add_parser("ablate", help="消融矩阵：逐头/逐块关掉，同一预算下出表")
+    # 同上：`profile` 的参数集在 `v4/profile.py`（`--run` 可重复 + `--self-check`/`--cross-check`），
+    # 也在进 argparse 之前整段转走；这里留一行只为 `--help` 里看得到它。
+    sub.add_parser("profile", help="模型画像：把已有自对弈产物摊成多维统计表（轴定义见 v4/profile.py）")
     args = ap.parse_args(argv)
     return args.fn(args)
 

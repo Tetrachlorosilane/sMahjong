@@ -15,7 +15,9 @@ import mahjong.bot.Bot;
 import mahjong.game.Round;
 import mahjong.game.Table;
 import mahjong.rules.Agari;
+import mahjong.rules.Evaluator;
 import mahjong.rules.Shanten;
+import mahjong.rules.YakuCodes;
 import mahjong.util.Json;
 import mahjong.util.Log;
 
@@ -284,6 +286,22 @@ final class TraceRecorder {
                 "tsumo", res != null && res.tsumo,
                 "nagashi", res != null && res.nagashi,
                 "tenpai", res == null ? List.of() : Json.boolList(res.tenpai));
+        // ---- 役种轴（画像工具：平均役种数 / 复合役率 / 平均番数 / 役种 Top-N / 真·役满率 / 満貫以上率）
+        //
+        // 数据源是引擎**已经算过**的那一份（`Round.Result.winScore`）—— ⛔ 记录器不重算役
+        // （那就是第二个实现，与 `agari` 报文早晚漂移）；役列表的协议表示也共用
+        // `YakuCodes.yakuJson`，与结算界面上的那一条**同一套码、同一个键序**。
+        // 流局 / 途中流局 / 投票收工没有和了者 ⇒ 这五列**整块缺席**（⛔ 不写 0：
+        // 读侧必须能区分"取不到"与"真的是 0"，AGENTS §6.5 的老轨迹纪律）。
+        // 键追加在**行尾**，与既有回填字段的追加方式一致（`trainer/src/trace.cpp` 必须同序）。
+        Evaluator.HandScore ws = res == null ? null : res.winScore;
+        if (ws != null) {
+            row.put("yaku", YakuCodes.yakuJson(ws.yaku));
+            row.put("han", ws.totalHan());
+            row.put("fu", ws.fu);
+            row.put("yakuman", ws.yakuman);
+            row.put("limit", YakuCodes.limitOf(ws.limit));
+        }
         hands.add(row);
         // 回填本小局的决策行（奖励事后才知道，所以只能在这一刻补）
         final int winner = res == null ? -1 : res.winner;

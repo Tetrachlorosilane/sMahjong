@@ -1,8 +1,12 @@
 package mahjong.rules;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+
+import mahjong.util.Json;
 
 /**
  * 协议词汇表：**役种名 / 打点档位 / 流局原因 → ASCII 码**。
@@ -212,5 +216,34 @@ public final class YakuCodes {
     /** 只读的役种词汇表（自检/文档用）。 */
     public static Map<String, String> vocabulary() {
         return Collections.unmodifiableMap(YAKU);
+    }
+
+    /**
+     * 一手牌的役列表 → 协议表示（**`agari` 报文与轨迹 `hand` 行共用这一份**）。
+     *
+     * <p>为什么提出来：轨迹的 `hand` 行要带"役种轴"（画像工具算平均役种数 / 复合役率 / 平均番数 /
+     * 役种 Top-N），而它**不能自己重算役** —— 那就是第二个实现，早晚与 `agari` 报文漂移。
+     * 这里就是 `Round.sendAgari` 原来那段内联循环，搬出来两边共用，键序与取值一字未改。
+     *
+     * <p>三条既有口径原样保留：① 只发 ASCII 码（参数化役种另带 ASCII 牌码 `tile`，
+     * 中文名只活在 {@code Evaluator} 内部）；② 役满按「13 × 倍数」折算番数
+     * （{@link Evaluator.Yaku#equivalentHan()}）⇒ **逐役 `han` 之和 == 合计 `han`**；
+     * ③ 役满另有 `yakuman` 字段给量纲（普通役没有这个键，免得让读侧以为它是役满）。
+     */
+    public static List<Object> yakuJson(List<Evaluator.Yaku> yaku) {
+        List<Object> out = new ArrayList<>(yaku.size());
+        for (Evaluator.Yaku y : yaku) {
+            Map<String, Object> yj = Json.obj("code", codeOf(y.name));
+            String ytile = tileOf(y.name);
+            if (ytile != null) {
+                yj.put("tile", ytile);
+            }
+            yj.put("han", y.equivalentHan());
+            if (y.yakuman > 0) {
+                yj.put("yakuman", y.yakuman);
+            }
+            out.add(yj);
+        }
+        return out;
     }
 }

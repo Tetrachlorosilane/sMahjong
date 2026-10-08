@@ -10,11 +10,17 @@
 #include "v4policy.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include "net.hpp"        // netArgmax（= Java `Logits.argmaxOf`）
 #include "v4features.hpp"
@@ -22,7 +28,17 @@
 namespace trainer {
 namespace {
 
-/** `LayerNorm` 的 eps（= Java `V4Policy.LN_EPS`，与 torch 缺省一致）。 */
+/**
+ * **标量口径开关**（诊断 / 对拍用）：`TRAINER_V4_SCALAR=1` 时禁用 SIMD 与 token 批处理，
+ * 走与本次优化之前**逐字相同**的标量双循环（但保留"零分配 + 权重单副本"）。
+ *
+ * <p>两个用途，都写进 docs/TRAINER-CPP.md：
+ *   ① **分档归因**：同一份代码开关一次就能量出"档 1（零分配/权重单副本）"与"档 2（SIMD +
+ *      批处理）"各占多少，不用维护两份源码；
+ *   ② **位级判据的负向对照**：两条路必须给出同一批比特 —— 判据是
+ *      `trainer v4net` 的输出逐字节相同。
+ */
+const bool kScalarMode = std::getenv("TRAINER_V4_SCALAR") != nullptr;
 constexpr float kLnEps = 1e-5f;
 
 /** 小端读取器：**显式按字节拼**（不依赖宿主字节序，也不做未对齐访问）。 */
@@ -114,12 +130,39 @@ std::string joinNames(const std::vector<std::string> &names, size_t limit) {
     return s;
 }
 
+/**
+ * 建 `dataT`（转置 + 行数补到 8 的倍数）—— **加载期一次**，之后只读。
+ *
+ * <p>为什么不懒建：懒建就要在热路径上加锁/原子，而一份权重是**全进程共享只读**的
+ * （`policies.hpp` 的工厂把同一个 `shared_ptr<const V4Policy>` 发给所有 worker）。
+ * 内存代价 = 每份网络多一份 float32 副本（g08：5.4 MB → 10.9 MB）；换来的是前向里
+ * 权重按 `c` 升序**流式**读、8 个输出行一条指令（见 `linearFast`）。
+ */
+void buildTransposed(V4Policy &p) {
+    for (auto &kv : p.mats) {
+        V4Policy::Mat &m = kv.second;
+        const int R = m.rows;
+        const int C = m.cols;
+        const int Rp = (R + 7) & ~7;
+        m.rowsPad = Rp;
+        m.dataT.assign(static_cast<size_t>(C) * static_cast<size_t>(Rp), 0.f);
+        for (int r = 0; r < R; r++) {
+            const float *src = m.data.data() + static_cast<size_t>(r) * static_cast<size_t>(C);
+            for (int c = 0; c < C; c++) {
+                m.dataT[static_cast<size_t>(c) * static_cast<size_t>(Rp) + static_cast<size_t>(r)]
+                        = src[c];
+            }
+        }
+    }
+}
+
 /** 构造收尾：形状核对（`bindAll`）+ "有张量没人读"（= Java 构造器末尾那两件事）。 */
 bool finishPolicy(V4Policy &p, std::string &err) {
     p.used.clear();
     if (!p.bindAll(err)) {
         return false;
     }
+    buildTransposed(p);
     if (p.used.size() != p.allNames.size()) {
         std::vector<std::string> unused;
         for (const std::string &n : p.allNames) {
@@ -138,9 +181,193 @@ bool finishPolicy(V4Policy &p, std::string &err) {
 // ---------------------------------------------------------------- 算子（顺序固定 = 与 Java 逐位可比）
 
 /**
+ * `out[r] = (b ? b[rowOff + r] : 0) + Σ_c W[rowOff + r][c]·x[c]`（`r < R`）——
+ * **逐位等于**原来的标量双循环。
+ *
+ * <p>口径（⛔ 改这里等于改判据，见 `Mat::dataT` 与文件顶部纪律）：
+ *   · 一个输出行 = **一个累加器**，沿 `c` **升序**；`b` 非空时累加器**从 bias 起**
+ *     （与原 `linear` 一致）；`b == nullptr` 时从 0 起（= 原 `rowDot`，`gruStep` 要那一支：
+ *     `bias + rowDot(...)` 与 `linear` 的"bias 起累加"**不是**同一个浮点序列）。
+ *   · 乘、加**分两步**（`_mm256_mul_ps` + `_mm256_add_ps`），**不用 FMA**：FMA 只舍入一次，
+ *     与标量的两次舍入不同位（`-ffp-contract=off` 的同一条理由）。
+ *   · SIMD 只铺在**输出行**方向（8 行/指令）⇒ 每个输出行的求和顺序与标量逐字相同。
+ *
+ * <p>为什么快：`W` 在加载期已转置（`dataT`），内层循环沿 `c` 流式读权重、一次算 8 个输出行；
+ * 再把输出行 4 路展开（4 条互相独立的累加链）⇒ 单核 matvec 从"每 MAC 2 条标量指令"降到
+ * "每 8 个 MAC 2 条向量指令"，而**数值口径一位不变**。
+ */
+void linearFast(float *out, const float *x, size_t xn, const V4Policy::Mat &w, const float *b,
+                int rowOff, int R) {
+    int r = 0;
+#if defined(__AVX2__)
+    if (!kScalarMode && !w.dataT.empty() && static_cast<int>(xn) == w.cols) {
+    const int Rp = w.rowsPad;
+    const float *WT = w.dataT.data() + static_cast<size_t>(rowOff);
+    for (; r + 32 <= R; r += 32) {                       // 4 路展开：4 条独立累加链
+        __m256 a0 = b == nullptr ? _mm256_setzero_ps() : _mm256_loadu_ps(b + rowOff + r);
+        __m256 a1 = b == nullptr ? _mm256_setzero_ps() : _mm256_loadu_ps(b + rowOff + r + 8);
+        __m256 a2 = b == nullptr ? _mm256_setzero_ps() : _mm256_loadu_ps(b + rowOff + r + 16);
+        __m256 a3 = b == nullptr ? _mm256_setzero_ps() : _mm256_loadu_ps(b + rowOff + r + 24);
+        const float *w0 = WT + r;
+        const float *w1 = w0 + 8;
+        const float *w2 = w0 + 16;
+        const float *w3 = w0 + 24;
+        for (size_t c = 0; c < xn; c++) {
+            const __m256 xv = _mm256_set1_ps(x[c]);
+            a0 = _mm256_add_ps(a0, _mm256_mul_ps(_mm256_loadu_ps(w0), xv));
+            a1 = _mm256_add_ps(a1, _mm256_mul_ps(_mm256_loadu_ps(w1), xv));
+            a2 = _mm256_add_ps(a2, _mm256_mul_ps(_mm256_loadu_ps(w2), xv));
+            a3 = _mm256_add_ps(a3, _mm256_mul_ps(_mm256_loadu_ps(w3), xv));
+            w0 += Rp;
+            w1 += Rp;
+            w2 += Rp;
+            w3 += Rp;
+        }
+        _mm256_storeu_ps(out + r, a0);
+        _mm256_storeu_ps(out + r + 8, a1);
+        _mm256_storeu_ps(out + r + 16, a2);
+        _mm256_storeu_ps(out + r + 24, a3);
+    }
+    for (; r + 8 <= R; r += 8) {                         // 1 路：8 个输出行
+        __m256 a0 = b == nullptr ? _mm256_setzero_ps() : _mm256_loadu_ps(b + rowOff + r);
+        const float *w0 = WT + r;
+        for (size_t c = 0; c < xn; c++) {
+            a0 = _mm256_add_ps(a0, _mm256_mul_ps(_mm256_loadu_ps(w0), _mm256_set1_ps(x[c])));
+            w0 += Rp;
+        }
+        _mm256_storeu_ps(out + r, a0);
+    }
+    }
+#endif
+    for (; r < R; r++) {                                 // 尾部（R%8）、标量档与无 AVX2 整机回退
+        float s = b == nullptr ? 0.f : b[rowOff + r];
+        const float *row
+                = w.data.data() + static_cast<size_t>(rowOff + r) * static_cast<size_t>(w.cols);
+        for (size_t c = 0; c < xn; c++) {
+            s += row[c] * x[c];
+        }
+        out[r] = s;
+    }
+}
+
+/**
+ * **一批 token 行共用一个权重矩阵**（`B` 行一起算）—— 与逐行 `linearFast` **逐位相同**。
+ *
+ * <p>唯一的区别是**循环次序**：输出行按 32 行分块放在外层、批内 token 放在内层 —— 于是那 32 行的
+ * 权重切片（`xn × 32 × 4 B` ≈ 24 KB @ xn=192）常驻 L1，被 `B` 个 token 复用，权重流量从
+ * **`B × |W|` 降到 `|W|`**。
+ *
+ * <p>为什么这条比"少几条指令"重要得多：8 worker 共享 L3，而本前向每决策要扫 ~180 MB 权重
+ * （g08 的权重集只有 10.9 MB ⇒ 同一批 cacheline 被反复搬运）。批处理把每次调用扫过的权重
+ * 从 `B` 遍压到 1 遍；实测这一步在 8 worker 下的收益**显著大于**单线程下的收益
+ * （docs/TRAINER-CPP.md 的实测表）。
+ */
+void linearBatchFast(float *out, int outStride, const float *x, int xStride, int B, size_t xn,
+                     const V4Policy::Mat &w, const float *b, int rowOff, int R) {
+    if (!kScalarMode && !w.dataT.empty() && static_cast<int>(xn) == w.cols) {
+        constexpr int kBlock = 32;                       // 4 个 8 行组 ⇒ 切片 ≈ L1
+        for (int rb = 0; rb < R; rb += kBlock) {
+            const int len = std::min(kBlock, R - rb);
+            for (int bi = 0; bi < B; bi++) {
+                linearFast(out + static_cast<size_t>(bi) * outStride + rb,
+                           x + static_cast<size_t>(bi) * xStride, xn, w,
+                           b == nullptr ? nullptr : b, rowOff + rb, len);
+            }
+        }
+        return;
+    }
+    for (int bi = 0; bi < B; bi++) {                     // 标量档 / 未建 dataT：逐行同原口径
+        const float *xb = x + static_cast<size_t>(bi) * xStride;
+        float *ob = out + static_cast<size_t>(bi) * outStride;
+        for (int r = 0; r < R; r++) {
+            float s = b == nullptr ? 0.f : b[rowOff + r];
+            const float *row = w.data.data()
+                    + static_cast<size_t>(rowOff + r) * static_cast<size_t>(w.cols);
+            for (size_t c = 0; c < xn; c++) {
+                s += row[c] * xb[c];
+            }
+            ob[r] = s;
+        }
+    }
+}
+
+// ---- 逐元素算子（都是**下标升序、单累加器**，与原来的 `std::vector` 版逐位同值；
+//      改成裸指针只是为了让中间量落在 `V4Scratch` 的扁平缓冲里 —— 热路径零堆分配）
+
+void reluBuf(float *x, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (x[i] < 0.f) {
+            x[i] = 0.f;
+        }
+    }
+}
+
+void sigmoidBuf(float *x, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        const double e = std::exp(-static_cast<double>(x[i]));
+        x[i] = static_cast<float>(1.0 / (1.0 + e));
+    }
+}
+
+void tanhBuf(float *x, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        x[i] = static_cast<float>(std::tanh(static_cast<double>(x[i])));
+    }
+}
+
+/** 原地 LayerNorm（**有偏方差**，eps = 1e-5，与 torch 缺省一致）。 */
+void layerNormBuf(float *x, int n, const float *g, const float *b) {
+    float mean = 0.f;
+    for (int i = 0; i < n; i++) {
+        mean += x[i] / static_cast<float>(n);
+    }
+    float var = 0.f;
+    for (int i = 0; i < n; i++) {
+        const float d = x[i] - mean;
+        var += d * d / static_cast<float>(n);
+    }
+    const float inv = static_cast<float>(1.0 / std::sqrt(static_cast<double>(var + kLnEps)));
+    for (int i = 0; i < n; i++) {
+        x[i] = (x[i] - mean) * inv * g[i] + b[i];
+    }
+}
+
+/** 原地 softmax（减去最大值再 exp）—— 只动前 `n` 个。 */
+void softmaxBuf(float *x, int n) {
+    float max = -std::numeric_limits<float>::infinity();
+    for (int i = 0; i < n; i++) {
+        if (x[i] > max) {
+            max = x[i];
+        }
+    }
+    float sum = 0.f;
+    for (int i = 0; i < n; i++) {
+        x[i] = static_cast<float>(std::exp(static_cast<double>(x[i] - max)));
+        sum += x[i];
+    }
+    if (sum > 0.f) {
+        for (int i = 0; i < n; i++) {
+            x[i] /= sum;
+        }
+    }
+}
+
+/** `Σ a[i]·b[i]`（从 0 起、下标升序 —— 与原来的 `dot` 同一个浮点序列）。 */
+float dotN(const float *a, const float *b, int n) {
+    float s = 0.f;
+    for (int i = 0; i < n; i++) {
+        s += a[i] * b[i];
+    }
+    return s;
+}
+
+/**
  * `out = W·x + b`（W 行主序 `[out][in]`，**单累加器顺序求和** —— 别改成并行规约）。
  *
  * <p>⚠ **别名安全**：`out` 与 `x` 是同一块内存时先复制一份（Java `linear` 的同名注意事项）。
+ *
+ * <p>走了 `dataT` 那条 SIMD 路径（逐位等价，见 `linearFast`）；`dataT` 没建（未经 `finishPolicy`
+ * 的 `Mat`）或 `xn != w.cols` 时退回原来的标量循环 —— 两条路必须给出同一批比特。
  */
 void linear(std::vector<float> &out, const float *x, size_t xn, const V4Policy::Mat &w,
             const std::vector<float> &b) {
@@ -149,6 +376,10 @@ void linear(std::vector<float> &out, const float *x, size_t xn, const V4Policy::
         copy.assign(x, x + xn);
         x = copy.data();
     }
+    if (!w.dataT.empty() && static_cast<int>(xn) == w.cols) {
+        linearFast(out.data(), x, xn, w, b.data(), 0, static_cast<int>(out.size()));
+        return;
+    }
     for (size_t r = 0; r < out.size(); r++) {
         float s = b[r];
         const float *row = w.data.data() + r * static_cast<size_t>(w.cols);
@@ -156,126 +387,6 @@ void linear(std::vector<float> &out, const float *x, size_t xn, const V4Policy::
             s += row[c] * x[c];
         }
         out[r] = s;
-    }
-}
-
-float dot(const std::vector<float> &a, const std::vector<float> &b) {
-    float s = 0.f;
-    for (size_t i = 0; i < a.size(); i++) {
-        s += a[i] * b[i];
-    }
-    return s;
-}
-
-void relu(std::vector<float> &x) {
-    for (float &v : x) {
-        if (v < 0.f) {
-            v = 0.f;
-        }
-    }
-}
-
-void sigmoid(std::vector<float> &x) {
-    for (float &v : x) {
-        const double e = std::exp(-static_cast<double>(v));
-        v = static_cast<float>(1.0 / (1.0 + e));
-    }
-}
-
-void tanhVec(std::vector<float> &x) {
-    for (float &v : x) {
-        v = static_cast<float>(std::tanh(static_cast<double>(v)));
-    }
-}
-
-/** 原地 LayerNorm（**有偏方差**，eps = 1e-5，与 torch 缺省一致）。 */
-void layerNorm(std::vector<float> &x, const std::vector<float> &g, const std::vector<float> &b) {
-    const int n = static_cast<int>(x.size());
-    float mean = 0.f;
-    for (float v : x) {
-        mean += v / static_cast<float>(n);
-    }
-    float var = 0.f;
-    for (float v : x) {
-        const float d = v - mean;
-        var += d * d / static_cast<float>(n);
-    }
-    const float inv = static_cast<float>(1.0 / std::sqrt(static_cast<double>(var + kLnEps)));
-    for (int i = 0; i < n; i++) {
-        x[static_cast<size_t>(i)]
-                = (x[static_cast<size_t>(i)] - mean) * inv * g[static_cast<size_t>(i)]
-                  + b[static_cast<size_t>(i)];
-    }
-}
-
-/** 原地 softmax（减去最大值再 exp）。 */
-void softmax(std::vector<float> &x) {
-    float max = -std::numeric_limits<float>::infinity();
-    for (float v : x) {
-        if (v > max) {
-            max = v;
-        }
-    }
-    float sum = 0.f;
-    for (float &v : x) {
-        v = static_cast<float>(std::exp(static_cast<double>(v - max)));
-        sum += v;
-    }
-    if (sum > 0.f) {
-        for (float &v : x) {
-            v /= sum;
-        }
-    }
-}
-
-float rowDot(const V4Policy::Mat &w, int rowIndex, const std::vector<float> &x) {
-    float s = 0.f;
-    const float *row = w.data.data() + static_cast<size_t>(rowIndex) * static_cast<size_t>(w.cols);
-    for (size_t i = 0; i < x.size(); i++) {
-        s += row[i] * x[i];
-    }
-    return s;
-}
-
-/**
- * GRU 一步（PyTorch `nn.GRUCell` 的 r/z/n 三段顺序）。
- *
- * <p>⚠ **返回新数组**，不复用 `h`：`gh` 要读**整条旧 h**（Java 原注释，错得很隐蔽）。
- */
-std::vector<float> gruStep(const std::vector<float> &x, const std::vector<float> &h,
-                           const V4Policy::Mat &wih, const V4Policy::Mat &whh,
-                           const std::vector<float> &bih, const std::vector<float> &bhh) {
-    const int d = static_cast<int>(x.size());
-    std::vector<float> out(static_cast<size_t>(d), 0.f);
-    for (int i = 0; i < d; i++) {
-        const float ir = bih[static_cast<size_t>(i)] + rowDot(wih, i, x);
-        const float iz = bih[static_cast<size_t>(d + i)] + rowDot(wih, d + i, x);
-        const float in = bih[static_cast<size_t>(2 * d + i)] + rowDot(wih, 2 * d + i, x);
-        const float hr = bhh[static_cast<size_t>(i)] + rowDot(whh, i, h);
-        const float hz = bhh[static_cast<size_t>(d + i)] + rowDot(whh, d + i, h);
-        const float hn = bhh[static_cast<size_t>(2 * d + i)] + rowDot(whh, 2 * d + i, h);
-        const float r = static_cast<float>(
-                1.0 / (1.0 + std::exp(-static_cast<double>(ir + hr))));
-        const float z = static_cast<float>(
-                1.0 / (1.0 + std::exp(-static_cast<double>(iz + hz))));
-        const float nn = static_cast<float>(
-                std::tanh(static_cast<double>(in + r * hn)));
-        out[static_cast<size_t>(i)] = (1.f - z) * nn + z * h[static_cast<size_t>(i)];
-    }
-    return out;
-}
-
-/** `in_proj` 第 `rowOff..rowOff+d` 行（= Java `V4Policy.projRows`）。 */
-void projRows(std::vector<float> &out, const float *x, size_t xn, const V4Policy::Mat &w,
-              const std::vector<float> &b, int rowOff, int d) {
-    for (int i = 0; i < d; i++) {
-        float s = b[static_cast<size_t>(rowOff + i)];
-        const float *row = w.data.data()
-                + static_cast<size_t>(rowOff + i) * static_cast<size_t>(w.cols);
-        for (size_t c = 0; c < xn; c++) {
-            s += row[c] * x[c];
-        }
-        out[static_cast<size_t>(i)] = s;
     }
 }
 
@@ -732,9 +843,14 @@ std::string v4Describe(const V4Policy &p) {
 
 namespace {
 
-/** `Mlp`（= `Linear + ReLU + Linear + ReLU`，注意**末尾那个 ReLU**）。 */
-bool mlp(const V4Policy &p, const float *x, size_t xn, const std::string &prefix, int cin, int dm,
-         std::vector<float> &out, std::string &err) {
+/**
+ * `Mlp`（= `Linear + ReLU + Linear + ReLU`，注意**末尾那个 ReLU**）—— **`B` 行一起算**。
+ *
+ * <p>`x` / `out` 都是扁平 `[B][行距]`；两层线性走 `linearBatchFast`（同一批权重只扫一遍），
+ * 激活逐元素 —— 与原来逐行调用**逐位相同**。
+ */
+bool mlp(const V4Policy &p, const float *x, int xStride, int B, size_t xn,
+         const std::string &prefix, int cin, int dm, float *out, V4Scratch &sc, std::string &err) {
     const V4Policy::Mat *w0 = p.mat(prefix + ".0.weight", dm, cin, err);
     const std::vector<float> *b0 = p.vec(prefix + ".0.bias", dm, err);
     const V4Policy::Mat *w2 = p.mat(prefix + ".2.weight", dm, dm, err);
@@ -742,19 +858,27 @@ bool mlp(const V4Policy &p, const float *x, size_t xn, const std::string &prefix
     if (!err.empty()) {
         return false;
     }
-    std::vector<float> h(static_cast<size_t>(dm), 0.f);
-    linear(h, x, xn, *w0, *b0);
-    relu(h);
-    out.assign(static_cast<size_t>(dm), 0.f);
-    linear(out, h.data(), h.size(), *w2, *b2);
-    relu(out);
+    std::vector<float> &h = sc.mlpHid;
+    if (h.size() < static_cast<size_t>(B) * static_cast<size_t>(dm)) {
+        h.resize(static_cast<size_t>(B) * static_cast<size_t>(dm));
+    }
+    linearBatchFast(h.data(), dm, x, xStride, B, xn, *w0, b0->data(), 0, dm);
+    reluBuf(h.data(), static_cast<size_t>(B) * static_cast<size_t>(dm));
+    linearBatchFast(out, dm, h.data(), dm, B, static_cast<size_t>(dm), *w2, b2->data(), 0, dm);
+    reluBuf(out, static_cast<size_t>(B) * static_cast<size_t>(dm));
     return true;
 }
 
-/** 多头注意力（单样本、无 mask）：`q` 对 `kv` 做注意力（= Java `V4Policy.mha`）。 */
-bool mha(const V4Policy &p, const std::vector<std::vector<float>> &q,
-         const std::vector<std::vector<float>> &kv, int d, const std::string &prefix,
-         std::vector<std::vector<float>> &out, std::string &err) {
+/**
+ * 多头注意力（单样本、无 mask）：`q` 对 `kv` 做注意力（= Java `V4Policy.mha`）。
+ *
+ * <p>`q` / `kv` / `out` 全是**扁平** `[行数][d]`（行距 = `d`）；q/k/v 投影与 out 投影都走
+ * `linearBatchFast` —— 与原来逐行 `projRows` **逐位相同**（每个输出行仍是单累加器 + c 升序，
+ * 变的只是循环次序）。注意力那两段归约**保持标量**：它们是"单个输出元素沿 kv 维求和"，
+ * 沿归约维做 SIMD 会改求和顺序 ⇒ 改比特，判据不允许。
+ */
+bool mha(const V4Policy &p, const float *q, int lq, const float *kv, int lk, int d,
+         const std::string &prefix, float *out, V4Scratch &sc, std::string &err) {
     const V4Policy::Mat *inW = p.mat(prefix + ".in_proj_weight", 3 * d, d, err);
     const std::vector<float> *inB = p.vec(prefix + ".in_proj_bias", 3 * d, err);
     const V4Policy::Mat *outW = p.mat(prefix + ".out_proj.weight", d, d, err);
@@ -762,76 +886,88 @@ bool mha(const V4Policy &p, const std::vector<std::vector<float>> &q,
     if (!err.empty()) {
         return false;
     }
-    const int lq = static_cast<int>(q.size());
-    const int lk = static_cast<int>(kv.size());
     const int hd = d / p.nHeads;
     const float scale = static_cast<float>(1.0 / std::sqrt(static_cast<double>(hd)));
-    std::vector<std::vector<float>> qp(static_cast<size_t>(lq), std::vector<float>(d, 0.f));
-    std::vector<std::vector<float>> kp(static_cast<size_t>(lk), std::vector<float>(d, 0.f));
-    std::vector<std::vector<float>> vp(static_cast<size_t>(lk), std::vector<float>(d, 0.f));
-    for (int t = 0; t < lq; t++) {
-        projRows(qp[static_cast<size_t>(t)], q[static_cast<size_t>(t)].data(),
-                 q[static_cast<size_t>(t)].size(), *inW, *inB, 0, d);
+    if (sc.qp.size() < static_cast<size_t>(lq) * static_cast<size_t>(d)) {
+        sc.qp.resize(static_cast<size_t>(lq) * static_cast<size_t>(d));
     }
-    for (int s = 0; s < lk; s++) {
-        projRows(kp[static_cast<size_t>(s)], kv[static_cast<size_t>(s)].data(),
-                 kv[static_cast<size_t>(s)].size(), *inW, *inB, d, d);
-        projRows(vp[static_cast<size_t>(s)], kv[static_cast<size_t>(s)].data(),
-                 kv[static_cast<size_t>(s)].size(), *inW, *inB, 2 * d, d);
+    if (sc.kp.size() < static_cast<size_t>(lk) * static_cast<size_t>(d)) {
+        sc.kp.resize(static_cast<size_t>(lk) * static_cast<size_t>(d));
     }
-    std::vector<float> scores(static_cast<size_t>(lk), 0.f);
-    std::vector<std::vector<float>> ctx(static_cast<size_t>(lq), std::vector<float>(d, 0.f));
+    if (sc.vp.size() < static_cast<size_t>(lk) * static_cast<size_t>(d)) {
+        sc.vp.resize(static_cast<size_t>(lk) * static_cast<size_t>(d));
+    }
+    if (sc.ctx.size() < static_cast<size_t>(lq) * static_cast<size_t>(d)) {
+        sc.ctx.resize(static_cast<size_t>(lq) * static_cast<size_t>(d));
+    }
+    if (sc.scores.size() < static_cast<size_t>(std::max(lq, lk))) {
+        sc.scores.resize(static_cast<size_t>(std::max(lq, lk)));
+    }
+    float *qp = sc.qp.data();
+    float *kp = sc.kp.data();
+    float *vp = sc.vp.data();
+    float *ctx = sc.ctx.data();
+    // 与 Java 同序：q 取 in_proj 的 [0,d) 行、k 取 [d,2d)、v 取 [2d,3d)（逐个输出行独立累加）
+    linearBatchFast(qp, d, q, d, lq, static_cast<size_t>(d), *inW, inB->data(), 0, d);
+    linearBatchFast(kp, d, kv, d, lk, static_cast<size_t>(d), *inW, inB->data(), d, d);
+    linearBatchFast(vp, d, kv, d, lk, static_cast<size_t>(d), *inW, inB->data(), 2 * d, d);
     for (int t = 0; t < lq; t++) {
         for (int hh = 0; hh < p.nHeads; hh++) {
             const int base = hh * hd;
             for (int s = 0; s < lk; s++) {
                 float sum = 0.f;
                 for (int i = 0; i < hd; i++) {
-                    sum += qp[static_cast<size_t>(t)][static_cast<size_t>(base + i)]
-                           * kp[static_cast<size_t>(s)][static_cast<size_t>(base + i)];
+                    sum += qp[static_cast<size_t>(t) * d + static_cast<size_t>(base + i)]
+                           * kp[static_cast<size_t>(s) * d + static_cast<size_t>(base + i)];
                 }
-                scores[static_cast<size_t>(s)] = sum * scale;
+                sc.scores[static_cast<size_t>(s)] = sum * scale;
             }
-            softmax(scores);
+            softmaxBuf(sc.scores.data(), lk);
             for (int i = 0; i < hd; i++) {
                 float sum = 0.f;
                 for (int s = 0; s < lk; s++) {
-                    sum += scores[static_cast<size_t>(s)]
-                           * vp[static_cast<size_t>(s)][static_cast<size_t>(base + i)];
+                    sum += sc.scores[static_cast<size_t>(s)]
+                           * vp[static_cast<size_t>(s) * d + static_cast<size_t>(base + i)];
                 }
-                ctx[static_cast<size_t>(t)][static_cast<size_t>(base + i)] = sum;
+                ctx[static_cast<size_t>(t) * d + static_cast<size_t>(base + i)] = sum;
             }
         }
     }
-    out.assign(static_cast<size_t>(lq), std::vector<float>(d, 0.f));
-    for (int t = 0; t < lq; t++) {
-        linear(out[static_cast<size_t>(t)], ctx[static_cast<size_t>(t)].data(),
-               static_cast<size_t>(d), *outW, *outB);
-    }
+    linearBatchFast(out, d, ctx, d, lq, static_cast<size_t>(d), *outW, outB->data(), 0, d);
     return true;
 }
 
 /**
  * `nn.TransformerEncoderLayer(d, nhead, dim_feedforward=2d, dropout=0, norm_first=True)` 一层
  * （= Java `V4Policy.transformerLayer`）：`x = x + attn(norm1(x))`，再 `x = x + linear2(relu(linear1(norm2(x))))`。
+ *
+ * <p>`x` / `out` 是扁平 `[len][d]`；中间量全在 `sc` 上（**热路径零分配**）。
  */
-bool transformerLayer(const V4Policy &p, const std::vector<std::vector<float>> &x,
-                      const std::string &prefix, std::vector<std::vector<float>> &out,
-                      std::string &err) {
-    const int len = static_cast<int>(x.size());
+bool transformerLayer(const V4Policy &p, const float *x, int len, const std::string &prefix,
+                      float *out, V4Scratch &sc, std::string &err) {
     const int d = p.dModel;
     const std::vector<float> *n1g = p.vec(prefix + ".norm1.weight", d, err);
     const std::vector<float> *n1b = p.vec(prefix + ".norm1.bias", d, err);
     if (!err.empty()) {
         return false;
     }
-    std::vector<std::vector<float>> xn(static_cast<size_t>(len), std::vector<float>(d, 0.f));
-    for (int i = 0; i < len; i++) {
-        xn[static_cast<size_t>(i)] = x[static_cast<size_t>(i)];
-        layerNorm(xn[static_cast<size_t>(i)], *n1g, *n1b);
+    const size_t ld = static_cast<size_t>(len) * static_cast<size_t>(d);
+    if (sc.xn.size() < ld) {
+        sc.xn.resize(ld);
+        sc.att.resize(ld);
+        sc.yv.resize(ld);
+        sc.res.resize(ld);
     }
-    std::vector<std::vector<float>> att;
-    if (!mha(p, xn, xn, d, prefix + ".self_attn", att, err)) {
+    if (sc.hid.size() < static_cast<size_t>(2) * ld) {
+        sc.hid.resize(static_cast<size_t>(2) * ld);
+    }
+    float *xn = sc.xn.data();
+    for (int i = 0; i < len; i++) {
+        std::memcpy(xn + static_cast<size_t>(i) * d, x + static_cast<size_t>(i) * d,
+                    sizeof(float) * static_cast<size_t>(d));
+        layerNormBuf(xn + static_cast<size_t>(i) * d, d, n1g->data(), n1b->data());
+    }
+    if (!mha(p, xn, len, xn, len, d, prefix + ".self_attn", sc.att.data(), sc, err)) {
         return false;
     }
     const std::vector<float> *n2g = p.vec(prefix + ".norm2.weight", d, err);
@@ -843,23 +979,25 @@ bool transformerLayer(const V4Policy &p, const std::vector<std::vector<float>> &
     if (!err.empty()) {
         return false;
     }
-    out.assign(static_cast<size_t>(len), std::vector<float>(d, 0.f));
+    float *yv = sc.yv.data();
     for (int i = 0; i < len; i++) {
-        std::vector<float> y(static_cast<size_t>(d), 0.f);
         for (int j = 0; j < d; j++) {
-            y[static_cast<size_t>(j)] = x[static_cast<size_t>(i)][static_cast<size_t>(j)]
-                    + att[static_cast<size_t>(i)][static_cast<size_t>(j)];
+            yv[static_cast<size_t>(i) * d + j]
+                    = x[static_cast<size_t>(i) * d + j] + sc.att[static_cast<size_t>(i) * d + j];
         }
-        std::vector<float> y2 = y;
-        layerNorm(y2, *n2g, *n2b);
-        std::vector<float> hid(static_cast<size_t>(2 * d), 0.f);
-        linear(hid, y2.data(), y2.size(), *f1W, *f1B);
-        relu(hid);
-        std::vector<float> res(static_cast<size_t>(d), 0.f);
-        linear(res, hid.data(), hid.size(), *f2W, *f2B);
+        std::memcpy(xn + static_cast<size_t>(i) * d, yv + static_cast<size_t>(i) * d,
+                    sizeof(float) * static_cast<size_t>(d));
+        layerNormBuf(xn + static_cast<size_t>(i) * d, d, n2g->data(), n2b->data());
+    }
+    linearBatchFast(sc.hid.data(), 2 * d, xn, d, len, static_cast<size_t>(d), *f1W, f1B->data(), 0,
+                    2 * d);
+    reluBuf(sc.hid.data(), static_cast<size_t>(2) * ld);
+    linearBatchFast(sc.res.data(), d, sc.hid.data(), 2 * d, len, static_cast<size_t>(2 * d), *f2W,
+                    f2B->data(), 0, d);
+    for (int i = 0; i < len; i++) {
         for (int j = 0; j < d; j++) {
-            out[static_cast<size_t>(i)][static_cast<size_t>(j)]
-                    = y[static_cast<size_t>(j)] + res[static_cast<size_t>(j)];
+            out[static_cast<size_t>(i) * d + j]
+                    = yv[static_cast<size_t>(i) * d + j] + sc.res[static_cast<size_t>(i) * d + j];
         }
     }
     return true;
@@ -876,16 +1014,6 @@ bool head(const V4Policy &p, const std::vector<float> &state, const std::string 
     out.assign(static_cast<size_t>(width), 0.f);
     linear(out, state.data(), state.size(), *w, *b);
     return true;
-}
-
-void flatten(const std::vector<std::vector<float>> &rows, int cols, std::vector<float> &out) {
-    out.assign(rows.size() * static_cast<size_t>(cols), 0.f);
-    for (size_t i = 0; i < rows.size(); i++) {
-        for (int c = 0; c < cols; c++) {
-            out[i * static_cast<size_t>(cols) + static_cast<size_t>(c)]
-                    = rows[i][static_cast<size_t>(c)];
-        }
-    }
 }
 
 // ---------------------------------------------------------------- 事件塔（W1：carry 也进融合）
@@ -913,13 +1041,13 @@ struct EventEnc {
         return err.empty();
     }
 
-    /** 一条 token 行 → 事件编码器输出（`linear` 别名安全：第二个线性层原地复用 `out`）。 */
-    void row(const float *tok, std::vector<float> &out) const {
-        out.assign(static_cast<size_t>(w1->rows), 0.f);
-        linear(out, tok, kCEvt, *w1, *b1);
-        relu(out);
-        linear(out, out.data(), out.size(), *w2, *b2);
-    }
+    /** 一条 token 行 → 事件编码器输出（第二个线性层与输入**别名** ⇒ 借 `sc.encTmp` 转一手）。 */
+    void row(const float *tok, float *out, V4Scratch &sc) const;
+    /**
+     * **`len` 行一起算**（事件窗口 60 行、重放里的单行都走它）：第一个线性层按 token 批处理
+     * （权重只扫一遍，见 `linearBatchFast`），激活逐元素 ⇒ 与逐行调用**逐位相同**。
+     */
+    void rows(const float *tok, int len, int tokStride, float *out, V4Scratch &sc) const;
 };
 
 /** `event.cell`（GRU）的四个张量 —— 同样绑一次、逐行复用。 */
@@ -937,33 +1065,78 @@ struct EventGru {
         bhh = p.vec("event.cell.bias_hh", 3 * dm, err);
         return err.empty();
     }
-
-    std::vector<float> step(const std::vector<float> &x, const std::vector<float> &h) const {
-        return gruStep(x, h, *wih, *whh, *bih, *bhh);
-    }
-};
-
-/** 事件塔一次前向的两样产物（= Java `V4Policy.EvtTower`）：窗口表示 + 隐状态。 */
-struct EvtTower {
-    std::vector<std::vector<float>> tokens;
-    std::vector<float> h;
 };
 
 /**
- * 窗口 60 行的两条产物：`e[i]`（`event.enc` 之后的 GRU 输入）与 Transformer 表示。
+ * 一步 GRU（原地：`h` 既是旧态也是新态）—— 六路门先全部算完再写 `h`，所以原地是安全的。
+ *
+ * <p>两处"不能省"的口径（= Java `V4Policy.gruStep`）：
+ *   ① `ir = bih[i] + rowDot(wih, i, x)`：`rowDot` **从 0 起**累加、随后再加 bias —— 与
+ *      `linear` 的"从 bias 起累加"**不是**同一个浮点序列 ⇒ 这里传 `b = nullptr`；
+ *   ② `gh` 必须读**整条旧 h** ⇒ 先把 `gh` 算进 `sc.gates` 的后半，再逐元素写 `out`。
+ */
+void gruStepBuf(const float *x, float *h, const EventGru &gru, int d, V4Scratch &sc) {
+    const size_t n3 = static_cast<size_t>(3) * static_cast<size_t>(d);
+    if (sc.gates.size() < 2 * n3) {
+        sc.gates.resize(2 * n3);
+    }
+    float *gx = sc.gates.data();
+    float *gh = sc.gates.data() + n3;
+    linearFast(gx, x, static_cast<size_t>(d), *gru.wih, nullptr, 0, 3 * d);
+    linearFast(gh, h, static_cast<size_t>(d), *gru.whh, nullptr, 0, 3 * d);
+    for (int i = 0; i < d; i++) {
+        const float ir = (*gru.bih)[static_cast<size_t>(i)] + gx[static_cast<size_t>(i)];
+        const float iz = (*gru.bih)[static_cast<size_t>(d + i)] + gx[static_cast<size_t>(d + i)];
+        const float in
+                = (*gru.bih)[static_cast<size_t>(2 * d + i)] + gx[static_cast<size_t>(2 * d + i)];
+        const float hr = (*gru.bhh)[static_cast<size_t>(i)] + gh[static_cast<size_t>(i)];
+        const float hz = (*gru.bhh)[static_cast<size_t>(d + i)] + gh[static_cast<size_t>(d + i)];
+        const float hn
+                = (*gru.bhh)[static_cast<size_t>(2 * d + i)] + gh[static_cast<size_t>(2 * d + i)];
+        const float r
+                = static_cast<float>(1.0 / (1.0 + std::exp(-static_cast<double>(ir + hr))));
+        const float z
+                = static_cast<float>(1.0 / (1.0 + std::exp(-static_cast<double>(iz + hz))));
+        const float nn = static_cast<float>(std::tanh(static_cast<double>(in + r * hn)));
+        const float old = h[static_cast<size_t>(i)];
+        h[static_cast<size_t>(i)] = (1.f - z) * nn + z * old;
+    }
+}
+
+void EventEnc::row(const float *tok, float *out, V4Scratch &sc) const {
+    rows(tok, 1, kCEvt, out, sc);
+}
+
+void EventEnc::rows(const float *tok, int len, int tokStride, float *out, V4Scratch &sc) const {
+    const int dm = w1->rows;
+    linearBatchFast(out, dm, tok, tokStride, len, static_cast<size_t>(kCEvt), *w1, b1->data(), 0,
+                    dm);
+    reluBuf(out, static_cast<size_t>(len) * static_cast<size_t>(dm));
+    // 第二个线性层与 out 别名：先整块拷进 `sc.encTmp`（与 Java 的"别名先复制"同一条纪律）
+    const size_t need = static_cast<size_t>(len) * static_cast<size_t>(dm);
+    if (sc.encTmp.size() < need) {
+        sc.encTmp.resize(need);
+    }
+    std::memcpy(sc.encTmp.data(), out, need * sizeof(float));
+    linearBatchFast(out, dm, sc.encTmp.data(), dm, len, static_cast<size_t>(dm), *w2, b2->data(), 0,
+                    dm);
+}
+
+/**
+ * 窗口 60 行的两条产物：`e[60][dm]`（`event.enc` 之后的 GRU 输入）与 Transformer 表示。
  *
  * <p>两条 carry 路线在这里是**同一份代码**（Java 里那两段也是逐行同构）—— 所以"给定同一个 h、
  * 同一个窗口 ⇒ 同一个结果"是构造出来的，不是靠两处实现碰巧一样。
  */
-bool encodeWindow(const V4Policy &p, const V4Tensors &t, const EventEnc &enc,
-                  std::vector<std::vector<float>> &e, std::vector<std::vector<float>> &tokens,
+bool encodeWindow(const V4Policy &p, const V4Tensors &t, const EventEnc &enc, V4Scratch &sc,
                   std::string &err) {
-    e.assign(static_cast<size_t>(kKEvt),
-             std::vector<float>(static_cast<size_t>(p.dModel), 0.f));
-    for (int i = 0; i < kKEvt; i++) {
-        enc.row(t.evt[static_cast<size_t>(i)].data(), e[static_cast<size_t>(i)]);
+    if (sc.eRows.size() < static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel)) {
+        sc.eRows.resize(static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel));
+        sc.eTokens.resize(static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel));
     }
-    return transformerLayer(p, e, "event.tr.layers.0", tokens, err);
+    enc.rows(t.evt[0].data(), kKEvt, kCEvt, sc.eRows.data(), sc);
+    return transformerLayer(p, sc.eRows.data(), kKEvt, "event.tr.layers.0", sc.eTokens.data(), sc,
+                            err);
 }
 
 /**
@@ -1000,21 +1173,18 @@ bool realRows(const V4Tensors &t, int &out, std::string &err) {
  *
  * <p>⚠ 每条事件的 token 行都过 `v4EventRow`（**自带清零**）：这里复用同一支缓冲逐事件重放，
  * 不清零就是**静默累积**（第 i 行 = 前 i 条事件按位或）—— Java 侧刚踩过，见 NOTES §6.5 第六十轮。
+ * ⚠ 单行编码用 `sc.rowTmp`（**不能借 `sc.eRows`**：窗口那 60 行 `e` 待会儿还要用）。
  */
 bool replayCarry(const V4Policy &p, const std::vector<const JVal *> &ev, int seat, int upto,
-                 const EventEnc &enc, const EventGru &gru, std::vector<float> &h,
-                 std::string &err) {
-    std::vector<float> tok(static_cast<size_t>(kCEvt), 0.f);
-    std::vector<float> rowEnc;
-    std::vector<float> acc(static_cast<size_t>(p.dModel), 0.f);
+                 const EventEnc &enc, const EventGru &gru, V4Scratch &sc, std::string &err) {
+    const int dm = p.dModel;
     for (int i = 0; i < upto; i++) {
-        if (!v4EventRow(*ev[static_cast<size_t>(i)], seat, tok.data(), err)) {
+        if (!v4EventRow(*ev[static_cast<size_t>(i)], seat, sc.tok.data(), err)) {
             return false;
         }
-        enc.row(tok.data(), rowEnc);
-        acc = gru.step(rowEnc, acc);
+        enc.row(sc.tok.data(), sc.rowTmp.data(), sc);
+        gruStepBuf(sc.rowTmp.data(), sc.carry.data(), gru, dm, sc);
     }
-    h = std::move(acc);
     return true;
 }
 
@@ -1022,27 +1192,25 @@ bool replayCarry(const V4Policy &p, const std::vector<const JVal *> &ev, int sea
  * **窗口内**推进：从 `h0`（**窗口之前**的 carry）推进窗口里的**真实**行 = Java `eventTowerWindow`。
  *
  * <p>golden 夹具（格式 2）走这条：三端拿同一个 `h0` 与同一个窗口，`h_evt` 必须逐位相同。
+ * `<p>进入前 `sc.carry` 必须是 `h0`。
  */
-bool eventTowerWindow(const V4Policy &p, const V4Tensors &t, const std::vector<float> &h0,
-                      EvtTower &tw, std::string &err) {
+bool eventTowerWindow(const V4Policy &p, const V4Tensors &t, V4Scratch &sc, std::string &err) {
     EventEnc enc;
     EventGru gru;
     if (!enc.bind(p, err) || !gru.bind(p, err)) {
         return false;
     }
-    std::vector<std::vector<float>> e;
-    if (!encodeWindow(p, t, enc, e, tw.tokens, err)) {
+    if (!encodeWindow(p, t, enc, sc, err)) {
         return false;
     }
     int real = 0;
     if (!realRows(t, real, err)) {
         return false;
     }
-    std::vector<float> h = h0;
+    const int dm = p.dModel;
     for (int i = kKEvt - real; i < kKEvt; i++) {
-        h = gru.step(e[static_cast<size_t>(i)], h);
+        gruStepBuf(sc.eRows.data() + static_cast<size_t>(i) * dm, sc.carry.data(), gru, dm, sc);
     }
-    tw.h = std::move(h);
     return true;
 }
 
@@ -1053,15 +1221,14 @@ bool eventTowerWindow(const V4Policy &p, const V4Tensors &t, const std::vector<f
  * <p>⛔ 不能退回"窗口 K 行冷启动"：那与槽里的 carry 是两个不同的量，而 W1 起它被融合消费
  * （两条生产路径会分叉、三端也会分叉）。
  */
-bool eventTowerRound(const V4Policy &p, const JVal &obs, const V4Tensors &t, EvtTower &tw,
+bool eventTowerRound(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4Scratch &sc,
                      std::string &err) {
     EventEnc enc;
     EventGru gru;
     if (!enc.bind(p, err) || !gru.bind(p, err)) {
         return false;
     }
-    std::vector<std::vector<float>> e;
-    if (!encodeWindow(p, t, enc, e, tw.tokens, err)) {
+    if (!encodeWindow(p, t, enc, sc, err)) {
         return false;
     }
     const std::vector<const JVal *> ev = v4EventsOf(obs);
@@ -1069,51 +1236,63 @@ bool eventTowerRound(const V4Policy &p, const JVal &obs, const V4Tensors &t, Evt
     // obs 的 `seat` 是**数字**（`v4Assemble` 已核过它在 0..3）：这里只要那一条语义。
     const JVal *seatVal = obs.find("seat");
     const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
-    std::vector<float> h;
-    if (!replayCarry(p, ev, seat, std::max(0, events - kKEvt), enc, gru, h, err)) {
+    std::fill(sc.carry.begin(), sc.carry.end(), 0.f);
+    if (!replayCarry(p, ev, seat, std::max(0, events - kKEvt), enc, gru, sc, err)) {
         return false;
     }
+    const int dm = p.dModel;
     const int real = std::min(events, kKEvt);
     for (int i = kKEvt - real; i < kKEvt; i++) {
-        h = gru.step(e[static_cast<size_t>(i)], h);
+        gruStepBuf(sc.eRows.data() + static_cast<size_t>(i) * dm, sc.carry.data(), gru, dm, sc);
     }
-    tw.h = std::move(h);
     return true;
 }
 
 }  // namespace
 
 bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
-                          std::string &err, const std::vector<float> *h0) const {
+                          std::string &err, const std::vector<float> *h0, V4Scratch *scr) const {
     err.clear();
     V4Tensors t;
     if (!v4Assemble(obs, missingBlocks, t, err)) {
         return false;
     }
+    V4Scratch localScr;
+    V4Scratch &sc = scr != nullptr ? *scr : localScr;
+    const int dm = dModel;
+    const int n = static_cast<int>(t.cand.size());
+    const int maxCand = std::max(1, n);
     // ---- 事件塔：**先**定下 carry 与窗口表示（W1 起两者都进融合）
     //   h0 == nullptr ⇒ 生产路径的**整手 carry**（重放 events[0, n-K) 再喂窗口里的真实行）；
     //   给了 h0 ⇒ golden 夹具那条（只从 h0 起喂窗口里的真实行）。
     //   ⛔ 别把这两条合成"窗口冷启动"：那与整手 carry 是两个量，融合消费它之后就会分叉。
-    EvtTower tw;
+    if (sc.carry.size() < static_cast<size_t>(dm)) {
+        sc.carry.assign(static_cast<size_t>(dm), 0.f);
+        sc.tok.assign(static_cast<size_t>(kCEvt), 0.f);
+        sc.rowTmp.assign(static_cast<size_t>(dm), 0.f);
+    }
     if (h0 != nullptr) {
-        if (static_cast<int>(h0->size()) != dModel) {
-            err = "h0 长度 " + std::to_string(h0->size()) + " != d_model " + std::to_string(dModel)
+        if (static_cast<int>(h0->size()) != dm) {
+            err = "h0 长度 " + std::to_string(h0->size()) + " != d_model " + std::to_string(dm)
                   + "（既不截断也不补零：静默凑合会让'同 h ⇒ 同输出'变成空转）";
             return false;
         }
-        if (!eventTowerWindow(*this, t, *h0, tw, err)) {
+        std::copy(h0->begin(), h0->end(), sc.carry.begin());
+        if (!eventTowerWindow(*this, t, sc, err)) {
             return false;
         }
-    } else if (!eventTowerRound(*this, obs, t, tw, err)) {
+    } else if (!eventTowerRound(*this, obs, t, sc, err)) {
         return false;
     }
-    const std::vector<std::vector<float>> &eTokens = tw.tokens;
-    const std::vector<float> &hEvt = tw.h;
-    const int n = static_cast<int>(t.cand.size());
-    const int dm = dModel;
+    const float *eTokens = sc.eTokens.data();
+    const float *hEvt = sc.carry.data();
 
     // ---- 牌种塔
-    std::vector<std::vector<float>> ht(kKindCount, std::vector<float>(tileD, 0.f));
+    if (sc.tileH.size() < static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD)) {
+        sc.tileH.resize(static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
+        sc.tileAt.resize(static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
+        sc.aliasTmp.resize(static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
+    }
     const Mat *w1 = mat("tile.enc.0.weight", tileD, kCTile, err);
     const std::vector<float> *b1 = vec("tile.enc.0.bias", tileD, err);
     const Mat *w2 = mat("tile.enc.2.weight", tileD, tileD, err);
@@ -1121,15 +1300,17 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     if (!err.empty()) {
         return false;
     }
-    for (int k = 0; k < kKindCount; k++) {
-        linear(ht[static_cast<size_t>(k)], t.tile[static_cast<size_t>(k)].data(), kCTile, *w1, *b1);
-        relu(ht[static_cast<size_t>(k)]);
-        linear(ht[static_cast<size_t>(k)], ht[static_cast<size_t>(k)].data(),
-               static_cast<size_t>(tileD), *w2, *b2);
-        relu(ht[static_cast<size_t>(k)]);
-    }
-    std::vector<std::vector<float>> at;
-    if (!mha(*this, ht, ht, tileD, "tile.attn", at, err)) {
+    float *ht = sc.tileH.data();
+    linearBatchFast(ht, tileD, t.tile[0].data(), kCTile, kKindCount, static_cast<size_t>(kCTile), *w1,
+                    b1->data(), 0, tileD);
+    reluBuf(ht, static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
+    // 第二个线性层与输入别名：先整块转一手（= Java `linear` 的别名保护）
+    std::memcpy(sc.aliasTmp.data(), ht,
+                static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD) * sizeof(float));
+    linearBatchFast(ht, tileD, sc.aliasTmp.data(), tileD, kKindCount, static_cast<size_t>(tileD), *w2,
+                    b2->data(), 0, tileD);
+    reluBuf(ht, static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
+    if (!mha(*this, ht, kKindCount, ht, kKindCount, tileD, "tile.attn", sc.tileAt.data(), sc, err)) {
         return false;
     }
     const std::vector<float> *normG = vec("tile.norm.weight", tileD, err);
@@ -1137,61 +1318,78 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     if (!err.empty()) {
         return false;
     }
-    std::vector<float> pool(static_cast<size_t>(tileD), 0.f);
+    float *tileAt = sc.tileAt.data();
+    if (sc.pool.size() < static_cast<size_t>(tileD)) {
+        sc.pool.assign(static_cast<size_t>(tileD), 0.f);
+    } else {
+        std::fill(sc.pool.begin(), sc.pool.end(), 0.f);
+    }
+    float *pool = sc.pool.data();
     for (int k = 0; k < kKindCount; k++) {
+        float *row = ht + static_cast<size_t>(k) * tileD;
+        const float *arow = tileAt + static_cast<size_t>(k) * tileD;
         for (int i = 0; i < tileD; i++) {
-            ht[static_cast<size_t>(k)][static_cast<size_t>(i)]
-                    += at[static_cast<size_t>(k)][static_cast<size_t>(i)];
+            row[i] += arow[i];
         }
-        layerNorm(ht[static_cast<size_t>(k)], *normG, *normB);
+        layerNormBuf(row, tileD, normG->data(), normB->data());
         for (int i = 0; i < tileD; i++) {
-            pool[static_cast<size_t>(i)]
-                    += ht[static_cast<size_t>(k)][static_cast<size_t>(i)]
-                       / static_cast<float>(ht.size());          // mean over tokens
+            pool[i] += row[i] / static_cast<float>(kKindCount);      // mean over tokens
         }
     }
-    std::vector<float> hTilePool(static_cast<size_t>(dm), 0.f);
+    if (sc.hTilePool.size() < static_cast<size_t>(dm)) {
+        sc.hTilePool.assign(static_cast<size_t>(dm), 0.f);
+    }
     {
         const Mat *tpW = mat("tile.proj.weight", dm, tileD, err);
         const std::vector<float> *tpB = vec("tile.proj.bias", dm, err);
         if (!err.empty()) {
             return false;
         }
-        linear(hTilePool, pool.data(), pool.size(), *tpW, *tpB);
+        linearFast(sc.hTilePool.data(), pool, static_cast<size_t>(tileD), *tpW, tpB->data(), 0, dm);
     }
 
     // ---- ctx / cand 编码器
-    std::vector<float> ctxEmb;
-    if (!mlp(*this, t.ctx.data(), t.ctx.size(), "ctx.net", kCCtx, dm, ctxEmb, err)) {
+    if (sc.ctxEmb.size() < static_cast<size_t>(dm)) {
+        sc.ctxEmb.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (!mlp(*this, t.ctx.data(), kCCtx, 1, static_cast<size_t>(kCCtx), "ctx.net", kCCtx, dm,
+             sc.ctxEmb.data(), sc, err)) {
         return false;
     }
-    std::vector<std::vector<float>> candEmb(static_cast<size_t>(n));
-    for (int i = 0; i < n; i++) {
-        if (!mlp(*this, t.cand[static_cast<size_t>(i)].data(), kCCand, "cand.net", kCCand, dm,
-                 candEmb[static_cast<size_t>(i)], err)) {
+    if (sc.candEmb.size() < static_cast<size_t>(maxCand) * static_cast<size_t>(dm)) {
+        sc.candEmb.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+    }
+    if (n > 0) {
+        if (!mlp(*this, t.cand[0].data(), kCCand, n, static_cast<size_t>(kCCand), "cand.net", kCCand,
+                 dm, sc.candEmb.data(), sc, err)) {
             return false;
         }
     }
 
     // ---- 融合
-    std::vector<std::vector<float>> kvTile(kKindCount, std::vector<float>(static_cast<size_t>(dm), 0.f));
+    if (sc.kvTile.size() < static_cast<size_t>(kKindCount) * static_cast<size_t>(dm)) {
+        sc.kvTile.resize(static_cast<size_t>(kKindCount) * static_cast<size_t>(dm));
+    }
     {
         const Mat *tpW = mat("fusion.tile_proj.weight", dm, tileD, err);
         const std::vector<float> *tpB = vec("fusion.tile_proj.bias", dm, err);
         if (!err.empty()) {
             return false;
         }
-        for (int k = 0; k < kKindCount; k++) {
-            linear(kvTile[static_cast<size_t>(k)], ht[static_cast<size_t>(k)].data(),
-                   static_cast<size_t>(tileD), *tpW, *tpB);
-        }
+        linearBatchFast(sc.kvTile.data(), dm, ht, tileD, kKindCount, static_cast<size_t>(tileD),
+                        *tpW, tpB->data(), 0, dm);
     }
-    std::vector<std::vector<float>> uTile;
-    std::vector<std::vector<float>> uEvt;
-    if (!mha(*this, candEmb, kvTile, dm, "fusion.q_tile", uTile, err)) {
+    if (sc.uTile.size() < static_cast<size_t>(maxCand) * static_cast<size_t>(dm)) {
+        sc.uTile.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+        sc.uEvt.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+        sc.u.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+    }
+    if (!mha(*this, sc.candEmb.data(), n, sc.kvTile.data(), kKindCount, dm, "fusion.q_tile",
+             sc.uTile.data(), sc, err)) {
         return false;
     }
-    if (!mha(*this, candEmb, eTokens, dm, "fusion.q_evt", uEvt, err)) {
+    if (!mha(*this, sc.candEmb.data(), n, eTokens, kKEvt, dm, "fusion.q_evt", sc.uEvt.data(), sc,
+             err)) {
         return false;
     }
     const Mat *gateW = mat("fusion.gate.weight", dm, 2 * dm, err);
@@ -1203,40 +1401,60 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
     if (!err.empty()) {
         return false;
     }
-    std::vector<std::vector<float>> u(static_cast<size_t>(n),
-                                      std::vector<float>(static_cast<size_t>(dm), 0.f));
-    std::vector<float> cat(static_cast<size_t>(2 * dm), 0.f);
-    std::vector<float> state(static_cast<size_t>(dm), 0.f);
-    std::vector<float> cat3(static_cast<size_t>(3 * dm), 0.f);
+    if (sc.cat.size() < static_cast<size_t>(2 * dm)) {
+        sc.cat.assign(static_cast<size_t>(2 * dm), 0.f);
+    }
+    if (sc.cat3.size() < static_cast<size_t>(3 * dm)) {
+        sc.cat3.assign(static_cast<size_t>(3 * dm), 0.f);
+    }
+    if (sc.state.size() < static_cast<size_t>(dm)) {
+        sc.state.assign(static_cast<size_t>(dm), 0.f);
+    }
+    // ⚠ `gate` / `write` / `film` **必须在进候选循环之前**就备好：n 可能为 0（legal 为空），
+    // 那时循环体一次都不执行，而后面"逐候选门控"直接用 `film` 当 `pgate` —— 空缓冲 + `fill`
+    // 就是堆损坏。缓冲区大小与"循环跑没跑"不能耦合。
+    if (sc.gate.size() < static_cast<size_t>(dm)) {
+        sc.gate.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (sc.write.size() < static_cast<size_t>(dm)) {
+        sc.write.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (sc.film.size() < static_cast<size_t>(dm)) {
+        sc.film.assign(static_cast<size_t>(dm), 0.f);
+    }
+    float *cat = sc.cat.data();
+    float *cat3 = sc.cat3.data();
+    float *state = sc.state.data();
+    float *uTile = sc.uTile.data();
+    float *uEvt = sc.uEvt.data();
+    float *u = sc.u.data();
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < dm; j++) {
-            cat[static_cast<size_t>(j)] = uEvt[static_cast<size_t>(i)][static_cast<size_t>(j)];
-            cat[static_cast<size_t>(dm + j)]
-                    = uTile[static_cast<size_t>(i)][static_cast<size_t>(j)];
+            cat[j] = uEvt[static_cast<size_t>(i) * dm + j];
+            cat[dm + j] = uTile[static_cast<size_t>(i) * dm + j];
         }
-        std::vector<float> g(static_cast<size_t>(dm), 0.f);
-        linear(g, cat.data(), cat.size(), *gateW, *gateB);
-        sigmoid(g);
-        std::vector<float> w(static_cast<size_t>(dm), 0.f);
-        linear(w, uEvt[static_cast<size_t>(i)].data(), static_cast<size_t>(dm), *writeW, *writeB);
+        float *g = sc.gate.data();
+        linearFast(g, cat, static_cast<size_t>(2 * dm), *gateW, gateB->data(), 0, dm);
+        sigmoidBuf(g, static_cast<size_t>(dm));
+        float *wv = sc.write.data();
+        linearFast(wv, uEvt + static_cast<size_t>(i) * dm, static_cast<size_t>(dm), *writeW,
+                   writeB->data(), 0, dm);
         for (int j = 0; j < dm; j++) {
-            state[static_cast<size_t>(j)] = hTilePool[static_cast<size_t>(j)]
-                    + g[static_cast<size_t>(j)] * w[static_cast<size_t>(j)];
+            state[j] = sc.hTilePool[static_cast<size_t>(j)] + g[j] * wv[j];
         }
-        std::vector<float> f(static_cast<size_t>(dm), 0.f);
-        linear(f, state.data(), state.size(), *filmW, *filmB);
-        tanhVec(f);
+        float *f = sc.film.data();
+        linearFast(f, state, static_cast<size_t>(dm), *filmW, filmB->data(), 0, dm);
+        tanhBuf(f, static_cast<size_t>(dm));
         for (int j = 0; j < dm; j++) {
-            f[static_cast<size_t>(j)] = uEvt[static_cast<size_t>(i)][static_cast<size_t>(j)]
-                    * (1.f + f[static_cast<size_t>(j)]);
+            f[j] = uEvt[static_cast<size_t>(i) * dm + j] * (1.f + f[j]);
         }
         for (int j = 0; j < dm; j++) {
-            cat3[static_cast<size_t>(j)] = uTile[static_cast<size_t>(i)][static_cast<size_t>(j)];
-            cat3[static_cast<size_t>(dm + j)] = f[static_cast<size_t>(j)];
-            cat3[static_cast<size_t>(2 * dm + j)] = ctxEmb[static_cast<size_t>(j)];
+            cat3[j] = uTile[static_cast<size_t>(i) * dm + j];
+            cat3[dm + j] = f[j];
+            cat3[2 * dm + j] = sc.ctxEmb[static_cast<size_t>(j)];
         }
-        if (!mlp(*this, cat3.data(), cat3.size(), "fusion.out.net", 3 * dm, dm,
-                 u[static_cast<size_t>(i)], err)) {
+        if (!mlp(*this, cat3, 3 * dm, 1, static_cast<size_t>(3 * dm), "fusion.out.net", 3 * dm, dm,
+                 u + static_cast<size_t>(i) * dm, sc, err)) {
             return false;
         }
     }
@@ -1253,7 +1471,10 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         const std::vector<float> *memB = vecs.count("fusion.mem.bias")
                                                  ? &vecs.at("fusion.mem.bias") : nullptr;
         if (memW != nullptr) {
-            std::vector<float> memG(static_cast<size_t>(dm), 1.f);
+            if (sc.memG.size() < static_cast<size_t>(dm)) {
+                sc.memG.assign(static_cast<size_t>(dm), 1.f);
+            }
+            float *memG = sc.memG.data();
             for (int j = 0; j < dm; j++) {
                 double acc = 0.0;
                 const float *row = memW->data.data() + static_cast<size_t>(j) * static_cast<size_t>(dm);
@@ -1265,16 +1486,17 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
             }
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < dm; j++) {
-                    u[static_cast<size_t>(i)][static_cast<size_t>(j)] *= memG[static_cast<size_t>(j)];
+                    u[static_cast<size_t>(i) * dm + j] *= memG[static_cast<size_t>(j)];
                 }
             }
         }
     }
 
     // ---- 头
-    std::vector<float> policy(static_cast<size_t>(n), 0.f);
-    std::vector<std::vector<float>> danger(static_cast<size_t>(n), std::vector<float>(4, 0.f));
-    std::vector<std::vector<float>> effect(static_cast<size_t>(n), std::vector<float>(3, 0.f));
+    if (sc.danger.size() < static_cast<size_t>(maxCand) * 4) {
+        sc.danger.resize(static_cast<size_t>(maxCand) * 4);
+        sc.effect.resize(static_cast<size_t>(maxCand) * 3);
+    }
     // ⚠ **belief 用"逐候选门控"接进 policy**（第五十五轮）：`g = 1 + tanh(W_g·sigmoid(bt) + b_g)`，
     //   `policy_i = W·(u_i ⊙ g) + b`。⛔ 第五十轮那版"把 sigmoid(bt) 拼在每个候选后面"是**空操作**
     //   （逐行常数 ⇒ argmax/softmax 不变、梯度恒 0，红证见 NOTES §6.5）；门控逐候选 ⇒ 真能改判。
@@ -1293,92 +1515,109 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
                                                             : nullptr;
     const std::vector<float> *pgB = vecs.count("heads.policy_gate.bias")
                                             ? &vecs.at("heads.policy_gate.bias") : nullptr;
-    std::vector<float> meanU(static_cast<size_t>(dm), 0.f);
+    if (sc.meanU.size() < static_cast<size_t>(dm)) {
+        sc.meanU.assign(static_cast<size_t>(dm), 0.f);
+    } else {
+        // ⚠ 必须**每次清零**：`meanU` 是累加量（原实现每决策新建一个全 0 的向量）。
+        // 只 resize 不清零 ⇒ 跨决策累积、logits 全错（这一步改错过一次）。
+        std::fill(sc.meanU.begin(), sc.meanU.end(), 0.f);
+    }
+    float *meanU = sc.meanU.data();
+    float *danger = sc.danger.data();
+    float *effect = sc.effect.data();
     const float polBias = (*polB)[0];
+    if (n > 0) {
+        linearBatchFast(danger, 4, u, dm, n, static_cast<size_t>(dm), *danW, danB->data(), 0, 4);
+        linearBatchFast(effect, 3, u, dm, n, static_cast<size_t>(dm), *effW, effB->data(), 0, 3);
+    }
+    const float denom = static_cast<float>(std::max(1, n));
     for (int i = 0; i < n; i++) {
-        linear(danger[static_cast<size_t>(i)], u[static_cast<size_t>(i)].data(),
-               static_cast<size_t>(dm), *danW, *danB);
-        linear(effect[static_cast<size_t>(i)], u[static_cast<size_t>(i)].data(),
-               static_cast<size_t>(dm), *effW, *effB);
-        const float denom = static_cast<float>(std::max(1, n));
         for (int j = 0; j < dm; j++) {
-            meanU[static_cast<size_t>(j)]
-                    += u[static_cast<size_t>(i)][static_cast<size_t>(j)] / denom;
+            meanU[j] += u[static_cast<size_t>(i) * dm + j] / denom;
         }
     }
     // n == 0 时 meanU 保持全 0（Java 显式重赋值一次，效果相同）
 
     // 先算 `belief_tenpai` 的**概率**（喂门控），再逐候选出 policy。
     // ⚠ 输出的 `belief_tenpai` 仍然是 **logits**（下面 `head(...)` 重新算一遍）—— 别搞混。
-    std::vector<float> btProb(3, 0.f);
+    if (sc.btProb.size() < 3) {
+        sc.btProb.assign(3, 0.f);
+    }
     {
         std::vector<float> btLogits;
-        if (!head(*this, meanU, "belief_tenpai", 3, btLogits, err)) {
+        if (!head(*this, sc.meanU, "belief_tenpai", 3, btLogits, err)) {
             return false;
         }
         for (int j = 0; j < 3; j++) {
-            btProb[static_cast<size_t>(j)]
+            sc.btProb[static_cast<size_t>(j)]
                     = 1.f / (1.f + std::exp(-btLogits[static_cast<size_t>(j)]));
         }
     }
     // 逐候选门控：`g[j] = 1 + tanh(Σ_k pgW[j][k]·btProb[k] + pgB[j])`（缺门控 ⇒ g ≡ 1）
-    std::vector<float> gate(static_cast<size_t>(dm), 1.f);
+    float *pgate = sc.film.data();
     if (pgW != nullptr) {
         for (int j = 0; j < dm; j++) {
             float acc = pgB != nullptr ? (*pgB)[static_cast<size_t>(j)] : 0.f;
             for (int k = 0; k < 3; k++) {
                 acc += pgW->data[static_cast<size_t>(j) * 3 + static_cast<size_t>(k)]
-                        * btProb[static_cast<size_t>(k)];
+                        * sc.btProb[static_cast<size_t>(k)];
             }
-            gate[static_cast<size_t>(j)] = 1.f + std::tanh(acc);
+            pgate[j] = 1.f + std::tanh(acc);
         }
+    } else {
+        std::fill(pgate, pgate + dm, 1.f);
     }
-    std::vector<float> gu(static_cast<size_t>(dm), 0.f);
+    if (sc.gu.size() < static_cast<size_t>(dm)) {
+        sc.gu.assign(static_cast<size_t>(dm), 0.f);
+    }
+    // ⚠ `maxCand` 会随决策变（legal 条数 1..15）⇒ 这里必须**单独**按当前上界涨，
+    // 不能跟 `gu` 挤在同一个 if 里（挤在一起就是"第二次 legal 更多时越界写" ⇒ 堆损坏）。
+    if (sc.policy.size() < static_cast<size_t>(maxCand)) {
+        sc.policy.resize(static_cast<size_t>(maxCand));
+    }
+    float *gu = sc.gu.data();
+    float *policy = sc.policy.data();
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < dm; j++) {
-            gu[static_cast<size_t>(j)] = u[static_cast<size_t>(i)][static_cast<size_t>(j)]
-                    * gate[static_cast<size_t>(j)];
+            gu[j] = u[static_cast<size_t>(i) * dm + j] * pgate[j];
         }
-        policy[static_cast<size_t>(i)] = polBias + dot(polW->data, gu);
+        policy[i] = polBias + dotN(polW->data.data(), gu, dm);
     }
 
     outAll.clear();
-    outAll["policy"] = std::move(policy);
+    outAll["policy"].assign(policy, policy + n);
     std::vector<float> value;
-    if (!head(*this, meanU, "value", valueBins, value, err)) {
+    if (!head(*this, sc.meanU, "value", valueBins, value, err)) {
         return false;
     }
     outAll["value"] = std::move(value);
     std::vector<float> placement;
-    if (!head(*this, meanU, "placement", 4, placement, err)) {
+    if (!head(*this, sc.meanU, "placement", 4, placement, err)) {
         return false;
     }
     outAll["placement"] = std::move(placement);
     std::vector<float> beliefHand;
-    if (!head(*this, meanU, "belief_hand", 3 * kKindCount, beliefHand, err)) {
+    if (!head(*this, sc.meanU, "belief_hand", 3 * kKindCount, beliefHand, err)) {
         return false;
     }
     outAll["belief_hand"] = std::move(beliefHand);
     std::vector<float> beliefTenpai;
-    if (!head(*this, meanU, "belief_tenpai", 3, beliefTenpai, err)) {
+    if (!head(*this, sc.meanU, "belief_tenpai", 3, beliefTenpai, err)) {
         return false;
     }
     outAll["belief_tenpai"] = std::move(beliefTenpai);
-    std::vector<float> dangerFlat;
-    flatten(danger, 4, dangerFlat);
-    outAll["danger"] = std::move(dangerFlat);
-    std::vector<float> effectFlat;
-    flatten(effect, 3, effectFlat);
-    outAll["effect"] = std::move(effectFlat);
+    outAll["danger"].assign(danger, danger + static_cast<size_t>(n) * 4);
+    outAll["effect"].assign(effect, effect + static_cast<size_t>(n) * 3);
     // W1 起把**事件塔的隐状态**也交出来：它现在是融合的输入（`fusion.mem` 门控），于是"三端同值"
     // 可以直接比这个向量（比只看七个头灵敏得多 —— 夹具格式 2 就是为此加了这一列）。
-    outAll["h_evt"] = hEvt;
+    outAll["h_evt"].assign(hEvt, hEvt + dm);
     return true;
 }
 
-bool V4Policy::logits(const JVal &obs, std::vector<float> &out, std::string &err) const {
+bool V4Policy::logits(const JVal &obs, std::vector<float> &out, std::string &err,
+                      V4Scratch *scr) const {
     std::map<std::string, std::vector<float>> all;
-    if (!forwardAll(obs, all, err)) {
+    if (!forwardAll(obs, all, err, nullptr, scr)) {
         return false;
     }
     const auto it = all.find("policy");
@@ -1390,8 +1629,9 @@ bool V4Policy::logits(const JVal &obs, std::vector<float> &out, std::string &err
     return true;
 }
 
-bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::string &err) {
-    return p.logits(obs, out, err);
+bool v4Logits(const V4Policy &p, const JVal &obs, std::vector<float> &out, std::string &err,
+              V4Scratch *scr) {
+    return p.logits(obs, out, err, scr);
 }
 
 bool v4ForwardAll(const V4Policy &p, const JVal &obs,
@@ -1592,6 +1832,110 @@ int v4NetCli(int argc, char **argv) {
     }
     std::fflush(stdout);
     std::fprintf(stderr, "[trainer] 共 %lld 条决策的 v4 前向完成\n", total);
+    return 0;
+}
+
+// ---------------------------------------------------------------- CLI：v4bench
+
+/**
+ * `trainer v4bench <net.bin> <轨迹.jsonl> [条数上限]`：把**特征拼装**与**网络前向**分开计时。
+ *
+ * <p>为什么必须分开：特征与网络的优化手段完全不同（特征是引擎派生量 → 少算/复用；网络是稠密
+ * 矩阵向量 → SIMD/循环推理）。混成一个数就不知道该动哪一边。与 Java
+ * `tools.V4Probe --bench` 同一件事（那一份是 Java 侧的口径），但这里**不写死任何验收数字**：
+ * 只报本机实测。
+ */
+int v4BenchCli(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr,
+                     "用法：trainer v4bench <net.bin> <轨迹.jsonl> [条数上限]\n"
+                     "  把 JSON 解析 / v4 特征拼装 / 网络前向分开计时（每决策毫秒）。\n");
+        return 2;
+    }
+    const int limit = argc > 3 ? std::atoi(argv[3]) : 200;
+    V4Policy net;
+    std::string err;
+    if (!v4LoadPolicy(argv[1], net, err)) {
+        std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+        return 1;
+    }
+    std::string text;
+    if (!readTextFile(argv[2], text)) {
+        std::fprintf(stderr, "[trainer] 找不到 corpus 文件：%s\n", argv[2]);
+        return 1;
+    }
+    std::vector<std::string> lines;
+    {
+        size_t pos = 0;
+        while (pos <= text.size() && static_cast<int>(lines.size()) < limit) {
+            const size_t nl = text.find('\n', pos);
+            const size_t end = nl == std::string::npos ? text.size() : nl;
+            std::string line = text.substr(pos, end - pos);
+            const bool last = nl == std::string::npos;
+            pos = last ? text.size() + 1 : nl + 1;
+            if (line.find_first_not_of(" \t\r\n") != std::string::npos) {
+                lines.push_back(std::move(line));
+            }
+            if (last) {
+                break;
+            }
+        }
+    }
+    // ① JSON 解析（只留 decision 行的 `obs`）
+    std::vector<JVal> obs;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (const std::string &line : lines) {
+        JVal row;
+        if (!jsonParse(line, row) || !row.isObj()) {
+            continue;
+        }
+        const JVal *type = row.find("type");
+        if (type == nullptr || !type->isStr() || type->strVal != "decision") {
+            continue;
+        }
+        const JVal *o = row.find("obs");
+        if (o != nullptr && o->isObj()) {
+            obs.push_back(*o);
+        }
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    if (obs.empty()) {
+        std::fprintf(stderr, "[trainer] 语料里没有 decision 行\n");
+        return 1;
+    }
+    // ② 特征拼装（消融表为空 = 生产口径）
+    const std::vector<std::string> ablate;
+    V4Tensors t;
+    for (int w = 0; w < 5 && w < static_cast<int>(obs.size()); w++) {   // 预热（首次触页 / 分支预测）
+        if (!v4Assemble(obs[static_cast<size_t>(w)], ablate, t, err)) {
+            std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+            return 1;
+        }
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    for (const JVal &o : obs) {
+        if (!v4Assemble(o, ablate, t, err)) {
+            std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+            return 1;
+        }
+    }
+    const auto t3 = std::chrono::steady_clock::now();
+    // ③ 前向（七个头；内部**自己再拼一次特征** ⇒ 净前向 = ③ − ②）
+    std::map<std::string, std::vector<float>> all;
+    for (const JVal &o : obs) {
+        if (!net.forwardAll(o, all, err)) {
+            std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+            return 1;
+        }
+    }
+    const auto t4 = std::chrono::steady_clock::now();
+    const double n = static_cast<double>(obs.size());
+    const double msParse = std::chrono::duration<double, std::milli>(t1 - t0).count() / n;
+    const double msFeat = std::chrono::duration<double, std::milli>(t3 - t2).count() / n;
+    const double msAll = std::chrono::duration<double, std::milli>(t4 - t3).count() / n;
+    std::printf("bench n=%.0f 解析 %.3f ms/决策 | 特征 %.3f ms/决策 | 前向(含特征) %.3f ms/决策"
+                " | 前向净 %.3f ms/决策 | 单线程 %.1f 决策/秒\n",
+                n, msParse, msFeat, msAll, msAll - msFeat, 1000.0 / (msParse + msAll));
     return 0;
 }
 

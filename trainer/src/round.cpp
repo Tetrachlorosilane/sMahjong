@@ -784,6 +784,8 @@ RoundResult Round::agariTsumo(int seat, int tileId, const HandScore &sc) {
     r.winner = seat;
     r.loser = -1;
     r.tsumo = true;
+    r.winScore = sc;                       // 轨迹 `hand` 行的役种轴来源（Java `Result.winScore`）
+    r.hasWinScore = true;
     const std::vector<trainer::Pao> paos = paoPaysFor(seat, sc);
     const PaymentResult pay = paymentsCompute(sc, seat, -1, dealer, honba, sticks, true, paos);
     applyDelta(r, pay.delta);
@@ -829,6 +831,12 @@ RoundResult Round::agariRon(const std::vector<int> &winners, int from, int tileI
             = paymentsCompute(sc, w, from, dealer, useHonba, useSticks, false, paos);
         sticksLeft -= useSticks;
         applyDelta(r, pay.delta);
+        // 轨迹侧的役种轴只取**第一家**（= `r.winner`，离放铳者最近那家）：`hand` 行的
+        // `winner` 就是它。与 Java `agariRon` 的 `if (i == 0)` 同一处、同一条件。
+        if (i == 0) {
+            r.winScore = sc;
+            r.hasWinScore = true;
+        }
     }
     r.sticksLeft = std::max(0, sticksLeft);
     r.dealerRenchan = containsInt(winners, dealer);

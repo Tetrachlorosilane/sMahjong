@@ -1080,6 +1080,100 @@ v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个�
 
 ---
 
+### 6.24 v4 前向：零分配 + token 批处理化（2026-10-05，已完成）
+
+**为什么做**：`--policy net:<v4>,…` 的自对弈里 **≈99% 的墙钟在 v4 前向**（引擎 + 轨迹 + I/O 加起来
+只有 3 s / 200 场）。本机实测（i9-14900HX / clang 22 / `-O3 -march=native` / 8 workers /
+`--rotate --aux` / seed 20260502 / `tools/build/v4-league-g08/net.bin`）：
+
+| 配置 | 墙钟 | 场/秒 | 每决策 worker 时间 |
+| --- | --- | --- | --- |
+| `--policy teacher,teacher,teacher,teacher`（**完全不前向**） | 3 s | 80.7 | ≈0.18 ms（引擎 + 轨迹 + I/O） |
+| `net:g08 ×4`（**改动前**） | **311 s** | 0.64 | **≈18.2 ms** |
+| `net:g08 ×4`（**改动后**） | **47.2 / 54.5 / 53.8 s**（中位 **53.8 s**） | 3.7–4.3 | ≈3.1 ms |
+
+⇒ **5.8×**（中位 53.8 s vs 基线 311 s；同一台机、同一条命令），且 **200 个 `g*.jsonl` 与改动前
+逐字节相同（0/200 差异）**。
+
+**同机同批 A/B**（50 场，基线与优化**交替**各跑 3 次，避免机器漂移）：
+基线 **79.4 / 83.3 / 81.8 s → 中位 81.8 s**；优化 **13.28 / 13.41 / 13.42 s → 中位 13.41 s**
+⇒ **6.10×**（优化侧三次极差 1.1%，基线侧 4.9%）。基线二进制留在 `trainer/build/trainer-baseline.exe`
+（`build/` 已 gitignore），要重测直接跑它、与 `trainer/build/base200/` 的轨迹对哈希。
+
+**前向为什么这么贵（`trainer v4bench` 拆解）**：改动前单线程 17.34 ms/决策 —— JSON 解析
+0.03 ms、特征拼装 0.05 ms、**前向 17.2 ms**。前向的 MAC 数 ≈ **42 M/决策**，不是"1.4 M 参数 ×2"：
+每决策都要**重走**一遍 60 行事件窗口的 `event.enc` + 60 token 的 Transformer（in_proj /
+attention / out_proj / FFN 2·d）+ `min(m,60)` 步 GRU + 34 牌的牌种塔。而 `d_model=192` 的小
+matvec 在改动前是**纯标量**（汇编里只有 `vaddss`/`vmulss`：一个 MAC 一条标量指令）——
+17.3 ms / 42 MMAC ≈ 2.4 GMAC/s ≈ 每 MAC 1.6 周期。
+
+**三档（逐档实测；`TRAINER_V4_SCALAR=1` 是同一份二进制的"档 1"开关，见下）**：
+
+| 档 | 内容 | 单线程前向净 |
+| --- | --- | --- |
+| 基线 | 每决策 ~800 次堆分配、`vector<vector<float>>` 满天飞、行主序标量 matvec、**四个座位各加载一份权重**（10.9 MB × 4，超过 36 MB L3 的一半） | 17.34 ms |
+| **档 1** | ① `V4Scratch`：扁平缓冲 + 每策略实例一份，热路径**零堆分配**；② 权重**全进程单副本**（按路径注册表，四席共享 `shared_ptr<const V4Policy>`）；③ 加载期建 `dataT`（转置）；④ 事件编码器第二层的别名中转改缓冲区复用 | **12.41 ms**（1.40×） |
+| **档 1+2** | ⑤ `linearFast`：AVX2 8 路**沿输出行** SIMD；⑥ `linearBatchFast`：输出行按 32 行分块在外、批内 token 在内 ⇒ 权重切片常驻 L1，**权重流量从 `B×|W|` 降到 `|W|`**；⑦ `mha` / `transformerLayer` / `mlp` / GRU 六路门全部改批处理 + 扁平缓冲 | **1.70 ms**（**10.2×**） |
+
+**位级口径（⛔ 改这几条等于改判据）**：
+
+- **SIMD 只铺在输出行方向**（8 行/指令），一个输出行仍是"**单累加器、`c` 升序、mul+add 两步**"
+  ⇒ 与标量路径**逐位相同**；沿归约维做 SIMD（或改多累加器）会改求和顺序 ⇒ 改最后一位舍入。
+- **不用 FMA**：`_mm256_mul_ps` + `_mm256_add_ps` 两次舍入 = 标量口径；FMA 只舍入一次
+  （与 `-ffp-contract=off` 同一条理由）。
+- **`bias + rowDot(...)` ≠ `linear(...)`**：`rowDot` **从 0 起**累加再加 bias，`linear` 从 bias 起
+  累加 —— `gruStep` 用的是前者（`linearFast` 的 `b == nullptr` 支），合成一个函数就会改比特。
+- **批处理只改循环次序，不改任何一次乘加**：权重切片的复用是"同一块内存多读几遍"，与数值无关。
+- **`TRAINER_V4_SCALAR=1`**（`kScalarMode`）关掉 SIMD 与批处理、保留零分配 —— 它同时是"分档归因"
+  的开关和位级判据的**负向对照**：同一份权重、同一批输入，两条路必须给出**同一批比特**。
+
+**判据（原样）**：
+
+| 项 | 结果 |
+| --- | --- |
+| ① **行为不变**：200 场 `--rotate --aux` 同种子、`--out` 两份目录逐 `g*.jsonl` 比 `Get-FileHash` | **`FILES=200 DIFFS=0`**（684 决策/场也逐条相同） |
+| ② `trainer --selftest`（用 S: 那份可写副本跑） | `TRAINER SELFTEST PASS`（exit 0） |
+| ③ `node tools/trainer-v4-parity.mjs --golden` | Java / C++ 各自 `PASS`（`特征 maxΔ=5.96e-08 前向 maxΔ=2.03e-06 argmax=10/10`，与改动前**逐项相同**） |
+| ③′ 真权重逐行（1,217 条决策 / g08 / `--tol 1e-6`） | `Java↔C++ maxΔ=0.000e+0`、`argmax 全同 1217 条` |
+| ④ `node tools/v4-cache-check.mjs <g08> 2` | `PASS`：`g0/g1.jsonl 逐字节一致` + `summary.json 除计时逐字段一致`（Java 侧增量缓存不受影响） |
+| ⑤ 速度（同一条 200 场命令 ×3） | **47.2 / 54.5 / 53.8 s → 中位 53.8 s**（基线 311 s；最终二进制上再跑一次 **51.8 s**，同样 `DIFFS=0`） |
+| ⑥ `node tools/trainer-selfplay-parity.mjs` | `PASS`：Java↔C++ `g0.jsonl` 逐字节一致 |
+| ⑦ 内存安全（额外自查） | `-San` 构建跑 `v4net` 519 决策 + `selfplay 4 --workers 2 --rotate` 全绿（ASan/UBSan 无报告） |
+
+**踩到的三个坑（都是"缓冲区复用"这一类，且都不在自检/golden 的覆盖里）**：
+
+1. **`sc.policy` 与 `sc.gu` 挤在同一个 `if (size < dm)` 里** ⇒ 第二次决策 `legal` 条数变多时按
+   新上界写越界 ⇒ **堆损坏**（`0xC0000374`，而 `--selftest` / `v4golden` / `-San` 的单条路径全绿，
+   只有真跑自对弈才炸）。判据：**每一支缓冲都要按"它自己的上界"独立涨**，不与别的缓冲共用 guard。
+2. **`meanU` 是累加量**：只 `resize` 不清零 ⇒ 跨决策累积。原实现每决策新建全 0 向量，这一条
+   必须显式 `std::fill(0)`（`resize` 到更大才会补 0，而它的大小恒定 ⇒ 永远不会补）。
+3. **`film` 在 `n == 0` 时从未被分配**：guard 写在候选循环体里，`legal` 为空时循环一次都不跑，
+   后面"逐候选门控"却拿它当 `pgate` ⇒ 空缓冲 + `fill`。判据：**缓冲区大小与实际跑没跑循环解耦**
+   （guard 提到循环外）。
+
+**8 worker 下的并行退化（实测，未消除）**：8 个 `v4bench` 进程并行时，单进程前向净从 1.70 ms
+涨到 **2.0–2.5 ms（≈1.35×）**；批处理之前是 1.94 → 2.47–2.75（≈1.32×）。⇒ 这条退化**不是**权重
+流量造成的（否则批处理会把它压掉），更像共享 L3 / 内存带宽 / 频率。`--workers` 是唯一能线性
+加算力的旋钮：这台机 24 个 P-core，8 → 24 大约还能再快 2.5–3×（未实测到底）。
+
+**还没做（按收益排序，都给实测依据）**：
+
+1. **事件塔逐行缓存**（= Java `setCacheLevel` 那一套的 C++ 版）：窗口每决策只移动 ~4 行，而
+   `event.enc`（3.3 MMAC）+ `in_proj`（6.6 MMAC）+ GRU（5.0 MMAC）都是**逐行局部**量 ⇒ 可复用；
+   余下的 attention + out_proj + FFN（约 12.5 MMAC）**必须**重算（FFN 的输入依赖注意力输出）。
+   上界 ≈ **1.4–1.5×**（42 MMAC → 约 28 MMAC），代价是跨决策状态 + "同一局内前缀不变"的校验。
+2. **档 3（fp16/int8 权重）**：当前内核已跑到 ≈ 6 MAC/周期（AVX2 上限 8），**再快只能靠"少算"**；
+   量化会改比特 ⇒ 与"逐字节轨迹"判据直接冲突，除非整条链改成容差判据。**不建议**。
+3. **GPU 推理服务**：本前向是 **batch=1 的小 GEMV**（最大矩阵 576×192），无批处理时 GPU 的
+   算力完全用不上，只剩内核启动开销；而机器上还有 16 个闲置 P-core ⇒ **CPU 加线程比上 GPU 便宜
+   得多**。要上 GPU 得先把"多局/多座位"凑成一个 batch，那是改引擎而不是改前向。
+
+**新增的可复用工具**：`trainer v4bench <net.bin> <轨迹.jsonl> [条数上限]` —— 把 JSON 解析 /
+特征拼装 / 前向**分开计时**（与 Java `tools.V4Probe --bench` 同一件事，只报实测、不写死验收数字）。
+`TRAINER_V4_SCALAR=1` 则是同一份二进制的分档开关。
+
+---
+
 ## 7. 目录与构建
 
 ```
@@ -1127,8 +1221,15 @@ trainer/
 │  ├─ obffeatures.hpp/.cpp 每个候选的派生特征（= Java `ObsFeatures`）
 │  ├─ jsonscan.hpp/.cpp 读回 `g*.jsonl` 的极简扫描器（`features` / `net` 用）
 │  ├─ features.hpp/.cpp `features <dir>`：轨迹 → `g*.feat.bin`（= Java `TraceFeatures`）
+│  ├─ v4features.hpp/.cpp obs → 四张量（`tile[34,48] / evt[60,96] / ctx[64] / cand[n,128]`）+ 块注册表
+│  │                     + 指纹（= Java `V4Features`，§6.22）
+│  ├─ v4policy.hpp/.cpp `net.bin` **格式 2** 加载 + 三塔/融合/七头前向（§6.22）；
+│  │                     前向的**中间缓冲**在 `V4Scratch`（每策略实例一份，热路径零分配）、
+│  │                     权重转置副本在 `Mat::dataT`（加载期建一次）、内核是 `linearFast` /
+│  │                     `linearBatchFast`（AVX2 逐位等价，§6.24）
 │  └─ main.cpp          CLI：wall / rng / rules / bench / score / settle / action / turnopts /
-│                       selfplay / features / **net** / --selftest
+│                       selfplay / features / **net** / **v4net** / **v4golden** / **v4bench** /
+│                       --selftest
 └─ build/               产物（**不进仓库**，已 gitignore）
 ```
 

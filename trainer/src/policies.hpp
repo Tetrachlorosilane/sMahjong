@@ -17,7 +17,9 @@
 
 #include <cstdlib>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "action.hpp"
@@ -173,7 +175,38 @@ inline Policy makeNetPolicy(std::shared_ptr<const Net> net, float temp, JavaRand
 }
 
 /**
- * `net:<权重文件>` 且权重是 **v4（格式 2）** 时的策略本体（= Java `V4Policy.chooseIndex/SampleIndex`）。
+ * `net:<权重文件>` 的**进程级权重注册表**：同一个路径在本进程里只加载一次。
+ *
+ * <p>为什么必须有它：`--policy "net:X,net:X,net:X,net:X"` 会给四个座位各要一个工厂 ——
+ * 没有注册表就是**四份独立加载**（每个座位一份 `V4Policy`）。g08 是 5.4 MB，加上加载期建的
+ * 转置副本是 10.9 MB ⇒ 一份策略串就吃掉 44 MB，**远超 L3（i9-14900HX = 36 MB）**，
+ * 前向的内存带宽立刻崩掉。注册表把它压回**一份只读权重**，四个座位 `shared_ptr` 共享
+ * （`V4Policy::forwardAll` 是 `const` 且不改状态，多线程同时前向本来就是安全的）。
+ *
+ * <p>生命周期：注册表**持有**这些 `shared_ptr`（进程级，不释放）—— 策略实例可能在任何
+ * 时候被销毁，权重必须活得比它们久。加载发生在建线程池**之前**，但仍在锁内做，
+ * 免得将来别处并发调用工厂时出现两份。
+ */
+inline std::shared_ptr<const V4Policy> sharedV4Policy(const std::string &path, std::string &err) {
+    static std::mutex mu;
+    static std::map<std::string, std::shared_ptr<const V4Policy>> cache;
+    const std::lock_guard<std::mutex> lock(mu);
+    const auto it = cache.find(path);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    std::shared_ptr<V4Policy> loaded = std::make_shared<V4Policy>();
+    std::string loadErr;
+    if (!v4LoadPolicy(path, *loaded, loadErr)) {
+        err = "加载 v4 神经网络权重失败：" + path + " —— " + loadErr;
+        return nullptr;
+    }
+    const std::shared_ptr<const V4Policy> shared = loaded;
+    cache.emplace(path, shared);
+    return shared;
+}
+
+/** `net:<权重文件>` 且权重是 **v4（格式 2）** 时的策略本体（= Java `V4Policy.chooseIndex/SampleIndex`）。
  *
  * <p>与 v3 那条（`makeNetPolicy`）**同一套语义**：`temp <= 0` ⇒ argmax（并列取最小下标）、
  * `temp > 0` ⇒ 从 `softmax(logits / T)` 采样；失败返回 `valid = false`（不悄悄换动作）。
@@ -181,7 +214,11 @@ inline Policy makeNetPolicy(std::shared_ptr<const Net> net, float temp, JavaRand
  * 所以多个自对弈 worker 线程同时前向是安全的（见 `v4policy.hpp` 的说明）。
  */
 inline Policy makeV4NetPolicy(std::shared_ptr<const V4Policy> net, float temp, JavaRandom rng) {
-    return [net, temp, rng](const Decision &d) mutable {
+    // **每策略实例一份**前向缓冲（`V4Scratch`）：一个实例只服务一个座位、一场、一个线程，
+    // 所以拿它当热路径的 scratch 是安全的（权重是共享只读的，缓冲绝不能挂在那儿）。
+    // 有了它，每决策的堆分配从 ~800 次降到 0（实测前向 17.34 ms → 1.70 ms/决策）。
+    auto scr = std::make_shared<V4Scratch>();
+    return [net, temp, rng, scr](const Decision &d) mutable {
         Cmd c;
         if (d.obs == nullptr) {
             return c;
@@ -199,7 +236,7 @@ inline Policy makeV4NetPolicy(std::shared_ptr<const V4Policy> net, float temp, J
         }
         std::vector<float> logits;
         std::string err;
-        if (!v4Logits(*net, obsJson, logits, err)) {
+        if (!v4Logits(*net, obsJson, logits, err, scr.get())) {
             return c;
         }
         const int pick = temp > 0.f ? netSampleSoftmax(logits, temp, rng) : netArgmax(logits);
@@ -295,13 +332,10 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
             return nullptr;
         }
         if (format == 2) {
-            std::shared_ptr<V4Policy> loadedV4 = std::make_shared<V4Policy>();
-            std::string loadErrV4;
-            if (!v4LoadPolicy(rest, *loadedV4, loadErrV4)) {
-                err = "加载 v4 神经网络权重失败：" + rest + " —— " + loadErrV4;
+            const std::shared_ptr<const V4Policy> sharedV4 = sharedV4Policy(rest, err);
+            if (!sharedV4) {
                 return nullptr;
             }
-            const std::shared_ptr<const V4Policy> sharedV4 = loadedV4;
             return [sharedV4, temp](int seat, int64_t gameSeed) {
                 return makeV4NetPolicy(sharedV4, temp, JavaRandom(netMixSeed(gameSeed, seat)));
             };

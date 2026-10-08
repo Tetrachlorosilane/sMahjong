@@ -104,6 +104,25 @@ class LoopConfig:
     grad_clip: float = 0.5
     kl_early_stop: float = 0.03
     kl_min_steps: int = 100
+    #: **W3：对现任的 KL 锚**（`docs/VALVES-AND-FIXTURES.md` §3 W3）。β=0（缺省）= 今天的行为。
+    #: 锚就是 `--init`（= 本轮的 `net_in` = **现任**）那一份 —— 回路不必再给 `--ref`，
+    #: `pretrain` 的缺省锚正是 `--init`。为什么要它：历季每轮只走 66/600 步、候选只是现任的
+    #: 微小扰动，而闸门分辨率（±2.35 顺位点）看不见那个量级 ⇒ 改成"放宽 KL 预算让每轮真能动
+    #: + 用 β 把方向锚在现任上"两个旋钮分开调（第六十二轮的三条遗留决策之 (B)+(C)）。
+    ref_beta: float = 0.0
+    #: **防过拟合的验证集早停**：每 `val_every` 步在固定子集上读 train/val 的 policy CE，
+    #: 连续 `val_patience` 次未改善就正常收尾（`pretrain --val-every/--val-patience`）。
+    #: 缺省 0 = 关闭（老行为）；回路跑长轮次时它是"廉价低噪的第一读数"那条的兜底。
+    val_every: int = 0
+    val_patience: int = 3
+    #: ★ **W4 第一步：逐候选引擎标签的模仿项**（`pretrain --il-weight`）。0（缺省）= 今天的行为。
+    #: 目标候选由 `dataset.engine_best_index` 从 `cand.derived`（引擎的逐候选牌效：打后向听/进张/
+    #: 听牌形）现算 —— 稠密、无采样噪声、不花闸门算力，且**每一份现有紧凑集里都有**。
+    il_weight: float = 0.0
+    #: 验证集早停**读哪个头的 CE**：`policy`（缺省，= 行为标签）/ `il`（引擎标签）。
+    #: ⚠ 开了 `il_weight` 就**必须**配 `--val-metric il`：IL 臂的行为 CE 必然抬高（实测 0.512 → 0.62），
+    #: 按行为 CE 判"没改善"会在引擎 CE 还在降的时候把这一轮掐掉（见 `docs/TRAINING-V4.md` §14.12）。
+    val_metric: str = "policy"
     #: `--strict-gate`：值头闸门（`audit` 相）不过就**停整条回路**（缺省只记账，不停）。
     strict_gate: bool = False
     #: **值头先行**（`critic` 相）的步数：`>0` 时在 PPO 之前先跑一段
@@ -226,6 +245,18 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     train += ["--grad-clip", f"{cfg.grad_clip:g}",
               "--kl-early-stop", f"{cfg.kl_early_stop:g}",
               "--kl-min-steps", str(cfg.kl_min_steps)]
+    # W3：锚的参考策略**就是 `--init`**（现任）⇒ 只转发 β 就够了（`pretrain` 的缺省锚 = `--init`）；
+    # 不为 0 时才进命令 —— 这样"β=0 的老轮次"打出来的命令与以前**逐字相同**（台账可比、自检也没动）。
+    if cfg.ref_beta:
+        train += ["--ref-beta", f"{cfg.ref_beta:g}"]
+    # 验证集早停：同样只在开启时进命令（缺省 0 = 今天的行为）
+    if cfg.val_every > 0:
+        train += ["--val-every", str(cfg.val_every), "--val-patience", str(cfg.val_patience)]
+        if cfg.val_metric != "policy":        # ⚠ 只在早停开着时转发（关着就没有"读哪个头"这回事）
+            train += ["--val-metric", cfg.val_metric]
+    # ★ W4：引擎逐候选标签的模仿项（只在非 0 时进命令 ⇒ 0 的轮次与以前**逐字相同**）
+    if cfg.il_weight:
+        train += ["--il-weight", f"{cfg.il_weight:g}"]
     if cfg.max_steps > 0:                      # "每轮短"：一轮的步数上限
         train += ["--max-steps", str(cfg.max_steps)]
     if cfg.advantage != "auto":
@@ -568,6 +599,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kl-early-stop", type=float, default=0.03,
                     help="KL(π_old‖π_new) 早停阈值（0 = 关；v3 同口径 0.03）")
     ap.add_argument("--kl-min-steps", type=int, default=100, help="KL 早停生效前至少跑多少步")
+    ap.add_argument("--ref-beta", type=float, default=0.0,
+                    help="**W3 对现任的 KL 锚**的权重：`loss += β·KL(π_θ ‖ π_ref)`，π_ref = `--init`"
+                         "那一份（本轮现任，冻结）。0（缺省）= 今天的行为；配 `--kl-early-stop` 放宽"
+                         "（例如 0.10）就是 W3 的「放宽预算 + 锚住方向」配方")
+    ap.add_argument("--val-every", type=int, default=0,
+                    help="**防过拟合**：每多少步读一次 train/val 的 policy CE（0 = 关闭）")
+    ap.add_argument("--val-patience", type=int, default=3,
+                    help="val CE 连续多少次未改善就早停（正常收尾、照常导出 ckpt）")
+    ap.add_argument("--val-metric", choices=["policy", "il"], default="policy",
+                    help="早停读哪个头的 CE：`policy`（缺省 = 行为标签）/ `il`（**引擎标签**）—— "
+                         "开了 `--il-weight` 就用 `il`（行为 CE 在 IL 臂上必然抬高）")
+    ap.add_argument("--il-weight", type=float, default=0.0,
+                    help="**W4 第一步**：引擎逐候选标签的模仿项权重"
+                         "（`loss += w·CE(logits, 引擎最优候选)`，只在学生行上）。0（缺省）= 今天的行为")
     ap.add_argument("--strict-gate", action="store_true",
                     help="值头闸门（`value-audit --strict --ev-ref legit`：EV ≥ 0.7×合法天花板 + "
                          "覆盖率 ≤3pp）不过就**停整条回路**；缺省只记账不停（先看几轮再决定）")
@@ -601,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps, advantage=args.advantage, rank_weight=args.rank_weight,
         baseline_fit=args.baseline_fit, grad_clip=args.grad_clip,
         kl_early_stop=args.kl_early_stop, kl_min_steps=args.kl_min_steps,
+        ref_beta=args.ref_beta, val_every=args.val_every, val_patience=args.val_patience,
+        val_metric=args.val_metric, il_weight=args.il_weight,
         strict_gate=args.strict_gate, critic_steps=args.critic_steps, critic_lr=args.critic_lr,
     )
     net_in = Path(args.init)

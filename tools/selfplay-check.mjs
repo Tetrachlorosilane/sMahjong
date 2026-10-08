@@ -49,6 +49,46 @@ const DECISION_KEYS = new Set(['type', 'game', 'hand_no', 'hand', 'step', 'seat'
   'kind', 'legal', 'chosen', 'chosen_index', 'obs', 'hand_delta', 'hand_winner', 'hand_loser',
   'hand_agari', 'reward_to_go', 'final_scores', 'placement', 'teacher', 'teacher_index']);
 
+/** 小局行（`hand`）的字段白名单 —— 与 `TraceRecorder.onEvent` / PROTOCOL §8.4 必须一致。 */
+const HAND_KEYS = new Set(['type', 'game', 'hand_no', 'hand', 'round', 'scores_after', 'delta',
+  'agari', 'abortive', 'reason', 'renchan', 'winner', 'loser', 'tsumo', 'nagashi', 'tenpai',
+  // 役种轴（2026-10 起；见 PROTOCOL §8.4 的字段表）
+  'yaku', 'han', 'fu', 'yakuman', 'limit']);
+
+/**
+ * **役种轴五列**（PROTOCOL §8.4）：**要么整块都在，要么整块都不在**。
+ *
+ * 为什么钉这条：流局 / 途中流局真的没有和了者，而 2026-10 之前的轨迹也没有这五列 ——
+ * 两者都必须是"缺席"而不是 0（画像工具据此画 `—` 而不是 `0.00`）。
+ */
+const YAKU_KEYS = ['yaku', 'han', 'fu', 'yakuman', 'limit'];
+/** 参数化役种（带 ASCII 牌码 `tile` 的那三个角色码，= `YakuCodes.YAKUHAI/ROUND_WIND/SEAT_WIND`）。 */
+const PARAM_CODES = new Set(['yakuhai', 'round_wind', 'seat_wind']);
+/** 单个役对象的字段白名单（与 `agari` 报文的 `yaku[]` **同一套键序**）。 */
+const YAKU_ITEM_KEYS = ['code', 'tile', 'han', 'yakuman'];
+/** 打点档位码（= `YakuCodes` 的 `LIMIT` 值域；`""` = 未达満貫）。 */
+const LIMIT_CODES = new Set(['', 'mangan', 'haneman', 'baiman', 'sanbaiman', 'kazoe_yakuman',
+  'yakuman']);
+
+/**
+ * **档次由番数决定**的档位码 —— 这些档次下符数**不参与计分**，所以引擎允许报 `fu == 0`
+ * （2026-10 起 `hand` 行的合法形态，见 `docs/PROTOCOL.md` §8.4）。
+ *
+ * ⚠ 两个"别写错"：
+ *   ① 判据必须是**档位码本身**，⛔ 不许写成 `han >= 13` —— 那是间接代理，而且**会判错**：
+ *      引擎里 5~12 番（`mangan`/`haneman`/`baiman`）同样是"番数定档"，但那些分支**仍报真实符数**
+ *      （实测 `han=7/limit=haneman → fu=30`、`han=5/limit=mangan → fu=20/40`）；真正把 `fu` 记 0 的是
+ *      **累计役满支**（`trainer/src/evaluator.cpp:633`：`s.han >= 13` ⇒ `s.fu = 0`，M.League
+ *      `kazoeYakuman=false` 时 `limit` 记 `sanbaiman`）与**役满支**。
+ *   ② `""`（未达満貫）**不在**这张表里 ⇒ 普通和了仍要求 `fu >= 20`（平和自摸 / 七对子也满足）。
+ */
+const FU_OPTIONAL_LIMITS = new Set(['mangan', 'haneman', 'baiman', 'sanbaiman',
+  'kazoe_yakuman', 'yakuman']);
+// 防第二份码表漂移：这张表的每一项都必须是登记过的档位码（加码时先改 `LIMIT_CODES`）。
+for (const c of FU_OPTIONAL_LIMITS) {
+  if (!LIMIT_CODES.has(c)) throw new Error(`FU_OPTIONAL_LIMITS 里的 ${c} 不是登记的档位码`);
+}
+
 const problems = [];
 const warnings = [];
 const stats = { games: 0, hands: 0, decisions: 0, turn: 0, claim: 0, byKind: {} };
@@ -277,8 +317,13 @@ for (const f of files) {
   // ---- 小局行
   let prev = null;
   if (hands.length === 0) add(file, hands[0]?.ln || 1, '没有任何小局结算行');
+  // 这个文件是不是**新格式**：只要有一条小局行带 `yaku`，这一份轨迹就是 2026-10 之后采的
+  // ⇒ 所有"有和了者"的行都必须带齐五列。老轨迹（整份缺席）照旧放行（不许当 0 读）。
+  const yakuFormat = hands.some(({ row }) => 'yaku' in row);
   for (const { row, ln } of hands) {
     stats.hands++;
+    const extra = Object.keys(row).filter((k) => !HAND_KEYS.has(k));
+    if (extra.length) add(file, ln, `小局行有未登记字段：${extra.join(',')}`);
     if (row.delta.length !== 4 || row.scores_after.length !== 4) add(file, ln, 'delta/scores_after 长度不为 4');
     const sum = row.delta.reduce((a, b) => a + b, 0);
     if (sum % 1000 !== 0) add(file, ln, `delta 之和 ${sum} 不是 1000 的整数倍（立直棒/点数账不对）`);
@@ -293,6 +338,94 @@ for (const f of files) {
     if (row.agari && row.winner < 0) add(file, ln, 'agari=true 但没有 winner');
     if (!row.agari && row.winner >= 0) add(file, ln, 'agari=false 却有 winner');
     if (row.tsumo && row.loser >= 0) add(file, ln, '自摸却有 loser');
+
+    // ---- 役种轴（2026-10；PROTOCOL §8.4）------------------------------------------------
+    // 契约：和了者那一手的役/番/符/役满/打点档；**没有和了者 ⇒ 五列整块缺席**（⛔ 不写 0）。
+    // 这里独立重算三件事（不照抄生产者的实现）：
+    //   ① 形状：`yaku` 是对象数组，键序 ∈ {code[,tile],han[,yakuman]}、参数化役种才带 `tile`；
+    //   ② **逐役 `han` 之和 == 合计 `han`**（役满按 13 × 倍数折算，PROTOCOL §3.7）；
+    //   ③ `yakuman > 0 ⇒ han == 13 × yakuman`，且合计 `yakuman` == 逐役倍数之和。
+    const haveYaku = YAKU_KEYS.filter((k) => k in row);
+    if (haveYaku.length && haveYaku.length !== YAKU_KEYS.length) {
+      add(file, ln, `役种轴五列必须整块出现或整块缺席，实际只有：${haveYaku.join(',')}`);
+    }
+    if (yakuFormat) {
+      // 「有和了者」与「有役种数据」在引擎里是同一处发生的（`Round.Result.winScore`）⇒ 双向都要对
+      if (row.agari && haveYaku.length === 0) add(file, ln, `agari=true 却缺役种轴（${YAKU_KEYS.join('/')}）`);
+      if (!row.agari && haveYaku.length) add(file, ln, '不是和了局（agari=false）却有役种轴');
+    }
+    if (haveYaku.length === YAKU_KEYS.length) {
+      stats.yakuHands = (stats.yakuHands || 0) + 1;
+      const yk = row.yaku;
+      if (!Array.isArray(yk) || yk.length === 0) {
+        add(file, ln, `yaku 形状可疑（应是非空数组）：${JSON.stringify(yk)}`);
+      } else {
+        let hanSum = 0;
+        let ykSum = 0;
+        yk.forEach((y, i) => {
+          const at = `yaku[${i}]`;
+          if (!y || typeof y !== 'object' || Array.isArray(y)) {
+            add(file, ln, `${at} 不是对象：${JSON.stringify(y)}`);
+            return;
+          }
+          const bad = Object.keys(y).filter((k) => !YAKU_ITEM_KEYS.includes(k));
+          if (bad.length) add(file, ln, `${at} 有未登记字段：${bad.join(',')}`);
+          // 码是 ASCII 小写蛇形（`YakuCodes` 的值域形状；具体码表由服务端 `misses()` 守）
+          if (typeof y.code !== 'string' || !/^[a-z][a-z0-9_]*$/.test(y.code)) {
+            add(file, ln, `${at}.code 不是 ASCII 码：${JSON.stringify(y.code)}`);
+          }
+          // 参数化役种（役牌/场风/自风）**必须**带 `tile`（`1z..7z`），其余**不许**带
+          const wantTile = PARAM_CODES.has(y.code);
+          if (wantTile && !/^[1-7]z$/.test(y.tile)) add(file, ln, `${at}（${y.code}）缺合法 tile：${JSON.stringify(y.tile)}`);
+          if (!wantTile && 'tile' in y) add(file, ln, `${at}（${y.code}）不是参数化役种却带 tile：${y.tile}`);
+          if (!Number.isInteger(y.han) || y.han <= 0) add(file, ln, `${at}.han 应为正整数：${JSON.stringify(y.han)}`);
+          if ('yakuman' in y && (!Number.isInteger(y.yakuman) || y.yakuman <= 0)) {
+            add(file, ln, `${at}.yakuman 应为正整数：${JSON.stringify(y.yakuman)}`);
+          }
+          if ('yakuman' in y && y.han !== 13 * y.yakuman) {
+            add(file, ln, `${at} 役满的 han 必须是 13 × 倍数（han=${y.han} / yakuman=${y.yakuman}）`);
+          }
+          hanSum += Number.isInteger(y.han) ? y.han : 0;
+          ykSum += Number.isInteger(y.yakuman) ? y.yakuman : 0;
+        });
+        if (hanSum !== row.han) add(file, ln, `逐役 han 之和 ${hanSum} != 合计 han ${row.han}`);
+        if (ykSum !== row.yakuman) add(file, ln, `逐役 yakuman 之和 ${ykSum} != 合计 yakuman ${row.yakuman}`);
+      }
+      if (!Number.isInteger(row.han) || row.han <= 0) add(file, ln, `han 应为正整数：${JSON.stringify(row.han)}`);
+      // 符数：**两种**合法的 `fu == 0`，加一种"必 ≥ 20"（契约见 PROTOCOL §8.4）——
+      //   ① 役满（`yakuman > 0`）：没有"符"这个量纲 ⇒ **恒 0**（⛔ 不许 ≥ 20）；
+      //   ② **档次由番数决定**（`limit ∈ FU_OPTIONAL_LIMITS`）：符数不参与计分 ⇒ **允许 0**
+      //      （实测 `S:\…\raw\v4-expert-atk-g02\g921.jsonl:642`：16 番、`limit=sanbaiman`、`fu=0`——
+      //       M.League `kazoeYakuman=false` 封三倍満，这就是引擎的合法约定，**不是记录器 bug**）；
+      //      同一档位下也允许真实符数（5~12 番那几支仍报 `fu`），但 1..19 是坏形状。
+      //   ③ 其余（`limit == ""` 的普通和了）：必 ≥ 20（平和自摸 / 七对子 25 也满足）。
+      // ⚠ 2026-10 修的是**误报**：旧判据只认情形①，于是把情形②（§8.4 白纸黑字的合法形态）
+      //   判红，整条打点线在第 2 代被卡住（`g921.jsonl:642` 唯一一处）。
+      if (!Number.isInteger(row.fu) || row.fu < 0) {
+        add(file, ln, `fu 形状可疑：${JSON.stringify(row.fu)}`);
+      } else if (row.yakuman > 0) {
+        if (row.fu !== 0) {
+          add(file, ln, `役满的 fu 必须为 0（yakuman=${row.yakuman} / fu=${row.fu}）—— 役满没有符这个量纲`);
+        }
+      } else if (FU_OPTIONAL_LIMITS.has(row.limit)) {
+        if (row.fu !== 0 && row.fu < 20) {
+          add(file, ln, `档次由番数决定（limit=${JSON.stringify(row.limit)}）时 fu 只能是 0 或 ≥ 20，实际 ${row.fu}`);
+        }
+      } else if (row.fu < 20) {
+        add(file, ln, `普通和了（limit=${JSON.stringify(row.limit)}）的 fu 必须 ≥ 20，实际 ${row.fu}`);
+      }
+      if (!Number.isInteger(row.yakuman) || row.yakuman < 0) add(file, ln, `yakuman 形状可疑：${JSON.stringify(row.yakuman)}`);
+      if (!LIMIT_CODES.has(row.limit)) add(file, ln, `limit 不是登记的档位码：${JSON.stringify(row.limit)}`);
+      if (row.yakuman > 0 && row.han !== 13 * row.yakuman) {
+        add(file, ln, `yakuman>0 ⇒ han 必须 == 13 × yakuman（han=${row.han} / yakuman=${row.yakuman}）`);
+      }
+      if (row.yakuman > 0 && row.limit !== 'yakuman') {
+        add(file, ln, `役满（yakuman=${row.yakuman}）的 limit 应为 yakuman，实际 ${JSON.stringify(row.limit)}`);
+      }
+      if (row.yakuman === 0 && row.limit === 'yakuman') {
+        add(file, ln, 'limit=yakuman 却不是役满（yakuman=0）—— 界面判据看 `yakuman` 字段，不看番数');
+      }
+    }
     prev = row;
   }
   if (game) {
@@ -475,6 +608,9 @@ if (!quiet) {
   console.log(`轨迹目录：${dir}`);
   console.log(`  场数 ${stats.games} / 小局 ${stats.hands} / 决策 ${stats.decisions}`
     + `（自家回合 ${stats.turn}，鸣牌 ${stats.claim}）`);
+  // 役种轴（2026-10）：0 = 老轨迹（整份没有这五列，画像工具会画 `—`）；老轨迹**照样 PASS**。
+  console.log(`  带役种数据的小局 ${stats.yakuHands || 0} / ${stats.hands}`
+    + `（0 = 2026-10 之前采的老轨迹，读侧按"取不到"处理，不是 0 番）`);
   console.log('  动作分布：' + Object.entries(stats.byKind)
     .sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(' '));
 }

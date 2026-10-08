@@ -80,20 +80,41 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
     """跑闸门：多套牌山集合 × 分块，最后按**合并后的**配对差分判决。"""
     root = out_root / tag
     series: list[tuple[dict[int, float], dict[int, float]]] = []
+    wall_deltas: list[float] = []
     print(f"闸门：现任={Path(incumbent).parent.name} vs 候选={Path(candidate).parent.name}"
           f"；{len(seeds)} 套牌山 × 每套至多 {games} 场（block={block}）")
     for s in seeds:
         d = root / f"s{s}"
         arena.run_pair(d, incumbent, candidate, block, s, workers=workers, prod=prod)
         x, y = arena.judge_series(d, incumbent, candidate, metric)
-        part = arena.judge_pair(x, y, incumbent, candidate, metric)
-        print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}")
+        # ⚠ **逐牌山这行必须与下面的合并判决同一个符号**（候选 − 现任）。`judge_pair(sa, sb, a, b)`
+        #   的约定是 `Δ = a − b`，所以这里要按 `(y, x, 候选, 现任)` 调 —— 写成 `(x, y, 现任, 候选)`
+        #   会打印出**符号相反**的逐牌山读数（判决本身不受影响，因为它走 `decide`），
+        #   症状极具误导性：两套牌山 `+2.34 / −0.08` 而合并是 `−1.13`，读日志的人会以为
+        #   "候选赢了一套"。（实测踩过：第八季 g01；判决逻辑没错，错的是这行 printf。）
+        part = arena.judge_pair(y, x, candidate, incumbent, metric)
+        print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}"
+              f"（候选 − 现任）")
+        wall_deltas.append(float(part.delta))
         series.append((x, y))
     sa, sb = pooled_diffs(series)
     out = decide(sa, sb, incumbent, candidate, metric)
     out["seeds"] = list(seeds)
     out["incumbent"] = incumbent
     out["candidate"] = candidate
+    # ⚠ **套间散布要打出来**（第八季审计）：合并 CI 只含"套内"的配对噪声，而"换一套牌山"本身
+    #   能把 Δ 摆动好几个点（实测同一候选：闸门 −2.26 vs 换牌山的自评 +1.32）。所以
+    #   ① 判决只能读成"**条件于这几套牌山**"；② 套间极差 ≫ CI 半宽时，这个判决不该被当成
+    #   "这一代普遍更好/更差"的证据，更不该把历次判决当独立复现来统计（牌山若是共用的就会伪重复）。
+    spread = (max(wall_deltas) - min(wall_deltas)) if len(wall_deltas) > 1 else 0.0
+    out["wall_deltas"] = wall_deltas
+    out["wall_spread"] = spread
+    half = (out["hi"] - out["lo"]) / 2
+    out["wall_spread_over_ci"] = (spread / half) if half > 0 else float("inf")
+    print(f"  套间散布：极差 {spread:.2f} / 合并 CI 半宽 {half:.2f}"
+          f" = {out['wall_spread_over_ci']:.2f}×"
+          + ("  ⚠ 套间散布已超过 CI 半宽 ⇒ **判决是条件于这几套牌山的**，别当普遍结论"
+             if out["wall_spread_over_ci"] > 1 else ""))
     print(f"== 合并判决：Δ={out['delta']:+6.2f} CI[{out['lo']:+6.2f},{out['hi']:+6.2f}] "
           f"n={out['n']} ⇒ {'采纳' if out['adopt'] else '不采纳（回滚到现任）'}")
     root.mkdir(parents=True, exist_ok=True)

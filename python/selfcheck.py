@@ -3284,7 +3284,18 @@ del _bf_g, _bf_s, _bf_r
 # ⚠ 上面若用 `mmap_mode="r"` 读这些 `.npy`，**映射还开着**的时候再让回填去 `open(..., "wb")`
 #   覆盖同名文件，Windows 会报 `OSError: [Errno 22] Invalid argument`（不是权限、也不是路径问题；
 #   `np.load()` 不带 mmap 就没这回事）。
-_bf_summary["per_game"][0]["rank_points"] = [15.0, 5.0, -5.0, -14.0]
+# ⚠ **2026-10 修：这条负向对照原来会静默空转**（红证实测）。`_rank_points_of` 的记忆键是
+#   `(路径, st_mtime_ns, st_size)`，而 **Windows 的文件时间戳分辨率 ≈ 时钟 tick（~15.6 ms）**：
+#   原来只把 `-15.0` 改成 `-14.0`（**字节数不变**）且紧挨着上一句写 ⇒ 键**完全一样** ⇒
+#   回填读回**旧表**（还是 −15.0、零和）⇒ 跑的根本不是"改坏后的"数据，测的是缓存。
+#   （实测：背靠背两次写同一个 summary.json，**90% 命中同一个键**；隔 >1 ms 才不命中 ——
+#   所以它还会 flaky：第一次跑 659/1、重跑 659/0。）
+#   两条一起改（任一条单独都够；两条是为"改动痕迹小、易被顺手还原"留的冗余）：
+#     ① **显式清记忆表** `clear_rank_points_cache()` —— 直击根因，不赌 tick；
+#     ② 夹具值改成 `-1.0`（`-15.0` → `-1.0` **少一个字节**）—— 即使记忆表被人重新引入，
+#        键也不同（判据"输入变了 ⇒ 结果必须跟着变"）。
+_bf_summary["per_game"][0]["rank_points"] = [15.0, 5.0, -5.0, -1.0]
+v4_ds.clear_rank_points_cache()
 (_bf_src / "summary.json").write_text(json.dumps(_bf_summary, ensure_ascii=False), encoding="utf-8")
 try:
     v4_ds.backfill_rank_points(_bf_ds, _bf_src, quiet=True)

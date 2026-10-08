@@ -14,6 +14,7 @@
 | `belief_tenpai` | `aux.npz` 的对手听牌真值 | 押し引き的输入 |
 | `danger` | `aux.npz` 的放铳结果（**只在被选中的那个候选上**有标签） | 第 4 通道 = "任一家" |
 | `effect` | sidecar 的逐候选派生量（向听/进张种数/进张枚数） | 牌效辅助（免费标签） |
+| `policy`（W4 的 `--il-weight`） | **引擎的逐候选牌效**（`cand.derived` 现算的"最优候选"，见 `dataset.engine_best_index`） | 稠密、无采样噪声的模仿项（缺省 0 = 关闭） |
 
 ⚠ 与 PPO 的区别：PPO 的策略损失用**自对弈回报**（`HEAD_SPECS` 里写的），
 这一轮用**教师动作**（BC）—— 所以**不需要** reward/优势，也不做 clip。
@@ -39,6 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .. import features as _f3
 from .. import guard, paths
 from . import adv as v4adv
 from . import dataset as v4ds
@@ -484,6 +486,84 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
     return model.to(device).eval()
 
 
+def _ref_logits(ref_model: M.V4Model, data: dict, device: str, batch: int,
+                ablate: dict[str, list[tuple[int, int]]] | None = None) -> np.ndarray:
+    """**冻结**参考策略 π_ref 的逐行 logits `[n, lmax]`（float32）—— KL 锚的右半边。
+
+    为什么**预算一次**而不是每个 batch 现算（与 PPO 预算 `logp_old` 同一思路）：
+    π_ref 不训练 ⇒ 同一行的 logits 在整轮里是常量；预算 = `n/batch` 次前向，
+    现算 = `epochs ×` 那么多次（β>0 时白烧一半算力，而它**永远不进反向图**）。
+
+    ⚠ 三条纪律（少一条就等于把参考策略也"训"进去了）：
+
+    ① `eval()` + `torch.no_grad()`（调用方还额外 `requires_grad_(False)`）—— π_ref 不是要训的网；
+    ② **温度不在这里缩放**（原样存 logits）：温度只在 `ref_kl_term()` 里按"与策略损失同一把尺子"
+       加一次。两处各缩一次 = 除以 `T²`（`_policy_logits()` 那个坑的翻版，症状同样是静默失真）；
+    ③ `ablate` **必须传进来**、与学生的输入口径一致：否则消融矩阵那一轮里学生看的是被消融的输入、
+       锚看的是没消融的输入 ⇒ 量出来的"KL"不是同一对分布上的量。
+    """
+    n = int(data["nlegal"].shape[0])
+    lmax = int(data["cand"].shape[1])
+    out = np.empty((n, lmax), dtype=np.float32)
+    ref_model.eval()
+    with torch.no_grad():
+        for i0 in range(0, n, batch):
+            idx = np.arange(i0, min(i0 + batch, n))
+            b = _batch(data, idx, device, ablate=ablate)
+            logits = ref_model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
+                               h=b.get("h"))["policy"]
+            # ⚠ 非法候选是被 `masked_fill(-inf)` 出来的（`Heads.forward`）⇒ 这里会存进 -inf。
+            #   那是**对的**（`ref_kl_term` 里按 `isfinite` 把那几格挑掉），别在这里 clamp 成有限值。
+            out[i0:i0 + idx.size] = logits.to("cpu").numpy()
+    return out
+
+
+def ref_kl_term(logits: torch.Tensor, ref_logits: torch.Tensor,
+                row_keep: torch.Tensor | None = None, temp: float = 1.0) -> torch.Tensor:
+    """`KL(π_θ(·|s) ‖ π_ref(·|s))` 的**逐行均值**（纯函数；自检/临时脚本直接喂数）。
+
+    π 一律取**同一个温度**的 `softmax(logits/T)`（与 PPO 的策略损失同一把尺子，见
+    `_policy_logits()` 的坑：温度只作用一侧会让 `ρ` 炸到 1e15、一个 step 打成 NaN）。
+
+    ## 为什么是**反向 KL**（π_θ‖π_ref），不是正向（π_ref‖π_θ）
+
+    · `KL(π_θ‖π_ref) = E_{π_θ}[log π_θ − log π_ref]` —— **mode-seeking**：
+      π_ref **低概率**的地方，只要 π_θ 也低就不受罚 ⇒ 它鼓励 π_θ **比 π_ref 更尖**，
+      主动放弃 π_ref 的尾巴（把质量挪到 π_ref 的几个峰上）。
+    · `KL(π_ref‖π_θ)` —— **mass-covering**：π_ref **有质量**的地方 π_θ 必须也有，
+      ⇒ π_θ 被逼着覆盖 π_ref 的整个支撑集（连尾巴一起），在"只想别偏离现任"这个目标下
+      反而会**放大** π_θ 的尾巴、把分布摊平。
+
+    W3 的目标是"**单调精修**"（让每轮真的能动、但别离现任太远），`docs/VALVES-AND-FIXTURES.md`
+    §3 的 W3 条目写的就是 `β · KL(π_θ ‖ π_ref)` ⇒ 这里按它实现。
+    两者的 logits 梯度**长得不一样**（临时脚本拿它当红证，别记反）：
+    · 反向（本函数）：`∇_z = π_θ ⊙ (log π_θ − log π_ref − KL)` —— 每个 `π_θ = 0` 的格子上恒为 0，
+      所以它只把**学生已经给质量的**候选往 ref 那边挪（这就是 mode-seeking 的梯度长相）；
+    · 正向：`∇_z KL(π_ref‖π_θ) = π_θ − π_ref`（处处非零，ref 有质量的格子都会被拉过去）。
+    要换方向只改这里的 `logp`/`logq` 互换，日志与判据都不用动。
+
+    ⚠ **两个 `-inf` 相减是 `nan`**（非法候选在两侧都被 `masked_fill(-inf)`）：必须先按
+    `isfinite` 把那些格挑掉再求和 —— `logp.exp()` 在那里是 0，但 `0 * nan = nan` 会整行污染
+    （症状：`ref_kl=nan`、`KL(θ‖θ) ≠ 0`，而"logits 逐位相同 ⇒ KL=0"那条判据当场红）。
+    这里连同 `logq` 一起换成有限替身，**任何中间量都不出现 inf/nan**（`where` 只当"选择"用）。
+    """
+    if temp and float(temp) != 1.0:
+        logits = logits / float(temp)
+        ref_logits = ref_logits / float(temp)
+    logp = torch.log_softmax(logits, dim=-1)
+    logq = torch.log_softmax(ref_logits, dim=-1)
+    # 非法候选（两侧都 -inf）：先把 logq 换成 0，`logp - logq_safe` 于是不再是 `-inf - (-inf) = nan`；
+    # 再按 `isfinite(logp)` 把那几格的选择值置 0（`logp.exp()` 在那里本来就是 0）。
+    logq_safe = torch.where(torch.isfinite(logq), logq, torch.zeros_like(logq))
+    d = torch.where(torch.isfinite(logp), logp - logq_safe, torch.zeros_like(logp))
+    per_row = (logp.exp() * d).sum(-1)
+    if row_keep is None:
+        return per_row.mean()
+    # 归一化口径与 `compute_loss` 里的 `reduce_row(..., row_keep)` 逐位一致（0/1 掩码）
+    use = (row_keep > 0).to(per_row.dtype)
+    return (per_row * use).sum() / use.sum().clamp_min(1e-6)
+
+
 def _policy_logits(out: dict[str, torch.Tensor], temp: float) -> torch.Tensor:
     """按**行为策略的温度**换算出策略 logits：`π(·|s;T) = softmax(logits / T)`。
 
@@ -536,7 +616,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  value_key: str = "value",
                  policy_temp: float = 1.0,
                  adv_fixed: torch.Tensor | None = None,
-                 adv_norm: str = "batch") -> tuple[torch.Tensor, dict[str, float]]:
+                 adv_norm: str = "batch",
+                 ref: tuple[float, torch.Tensor] | None = None,
+                 il: tuple[float, torch.Tensor] | None = None) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -555,11 +637,27 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     @param policy_temp 行为策略的采样温度 `T`：`logp_new` 与 `logp_old` 都必须在
         `softmax(logits/T)` 这个**同一个分布**上算（见 `_policy_logits()` 的坑）。
         ⚠ 它只影响 PPO 的替代项与熵，**不影响**值头/辅助头（那些是状态级的量）。
+        ⚠ **也包括 KL 锚**（`ref`）：锚项必须与策略损失用**同一个** `softmax(logits/T)`。
+    @param ref `(β, π_ref 的 logits)` —— **对现任的 KL 锚**（W3）：`total += β·KL(π_θ‖π_ref)`。
+        `π_ref` 的 logits 由 `_ref_logits()` **冻结预算**（`no_grad` ⇒ 它不进反向图）；
+        `ref=None`（缺省）时**一行都不走** ⇒ β=0 与加这个功能之前逐位相同。
+    @param il  `(w, 引擎最优候选下标 [B])` —— **逐候选引擎标签的模仿项**（W4 第一步）：
+        `total += w · CE(logits, 引擎最优候选)`，`w` 缺省 0（`il=None` ⇒ 一行都不走）。
+        三条口径：① **只在学生行上**（与策略损失同一个 `row_keep`）；② 同一把温度尺子
+        （`softmax(logits/T)`，与 `_policy_logits()` 逐字一致）；③ **只吃掩码、不吃 RWR 权重**
+        （与 `danger` 同一个理由：它是"这张牌该不该打"的行为标签，按回报加权等于按结果
+        去偏"打哪张"，会把标签本身带歪）。`b["il_target"]` 由调用方按行号取好（见 `train()`）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
     total = torch.zeros((), device=b["label"].device)
     eff = row_keep if row_w is None else (row_w if row_keep is None else row_keep * row_w)
+    ref_kl_t: torch.Tensor | None = None
+    ref_beta = 0.0
+    il_w = 0.0
+    il_tgt: torch.Tensor | None = None
+    if il is not None:
+        il_w, il_tgt = float(il[0]), il[1]
 
     def reduce_row(per_row: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:
         """逐行损失 → 标量（有掩码/权重时按权重归一；没有时就是 mean，与原行为逐位相同）。
@@ -571,6 +669,17 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
             return per_row.mean()
         denom = use.sum().clamp_min(1e-6)
         return (per_row * use).sum() / denom
+
+    # ★ W3：对**现任**的 KL 锚 `β · KL(π_θ ‖ π_ref)` —— 与 objective 无关（bc/rwr/ppo 都成立），
+    #   所以放在策略损失之前、只算一次。三条口径（见 `ref_kl_term()` 的推导）：
+    #   ① **只在学生行上算**：与策略损失同一个 `row_keep`（对手/老师的行不是"我们要训的那个策略"的行为）；
+    #   ② **同一把温度尺子**：`softmax(logits/T)`，与 `_policy_logits()` 逐字一致；
+    #   ③ **π_ref 冻结**：logits 由 `no_grad` 预算（`_ref_logits`），这里只读不建图。
+    if ref is not None:
+        ref_beta, ref_logits = ref
+        ref_kl_t = ref_kl_term(out["policy"], ref_logits, row_keep=row_keep, temp=policy_temp)
+        parts["ref_kl"] = float(ref_kl_t.detach())
+        total = total + ref_beta * ref_kl_t
 
     if ppo is not None:
         logp_old, clip_eps, ent_coef = ppo
@@ -678,6 +787,20 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         l_e = reduce_row(per_row)
         parts["effect"] = float(l_e.detach())
         total = total + w["effect"] * l_e
+    # ★ W4 第一步：**逐候选引擎标签**的模仿项 `w · CE(logits, 引擎最优候选)`。
+    #   为什么值得加：`effect`（打后向听/进张）与 `cand.derived`（含听牌形）是**引擎给的稠密标签** ——
+    #   无采样噪声、无 critic、不依赖闸门算力；而 RL 的效应（~1 顺位点）落在 ±2.35 的分辨率里看不见。
+    #   ⚠ 三条口径写在 `il` 的 docstring 里（只在学生行 / 同一把温度 / 不吃 RWR 权重）。
+    #   ⚠ `w == 0` 时 `total` 加的是**精确的 0 张量**（`il_w * l_il` 不是 `0.0` 常量），
+    #   但它与"这一项不存在"在本项目的前向里逐位相同（无 dropout/BN，`+0` 不改任何梯度）——
+    #   判据是 `--il-weight 0` 与改动前**逐位相同**（见 `selfcheck` / W3 同款做法）。
+    if il_tgt is not None:
+        logits_il = _policy_logits(out, policy_temp)
+        l_il = F.cross_entropy(logits_il, il_tgt, reduction="none")
+        # 掩码口径与 `danger` 一致：**只吃掩码、不吃 RWR**（见 docstring ③）
+        l_il = reduce_row(l_il, row_keep)
+        parts["il_ce"] = float(l_il.detach())
+        total = total + il_w * l_il
     if ssl is not None:
         head, mask, target = ssl
         logits = head(out["e_tokens"])                       # [B,K,类型数]
@@ -685,6 +808,12 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
             l_ssl = F.cross_entropy(logits[mask], target[mask])
             parts["ssl"] = float(l_ssl.detach())
             total = total + w.get("ssl", 1.0) * l_ssl
+    if ref_kl_t is not None:
+        # 锚项**占总损失的比例**（含它自己）—— 与 `ref_kl` 一起打，用来判断"锚是不是白加"：
+        # 占比 ≪1% 说明 β 太小、这一项管不住；≫50% 说明它在主导（策略几乎没在动）。
+        with torch.no_grad():
+            parts["ref_kl_share"] = float((ref_beta * ref_kl_t).abs()
+                                         / total.detach().abs().clamp_min(1e-12))
     return total, parts
 
 
@@ -693,31 +822,52 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
              ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0,
              row_keep=None, value_key: str = "value",
              ablate: dict[str, list[tuple[int, int]]] | None = None,
-             extra: dict[str, np.ndarray] | None = None) -> dict:
-    """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率。
+             extra: dict[str, np.ndarray] | None = None,
+             rows: np.ndarray | None = None,
+             il_target: np.ndarray | None = None) -> dict:
+    """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率
+    + **引擎最优候选一致率**（W4 的低噪判据）。
 
     @param row_keep 只在**这些行**上统计一致率（自对弈数据里 = 学生那一代的行；
         不给就统计全部行）。⚠ 损失仍在全部行上算（那是"这一局的局面"的损失，与谁动的手无关）。
     @param ablate **块消融**（消融矩阵）：val 必须与 train 用同一份消融输入，否则表读不出来
     @param extra 额外逐行数组（键名 = batch 键）：`gae-hand` 的 `vtarget` 走它 —— 否则 val 的
         `compute_loss` 会因为取不到 `vtarget` 直接 KeyError
+    @param rows 只在**这个行子集**上评（`--val-every` 的廉价读数用它；缺省 = 全部行）。
+        ⚠ 行子集必须是**固定的那一份**：每次读数换样本的话，两次之间的差里混着采样噪声，
+        "val CE 有没有抬头"就判不出来了（早停会随机早停或永不早停）。
+    @param il_target `[n]` 逐行**引擎最优候选下标**（`dataset.engine_targets`）。给了就同时报
+        `engine_top1`（argmax(logits) == 引擎最优）与 `engine_random`（**随机基线** `1/nlegal` 的
+        均值）——后者是"这个一致率在多少之上才算学到东西"的参照。⚠ 它与 `row_keep` 一起用时
+        就是"**行为策略基线**"（`train()` 在开训前用 `--init` 那一份网读一次）。
     """
     model.eval()
-    n = int(data["nlegal"].shape[0])
+    n_all = int(data["nlegal"].shape[0])
+    rows_arr = None if rows is None else np.asarray(rows, dtype=np.int64)
+    n = n_all if rows_arr is None else int(rows_arr.size)
     types = data["meta"].get("action_types", [])
     hit = tot = 0
     by_type: dict[str, list[int]] = {}
     first_legal = 0
+    eng_hit = eng_tot = 0
+    eng_rand = 0.0
     loss_sum = 0.0
     parts_sum: dict[str, float] = {}
     ssl_hit = ssl_n = 0
     gen = torch.Generator(device="cpu").manual_seed(12345)          # val 掩码固定 ⇒ 同种子可比
+    il_arr = None if il_target is None else np.asarray(il_target, dtype=np.int64)
     for i0 in range(0, n, batch):
-        idx = np.arange(i0, min(i0 + batch, n))
+        end = min(i0 + batch, n)
+        # `rows` 给定时按**行子集**取（下标仍是原表的行号：`_batch` / `row_keep` / `extra` 都按它对齐）
+        idx = np.arange(i0, end) if rows_arr is None else rows_arr[i0:end]
         b = _batch(data, idx, device, ablate=ablate)
         if extra:
             for k, arr in extra.items():
                 b[k] = torch.from_numpy(np.asarray(arr[idx], dtype=np.float32)).to(device)
+        il_b = None
+        if il_arr is not None:
+            il_b = torch.from_numpy(il_arr[idx]).to(device)
+            b["il_target"] = il_b
         ssl = None
         if ssl_head is not None and mask_frac > 0:
             evt_masked, mask_rows, target = mask_events(b["evt"], mask_frac, gen)
@@ -729,7 +879,10 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
         #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
         kb_e = None if row_keep is None else torch.from_numpy(
             np.asarray(row_keep[idx], dtype=np.float32)).to(device)
-        loss, parts = compute_loss(out, b, ssl=ssl, row_keep=kb_e, value_key=value_key)
+        # ⚠ IL 项在这里**权重给 0**：val 只拿它的读数（`loss_il_ce` = 对引擎标签的 CE），
+        #   不让它进 val 的 loss —— 否则"val loss"就成了训练目标的函数，与历史读数不可比。
+        loss, parts = compute_loss(out, b, ssl=ssl, row_keep=kb_e, value_key=value_key,
+                                   il=(None if il_b is None else (0.0, il_b)))
         loss_sum += float(loss) * idx.size
         for k, v in parts.items():
             parts_sum[k] = parts_sum.get(k, 0.0) + v * idx.size
@@ -748,6 +901,13 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
         hit += int((take(pred) == take(b["label"])).sum())
         first_legal += int((take(b["label"]) == 0).sum())
         tot += int(take(b["label"]).numel())
+        # ★ W4：**引擎最优候选一致率** + 随机基线（都按同一个 `sel` 取行，与 top1 同口径）
+        if il_b is not None:
+            nleg_b = b["nlegal"].to(pred.device)
+            eng_hit += int((take(pred) == take(il_b)).sum())
+            eng_tot += int(take(il_b).numel())
+            eng_rand += float((1.0 / nleg_b.clamp_min(1).float())[sel].sum()) if sel is not None \
+                else float((1.0 / nleg_b.clamp_min(1).float()).sum())
         # 按动作类型分解（教师偏爱哪些类型、模型学会了没有）—— 类型来自数据集里的 `label_type`
         if data.get("label_type") is not None:
             tids = np.asarray(data["label_type"][idx], dtype=np.int64)
@@ -764,10 +924,68 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
            "loss": loss_sum / max(1, tot),
            **{f"loss_{k}": v / max(1, tot) for k, v in parts_sum.items()},
            "by_type": {k: {"n": v[1], "top1": v[0] / max(1, v[1])} for k, v in by_type.items()}}
+    if eng_tot:
+        out["engine_top1"] = eng_hit / eng_tot
+        out["engine_random"] = eng_rand / eng_tot
+        out["engine_n"] = eng_tot
     if ssl_n:
         out["ssl_acc"] = ssl_hit / ssl_n
         out["ssl_n"] = ssl_n
     return out
+
+
+#: 验证集早停的**改善容忍**：`val CE` 要比历史最好值低**至少**这个量才算"还在学"。
+#: 为什么不是"严格小于"：CE 在第 3 位小数上的抖动没有语义（尤其子集只有几百行），
+#: 用严格小于会让"平着走"也被算成改善 ⇒ 早停永远不触发（防过拟合那件事就没了）。
+CE_IMPROVE_TOL = 1e-4
+
+
+def ce_probe(model: M.V4Model, data: dict, device: str, *, rows: np.ndarray, batch: int,
+             ssl_head: MaskedEventHead | None = None, mask_frac: float = 0.0,
+             value_key: str = "value", ablate: dict[str, list[tuple[int, int]]] | None = None,
+             extra: dict[str, np.ndarray] | None = None, metric: str = "policy",
+             il_target: np.ndarray | None = None) -> float:
+    """**廉价 CE 读数**（`--val-every` 用）：在**固定行子集**上跑现成的 `evaluate()`，取 `loss_<metric>`。
+
+    为什么不另写一份指标：这个数必须与 epoch 行上打的 `policy {val_loss_policy}` **同一个口径**
+    （都是 `evaluate()` 的逐头损失），否则"train CE / val CE 两条线"没法与 epoch 行对照 ——
+    本仓库在"两把尺子量同一个东西"上踩过坑（`std(A)` 那两次量纲事故）。
+
+    @param metric 读哪个头的 CE：`policy`（缺省 = 行为标签的 CE，与 W3 逐位一致）/ `il`
+        （**引擎标签**的 CE，对应 `compute_loss` 里的 `parts["il_ce"]`）。⚠ 加了 `--il-weight > 0`
+        之后，**要优化的目标已经不是行为 CE 了**：
+    实测（见 `docs/TRAINING-V4.md` §14.12）行为 CE 从 0.512 抬到 0.62（那是**必然**的 ——
+    引擎标签与行为标签本来就只有 ~57% 重合），于是按行为 CE 判"没改善"会在 step 250~300 就把
+    这一轮掐掉，而那一刻**引擎 CE 还在降**。⇒ 用 `--il-weight` 时必须把护栏切到 `il`
+    （缺省仍是 `policy`，所以不给这个开关时逐位等于今天）。
+
+    ⚠ 调用方负责**把 `model` 放回 `train()`**（`evaluate()` 会 `model.eval()`）：见 `train()` 里的
+    `model.train(); ssl_head.train()`。本仓库的前向无 dropout/batchnorm，所以这一条今天不影响数值 ——
+    但"读一次指标就把训练模式改了"是那种**以后加个 dropout 才会咬人**的静默 bug，不留给下一个人。
+    """
+    ev = evaluate(model, data, device, batch=batch, ssl_head=ssl_head, mask_frac=mask_frac,
+                  value_key=value_key, ablate=ablate, extra=extra, rows=rows,
+                  il_target=il_target)
+    # ⚠ 头名 → 损失键名：`il` 在 `compute_loss` 里叫 `il_ce`（`loss_il_ce`）—— 两处必须对上，
+    #   否则 `--val-metric il` 会在第一次读数时炸（实测踩到，报"这个读数不存在"）。
+    part = "il_ce" if metric == "il" else metric
+    key = f"loss_{part}"
+    if key not in ev:
+        raise SystemExit(f"`--val-metric {metric}` 要的那个读数（`{key}`）这一轮不存在 —— "
+                         f"可用的是 {sorted(k[5:] for k in ev if k.startswith('loss_'))}"
+                         f"（`il` 需要 `--il-weight` 那一项真的在算：缺 `il_target` 就没有它）")
+    return float(ev[key])
+
+
+def probe_rows(n: int, want: int, seed: int = 0) -> np.ndarray:
+    """固定行子集（纯函数）：`n` 行里按**固定种子**抽 `want` 行并**升序**返回。
+
+    · 固定种子 ⇒ 每次读数都看同一批行（否则两次之间的差里混着采样噪声，早停判不出来）；
+    · **升序** ⇒ `_batch` 的 memmap 花式索引按升序读（与 v3 的 `bc._batch` 同规矩，避开随机读放大）。
+    """
+    if want >= n:
+        return np.arange(n, dtype=np.int64)
+    return np.sort(np.random.default_rng(seed).permutation(n)[:max(1, int(want))]).astype(np.int64)
 
 
 #: 三个阶段（**这一轮的核心改动**：第一轮辅助头不收敛 = 多任务权重冲突，所以分阶段）
@@ -855,6 +1073,43 @@ def train(args) -> dict:
         src = _load_behaviour(init_spec, device)
         model.load_state_dict(src.state_dict(), strict=True)
         print(f"初始化：从 {init_spec} 载入权重")
+    # ---- ★ W3：对**现任**的 KL 锚 `β · KL(π_θ‖π_ref)` -------------------------------------
+    # `docs/VALVES-AND-FIXTURES.md` §3 的 W3：历季"每轮只走 66/600 步 ⇒ 候选只是现任的微小扰动"，
+    # 而闸门的分辨率（n=2000 时 ±2.35 顺位点）**看不见**那个量级。⇒ 改成"让每轮真的能动
+    # （放宽 KL 预算）+ 让方向可靠（**对现任加 KL 锚**）"：锚把 π_θ 的每一次移动都拉回现任，
+    # 于是"能动"与"别乱动"可以分别用两个旋钮（KL 早停阈值 / β）调。
+    #
+    # ⚠ `--ref-beta 0`（缺省）时**这一整段一行都不走**（连参考网都不建、不载）⇒ 与加这个功能
+    #   之前**逐位相同**（这是能不能安全上线的判据；临时脚本用 HEAD 那份 `pretrain` 逐位对过）。
+    ref_beta = float(getattr(args, "ref_beta", 0.0) or 0.0)
+    if ref_beta < 0:
+        raise SystemExit(f"--ref-beta 不能为负（收到 {ref_beta:g}）：它是「把 π_θ 拉回现任」的力度")
+    ref_spec = getattr(args, "ref", None)
+    ref_model: M.V4Model | None = None
+    if ref_beta > 0:
+        # 缺省锚 = `--init` 那一份**现任**（"单调精修"要锚的就是现任，不是随便一份权重）
+        source = ref_spec or init_spec
+        if not source:
+            raise SystemExit("--ref-beta > 0 但**没有参考策略**：给 `--ref <net.bin|model.pt|ckpt 目录>`，"
+                             "或给 `--init`（缺省锚 = `--init` 那一份现任网）")
+        ref_model = _load_behaviour(source, device)
+        # ⚠ 冻结三件套：`requires_grad_(False)`（参数不更新）+ `eval()`（无 dropout，语义正确性）
+        #   + `_ref_logits` 里的 `no_grad`（它的 logits 绝不进反向图）。
+        ref_model.requires_grad_(False)
+        ref_model.eval()
+        print(f"KL 锚（W3）：β={ref_beta:g}，参考策略 {source}"
+              f"{'（**缺省 = `--init` 那一份现任**）' if not ref_spec else '（`--ref` 显式指定）'}"
+              f"；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）")
+        # ⚠ **锚不是目标**（P2 护栏）：它只把 π_θ 拉回现任 —— "别乱动"是**约束**，不是**方向**。
+        #   实测：β=0.5 会把 `--il-weight` 的一致率增益**砍半**（KL(π‖init) 0.377→0.168）。
+        #   所以"放宽 KL 预算 + 加锚"这一对里，**位移额度靠别的东西给**，锚只负责别跑偏。
+        print("   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）："
+              "实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）"
+              "⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。")
+    elif ref_spec:
+        # 不静默：给了 `--ref` 却没给 β ⇒ 锚不生效（那是缺省行为，但要说出来）
+        print(f"⚠ 给了 `--ref {ref_spec}` 但 `--ref-beta`=0 ⇒ **锚不生效**（那几行一行都没走，"
+              f"与加这个功能之前逐位相同）；要启用就同时给 `--ref-beta <β>`")
     weights = dict(M.loss_weights())
     weights["ssl"] = args.ssl_weight
     # `--only-heads`：只训点名的头（其余头的损失权重清零 + 参数冻住）。"修 critic"那一轮用它
@@ -937,6 +1192,17 @@ def train(args) -> dict:
             tensor, start, width = slices[bid]
             ablate.setdefault(tensor, []).append((start, width))
         print(f"消融块：{ablate_blocks}（输入张量对应通道整段置 0；权重与标签不动）")
+    # π_ref 的 logits **预算一次**（冻结量；见 `_ref_logits` 的三条纪律）。放在这里是为了
+    # `ablate` 已经建好 —— 锚必须看与学生**同一份**（可能被消融过的）输入。
+    ref_np: np.ndarray | None = None
+    if ref_model is not None:
+        t_ref = time.perf_counter()
+        ref_np = _ref_logits(ref_model, train_data, device, args.eval_batch, ablate=ablate or None)
+        print(f"KL 锚：π_ref 的 logits 已冻结预算（{ref_np.shape[0]} 行 × {ref_np.shape[1]} 候选，"
+              f"{ref_np.nbytes / 2**20:.1f} MiB，用时 {time.perf_counter() - t_ref:.1f}s）"
+              f"—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）")
+        del ref_model                                # logits 已落成数组，参考网本身不再需要
+        ref_model = None
     if value_key == "rtg":
         ok = all(d.get("rtg") is not None
                  and bool(np.isfinite(np.asarray(d["rtg"], dtype=np.float32)).all())
@@ -963,6 +1229,35 @@ def train(args) -> dict:
     if keep_tr is not None and frac_tr <= 0.0:
         raise SystemExit("学生行占比 0 —— `dataset build --student` 的策略串与轨迹里的 "
                          "`policy` 字段没对上（这是静默失真的源头，宁可报错）")
+    # ---- ★ 验证集早停（防过拟合，廉价读数）--------------------------------------------------
+    # `--val-every 0`（缺省）= 关闭 ⇒ 与今天的行为逐位相同（一行都不走）。
+    # 读数用**现成的 `evaluate()`**（`ce_probe`），口径与 epoch 行的 `policy {val_loss_policy}` 一致；
+    # 行子集**固定**（`probe_rows`），否则两次之间的差里混着采样噪声。日志**同时打 train CE 与
+    # val CE**：train 还在降、val 开始抬头 = "开始记数据"（这就是要早停的那一刻）。
+    val_every = int(getattr(args, "val_every", 0) or 0)
+    val_patience = int(getattr(args, "val_patience", 3) or 3)
+    # ★ W4：早停读哪个头的 CE —— 缺省 `policy`（= 加这个开关之前逐位相同）；用 `--il-weight > 0`
+    #   时必须切到 `il`（行为 CE 在 IL 臂上**必然**抬高，见 `ce_probe` 的注释与 §14.12 的实测）。
+    val_metric = str(getattr(args, "val_metric", "policy") or "policy")
+    if val_metric not in ("policy", "il"):
+        raise SystemExit(f"--val-metric 只认 policy|il（收到 {val_metric!r}）")
+    if val_every < 0 or val_patience < 1:
+        raise SystemExit(f"--val-every 不能为负（{val_every}）、--val-patience 至少 1（{val_patience}）")
+    # 读数子集**至少 1024 行**（而不是 `eval_batch` 的 256）：逐行 policy CE 是**重尾**的
+    # （实测：中位 0.17 / p90 1.50 / max 14.3）⇒ 256 行的**自助法标准误 ≈0.048**，而要看的
+    # 趋势量级只有 0.03~0.05 ⇒ 读数会被自己的抽样噪声主导（实测同一份权重上 256 行子集给 0.6213、
+    # 全 val 切分给 0.5241）。1024 行把标准误压到 ≈0.024，且行子集**固定** ⇒ 趋势可比。
+    # ⚠ 绝对水位仍然不等于"全 val 切分"的数（本仓库的旧账：两把尺子量同一个东西）——
+    #   早停只用**趋势**，epoch 行上那个 `policy …` 才是全切分的数。
+    probe_n = max(int(args.eval_batch), 1024)
+    tr_probe = va_probe = None
+    if val_every > 0:
+        tr_probe = probe_rows(n, probe_n, seed=0)
+        va_probe = probe_rows(nv, probe_n, seed=0)
+        print(f"验证集早停（防过拟合）：每 {val_every} 步读一次 **{val_metric}** CE（train/val 各 "
+              f"{tr_probe.size}/{va_probe.size} 行，**固定子集**；口径 = `evaluate().loss_{val_metric}`），"
+              f"连续 {val_patience} 次未改善（相对最好值，容忍 {CE_IMPROVE_TOL:g}）就**正常收尾**"
+              f"（返回 metrics + 照常导出 ckpt）")
     if w_tr is not None:
         print(f"RWR：β={args.rwr_beta:g} 千点 → 权重 min={float(w_tr.min()):.3f} "
               f"mean={float(w_tr.mean()):.3f} max={float(w_tr.max()):.3f}")
@@ -1061,6 +1356,71 @@ def train(args) -> dict:
             print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
                   f"（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）")
         print(f"  （用时 {time.perf_counter() - t_v:.1f}s；优势已冻结、不再随 critic 变动）")
+    # ---- ★ W4 第一步：**逐候选引擎标签**（`docs/VALVES-AND-FIXTURES.md` §3 的 W4）---------------
+    # 为什么需要它：RL 这一路已证明"看不见自己的进步"（每轮只走 100~150 步、KL 预算用满也只有
+    # 0.05 nats ⇒ 效应小于闸门在小算力下的分辨率 ±2.35 顺位点）。而引擎**每一行**都给逐候选的
+    # 牌效量（`cand.derived`：打后向听/进张/听牌形），那是**稠密、无采样噪声、不花闸门算力**的
+    # 监督信号，且**每一份现有紧凑集里都有**（不需要新采集、不需要新生产者、不新增列）。
+    # 放在这里（而不是函数开头）是为了 `--advantage gae-hand/hand`：那两路的 val 前向要 `vtarget`
+    # （`val_extra` 刚建好），否则下面那次"开训前读数"会 KeyError。
+    #
+    # 两个用途分开，别混：
+    #   ① `--il-weight > 0` ⇒ **训练项** `w·CE(logits, 引擎最优候选)`（只在学生行上）；
+    #   ② 无论权重多少 ⇒ **读数** `engine_top1`（argmax(logits) == 引擎最优）+ 随机基线
+    #      `engine_random`（`1/nlegal` 的均值）+ **行为策略基线**（开训前那份 `--init` 网的同一个数）。
+    #      这个一致率就是"这一轮有没有学到东西"的低噪判据（取代 ±2.35 那个闸门）。
+    il_w = float(getattr(args, "il_weight", 0.0) or 0.0)
+    if il_w < 0:
+        raise SystemExit(f"--il-weight 不能为负（收到 {il_w:g}）：它是模仿项的权重，0 = 关闭")
+    il_tr: np.ndarray | None = None
+    il_va: np.ndarray | None = None
+    _il_span = spec.block_slices()["cand.derived"]
+    _il_n = int(_f3.DERIVED_CANDIDATE)
+    try:
+        il_tr = v4ds.engine_targets(train_data)
+        il_va = v4ds.engine_targets(val_data)
+    except spec.ContractError as e:
+        if il_w > 0:
+            raise SystemExit(f"⛔ `--il-weight {il_w:g}` 需要**逐候选引擎标签**，但这一份紧凑集给不出：{e}")
+        # ⚠ 不静默：老紧凑集（`cand.derived` 整块 0）在 `--il-weight 0` 下照常能训（逐位兼容），
+        #   但**必须说出来**"这一轮没有引擎一致率读数"，否则报告里会凭空少一个判据而没人发现。
+        print(f"⚠ **没有逐候选引擎标签**（`--il-weight` = 0 ⇒ 不影响训练，但一致率读数本轮不可用）：{e}")
+    if il_w > 0:
+        # ⛔ **显眼警告**（第七个 P2 护栏）：`--il-weight > 0` 是**已被实测证否**的开关，不改它的
+        #   行为（不拦、不报错），但**必须**在日志最上面说清楚，免得下一轮又把它当"进步手段"打开。
+        #   只在 > 0 时打（缺省 0 一个字符都不多 ⇒ 行为与加这个警告之前逐位相同）。
+        print("=" * 100)
+        print(f"⛔⛔ 警告：`--il-weight {il_w:g}` > 0 —— 这个开关**已被实测证否**（不是「还没验证」）：")
+        print("    · 引擎逐候选标签是**纯牌效**，**没有打点、没有押し引き**（`dora_count` 刻意不参与）")
+        print("      ⇒ 优化它必然拿这两样去换进张；")
+        print("    · 实测（一季第 1 代，2026-10-03）：闸门 **Δ=−12.65 顺位点 CI[−14.92,−10.42] n=2000**")
+        print("      （越界 5 倍）、和了率 24.1%→20.8%、放铳率 15.7%→17.0%、**平均打点 7037→6010**；")
+        print("    · 唯一「变好」的读数是 `engine_top1`（+6.95pp）—— 它与闸门**符号相反**，")
+        print("      ⛔ **贴标签的读数不是强弱判据**；**判强弱只能走闸门**（多套新牌山配对、CI 排除 0 且为正）。")
+        print("    详见 `NOTES.md` §6.5 第六十三轮 / `docs/TRAINING-V4.md` §14.12.6。")
+        print("=" * 100)
+    if il_tr is not None:
+        print(f"引擎标签（W4）：目标候选从 `cand.derived[{_il_span[1]}:{_il_span[1] + _il_n}]` 现算"
+              f"（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；"
+              f"模仿项权重 `--il-weight` = {il_w:g}"
+              f"{'（**缺省 0 = 逐位等于今天**）' if il_w == 0 else ''}")
+    # 行为策略基线：**开训前**（= `--init` 那一份现任网）的引擎一致率 —— 判据是"训练后必须显著高于它"
+    il_init = il_init_all = il_rand = None
+    if il_va is not None:
+        model.eval()
+        ev0 = evaluate(model, val_data, device, batch=args.eval_batch, value_key=value_key,
+                       ablate=ablate or None, extra=val_extra, il_target=il_va)
+        ev0s = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
+                         value_key=value_key, ablate=ablate or None, extra=val_extra, il_target=il_va)
+                if keep_va is not None else ev0)
+        model.train()
+        il_init = ev0s.get("engine_top1")          # 行为策略基线（学生行 = 与策略损失同口径）
+        il_init_all = ev0.get("engine_top1")       # 全部行（含教师/对手行）
+        il_rand = ev0.get("engine_random")         # 随机基线 1/平均候选数
+        print(f"引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 {il_init:.4f}"
+              f"（n={ev0s.get('engine_n', 0)}）/ 全部行 {il_init_all:.4f}"
+              f" | **随机基线 1/平均候选数** {il_rand:.4f}"
+              f" ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** {il_init:.4f}")
     print(f"数据：训练 {n} 条（{len(meta['train_files'])} 场）/ 验证 "
           f"{nv} 条；lmax={meta['lmax']}；"
           f"标签侧 {'有' if meta['has_aux'] else '无'}；"
@@ -1078,6 +1438,11 @@ def train(args) -> dict:
     t0 = time.perf_counter()
     gstep = 0
     stop_reason: str | None = None
+    # 验证集早停的状态（**跨 epoch 连续**：早停判的是"整轮"的 val CE 轨迹，不是单个 epoch）；
+    # `ce_log` 逐点存下来进 metrics —— 报告要的是"两条 CE 的数值轨迹"，只打屏会丢。
+    best_val_ce: float | None = None
+    no_improve = 0
+    ce_log: list[dict[str, float]] = []
     for epoch in range(1, args.epochs + 1):
         rng = np.random.default_rng(args.seed + epoch)
         perm = rng.permutation(n)
@@ -1109,6 +1474,10 @@ def train(args) -> dict:
             b = _batch(train_data, idx, device, ablate=ablate or None)
             if adv_tr is not None:
                 b["vtarget"] = torch.from_numpy(vtar_tr[idx]).to(device)
+            # ★ W4：这一批的**引擎最优候选**下标（逐行取好；`il_w=0` 时只用来报 `il_ce` 读数）
+            il_b = None if il_tr is None else torch.from_numpy(il_tr[idx]).to(device)
+            if il_b is not None:
+                b["il_target"] = il_b
             ssl = None
             if stage in ("a", "c") and args.mask_frac > 0:
                 evt_masked, mask_rows, target = mask_events(b["evt"], args.mask_frac, rng_gen)
@@ -1121,12 +1490,15 @@ def train(args) -> dict:
             if logp_tr is not None:
                 ppo = (logp_tr[idx].to(device), ppo_cfg[0], ppo_cfg[1])
             adv_b = None if adv_tr is None else torch.from_numpy(adv_tr[idx]).to(device)
+            ref_b = None if ref_np is None else torch.from_numpy(ref_np[idx]).to(device)
             # ⚠ 优势**只归一化一次**：`adv_tr`（手级路径）已在 `_hand_advantage` 里按学生行全局
             #   z-score 过 ⇒ 这里 `norm="none"`；遗留路径（V 每步重算的 final/rtg 口径）才是批内。
             loss, parts = compute_loss(out, b, weights if only else (STAGE_WEIGHTS.get(stage) or weights),
                                        ssl, row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
                                        policy_temp=p_temp, adv_fixed=adv_b,
-                                       adv_norm=("none" if adv_tr is not None else "batch"))
+                                       adv_norm=("none" if adv_tr is not None else "batch"),
+                                       ref=(None if ref_b is None else (ref_beta, ref_b)),
+                                       il=(None if il_b is None else (il_w, il_b)))
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -1157,17 +1529,57 @@ def train(args) -> dict:
             for k, v in parts.items():
                 run_parts[k] = run_parts.get(k, 0.0) + v * idx.size
             gstep += 1
+            # ★ **验证集早停**（防过拟合）：每 `--val-every` 步在**固定子集**上读一次 train/val 的
+            #   policy CE。判据是"val CE 相对**历史最好值**没有再降（容忍 `CE_IMPROVE_TOL`）"，
+            #   连续 `--val-patience` 次 ⇒ 停这一轮。**正常收尾**：只置 `stop_reason` 后 break，
+            #   下面照常 `evaluate` / 追加 `history` / 落盘 ckpt（不是异常退出）。
+            if val_every > 0 and gstep % val_every == 0:
+                # ⚠ `evaluate()` 会把 model 置 eval ⇒ 读完必须放回 train（见 `ce_probe` 的注释）
+                model.eval()
+                t_ce = ce_probe(model, train_data, device, rows=tr_probe, batch=args.eval_batch,
+                                ssl_head=ssl_head, mask_frac=args.mask_frac, value_key=value_key,
+                                ablate=ablate or None, metric=val_metric, il_target=il_tr)
+                v_ce = ce_probe(model, val_data, device, rows=va_probe, batch=args.eval_batch,
+                                ssl_head=ssl_head, mask_frac=args.mask_frac, value_key=value_key,
+                                ablate=ablate or None, extra=val_extra, metric=val_metric,
+                                il_target=il_va)
+                model.train()
+                ssl_head.train()
+                improved = best_val_ce is None or v_ce < best_val_ce - CE_IMPROVE_TOL
+                if improved:
+                    best_val_ce = v_ce
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                ce_log.append({"step": gstep, "train_ce": t_ce, "val_ce": v_ce,
+                               "best_val_ce": best_val_ce, "no_improve": no_improve})
+                # 两条线一起打：train CE 还在降而 val CE 抬头 = "开始记数据"（不只是看单个数）
+                print(f"  [val] step {gstep:>5}（{val_metric} CE）: train {t_ce:.4f} | val {v_ce:.4f}"
+                      f"（最好 {best_val_ce:.4f}，连续 {no_improve} 次未改善）"
+                      f" ⇒ {'还在学' if improved else '可能开始记数据'}")
+                if no_improve >= val_patience:
+                    stop_reason = (f"验证集 {val_metric} CE 连续 {no_improve} 次未改善 ⇒ 早停（防过拟合）"
+                                   f"：step {gstep} 的 val {val_metric} CE {v_ce:.4f}（最好 {best_val_ce:.4f}）"
+                                   f"、train {t_ce:.4f}")
+                    print(f"  !! {stop_reason}")
+                    break
         ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
                       mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
-                      extra=val_extra)
+                      extra=val_extra, il_target=il_va)
         ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
-                           value_key=value_key, ablate=ablate or None, extra=val_extra)
+                           value_key=value_key, ablate=ablate or None, extra=val_extra,
+                           il_target=il_va)
                   if keep_va is not None else None)
         row = {"epoch": epoch, "stage_at_end": cur_stage, "train_loss": run / max(1, seen),
                "train_parts": {k: v / max(1, seen) for k, v in run_parts.items()},
                "train_student_frac": frac_tr, "val_student_frac": frac_va,
                "val_top1_student": (ev_stu["top1"] if ev_stu else None),
                "val_top1_student_n": (ev_stu["n"] if ev_stu else None),
+               # W4：**引擎一致率**（全行 / 学生行）+ 随机基线 + 行为策略基线（开训前那一份）
+               "val_engine_top1": ev.get("engine_top1"),
+               "val_engine_top1_student": (ev_stu.get("engine_top1") if ev_stu else None),
+               "val_engine_random": ev.get("engine_random"),
+               "il_init_engine_top1_student": il_init,
                **{f"val_{k}": v for k, v in ev.items() if k != "by_type"},
                "val_by_type": ev["by_type"]}
         history.append(row)
@@ -1182,13 +1594,27 @@ def train(args) -> dict:
               f"ssl_acc {ev.get('ssl_acc', float('nan')):.3f}"
               + (f" | **学生行 top1 {ev_stu['top1']:.3f}**(n={ev_stu['n']})" if ev_stu else "")
               + (f" | 学生行 policy {ev_stu['loss_policy']:.3f}" if ev_stu else "")
+              # ★ W4 的**低噪判据**：引擎一致率（学生行）—— 括号里是**开训前**的行为策略基线
+              + (f" | **引擎一致率 {ev_stu.get('engine_top1'):.3f}**"
+                 f"(init {il_init:.3f} / 随机 {ev.get('engine_random'):.3f})"
+                 if (ev_stu and ev_stu.get("engine_top1") is not None) else "")
+              + (f" | 引擎 CE(学生行) {ev_stu.get('loss_il_ce'):.4f}"
+                 if (ev_stu and ev_stu.get("loss_il_ce") is not None) else "")
               + (f" | KL {row['train_parts'].get('kl', float('nan')):.4f}"
                  f"/{row['train_parts'].get('kl_inv', float('nan')):.4f}"
                  f" clip {row['train_parts'].get('clip_frac', float('nan')):.3f}"
                  f" |A| {row['train_parts'].get('adv_abs', float('nan')):.2f}"
                  f" gap {row['train_parts'].get('logp_gap', float('nan')):.2f}"
                  f" |g| {row['train_parts'].get('grad_norm', float('nan')):.2f}"
-                 if "kl" in row["train_parts"] else ""))
+                 if "kl" in row["train_parts"] else "")
+              # W3 的锚项：数值 + **它对总损失的占比**（占比 ≪1% ⇒ β 太小、管不住这一轮）
+              + (f" | ref_kl={row['train_parts'].get('ref_kl', float('nan')):.4f}"
+                 f"（β={ref_beta:g}，占总损失 "
+                 f"{100 * row['train_parts'].get('ref_kl_share', float('nan')):.1f}%）"
+                 if ref_beta > 0 else "")
+              # 验证集早停的两条线也进 epoch 行：一眼看出"还在学"还是"开始记数据"
+              + (f" | CE({val_metric}: train {ce_log[-1]['train_ce']:.4f} / val {ce_log[-1]['val_ce']:.4f})"
+                 if ce_log else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
         if stop_reason:
@@ -1214,9 +1640,36 @@ def train(args) -> dict:
         "has_h0": bool(has_h0),
         "h0_dim": (int(train_data["h0"].shape[1]) if has_h0 else None),
         "no_carry": bool(no_carry),
+        # W3（对现任的 KL 锚）：β 与**这一轮实测的** `ref_kl`（最后一个 epoch 的学生行均值）。
+        # 台账里"β=0.5 那一轮到底离现任多远"就是一个数；β=0 时是 None（那一项压根没算）。
+        "ref_beta": float(ref_beta),
+        "ref_source": (ref_spec or init_spec) if ref_beta > 0 else None,
+        "ref_kl": (history[-1]["train_parts"].get("ref_kl") if (history and ref_beta > 0) else None),
+        "ref_kl_mean": (float(np.mean([h["train_parts"]["ref_kl"] for h in history
+                                       if "ref_kl" in h["train_parts"]]))
+                        if (history and ref_beta > 0) else None),
+        # 验证集早停（防过拟合）：开关 + **两条 CE 的完整轨迹**（报告要用；只打屏会丢）
+        "val_every": int(val_every), "val_patience": int(val_patience),
+        # ★ W4：早停读的是哪个头（`policy` 缺省 = 与 W3 逐位一致；`il` = 引擎标签的 CE）
+        "val_metric": val_metric,
+        "val_ce_checks": ce_log,
+        "val_best_ce": best_val_ce,
         "final_val_top1": history[-1]["val_top1"] if history else None,
+        # ★ W4 第一步（逐候选引擎标签）：权重 + **一致率的四个数**（低噪判据；报告的关键读数）。
+        #   `init` = 开训前那一份 `--init` 网（= 行为策略基线）；`random` = `1/平均候选数`；
+        #   判据是 `final_student` **显著高于** `init_student`（student 口径 = 与策略损失同一个 row_keep）。
+        "il_weight": float(il_w),
+        "il_target_source": (f"cand.derived[{_il_span[1]}:{_il_span[1] + _il_n}]" if il_tr is not None
+                             else None),
+        "il_engine_top1_init_student": il_init,
+        "il_engine_top1_init_all": il_init_all,
+        "il_engine_random": il_rand,
+        "il_engine_top1_final_student": (history[-1]["val_engine_top1_student"] if history else None),
+        "il_engine_top1_final_all": (history[-1]["val_engine_top1"] if history else None),
+        "il_loss_final_student": (history[-1]["train_parts"].get("il_ce") if history else None),
         "stages": {"a": "policy+effect（主干先会打牌）", "b": "冻主干只训头", "c": "联合微调（余弦降 lr）",
-                   "ssl": f"掩码事件重建 frac={args.mask_frac} weight={args.ssl_weight}"},
+                   "ssl": f"掩码事件重建 frac={args.mask_frac} weight={args.ssl_weight}",
+                   "il": f"引擎逐候选标签的模仿项 weight={il_w:g}（只在学生行）"},
     }
     (out / "metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2),
                                       encoding="utf-8")
@@ -1293,7 +1746,42 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ablate-blocks", default=None, metavar="B1,B2",
                     help="把点名的输入块整段置 0（`v4 spec` 里登记的块 id）—— 消融矩阵用")
     ap.add_argument("--init", default=None,
-                    help="从这份权重起步（ckpt 或 net.bin）—— 缺省随机初始化（纯模仿那几轮的口径）")
+                    help="从这份权重起步（ckpt / net.bin / 含 model.pt 的 ckpt 目录）—— "
+                         "缺省随机初始化（纯模仿那几轮的口径）")
+    # ---- ★ W3：对**现任**的 KL 锚（`docs/VALVES-AND-FIXTURES.md` §3 W3）--------------------
+    ap.add_argument("--ref", default=None, metavar="NET.BIN|MODEL.PT|CKPT 目录",
+                    help="KL 锚的**参考策略** π_ref（冻结）；缺省 = `--init` 那一份（**现任**）。"
+                         "只在 `--ref-beta > 0` 时被读取")
+    ap.add_argument("--ref-beta", type=float, default=0.0,
+                    help="KL 锚的权重 β：`loss += β·KL(π_θ(·|s) ‖ π_ref(·|s))`（只在学生行上、"
+                         "与策略损失同一个 softmax(logits/T)）。**缺省 0 = 完全等于今天的行为**"
+                         "（逐位相同，向后兼容）；W3 的「放宽 KL 预算 + 对现任加锚」里 β 是"
+                         "「别乱动」那个旋钮（0.1~1 量级起步）。"
+                         "⛔ **它只保证「别乱动」，不提供目标**：它把 π_θ 拉回现任，"
+                         "既不补打点也不补押し引き —— 实测 β=0.5 把 `--il-weight` 的一致率增益"
+                         "**砍半**（KL(π‖init) 0.377→0.168）⇒ 想要「能动」就得同时有别的信号源")
+    # ---- ★ W4 第一步：**逐候选引擎标签**的模仿项（`docs/VALVES-AND-FIXTURES.md` §3 的 W4）------
+    ap.add_argument("--il-weight", type=float, default=0.0,
+                    help="**引擎逐候选标签**的模仿项权重 w：`loss += w·CE(logits, 引擎最优候选)`"
+                         "（目标由 `dataset.engine_best_index` 从 `cand.derived` 现算：打后向听最小 → "
+                         "进张/听牌枚数最多 → 同分取最小下标；**只在学生行上**、与 `--ref-beta` 可同时开）。"
+                         "**缺省 0 = 逐位等于今天**（那一项一行都不走）。"
+                         "⛔⛔ **>0 已被实测证否，别拿它当进步手段**（2026-10-03 第六十三轮）："
+                         "引擎牌效标签**缺打点/押し引き**（`dora_count` 刻意不参与）⇒ 优化它必然"
+                         "拿这两样换进张：`-IlWeight 1` 起的那一季第 1 代闸门 **Δ=−12.65 顺位点**"
+                         "CI[−14.92,−10.42]（和了率 24.1%→20.8%、打点 7037→6010）。"
+                         "唯一「变好」的读数是 `engine_top1`（+6.95pp）—— 它与闸门**符号相反**，"
+                         "⛔ **不是强弱判据**。**判强弱只能走闸门**（多套新牌山配对、CI 排除 0 且为正）")
+    # ---- ★ 防过拟合：验证集早停（廉价读数）--------------------------------------------------
+    ap.add_argument("--val-every", type=int, default=0,
+                    help="每多少步在**固定子集**上读一次 train/val 的 policy CE（0 = 关闭 = 今天的行为）")
+    ap.add_argument("--val-patience", type=int, default=3,
+                    help="val CE 连续多少次没有改善（相对最好值，容忍 1e-4）就停这一轮"
+                         "（**正常收尾**：返回 metrics + 照常导出 ckpt）")
+    ap.add_argument("--val-metric", choices=["policy", "il"], default="policy",
+                    help="早停读哪个头的 CE：`policy`（缺省 = 行为标签，与 W3 逐位一致）/ "
+                         "`il`（**引擎标签**，配合 `--il-weight > 0` 时必须用它 —— 行为 CE 在 IL 臂上"
+                         "必然抬高，见 `docs/TRAINING-V4.md` §14.12 的实测）")
     # ⚠ 缺省 False = **硬闸门**：紧凑集没有 `h0` 列（长程 carry）就报错退出。
     #   为什么不是"缺了就退化"：上线端喂整手 carry、训练端喂窗口 —— 两边不是同一个量，
     #   而那种不一致**不报错**（训练照跑、指标照出）。见 `train()` 里的三态说明。
