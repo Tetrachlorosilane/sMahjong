@@ -3,13 +3,15 @@ package mahjong.core;
 import java.util.Map;
 
 import mahjong.util.Json;
+import mahjong.util.Log;
 
 /** 规则配置。字段含义见 docs/PROTOCOL.md §5。 */
 public final class Rules {
 
     /** "tonpuu"（东风战）或 "hanchan"（半庄）。 */
     public String length = "hanchan";
-    /** 赤宝牌数量：0 / 3 / 4。 */
+    /** 赤宝牌数量：**0 / 3**。其它值在 {@link #clampToSane()} 里归一化（1/2 表达不了"少放哪几张"，
+     *  4 = 两张赤五筒也没有码位）—— 见 NOTES §10。 */
     public int aka = 3;
     public boolean kuitan = true;
     public boolean ura = true;
@@ -39,8 +41,8 @@ public final class Rules {
      * <p>头名赏 = {@code (返点 − 原点)/1000 × 4} → M.League /《天凤》= 20，
      * 《雀魂》段位场「精算基准与配给原点相同（25000）」→ 无头名赏
      * （见 `docs/日本麻将.md` §精算点数）。⚠《雀魂》的**一位必要点数**（和了止/续行）是 30000，
-     * 与精算基准不同 —— 本项目把它拆成两个概念不合适，所以这一项只当**精算基准**用；
-     * 唯一的另一位必要点数使用者是西入（`westExtension`，三套预设都是关）。
+     * 与精算基准是**两个数** —— 本项目把它拆成 `requiredPoints` 与这一项两个字段；
+     * 另一位必要点数的使用者是**延长战**（`westExtension` = 南入/西入：《天凤》《雀魂》开、M.League 关）。
      */
     public int returnScore = 30000;
     public int[] uma = {15, 5, -5, -15};
@@ -168,9 +170,9 @@ public final class Rules {
                 aka = 3; kuitan = true; ura = true; kanDora = true; koyaku = false; minHan = 1;
                 doubleYakuman = false; renhou = "off"; headBump = false; sanchaAbort = true;
                 fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
-                nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+                nagashiMangan = true; tobi = true; agariyame = true; westExtension = true;
                 // 《天凤》：All Last 庄家**达到一位必要点数且为 1 位**时才和了止/听牌止
-                //（文档 L116），西入的门槛也是它（L145：达到 30000 即可结束）
+                //（文档 L116）；延长战（东风战→南入、半庄→西入）的门槛也是它（L145：达到 30000 即结束）
                 requiredPoints = 30000;
                 // 包牌只到「大三元 / 大四喜」，但**包牌承担复合后的全部役满得点**
                 kuikae = true; pao = true; paoFourKan = false; paoCoversAll = true;
@@ -183,7 +185,7 @@ public final class Rules {
                 aka = 3; kuitan = true; ura = true; kanDora = true; koyaku = false; minHan = 1;
                 doubleYakuman = true; renhou = "off"; headBump = false; sanchaAbort = false;
                 fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
-                nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+                nagashiMangan = true; tobi = true; agariyame = true; westExtension = true;
                 // 《雀魂》四人段位场：**一位必要点数 = 30000**（文档 L157）
                 requiredPoints = 30000;
                 // 《雀魂》特有：**天和时国士无双视作国士无双十三面**（文档 L1149）
@@ -288,7 +290,16 @@ public final class Rules {
      * 付方凑齐"构造保证（这样任何罚符值都不会凭空生灭点数）。
      */
     private void clampToSane() {
-        aka = clamp(aka, 0, 3);
+        // 赤五只有"每种一张"这一套码位（0m/0p/0s）⇒ "几张"只有 0 / 3 有意义：
+        // 1、2（"少放几张"）说不出少的是**哪几张**；4（两张赤五筒）也没有码位（AUDIT S-26）。
+        // ⇒ **归一化**到 0 / 3，并留一条可见告警：静默保留 1/2 会让牌山照发 3 张赤五，
+        //   而牌谱导出按 `aka >= 3 ? 1 : 0` 声明 0 张 —— 正是 AGENTS §2.3-11 警告的自相矛盾组合。
+        if (aka != 0 && aka != 3) {
+            int normalized = (aka <= 0) ? 0 : 3;
+            Log.warn("规则 aka=" + aka + " 无对应编码，已归一化到 " + normalized
+                    + "（合法取值只有 0 = 无赤五 / 3 = 每种一张）");
+            aka = normalized;
+        }
         notenPenalty = clamp(notenPenalty, 0, 12000);
         startScore = clamp(startScore, 1000, 1000000);
         returnScore = clamp(returnScore, 1000, 1000000);

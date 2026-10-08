@@ -149,6 +149,20 @@ public final class RoundOptions {
      */
     public static List<Object> chiSets(int[] concealed, int calledKind) {
         final List<Object> sets = new ArrayList<>();
+        for (int[] kp : chiKinds(concealed, calledKind)) {
+            sets.add(Json.arr(Tiles.kindToStr(kp[0]), Tiles.kindToStr(kp[1])));
+        }
+        return sets;
+    }
+
+    /**
+     * 吃：可行的搭子**按牌种**给出（{a, b} 两种 kind 各一个）。
+     *
+     * <p>拆出来是因为"用哪张赤五去吃"要**牌码**（`0p` / `5p`），而牌码得看手里真实持有的 id ——
+     * {@link #chiSets} 只给普通码，留给不关心赤宝的调用方（例如"有没有这个搭子"的纯判据）。
+     */
+    public static List<int[]> chiKinds(int[] concealed, int calledKind) {
+        final List<int[]> sets = new ArrayList<>();
         if (Tiles.isHonor(calledKind)) {
             return sets;
         }
@@ -164,9 +178,40 @@ public final class RoundOptions {
                 continue;
             }
             if (concealed[a] > 0 && concealed[b] > 0) {
-                sets.add(Json.arr(Tiles.kindToStr(a), Tiles.kindToStr(b)));
+                sets.add(new int[]{a, b});
             }
         }
         return sets;
+    }
+
+    /**
+     * 吃的**赤宝取法**：给一组搭子与"这两种牌手里有没有普通 / 有没有赤五"，列出所有取法。
+     *
+     * <p>顺序固定为**普通在前、用赤在后**（客户端按钮顺序也就稳定）。同花色里两种 kind 只可能有
+     * **一个**是赤五位（`5m`/`5p`/`5s`）⇒ 最多两条。
+     *
+     * <p>⚠ 手里**只有赤五**那一种时只给一条，但牌码必须写 `0p` —— 老实现写 `5p` 让服务端去回退，
+     * 结果是客户端**看不到**"这一副要吃赤五"，与碰/大明杠的口径也不一致（见 PROTOCOL §3.6）。
+     *
+     * @param kinds    两种牌种（长度 2）
+     * @param hasPlain 两种牌种手里有没有普通牌
+     * @param hasRed   两种牌种手里有没有赤五（非赤位恒 false）
+     */
+    public static List<Object> chiVariants(int[] kinds, boolean[] hasPlain, boolean[] hasRed) {
+        final List<Object> out = new ArrayList<>();
+        final List<Object> base = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            // 只有赤五可用时，基准那条就得写赤牌码（否则等于谎报"吃的是普通五"）
+            base.add(Tiles.kindToStr(kinds[i], hasRed[i] && !hasPlain[i]));
+        }
+        out.add(base);
+        for (int i = 0; i < 2; i++) {
+            if (hasRed[i] && hasPlain[i]) {
+                final List<Object> v = new ArrayList<>(base);
+                v.set(i, Tiles.kindToStr(kinds[i], true));
+                out.add(v);
+            }
+        }
+        return out;
     }
 }

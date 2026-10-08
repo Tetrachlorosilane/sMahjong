@@ -134,12 +134,75 @@ public final class Server {
     }
 
     public void onClosed(Session s) {
+        retire(s);
         sessions.remove(s);
         Table t = s.table;
         if (t != null) {
             t.onSessionClosed(s);
             serverCleanup(t);
         }
+    }
+
+    /**
+     * 已断开连接留下的**重连凭据**保留时长（`pid → token/uuid/昵称`）。
+     *
+     * <p>为什么要保留到 TTL：`rejoin` 原来只在**旧连接还活着**时找得到人（`sessions` 里按 pid 查）——
+     * 真断了线（进程被杀、网线断了、客户端重启）就再也没人认得出他，于是"接回座位"只能退化成
+     * **只看 uuid**：谁同步/复制一份 `settings.json`，谁就能顶掉一个**托管中**的座位
+     * （托管 = 人还在、只是断线）。
+     *
+     * <p>保留 TTL 之后，新连接只要拿得出**原 pid + 原 token**，就能证明"我是那个客户端"，
+     * 接回座位这件事才有真正的凭据。TTL 取 2 分钟：够客户端重启一次、也够网络抖动恢复，
+     * 而这段时间里原 token 只在一个**已关闭**的连接上存在过，猜不到。
+     */
+    public static final long REJOIN_TTL_MS = 120_000L;
+
+    /** 一条已断开连接留下的重连凭据（只在 TTL 内有效）。 */
+    public static final class Retired {
+        public final String token;
+        public final String uuid;
+        public final String name;
+        final long expiresAt;
+
+        Retired(String token, String uuid, String name, long expiresAt) {
+            this.token = token;
+            this.uuid = uuid;
+            this.name = name;
+            this.expiresAt = expiresAt;
+        }
+    }
+
+    private final Map<Long, Retired> retired = new ConcurrentHashMap<>();
+
+    /** 连接关掉时留一份重连凭据（没有 token 的连接不留：它本来也认不出来）。 */
+    public void retire(Session s) {
+        if (s == null || s.pid <= 0 || s.token == null || s.token.isEmpty()) {
+            return;
+        }
+        final long now = System.currentTimeMillis();
+        retired.put(s.pid, new Retired(s.token, s.uuid, s.name, now + REJOIN_TTL_MS));
+        purgeRetired(now);
+    }
+
+    /** 按 pid 取**未过期**的重连凭据（过期的顺手删掉）。 */
+    public Retired retiredFor(long pid) {
+        purgeRetired(System.currentTimeMillis());
+        return retired.get(pid);
+    }
+
+    /** 过期即删（惰性清理：调用点在 `retire` 与 `retiredFor`，不需要后台线程）。 */
+    private void purgeRetired(long now) {
+        retired.values().removeIf(r -> r.expiresAt <= now);
+    }
+
+    /**
+     * 自测钩子：直接投一份重连凭据（**不建连接**）—— 用来测"命中 / 过期即删"，
+     * 免得为了等 2 分钟、或为了造一个真 socket 才写测试（见 `SelfTest.rejoinCredentialTests`）。
+     *
+     * @param ttlMs 有效期；**负数 = 已经过期**（直接进"过期即删"那条路）
+     */
+    public void debugRetire(long pid, String token, String uuid, String name, long ttlMs) {
+        retired.put(pid, new Retired(token, uuid, name, System.currentTimeMillis() + ttlMs));
     }
 
     private void serverCleanup(Table t) {

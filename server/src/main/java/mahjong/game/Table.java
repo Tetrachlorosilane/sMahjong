@@ -1229,6 +1229,11 @@ public final class Table implements Runnable {
             // 训练接口用：小局结算结果（和了者/放铳者/听牌/收支）留在桌上。
             // 必须在广播 round_end **之前**赋值 —— 记录器是在 round_end 的钩子里读它的。
             lastResult = res;
+            // 下一局的推进量**先算一次**：既喂 `round_end.next`（PROTOCOL §3.7），也喂下面真正的推进
+            // —— 一处算、两处用，杜绝"报文里的 next 与真走的下一局不一致"。
+            // ⚠ 只在这里调一次：`nextRound` 内部会调 `nextHonba`，而那个函数带自检计数器。
+            final int[] nxt = RoundScoring.nextRound(roundWind, kyoku, honba, dealer,
+                    res.dealerRenchan, res.agari, res.nagashi);
             broadcast(Json.obj(
                     "ev", "round_end",
                     "round", Json.obj(
@@ -1241,6 +1246,11 @@ public final class Table implements Runnable {
                     "abortive", res.abortive,
                     "reason", YakuCodes.reasonOf(res.abortReason),
                     "renchan", res.dealerRenchan,
+                    // 只按推进规则算的"下一局"；要不要真打看本条的 game_over 与之后的 game_end
+                    "next", Json.obj(
+                            "bakaze", new String[]{"E", "S", "W", "N"}[nxt[0]],
+                            "kyoku", nxt[1],
+                            "honba", nxt[2]),
                     "game_over", false));
             sleepMs(roundDelayMs);
             // 小局之间：等**所有玩家确认**，或最多等 ROUND_CONFIRM_MS（5 秒）。
@@ -1266,7 +1276,8 @@ public final class Table implements Runnable {
                 // 本场数：连庄与**流局后轮庄**都 +1，只有"闲家和了轮庄"才清零
                 // （判据抽在 RoundScoring.nextHonba，真值表在自检里；这里原来内联写着，
                 //  且与规则反了 —— 中途流局不加、荒牌流局庄家不听时清零，见 AUDIT S-46）
-                honba = RoundScoring.nextHonba(honba, res.dealerRenchan, res.agari, res.nagashi);
+                // ⚠ 用上面 `round_end.next` 那一次算出来的值（同一个纯函数、同一次调用）
+                honba = nxt[2];
                 if (res.dealerRenchan) {
                     // ---------- 和了止 / 听牌止（`docs/日本麻将.md` L116）----------
                     // 三条判据抽在 RoundScoring.stopAtAllLast（本局是 All Last、庄家连庄由这里判，
@@ -1275,17 +1286,17 @@ public final class Table implements Runnable {
                             && RoundScoring.stopAtAllLast(dealer, res.agari, res.nagashi,
                                                           res.tenpai, scores, rules)) {
                         gameOver = true;
+                    } else if (roundWind > lastWind()
+                            && RoundScoring.extensionReached(rules, scores)) {
+                        // 延长战（南入/西入）里**连庄也要每局看一次**门槛：有人到一位必要点数就当场终止
+                        //（《天凤》sudden death；轮庄那一支在下面 keepPlayingWest 里判）
+                        gameOver = true;
                     }
                 } else {
                     int nd = (dealer + 1) % 4;
-                    int nw = roundWind;
-                    int nk;
-                    if (nd == 0) {
-                        nw = roundWind + 1;
-                        nk = 1;
-                    } else {
-                        nk = nd + 1;
-                    }
+                    // ⚠ 场风/局也用 `nxt`（与 `round_end.next` 同源），别再内联推一遍
+                    int nw = nxt[0];
+                    int nk = nxt[1];
                     if (nw > lastWind()) {
                         int top = -1;
                         for (int i = 0; i < 4; i++) {
@@ -1816,7 +1827,10 @@ public final class Table implements Runnable {
                 "dealer", r.dealer,
                 // 谁手里有 14 张（公开信息）：半场进入时各家张数靠它一次摆对
                 "drawn_seat", r.lastDrawer,
-                "turn", r.lastDrawer,
+                // ⚠ `turn` 与 `drawn_seat` **不是一件事**：`turn` = 当前该行动的人（打牌后就是下家，
+                //   鸣牌后是鸣牌者）。老实现两个字段都填 `lastDrawer` ⇒ 重连/观战会把刚打牌那家
+                //   高亮成当前手番（AGENTS §6.4 / PROTOCOL §3.8）。
+                "turn", r.turnSeat,
                 "round", Json.obj(
                         "bakaze", new String[]{"E", "S", "W", "N"}[r.roundWind],
                         "kyoku", r.kyoku,

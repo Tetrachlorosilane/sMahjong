@@ -128,6 +128,35 @@ public final class RoundScoring {
     }
 
     /**
+     * 下一局的「场风 / 局 / 本场」—— **只按推进规则算**，不判"要不要真打"。
+     *
+     * <p>规则：连庄 → 场风与局不动、本场按 {@link #nextHonba}；闲家轮庄 → 庄家下家坐庄，
+     * 轮回到起家（下家 `== 0`）时**场风 +1、局回到 1**。
+     *
+     * <p>⚠ 这里**不判**击飞、和了止/听牌止、延长战门槛（{@link #keepPlayingWest}）与投票结束 ——
+     * 那四条由 `Table.playGame` 在同一个位置判。所以 `round_end.next` 的语义是
+     * 「**若这一局之后继续打**，下一局就是它」；客户端要同时看同一条报文里的 `game_over`
+     * 与之后的 `game_end`（PROTOCOL §3.7）。
+     *
+     * <p>⚠ 调用方**只调一次**（`Table` 用它同时喂 `next` 与真正的推进）：`nextHonba` 里带自检计数器，
+     * 同一局调两次会把计数翻倍、把自检的真值表带偏。
+     *
+     * @return `{场风下标, 局, 本场}`（场风下标 0..3 = E / S / W / N）
+     */
+    public static int[] nextRound(int roundWind, int kyoku, int honba, int dealer,
+                                  boolean dealerRenchan, boolean agari, boolean nagashi) {
+        int nh = nextHonba(honba, dealerRenchan, agari, nagashi);
+        if (dealerRenchan) {
+            return new int[]{roundWind, kyoku, nh};
+        }
+        int nd = (dealer + 1) % 4;
+        if (nd == 0) {
+            return new int[]{roundWind + 1, 1, nh};
+        }
+        return new int[]{roundWind, nd + 1, nh};
+    }
+
+    /**
      * **和了止 / 听牌止**（`docs/日本麻将.md` L116）：
      * 「《天凤》在 All Last 庄家**达到一位必要点数、且为 1 位**时，采用自动和了止、**听牌止**；
      * M.League 则继续按通常的连庄条件进行，直到庄家轮庄」。
@@ -191,7 +220,8 @@ public final class RoundScoring {
      * <p>⚠ 场风上限是 **`lastWind + 1`**（东风战 → 南入、半庄战 → 西入），**没有北入**
      * （原文 L145 明写「大部分规则没有北风场，因而也没有北入」，且「半庄战最多进行到西 4 局」）。
      * 旧实现写死 `nw &lt;= 3`，于是半庄的西 4 轮庄后会进**北 1 局**、东风战还能一路进到**西场**
-     * （审计 S-54；三套预设 `westExtension` 全关 → 休眠缺陷，但开关一开就错）。
+     * （审计 S-54）。⚠ 2026-10 起《天凤》《雀魂》预设**真的打开了** `westExtension`
+     * （此前三套预设全关、这条链是睡着的，见 NOTES §10.2），所以它现在每次实局都会跑到。
      *
      * @param top             当前 1 位的持点
      * @param nextRoundWind   轮庄后的场风编号（0=东 1=南 2=西 3=北）
@@ -202,6 +232,29 @@ public final class RoundScoring {
         return rules != null && rules.westExtension
                 && nextRoundWind <= lastWind + 1
                 && top < rules.requiredPoints;
+    }
+
+    /**
+     * 延长战（南入 / 西入）里**是否已经有人达到一位必要点数** ⇒ 当场终止对局。
+     *
+     * <p>为什么单列一条：{@link #keepPlayingWest} 只在**轮庄**那一支被问到，而延长战是
+     * "**谁先到门槛谁就赢**"（《天凤》sudden death，`docs/日本麻将.md` L145）—— **庄家连庄**
+     * 也要每局结束看一次，否则"庄家连庄把门槛刷过去了、牌局却还在打"。
+     *
+     * <p>与 {@link #keepPlayingWest} 同口径：`westExtension` 关（M.League）时恒 `false`；
+     * `requiredPoints = 0`（"不要求"）时任何非负持点都算达到 —— 与 `keepPlayingWest` 的
+     * `top &lt; 0` 恒假一致，两处不会互相打架。
+     */
+    public static boolean extensionReached(Rules rules, int[] scores) {
+        if (rules == null || !rules.westExtension || scores == null) {
+            return false;
+        }
+        for (int s : scores) {
+            if (s >= rules.requiredPoints) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
