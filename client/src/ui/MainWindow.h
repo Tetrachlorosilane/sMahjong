@@ -61,6 +61,16 @@ public:
     QLabel* voteLabelForTest() const { return m_voteLabel; }
     /** 当前持有的身份（uuid）：`uuid_ok{issued:true}` 之后应当被写进设置。 */
     QString uuidForTest() const { return m_settings.uuid; }
+    /**
+     * 自测：按**当前设置**算出"连上就发的第一条身份命令"。
+     *
+     * <p>有重连凭据（pid+token）时是 `rejoin`、否则是 `hello` —— 这条判据是 A5 的核心
+     * （凭据在手才允许接回托管中的座位），所以单独开个口子，测试不必真的去连一次网。
+     */
+    QJsonObject identityCommandForTest(const QString& name) { return identityCommand(name); }
+    /** 自测：当前保存的重连凭据（`hello_ok` 之后应当被写进设置）。 */
+    long long pidForTest() const { return m_settings.pid; }
+    QString tokenForTest() const { return m_settings.token; }
     /** 等待室的座位行（自检要看「掉线」标记有没有画进去）。 */
     QLabel* seatLabelForTest(int seat) const
     {
@@ -165,6 +175,9 @@ private:
     void refreshVoteUi();
     /** 把 `uuid_ok` 给的**身份**写进设置文件（`issued=true` 时必须存下来）。 */
     void saveIdentity();
+
+    /** 连上后发的第一条身份命令：有重连凭据 `rejoin`，否则 `hello`（见实现处的说明）。 */
+    QJsonObject identityCommand(const QString& name);
 
     /**
      * 打开回放窗口（懒建）：replayId 为空 = 只打开列表让用户挑。

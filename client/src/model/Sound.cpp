@@ -333,7 +333,7 @@ void Player::init()
             //   `defaultAudioOutput()` 为空是"后端在但没设备"的唯一线索。
             const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
             trace(QStringLiteral("init → backend=%1 默认输出设备=%2")   // i18n-keep
-                      .arg(m_backend, dev.isNull() ? QStringLiteral("(空)")
+                      .arg(m_backend, dev.isNull() ? QStringLiteral("(空)")   // i18n-keep
                                                    : dev.description()));
         }
         for (const QString& n : allNames()) {
@@ -342,8 +342,8 @@ void Player::init()
             }
             const QByteArray bytes = data(n);
             if (bytes.isEmpty()) {
-                trace(QStringLiteral("init %1 → 跳过：三档都没取到素材（材质包/exe 同级 sfx/qrc）")
-                          .arg(n));   // i18n-keep
+                trace(QStringLiteral("init %1 → 跳过：三档都没取到素材（材质包/exe 同级 sfx/qrc）")   // i18n-keep
+                          .arg(n));
                 continue;
             }
             // ⚠ `QSoundEffect::setSource()` 只吃 URL，没有 setData()：
@@ -365,8 +365,8 @@ void Player::init()
                                                           .arg(n);
             auto* tmp = new QFile(tmpPath, this);
             if (!tmp->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                trace(QStringLiteral("init %1 → 跳过：临时文件建不出（%2：%3）")
-                          .arg(n, tmpPath, tmp->errorString()));   // i18n-keep
+                trace(QStringLiteral("init %1 → 跳过：临时文件建不出（%2：%3）")   // i18n-keep
+                          .arg(n, tmpPath, tmp->errorString()));
                 delete tmp;
                 continue;
             }

@@ -9,6 +9,7 @@
 #include "model/Sound.h"
 #include "model/TableModel.h"
 #include "model/Tile.h"
+#include "net/NetClient.h"
 #include "net/Protocol.h"
 #include "ui/ActionBar.h"
 #include "ui/AutoBar.h"
@@ -45,6 +46,8 @@
 #include <QStringList>
 #include <QTextStream>
 #include <QThread>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QVector>
 #include <cstdio>
 
@@ -1542,6 +1545,34 @@ int run(const QString& outDir)
         }
     }
 
+    // ---------- 抢杠询问（kind = chankan）：服务端 2026-10 起才真的会发 ----------
+    // 客户端**早就**写了这个 kind 的分支（标题/状态栏文案 + 荣和/跳过）—— 这里把它钉住：
+    // 服务端一开就有人能应答，而不是"按钮画不出来、只能等超时见逃"。
+    {
+        ActionBar ck;
+        ck.setAsk(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"ask","ask_id":94,"seat":0,"kind":"chankan","deadline_ms":15000,)"
+            R"("from":2,"tile":"5z","options":[{"type":"ron"},{"type":"pass"}]})"),
+            nullptr));
+        check(ck.titleTextForTest().contains(lang::t("ui.action.chankan")),
+              QStringLiteral("抢杠询问的标题走 ui.action.chankan（实际：%1）")
+                  .arg(ck.titleTextForTest()));
+        checkEq(ck.buttonTextsForTest().join(QStringLiteral("/")),
+                QStringLiteral("%1/%2").arg(lang::t("ui.action.ron"), lang::t("ui.action.pass")),
+                QStringLiteral("抢杠只有「荣和」+「跳过」两个按钮（不能碰/吃/杠）"));
+        QJsonObject ckSent;
+        QObject::connect(&ck, &ActionBar::actionReady, [&](const QJsonObject& o) { ckSent = o; });
+        QPushButton* ronBtn = ck.buttonForTest(lang::t("ui.action.ron"));
+        check(ronBtn != nullptr, QStringLiteral("抢杠的「荣和」按钮在"));
+        if (ronBtn != nullptr) {
+            ronBtn->click();
+            checkEq(ckSent.value(QStringLiteral("type")).toString(), QStringLiteral("ron"),
+                    QStringLiteral("抢杠回包 type = ron"));
+            checkEq(QString::number(ckSent.value(QStringLiteral("ask_id")).toInt()),
+                    QStringLiteral("94"), QStringLiteral("抢杠回包带 ask_id"));
+        }
+    }
+
     // ---------- 大明杠的赤宝选择：同样只做"真有得选"时的区分 ----------
     {
         const QString kanLabel = lang::t("ui.action.daiminkan");
@@ -2288,6 +2319,22 @@ int run(const QString& outDir)
                 QStringLiteral("牌谱：普通五筒 → 25（赤与不赤是两套码）"));
         checkEq(QString::number(TenhouLog::tileNumber(QStringLiteral("nope"))), QStringLiteral("-1"),
                 QStringLiteral("牌谱：认不出的牌码 → -1"));
+        // 流局状态字：码必须**逐个**与服务端 `YakuCodes.REASON` 对齐（2026-10 修：`nine_terms`
+        // 从来不是服务端的码 ⇒ 九种九牌被静默导成通用「流局」，而检查器只看"是不是流局"，抓不到）
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("kyuushu")), QStringLiteral("九種九牌"),
+                QStringLiteral("牌谱：kyuushu → 九種九牌（曾因码写错落成「流局」）"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("four_winds")), QStringLiteral("四風連打"),
+                QStringLiteral("牌谱：four_winds → 四風連打"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("four_kans")), QStringLiteral("四槓散了"),
+                QStringLiteral("牌谱：four_kans → 四槓散了"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("four_riichi")), QStringLiteral("四家立直"),
+                QStringLiteral("牌谱：four_riichi → 四家立直"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("triple_ron")), QStringLiteral("三家和了"),
+                QStringLiteral("牌谱：triple_ron → 三家和了"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("nagashi")), QStringLiteral("流し満貫"),
+                QStringLiteral("牌谱：nagashi → 流し満貫"));
+        checkEq(TenhouLog::drawStatusForTest(QStringLiteral("exhaustive")), QStringLiteral("流局"),
+                QStringLiteral("牌谱：荒牌流局/未知码 → 兜底「流局」"));
 
         // 手写一小局，**五种鸣牌都走到**：吃 / 碰 / 大明杠 / 加杠 / 暗杠，外加摸切、立直、自摸和了。
         const QStringList deal { QStringLiteral("1m"), QStringLiteral("2m"), QStringLiteral("3m"),
@@ -2765,7 +2812,7 @@ int run(const QString& outDir)
         // ② 再载入真正的语言文件（后面的断言都基于它；也验证了"exe 同级 i18n/ → qrc"这条路）
         check(lang::load(), QStringLiteral("语言文件载入成功（exe 同级 i18n/ 或 qrc）"));
         checkEq(lang::locale(), QStringLiteral("zh_CN"), QStringLiteral("缺省语言是 zh_CN"));
-        checkEq(QString::number(lang::keyCount()), QStringLiteral("450"),
+        checkEq(QString::number(lang::keyCount()), QStringLiteral("451"),
                 QStringLiteral("语言文件条目数（新增/删除 key 必须同步这条断言）"));
         // 建房对话框的「规则预设」三条文案 + 字段标题 + tooltip 必须在语言文件里
         //（服务端加了预设而客户端没跟上时，这条会先红）
@@ -2792,7 +2839,7 @@ int run(const QString& outDir)
                 QStringLiteral("reason.* 条目数（荒牌/流满/九种九牌/四风/四杠/四家立直/三家和了）"));
         checkEq(QString::number(family.value(QStringLiteral("error"))), QStringLiteral("13"),
                 QStringLiteral("error.* 条目数（含回放的两个码 + bad_seat + bad_bot_ai）"));
-        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("325"),
+        checkEq(QString::number(family.value(QStringLiteral("ui"))), QStringLiteral("326"),
                 QStringLiteral("ui.* 条目数（界面固定文案；**代码里的中文都在这族里**）"));
         // 结束对局投票 / 掉线托管：这两族同样是"漏一条 key 就会显示裸键"，
         // 所以除了上面那条总数断言，再把**用得着的几条**逐条点名（占位符也点）。
@@ -3879,6 +3926,25 @@ int run(const QString& outDir)
                 QStringLiteral("刚摸牌那家按 14 张画（13 + 摸牌）"));
         checkEq(QString::number(m.concealedCount(0)), QStringLiteral("13"),
                 QStringLiteral("其余家 13 张"));
+        // ⚠ `drawn_seat`（最后摸牌者）≠「手里有 14 张」：他已经打牌之后就是 13 张。
+        //   服务端的 `turn` 分清这两件事（打牌后 turn = 下家）—— 快照必须与实时路径同源，
+        //   否则观战/重连会给刚打牌那家多算一张、并把当前手番高亮错家。
+        m.applyEvent(proto::decodeLine(QByteArrayLiteral(
+            R"({"ev":"state","phase":"playing","seat":-1,"spectate":true,"dealer":2,)"
+            R"("drawn_seat":2,"turn":3,"round":{"bakaze":"E","kyoku":2,"honba":0,)"
+            R"("riichi_sticks":0},"scores":[25000,24000,26000,25000],)"
+            R"("melds":[[],[],[],[]],"discards":[[],["1m"],["9p"],[]],)"
+            R"("riichi":[false,false,false,false],"furiten":[false,false,false,false],)"
+            R"("dora_indicators":["5p"],"tiles_left":60,"dead_wall_left":4})"),
+            nullptr));
+        checkEq(QString::number(m.turn()), QStringLiteral("3"),
+                QStringLiteral("快照里的当前手番 = turn（打牌后是下家）"));
+        checkEq(QString::number(m.drawnSeat()), QStringLiteral("-1"),
+                QStringLiteral("最后摸牌那家已打牌 ⇒ 谁都只有 13 张（drawn_seat 只说明谁摸过）"));
+        checkEq(QString::number(m.concealedCount(2)), QStringLiteral("13"),
+                QStringLiteral("刚打牌那家按 13 张画（老实现按 drawn_seat +1 → 多一张）"));
+        checkEq(QString::number(m.concealedCount(3)), QStringLiteral("13"),
+                QStringLiteral("轮到的那家还没摸牌，也是 13 张"));
         checkEq(QString::number(m.kyoku()), QStringLiteral("2"),
                 QStringLiteral("快照里的场次要吃进来（半场进入不能从东 1 局重来）"));
         // 视角切换：只改"哪家画在下方"，不改任何判定
@@ -3970,6 +4036,69 @@ int run(const QString& outDir)
             Settings reread = Settings::load(path);
             checkEq(reread.uuid, kNew,
                     QStringLiteral("身份：新身份**立刻落盘**（否则下次连接又变成新玩家）"));
+        }
+
+        // ---- ①b 重连凭据（pid+token）：成对才存、连上优先 rejoin、失效要能自愈 ----
+        {
+            Settings st;
+            st.uuid = kOld;
+            st.pid = 4242;
+            st.token = QStringLiteral("deadbeef");
+            check(st.save(path), QStringLiteral("凭据：pid+token 能写进设置文件"));
+            Settings back = Settings::load(path);
+            check(back.pid == 4242, QStringLiteral("凭据：pid 往返"));
+            checkEq(back.token, QStringLiteral("deadbeef"), QStringLiteral("凭据：token 往返"));
+
+            MainWindow w;
+            w.applySettings(back, path);
+            // 有凭据 ⇒ 连上就 rejoin（服务端**只认** pid+token 才让接回托管中的座位）
+            const QJsonObject cmd = w.identityCommandForTest(QStringLiteral("我"));
+            checkEq(cmd.value(QStringLiteral("cmd")).toString(), QStringLiteral("rejoin"),
+                    QStringLiteral("有凭据时第一条命令是 rejoin"));
+            check(cmd.value(QStringLiteral("pid")).toVariant().toLongLong() == 4242,
+                  QStringLiteral("rejoin 带上原 pid"));
+            checkEq(cmd.value(QStringLiteral("token")).toString(), QStringLiteral("deadbeef"),
+                    QStringLiteral("rejoin 带上原 token"));
+            // 服务端回的 `hello_ok` 是**权威**：新凭据要立刻落盘
+            w.feedEventForTest(
+                parseEv(R"({"ev":"hello_ok","pid":7777,"token":"cafe","name":"我"})"));
+            check(w.pidForTest() == 7777, QStringLiteral("hello_ok 的 pid 被采纳"));
+            checkEq(w.tokenForTest(), QStringLiteral("cafe"), QStringLiteral("hello_ok 的 token 被采纳"));
+            Settings reread = Settings::load(path);
+            check(reread.pid == 7777 && reread.token == QStringLiteral("cafe"),
+                  QStringLiteral("新凭据**立刻落盘**（否则下次重连又接不回座位）"));
+
+            // 凭据失效（服务端重启 / 超出 TTL）⇒ 清掉并改走 hello，别卡在"连不上"
+            QVector<QJsonObject> sent;
+            w.setCommandTapForTest([&sent](const QJsonObject& o) { sent.append(o); });
+            w.feedEventForTest(parseEv(R"({"ev":"error","code":"bad_token"})"));
+            check(!sent.isEmpty()
+                          && sent.last().value(QStringLiteral("cmd")).toString()
+                                  == QLatin1String("hello"),
+                  QStringLiteral("bad_token ⇒ 清凭据并立刻改走 hello（自愈）"));
+            check(w.pidForTest() == 0 && w.tokenForTest().isEmpty(),
+                  QStringLiteral("bad_token ⇒ 本地凭据清掉"));
+            Settings after = Settings::load(path);
+            check(after.pid == 0 && after.token.isEmpty(),
+                  QStringLiteral("失效凭据不许留在盘上（下次别再用它去撞 bad_token）"));
+        }
+
+        // ---- ①c 半个凭据 = 没有凭据（清掉，并回到 hello）----
+        {
+            QJsonObject o;
+            o.insert(QStringLiteral("uuid"), kOld);
+            o.insert(QStringLiteral("pid"), 4242.0);       // 只有 pid、没有 token
+            QStringList repaired;
+            Settings half = Settings::fromJson(o, &repaired);
+            check(half.pid == 0 && half.token.isEmpty(),
+                  QStringLiteral("半个凭据被清掉（只有 pid 或只有 token 都不算）"));
+            check(repaired.contains(QStringLiteral("pid")),
+                  QStringLiteral("清掉半个凭据要登记成「已修复」（sanitize 的约定）"));
+            MainWindow w;
+            w.applySettings(half, path);
+            checkEq(w.identityCommandForTest(QStringLiteral("我"))
+                            .value(QStringLiteral("cmd")).toString(),
+                    QStringLiteral("hello"), QStringLiteral("没有凭据时第一条命令回到 hello"));
         }
 
         // ---- ② 掉线托管：等待室座位行与牌桌分数栏都要标出来 ----
@@ -4075,6 +4204,109 @@ int run(const QString& outDir)
             check(w.voteEndButtonForTest()->isHidden(),
                   QStringLiteral("投票：整场结束后「结束对局」按钮收起"));
         }
+    }
+
+    // ---------- 收包超时（A6）：下行静默 ⇒ 明确提示 + 断开，可以重连 ----------
+    // 真 loopback：起一个 QTcpServer，接住连接后**故意不再发**（TCP 半开 / 对端进程被杀的模拟）——
+    // 客户端必须在超时后给一条明确原因并断开；而"一直在收包"时**绝不能**误报。
+    {
+        QTcpServer srv;
+        check(srv.listen(QHostAddress::LocalHost, 0), QStringLiteral("收包超时：假服务端起得来"));
+        const quint16 port = srv.serverPort();
+        // 约定值是 60 秒（PROTOCOL §0）；这里把超时压到 300 ms —— 走的就是那条
+        // `MAHJONG_RECV_TIMEOUT_MS` 生产开关（测试与排查共用同一个入口）。
+        qputenv("MAHJONG_RECV_TIMEOUT_MS", "300");
+
+        // ① 静默：连上 → 收一条 `hello_ok`（算握手完成）→ 之后一个字都不发
+        {
+            NetClient c;
+            QVector<QJsonObject> events;
+            QStringList errors;
+            int disconnected = 0;
+            bool connected = false;
+            QObject::connect(&c, &NetClient::connected, [&]() { connected = true; });
+            QObject::connect(&c, &NetClient::disconnected, [&]() { ++disconnected; });
+            QObject::connect(&c, &NetClient::errorOccurred, [&](const QString& m) { errors << m; });
+            QObject::connect(&c, &NetClient::eventReceived,
+                             [&](const QJsonObject& e) { events << e; });
+            c.connectToServer(QStringLiteral("127.0.0.1"), port);
+            pumpFor(300);
+            check(connected, QStringLiteral("收包超时①：连上了假服务端"));
+            QTcpSocket* peer = srv.hasPendingConnections() ? srv.nextPendingConnection() : nullptr;
+            check(peer != nullptr, QStringLiteral("收包超时①：假服务端接到了连接"));
+            if (peer != nullptr) {
+                peer->write("{\"ev\":\"hello_ok\",\"pid\":1,\"name\":\"假\"}\n");
+                peer->flush();
+            }
+            pumpFor(150);
+            check(events.size() == 1,
+                  QStringLiteral("收包超时①：先收到了那条 hello_ok（%1 条）").arg(events.size()));
+            check(errors.isEmpty(), QStringLiteral("收包超时①：刚收到包时**不能**误报（%1）")
+                                        .arg(errors.join(QStringLiteral(" / "))));
+            // 保持静默：再过 900 ms（> 300 ms 超时）必须报超时并断开
+            pumpFor(900);
+            check(errors.size() == 1 && errors.first().contains(QStringLiteral("没有收到任何下行报文")),
+                  QStringLiteral("收包超时①：静默超时给了 `ui.net.recv_timeout`（实际：%1）")
+                      .arg(errors.join(QStringLiteral(" / "))));
+            check(disconnected == 1,
+                  QStringLiteral("收包超时①：断开信号恰好一次（实际 %1）").arg(disconnected));
+            check(!c.isConnected(), QStringLiteral("收包超时①：连接真的关了（界面可重连）"));
+            if (peer != nullptr)
+                peer->deleteLater();
+        }
+
+        // ② 一直在收包 ⇒ **绝不**误报（否则正常对局会被自己踢下线）
+        {
+            NetClient c;
+            QStringList errors;
+            int disconnected = 0;
+            QObject::connect(&c, &NetClient::errorOccurred, [&](const QString& m) { errors << m; });
+            QObject::connect(&c, &NetClient::disconnected, [&]() { ++disconnected; });
+            c.connectToServer(QStringLiteral("127.0.0.1"), port);
+            pumpFor(300);
+            QTcpSocket* peer = srv.hasPendingConnections() ? srv.nextPendingConnection() : nullptr;
+            check(peer != nullptr, QStringLiteral("收包超时②：假服务端接到了连接"));
+            if (peer != nullptr) {
+                // 每 100 ms 一条（间隔 < 300 ms 超时）：心跳正常时永远不该判掉线
+                for (int i = 0; i < 12; ++i) {
+                    peer->write("{\"ev\":\"pong\"}\n");
+                    peer->flush();
+                    pumpFor(100);
+                }
+            }
+            check(errors.isEmpty(), QStringLiteral("收包超时②：持续收包时不许误报（%1）")
+                                        .arg(errors.join(QStringLiteral(" / "))));
+            check(disconnected == 0, QStringLiteral("收包超时②：也不许断开（实际断开 %1 次）")
+                                         .arg(disconnected));
+            if (peer != nullptr)
+                peer->deleteLater();
+        }
+
+        // ③ 连上之后**一个字都没发**（服务端 accept 了却卡住 / 握手前就静默）：
+        //    同样要出提示 + 回到「未连接」—— 不能因为"还没握手"就把界面留在"已连接"。
+        {
+            NetClient c;
+            QStringList errors;
+            int disconnected = 0;
+            QObject::connect(&c, &NetClient::errorOccurred, [&](const QString& m) { errors << m; });
+            QObject::connect(&c, &NetClient::disconnected, [&]() { ++disconnected; });
+            c.connectToServer(QStringLiteral("127.0.0.1"), port);
+            pumpFor(300);
+            QTcpSocket* peer = srv.hasPendingConnections() ? srv.nextPendingConnection() : nullptr;
+            check(peer != nullptr, QStringLiteral("收包超时③：假服务端接到了连接（故意不回）"));
+            pumpFor(900);
+            check(errors.size() == 1 && errors.first().contains(QStringLiteral("没有收到任何下行报文")),
+                  QStringLiteral("收包超时③：握手前静默也报超时（实际：%1）")
+                      .arg(errors.join(QStringLiteral(" / "))));
+            check(disconnected == 1,
+                  QStringLiteral("收包超时③：握手前静默也发一次 disconnected（实际 %1）")
+                      .arg(disconnected));
+            if (peer != nullptr)
+                peer->deleteLater();
+        }
+
+        qunsetenv("MAHJONG_RECV_TIMEOUT_MS");
+        srv.close();
     }
 
     // ---------- 汇总 ----------

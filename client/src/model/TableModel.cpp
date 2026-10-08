@@ -838,8 +838,14 @@ void TableModel::applyEvent(const QJsonObject& ev)
         m_turn = ev.value(QStringLiteral("turn")).toInt(0);
         // 半场进入：谁手里有 14 张（公开信息）。**必须**吃这个字段，
         // 否则四家张数都按 13 画，正在摸牌的那家会少一张（观战/重连都会看到）。
-        if (ev.contains(QStringLiteral("drawn_seat")))
-            m_drawnSeat = qBound(-1, ev.value(QStringLiteral("drawn_seat")).toInt(-1), 3);
+        // ⚠ 快照里的 `drawn_seat` 是"**最后摸牌的人**"，不等于"**手里有 14 张**"：他若已经打牌，
+        //   手里就是 13 张。服务端的 `turn` 正好能分开这两种情形（摸牌后 `turn == drawn_seat`；
+        //   打牌后 `turn` 是下家）—— 这里必须与实时路径（`draw` 置上、`discard` 清成 -1）
+        //   算出同一个值，否则重连/观战会给刚打牌那家多算一张。
+        if (ev.contains(QStringLiteral("drawn_seat"))) {
+            const int ds = qBound(-1, ev.value(QStringLiteral("drawn_seat")).toInt(-1), 3);
+            m_drawnSeat = (m_turn == ds) ? ds : -1;
+        }
         m_phase = ev.value(QStringLiteral("phase")).toString();
 
         const QJsonArray melds = ev.value(QStringLiteral("melds")).toArray();

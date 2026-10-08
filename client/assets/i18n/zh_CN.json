@@ -448,5 +448,6 @@
   "ui.main.bot_ai": "机器人 AI：",
   "ui.main.bot_ai_tip": "房主开局前可换：这一桌的机器人用哪一代 AI（牌局进行中不可改）",
   "ui.replay.export_json": "牌谱 JSON（喂 mjai-reviewer / Mortal 用）已写到 %1",
-  "ui.replay.export_json_failed": "牌谱 JSON 写失败：%1"
+  "ui.replay.export_json_failed": "牌谱 JSON 写失败：%1",
+  "ui.net.recv_timeout": "已 %1 秒没有收到任何下行报文，连接已断开（服务端可能已停止、或网络中断）"
 }

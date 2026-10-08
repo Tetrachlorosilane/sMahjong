@@ -134,7 +134,9 @@ QStringList nakiTilesReal(const QStringList& codes, const QString& called, int a
  */
 QString drawStatusText(const QString& reason)
 {
-    if (reason == QLatin1String("nine_terms")) {
+    // ⚠ 码必须与 `server/.../rules/YakuCodes.java` 的 `REASON` 表同源：曾写成 `nine_terms`
+    //   （服务端从不产生这个串）⇒ 九种九牌被**静默**导成通用「流局」（2026-10 修）。
+    if (reason == QLatin1String("kyuushu")) {
         return QStringLiteral("九種九牌");       // i18n-keep 牌谱格式常量
     }
     if (reason == QLatin1String("four_winds")) {
@@ -738,6 +740,11 @@ QString joinIds(const QVector<int>& v)
 }
 
 }   // namespace
+
+QString TenhouLog::drawStatusForTest(const QString& reason)
+{
+    return drawStatusText(reason);
+}
 
 QVector<int> TenhouLog::decodeMeldForTest(int m, QString* kind, int* dir)
 {

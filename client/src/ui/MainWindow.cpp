@@ -85,11 +85,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_port = port;
                 // 「个人设置」：从大厅连过一次就把地址/端口/昵称记下来，下次启动直接带出来
                 saveCurrentEndpoint();
-                QJsonObject hello;
-                hello.insert(QStringLiteral("cmd"), QStringLiteral("hello"));
-                hello.insert(QStringLiteral("name"), name);
-                hello.insert(QStringLiteral("ver"), proto::Version);
-                m_pendingHello = hello;
+                m_pendingHello = identityCommand(name);
                 m_lobby->setStatus(lang::t("ui.main.connecting").arg(host).arg(port));
                 m_net.connectToServer(host, port);
             });
@@ -758,6 +754,30 @@ void MainWindow::saveIdentity()
     }
 }
 
+/**
+ * 连接后要发的第一条**身份命令**：有重连凭据就 `rejoin`，否则 `hello`。
+ *
+ * <p>为什么优先 `rejoin`：服务端只认**原 pid + 原 token** 才允许接回一个**托管中**的座位
+ * （光是 uuid 不算数 —— 那份设置文件可以被复制，只看 uuid 就等于"谁复制谁顶位"，见 A5）。
+ * 没有凭据（第一次玩 / 换了机器 / 服务端重启过 TTL）就走 `hello`：领一个新身份、
+ * 从大厅重新入座，不会卡住。
+ */
+QJsonObject MainWindow::identityCommand(const QString& name)
+{
+    if (m_settings.pid > 0 && !m_settings.token.isEmpty()) {
+        QJsonObject cmd;
+        cmd.insert(QStringLiteral("cmd"), QStringLiteral("rejoin"));
+        cmd.insert(QStringLiteral("pid"), double(m_settings.pid));
+        cmd.insert(QStringLiteral("token"), m_settings.token);
+        return cmd;
+    }
+    QJsonObject hello;
+    hello.insert(QStringLiteral("cmd"), QStringLiteral("hello"));
+    hello.insert(QStringLiteral("name"), name);
+    hello.insert(QStringLiteral("ver"), proto::Version);
+    return hello;
+}
+
 void MainWindow::onConnected()
 {
     statusBar()->showMessage(lang::t("ui.main.connected"));
@@ -1006,12 +1026,8 @@ void MainWindow::autoStart(const QString& host, quint16 port, const QString& nam
     m_autoPlay = bots > 0;   // --no-answer 随后会把 m_autoPlay 关掉（见 setAutoAnswer）
     if (m_lobby)
         m_lobby->setStatus(lang::t("ui.main.auto_connecting").arg(host).arg(port));
-    // 与大厅「连接」按钮走同一条路径：先备好 hello，连上后由 onConnected 发出
-    QJsonObject hello;
-    hello.insert(QStringLiteral("cmd"), QStringLiteral("hello"));
-    hello.insert(QStringLiteral("name"), name);
-    hello.insert(QStringLiteral("ver"), proto::Version);
-    m_pendingHello = hello;
+    // 与大厅「连接」按钮走同一条路径：先备好 hello/rejoin，连上后由 onConnected 发出
+    m_pendingHello = identityCommand(name);
     m_net.connectToServer(host, port);
 }
 
@@ -1185,7 +1201,24 @@ void MainWindow::onEvent(const QJsonObject& ev)
             statusBar()->showMessage(lang::t("ui.vote.denied_not_playing"), 5000);
         }
         refreshVoteUi();
-    } else if (name == QLatin1String("hello_ok")) {        m_myPid = ev.value(QStringLiteral("pid")).toInt();
+    } else if (name == QLatin1String("hello_ok")) {
+        m_myPid = ev.value(QStringLiteral("pid")).toInt();
+        // 重连凭据：`pid` + `token` 都存下来，下次连接才能 `rejoin`（接回托管中的座位）。
+        // ⚠ 这是**唯一**会更新它们的地方（服务端是权威）；`bad_token` 时清掉（见 error 分支）。
+        bool credsDirty = false;
+        const qlonglong gotPid = ev.value(QStringLiteral("pid")).toVariant().toLongLong();
+        const QString gotToken = ev.value(QStringLiteral("token")).toString();
+        if (gotPid > 0 && gotPid != m_settings.pid) {
+            m_settings.pid = gotPid;
+            credsDirty = true;
+        }
+        if (!gotToken.isEmpty() && gotToken != m_settings.token) {
+            m_settings.token = gotToken;
+            credsDirty = true;
+        }
+        if (credsDirty) {
+            saveIdentity();
+        }
         m_myName = ev.value(QStringLiteral("name")).toString(m_myName);
         // 服务端可选的机器人 AI 清单（建桌与等待室两个下拉框都用它）
         setBotAiCatalogue(ev.value(QStringLiteral("bot_ais")).toArray());
@@ -1510,6 +1543,14 @@ void MainWindow::onEvent(const QJsonObject& ev)
         statusBar()->showMessage(lang::t("ui.main.server_error").arg(detail), 6000);
         if (m_lobby && m_lobby->isVisible())
             m_lobby->setStatus(lang::t("ui.main.error_prefix").arg(detail));
+        // 重连凭据失效（服务端重启过 / 超过 TTL / 换了服务器）：清掉，**立刻改走 `hello`** ——
+        // 否则这条连接会一直"连不上"（服务端只认它刚回的那个新身份，而我们还在拿旧 pid/token）。
+        if (code == QLatin1String("bad_token") && (m_settings.pid > 0 || !m_settings.token.isEmpty())) {
+            m_settings.pid = 0;
+            m_settings.token.clear();
+            saveIdentity();
+            sendCommand(identityCommand(m_myName));
+        }
         // ⚠ 这里**不要**在收到 error 后去 clearAsk()：服务端并没有重新下发 ask，
         //   清掉询问栏只会让玩家彻底点不动（旧代码曾等一个服务端从不发送的
         //   `illegal_action`，`tools/check-i18n.mjs` 会把这个失效码报出来）。

@@ -93,7 +93,7 @@ public:
     QStringList hand() const { return m_hand; }        // 已排序（不含摸到的牌）
     QString drawnTile() const { return m_drawn; }      // 刚摸到、单独放在最右
     int concealedCount(int seat) const;                // 该家暗牌张数（含摸牌）
-    int drawnSeat() const { return m_drawnSeat; }      // 刚摸牌的是哪家（-1 = 无）
+    int drawnSeat() const { return m_drawnSeat; }      // 手里有 14 张的那家（-1 = 谁都只有 13 张）
 
     // ---- 回放「显示他家手牌」（上帝视角）----
     // 实时对局里客户端**看不到**别家的暗牌（服务端只发张数）；回放里 `round_start` / `draw`
@@ -196,7 +196,7 @@ private:
 
     QStringList m_hand;
     QString m_drawn;      // 摸到的牌（单独放最右）
-    int m_drawnSeat = -1; // 刚摸牌的座位
+    int m_drawnSeat = -1; // **手里有 14 张**的座位（收 `draw` 置上、`discard`/快照按 turn 清掉）
 
     // 上帝视角（仅回放）：四家暗牌 + 刚摸到的那张。`m_godHas` 为假 = 该家仍按实时对局处理。
     QStringList m_godHand[4];

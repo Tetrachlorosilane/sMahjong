@@ -12,7 +12,8 @@
 namespace {
 
 /** 设置文件里我们**管**的键；其余键原样保留（见 Settings::extra）。 */
-const char* const kKnownKeys[] = {"host", "port", "name", "uuid", "pack", "sfx", "sfx_volume"};
+const char* const kKnownKeys[] = {"host", "port", "name", "uuid", "pack", "sfx", "sfx_volume",
+                                  "pid", "token"};
 
 bool isKnownKey(const QString& k)
 {
@@ -132,6 +133,20 @@ void Settings::sanitize(QStringList* repaired)
     if (fix(!uuid.isEmpty() && !isUuidShape(uuid), "uuid")) {
         uuid = def.uuid;
     }
+    // 重连凭据：**成对**才有效 —— 缺一个就整体清掉（半个凭据发出去只会换来 `bad_token`，
+    // 客户端还得再走一次 hello 兜底；这里直接让它一开始就走 hello）。
+    // ⚠ "两个都空"是**正常状态**（第一次玩 / 换了机器），**不算修复** —— 只有"本来有半个/坏的"
+    //   才登记（`Settings` 的自检里有一条"好文件不报任何问题"，把缺省当修复会把它判红）。
+    if (pid < 0) {
+        pid = 0;
+    }
+    token = token.trimmed();
+    if (pid <= 0 || token.isEmpty() || token.size() > 64) {
+        // 只在"本来有半个/坏凭据"时登记修复；两个都空 = 第一次玩，不是问题
+        fix(pid != 0 || !token.isEmpty(), "pid");
+        pid = 0;
+        token.clear();
+    }
     pack = pack.trimmed();
     // ⚠ 材质包路径**不因为"文件不在"而清掉**：用户可能插着 U 盘、或盘符还没挂上。
     //   路径不可用时只是"回退默认素材"，设置在原地保留（材质包那层单独回报问题）。
@@ -164,6 +179,10 @@ Settings Settings::fromJson(const QJsonObject& o, QStringList* repaired)
     // 身份（uuid）：类型不对 → 空串（= 还没有身份）；形状不对由 sanitize 清掉
     const QJsonValue uv = o.value(QStringLiteral("uuid"));
     s.uuid = uv.isString() ? uv.toString() : QString();
+    // 重连凭据：JSON 数字（pid）+ 十六进制串（token）。类型不对按"没有凭据"处理（pid=0）
+    s.pid = o.value(QStringLiteral("pid")).toVariant().toLongLong();
+    const QJsonValue tv = o.value(QStringLiteral("token"));
+    s.token = tv.isString() ? tv.toString() : QString();
     s.pack = o.value(QStringLiteral("pack")).toString(s.pack);
     // 音效：缺省开、音量 70。类型不对时用**缺省值**（sanitize 里登记为已修复）。
     {
@@ -194,6 +213,11 @@ QJsonObject Settings::toJson() const
     o.insert(QStringLiteral("port"), int(port));
     o.insert(QStringLiteral("name"), name);
     o.insert(QStringLiteral("uuid"), uuid);
+    // 重连凭据（`rejoin` 用）：只在**成对**有效时才写盘 —— 半个凭据没有意义
+    if (pid > 0 && !token.isEmpty()) {
+        o.insert(QStringLiteral("pid"), double(pid));
+        o.insert(QStringLiteral("token"), token);
+    }
     o.insert(QStringLiteral("pack"), pack);
     o.insert(QStringLiteral("sfx"), sfx);
     o.insert(QStringLiteral("sfx_volume"), sfxVolume);
