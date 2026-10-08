@@ -1822,7 +1822,8 @@ ok(float(_masked[0, 3].abs().sum()) == 0.0 and float(_bm_evt[0, 3].abs().sum()) 
    "v4 预训练（P1）：被掩码的 token 真的置 0，且不改原张量")
 eq("v4 预训练（P1）：掩码目标 = 原事件的类型下标", int(_mtgt[0, 4]), 1)
 # ⑤ 模型多返回 `e_tokens`（pretext 用）—— 推理头清单里**不许**出现它
-ok("e_tokens" not in v4_model.inference_heads(), "v4：e_tokens 不进推理头清单")
+ok("e_tokens" not in v4_model.contract_heads() and "e_tokens" not in v4_model.ONLINE_HEADS,
+   "v4：e_tokens 既不进契约头、也不进推理头清单")
 _ssl = v4_pt.MaskedEventHead()
 ok(sum(p.numel() for p in _ssl.parameters()) == 192 * len(v4_spec.EVT_TYPES) + len(v4_spec.EVT_TYPES),
    "v4 预训练：SSL 头只做事件类型分类（D_MODEL → 类型数）")
@@ -1897,7 +1898,7 @@ ok(_pr["aux_separation"], f"v4 判据⑥：推理路径不碰 aux 标签 {_pr['a
 _v4m = v4_model.build(seed=5)
 ok(_v4m.param_count() <= 3_000_000, f"v4：参数量 {_v4m.param_count():,} ≤ 3M（上限来自 §0.1.3）")
 eq("v4：上线必需头（策略 + 分布价值 + 对手听牌 + 危险）",
-   v4_model.inference_heads(), ("policy", "value", "belief_tenpai", "danger"))
+   v4_model.contract_heads(), ("policy", "value", "belief_tenpai", "danger"))
 eq("v4：头清单权重（策略头 = 1.0，teacher 模仿头**不在**这里）",
    v4_model.loss_weights()["policy"], 1.0)
 ok("teacher" not in "".join(v4_model.loss_weights()), "v4：多头里没有 teacher 通道（teacher 只是起点/对手/基准）")

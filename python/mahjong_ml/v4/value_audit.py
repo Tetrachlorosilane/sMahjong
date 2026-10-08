@@ -202,7 +202,7 @@ def audit(data_dir: str | Path, split: str, ckpts: list[str],
     @param target **主口径**：`auto`（同上）/ `value` / `rtg` / `delta` —— P1b 之后值头可能学的是
         "本小局收支"（`delta`），拿 `value` 去量它是"用另一把尺子量"（§14.6）
     @param ev_ref `floor` = 用绝对门槛 `EV_FLOOR`；`legit` = 现算**合法天花板**（`legit_full` 那组，
-        同口径）并用 `EV ≥ 0.8 × 天花板` 当判据（§14.8.4：绝对门槛对实现值类目标不可达）
+        同口径）并用 `EV ≥ 0.7 × 天花板` 当判据（§14.8.4：绝对门槛对实现值类目标不可达）
     """
     data = ds.load_split(data_dir, split)
     lens = {k: (int(data[k].shape[0]) if data.get(k) is not None else -1)
@@ -280,7 +280,7 @@ def verdicts(row: dict, value_key: str = "value",
     """把一行判据翻成 PASS/FAIL（`False` = 不合格）。判据口径见 `docs/TRAINING-V4.md` §8.2 / §14.8.4。
 
     @param ev_ref **合法天花板参照**（同口径的 `legit*` 岭回归 EV）。给了就用
-        `EV ≥ 0.8 × 天花板` 当判据，不再用绝对值 `EV_FLOOR` —— 绝对门槛在"实现值"类目标上
+        `EV ≥ 0.7 × 天花板` 当判据，不再用绝对值 `EV_FLOOR` —— 绝对门槛在"实现值"类目标上
         是**构造上不可达**的（小局收支的合法天花板只有 0.069，第十九轮实测）。
     """
     out = []
@@ -942,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strict", action="store_true", help="有关键判据不过就返回 2")
     ap.add_argument("--ev-ref", choices=["floor", "legit"], default="floor",
                     help="EV 判据的参照：floor = 绝对门槛 0.1（老口径）；legit = 现算**合法天花板**"
-                         "并用 `EV ≥ 0.8 × 天花板`（§14.8.4 —— 绝对门槛对 `delta`/`rtg` 不可达）")
+                         "并用 `EV ≥ 0.7 × 天花板`（§14.8.4 —— 绝对门槛对 `delta`/`rtg` 不可达）")
     ap.add_argument("--ceiling", action="store_true",
                     help="另报**引擎真值特征的线性参照**（value / rtg / delta 各能解释多少方差）")
     ap.add_argument("--calibrate", action="store_true",

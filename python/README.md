@@ -60,7 +60,8 @@ python\.venv\Scripts\python.exe python\verify_env.py
 本机当前结果（迁 S 盘后）：**20 通过 / 0 警告 / 0 失败**（此前那条警告是"受限沙箱写数据盘被拒"；
 数据根换到 S 盘、且会话放开写权限后不再出现）。
 
-Python 侧另有一份**单元自检**（统计口径 / 配对评测 / 两条纪律 / 特征 / 数据集 / 网络 / BC / DAgger / 混合 / P3 的转移与校准，**157 项**）：
+Python 侧另有一份**单元自检**（统计口径 / 配对评测 / 两条纪律 / 特征 / 数据集 / 网络 / BC / DAgger / 混合 / P3 的转移与校准）——
+⚠ **项数只在 `AGENTS.md` §4 记一处**（本文件不再重复总数；旧的"157 项"已过时）：
 
 ```powershell
 python\.venv\Scripts\python.exe python\selfcheck.py     # 期望 SELFCHECK PASS
@@ -99,7 +100,7 @@ python\.venv\Scripts\python.exe -m mahjong_ml.eval --pool <dir1> <dir2> <dir3> `
 
 | # | 约束 | 怎么守 |
 | --- | --- | --- |
-| ① | 数据只落 S 盘 | 唯一数据根 `S:\mahjong-training\`；`raw ≤30 GB`、`compact ≤10 GB`、`ckpt+league ≤3 GB`、`logs ≤1 GB`，任何时刻留 ≥10 GB |
+| ① | 数据只落 S 盘 | 唯一数据根 `S:\mahjong-training\`；**配额以 `python/mahjong_ml/paths.py:40-55` 为权威**：`raw ≤80 GB`、`compact ≤116 GB`、`ckpt ≤2 GB`、`league ≤1 GB`、`logs ≤1 GB`，**数据根总量 ≤200 GB**（`TOTAL_QUOTA_GB` = 五项之和），任何时刻留 **≥10 GB**（`MIN_FREE_GB`） |
 | ② | GPU ≤80% | **时间平均**口径；`GpuMonitor` + `DutyCycle`（占空比节流，实测把稳态均值压到 46%，吞吐代价约 21%）。⛔ 不用 `nvidia-smi -lgc` 锁频（全局设置） |
 | ③ | CPU ≤75% 的核 | 采集 `--workers 24`（**必须显式**）、训练 `torch.set_num_threads(4)`、**生成与训练不并行**（24+4 > 24） |
 
@@ -266,7 +267,9 @@ python\.venv\Scripts\python.exe -m mahjong_ml.v4.dataset S:\mahjong-training\raw
 python\.venv\Scripts\python.exe -m mahjong_ml.v4 value-audit `
      --data S:\mahjong-training\compact\v4-sp-004 --ckpt S:\mahjong-training\ckpt\v4-ppo-002 `
      --ckpt S:\mahjong-training\ckpt\v4-bc-004 [--value-key auto] [--strict] [--out audit.json]
-# 判据（§8.2）：CE < 边缘基线、EV ≥ 0.1、CRPS < 气候学基线、50/80/95% 覆盖率与标称差 ≤ 3pp
+# 判据（§8.2）：CE < 边缘基线、CRPS < 气候学基线、50/80/95% 覆盖率与标称差 ≤ 3pp；EV 看**用的是哪把尺子**：
+#   `--ev-ref legit`（`v4 loop` 的默认，唯一权威）= `EV ≥ 0.7 ×` 同轮**合法天花板**（现算）
+#   `--ev-ref floor` = 老的绝对门槛 `EV ≥ 0.1`（只在"值头目标本身有绝对量纲"时才有意义，作诊断用）
 # 实测（2026-09-28）：整场口径 EV 0.44–0.57 但覆盖率不达标；`rtg` 口径（v4-ppo-002）EV 0.006 = 塌了
 # `--ceiling`：引擎真值特征的**线性参照**（判"是训练不行还是目标本身没信号"）
 #   ⚠ 按**合法性**分组：`legit*` = 决策那一刻自家能算的，`label_*` = 结局列/别家隐藏真值（作弊上界）。

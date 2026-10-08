@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
@@ -31,14 +31,20 @@ VALUE_RANGE = 30.0
 
 @dataclass(frozen=True)
 class HeadSpec:
-    """一个头的：形状 / 监督来源 / 损失 / 权重 / 是否上线必需（设计 §6 的表）。"""
+    """一个头的：形状 / 监督来源 / 损失 / 权重 / 是否**训练与契约必需**（设计 §6 的表）。
+
+    ⚠ **这不是"上线必需"**（2026-10-07 用户裁决拆成两张表）：
+    - 本字段 ⇒ **`TRAIN_HEADS`（训练与契约必需）**：必须训练、必须过 parity、进消融与加载器契约；
+    - **`ONLINE_HEADS`（推理必需）** ⇒ 由**前向路径实际是否读取**决定，见下面的常量与
+      `online_heads()` 的机械判据。⛔ 两者**不能合并**：训练必需要从来推导不出"影响决策"。
+    """
 
     name: str
     shape: str
     target: str
     loss: str
     weight: float
-    inference: bool
+    contract: bool
     note: str = ""
 
 
@@ -46,13 +52,29 @@ HEAD_SPECS: tuple[HeadSpec, ...] = (
     HeadSpec("policy", "[L]", "自对弈回报（PPO 优势）", "ppo-clip", 1.0, True, "主力"),
     HeadSpec("value", f"[{VALUE_BINS}]", "final_scores − 起点（千点）", "hl-gauss 交叉熵", 0.5, True,
              "critic / 风险敏感"),
-    HeadSpec("placement", "[4]", "整场 placement", "交叉熵", 0.3, False, "终局取舍（可选上线）"),
+    HeadSpec("placement", "[4]", "整场 placement", "交叉熵", 0.3, False, "终局取舍"),
     HeadSpec("belief_hand", f"[3,34]", "自对弈真值 opp_hand", "交叉熵", 0.2, False,
              "对手手牌信念：**只训练/诊断**，不回喂"),
-    HeadSpec("belief_tenpai", "[3]", "自对弈真值 opp_tenpai", "BCE", 0.2, True, "押し引き输入"),
+    HeadSpec("belief_tenpai", "[3]", "自对弈真值 opp_tenpai", "BCE", 0.2, True,
+             "⚠ **经 `policy_gate` 进 policy** ⇒ 见 `ONLINE_HEADS`"),
     HeadSpec("danger", "[L,4]", "自对弈放铳结果", "BCE", 0.3, True, "候选 × 目标家的放铳概率"),
     HeadSpec("effect", "[L,3]", "引擎 HandEval.afterDiscard", "回归", 0.3, False, "牌效辅助（免费标签）"),
 )
+
+#: **训练与契约必需**的头（必须训练 + 过 parity + 进消融/加载器契约）= `HeadSpec.contract`。
+TRAIN_HEADS: tuple[str, ...] = tuple(h.name for h in HEAD_SPECS if h.contract)
+
+#: **推理必需**的头 —— ⛔ 定义是"**前向路径实际读取**"，不是"训练过"（用户裁决 2026-10-07）。
+#:
+#: **当前值（实测）**：`policy` + `belief_tenpai`。后者的在线**原因**是逐候选门控
+#: `gate = 1 + tanh(policy_gate(sigmoid(bt)))` 乘在候选表示上 ⇒ 真的改 argmax（第五十五轮）。
+#:
+#: ⚠ 它是"**每个 checkpoint 的性质**"，不是"代码拓扑常量"：`heads.policy_gate.*` 属**可缺张量**
+#: （`normalize_state` 缺则补 0）⇒ **老网**没有它时门控恒等、`belief_tenpai` **不进推理**，
+#: 此时本集合退化成 `("policy",)`。所以换 checkpoint 要**重跑判据**（`v4 check` ⑦/⑦′）。
+#: 判据 = `online_heads()`（见下）；唯一规格与升级规则见 `docs/TRAINER-CPP.md` §6.25；
+#: 三端同值由 `node tools/head-tables-check.mjs` 机械比对。
+ONLINE_HEADS: tuple[str, ...] = ("policy", "belief_tenpai")
 
 
 class TileTower(nn.Module):
@@ -209,7 +231,7 @@ class Heads(nn.Module):
 
 
 class V4Model(nn.Module):
-    """v4 全模型。`forward` 返回**每个头**的输出；推理只用 `inference_heads()`。
+    """v4 全模型。`forward` 返回**每个头**的输出；推理只用 `ONLINE_HEADS`（前向实测；训练与契约必需是 `contract_heads()`）。
 
     ⚠ **只有四个宽度可变**（`d_model / tile_d / n_heads / value_bins`），**拓扑固定**
     （三塔 + 融合 + 多头）—— 与 v3 的 `hidden/head/trunk_layers` 同一个思路：
@@ -253,7 +275,7 @@ class V4Model(nn.Module):
         out = self.heads(u, u.mean(dim=1), mask)
         out["h_evt"] = h_evt
         # ⚠ `e_tokens` 只给 **P1 的掩码事件重建**（先验/自监督 pretext）用 —— 推理路径不读它
-        #   （`inference_heads()` 里没有它；多一个键不影响任何上线前向）。
+        #   （`contract_heads()`/`ONLINE_HEADS` 里都没有它；多一个键不影响任何上线前向）。
         out["e_tokens"] = e_tokens
         return out
 
@@ -283,8 +305,43 @@ def build(seed: int = 20260927, **dims: int) -> V4Model:
     return m
 
 
-def inference_heads() -> tuple[str, ...]:
-    return tuple(h.name for h in HEAD_SPECS if h.inference)
+def contract_heads() -> tuple[str, ...]:
+    """**训练与契约必需**的头（必须训练 + 过 parity + 进消融/加载器契约）。
+
+    ⚠ 旧名 `inference_heads()` **已废弃**（2026-10-07）：那个名字把"训练必需"说成了"上线必需"，
+    而两者**是两张表**（用户裁决）。推理必需见 `ONLINE_HEADS` 与 `online_heads()`。
+    """
+    return TRAIN_HEADS
+
+
+def online_heads(m: "V4Model", forward_fn: Callable[[], dict[str, torch.Tensor]]) -> tuple[str, ...]:
+    """判据：头是否"**上线**" = **前向路径是否读取**（用户裁决 2026-10-07）—— 机械、不靠文档声明。
+
+    做法：把某个头的参数**清零**后重跑同一次前向 ⇒ 动作 logits **逐位不变** ⇔ 它不在推理路径上。
+    返回实测集合（`policy` 恒在）。
+
+    ⚠ **两个必带的对照**（缺任一条就会假绿或空转）：
+
+    ① **正向控制**（调用方做）：清零 `heads.policy.*` **必须**让 logits 变化 —— 否则这条判据
+       根本没测到东西；
+    ② **非退化门控**：`policy_gate` 是**零初始化**的 `1 + tanh(W_g·sigmoid(bt))` ⇒ `W_g = 0` 时
+       恒等，会把"`belief_tenpai` 被 policy 消费"这件事**测成绿的**。所以调用方要么先把
+       `policy_gate` 抬离 0、要么直接用训练过的网。本函数不替调用方决定，只报告"清零后变不变"。
+    """
+    base = {k: v.detach().clone() for k, v in m.state_dict().items()}
+    ref = forward_fn()["policy"].detach().clone()
+    changed: list[str] = []
+    for name in (h.name for h in HEAD_SPECS if h.name != "policy"):
+        prefix = f"heads.{name}."
+        with torch.no_grad():
+            for k, v in m.state_dict().items():
+                if k.startswith(prefix):
+                    v.zero_()
+            differs = not torch.equal(forward_fn()["policy"], ref)
+            m.load_state_dict(base)
+        if differs:
+            changed.append(name)
+    return ("policy", *changed)
 
 
 def loss_weights() -> dict[str, float]:
