@@ -256,6 +256,10 @@ public:
                             && stopAtAllLast(dealer, res.agari, res.nagashi, res.tenpai, scores,
                                              rules)) {
                         gameOver = true;
+                    } else if (roundWind > lastWindOf(rules)
+                            && extensionReached(rules, scores)) {
+                        // 延长战（南入/西入）里**连庄也要每局看一次**门槛（《天凤》sudden death）
+                        gameOver = true;
                     }
                 } else {
                     const int nd = (dealer + 1) % 4;

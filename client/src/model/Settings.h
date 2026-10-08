@@ -31,6 +31,16 @@ struct Settings
      * 形状不对的值在 {@link #sanitize} 里被清掉（不报错、不阻断）。
      */
     QString uuid;
+    /**
+     * **重连凭据**（`pid` + `token`，来自 `hello_ok`）：见 PROTOCOL §2.0。
+     *
+     * <p>为什么要存：掉线后服务端只认**原 pid + 原 token**（`rejoin`）—— 光有 uuid 不足以接回
+     * 一个**托管中**的座位（那份设置文件是可以被复制/同步的，只看 uuid 就等于"谁复制谁顶位"）。
+     * 没有凭据（第一次玩 / 换了机器 / 服务端重启过）时退回普通 `hello`：领一个新身份、
+     * 从大厅重新入座 —— 不会卡住，只是接不回原座位。
+     */
+    long long pid = 0;
+    QString token;
     /** 材质包路径：目录或 `.zip`。空 = 全用默认素材。 */
     QString pack;
     /** 音效总开关（缺省开）。 */

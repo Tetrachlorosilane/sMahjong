@@ -93,7 +93,11 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
                  name: str | None = None) -> list[str]:
     """自对弈采集命令（Java 与 C++ 两版**参数口径相同**，所以调用方不必分叉）。
 
-    @param aux 额外落标签侧 `g*.aux.npz`（**只有 Java 生产者支持**；C++ 会显式报错）
+    @param aux 额外落标签侧 `g*.aux.npz`（**Java 与 C++ 两个生产者都支持**，且连 npz 容器
+               一起**逐字节相同**：C++ 侧是 `npzwriter.hpp` + `TraceRecorder` 的标签侧行，
+               判据 `node tools/trainer-aux-parity.mjs`；见本文件 :39-42 与
+               `docs/TRAINER-CPP.md` §6.23）。⚠ 当前 `CPP_MISSING` 只剩 `--teacher-label`
+               （DAgger 标注）这**一项**（:43-46）。
     """
     p = producer(name)
     guard_java_free(name)

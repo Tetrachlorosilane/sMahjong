@@ -236,7 +236,6 @@ private:
     bool canDaiminkan(int seat, int kind) const;
 
     RoundResult turnKan(int seat, const Cmd &act, int drawn, bool &ended);
-    std::vector<int> chankanRon(int kanSeat, int tileId, bool kokushiOnly) const;
     bool isKokushiScore(const HandScore &sc) const;
     RoundResult agariTsumo(int seat, int tileId, const HandScore &sc);
     RoundResult agariRon(const std::vector<int> &winners, int from, int tileId, bool chankan,
@@ -250,7 +249,16 @@ private:
     bool fourKanAbortNow() const;
     bool allKansByOnePlayer() const;
 
-    Claim claimPhase(int from, int tileId, bool riichiDiscard);
+    /**
+     * 鸣牌阶段（打牌后的吃碰杠荣 + **抢杠**）。
+     *
+     * @param chankan     抢杠询问（`ron` + `pass`；见逃置同巡振听、见逃后杠成立）
+     * @param kokushiOnly 只认国士无双（《雀魂》的国士抢暗杠）—— 与 Java 同签名、同口径。
+     */
+    Claim claimPhase(int from, int tileId, bool riichiDiscard, bool chankan = false,
+                     bool kokushiOnly = false);
+    /** 抢杠的询问内容（Java `Round.chankanOptions` 的镜像）：只给 `ron` + `pass`。 */
+    std::vector<Option> chankanOptions(int seat, int from, int tileId, bool kokushiOnly);
     bool pickChiTiles(int seat, int tileId, const std::vector<std::string> &want,
                       std::array<int, 2> &out) const;
     int findHandTile(int seat, int kind, bool red, const std::vector<int> &used) const;

@@ -2019,6 +2019,59 @@ std::string javaPercentG(double v, int precision = 6) {
     return buf;
 }
 
+/** `{"a","b"}` → `"a,b"`（头表的汇总行；与 Java `String.join(",", …)` 同形）。 */
+std::string joinNames(const std::vector<std::string> &names) {
+    std::string s;
+    for (size_t i = 0; i < names.size(); i++) {
+        if (i > 0) {
+            s += ",";
+        }
+        s += names[i];
+    }
+    return s;
+}
+
+/** 两条 logits 的最大绝对差（头表判据用；"逐位不变"就是这里**恰好 0**）= Java `maxAbsDelta`。 */
+float maxAbsDelta(const std::vector<float> &a, const std::vector<float> &b) {
+    const size_t n = std::min(a.size(), b.size());
+    float w = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        w = std::max(w, std::fabs(a[i] - b[i]));
+    }
+    return w;
+}
+
+/**
+ * 深拷贝一份权重，并把 `heads.<head>.*` 的**全部**张量清零（= Java `V4Policy.debugZeroHead`）——
+ * 头表判据（§6.25）的探针：清零后重跑前向，看策略头 logits 变不变。
+ *
+ * <p>⚠ ① 只在**副本**上动刀：调用方的夹具权重一次都不改（后面的用例还要用）。
+ * <p>⚠ ② `Mat` 有**两份**存储（`data` 与加载期建好的转置副本 `dataT`），**两份都要清** ——
+ * 只清 `data` 的话 `linear`/`linearFast` 仍从 `dataT` 读到原值，探针会测出一个**假绿**的 Δ=0。
+ * <p>⚠ ③ 前缀带点（`heads.<head>.`）⇒ 清零 `policy` 不会误伤 `policy_gate`（后者是**策略路径**
+ * 的一部分，清零它必须改变 logits）。
+ *
+ * @param hit 出参：是否真的清到了张量（`policy_gate` 是**可缺张量**，老网没有它）。
+ */
+void zeroHeadInto(const V4Policy &src, const std::string &head, V4Policy &out, bool &hit) {
+    out = src;
+    const std::string prefix = "heads." + head + ".";
+    hit = false;
+    for (auto &kv : out.mats) {
+        if (kv.first.compare(0, prefix.size(), prefix) == 0) {
+            std::fill(kv.second.data.begin(), kv.second.data.end(), 0.f);
+            std::fill(kv.second.dataT.begin(), kv.second.dataT.end(), 0.f);
+            hit = true;
+        }
+    }
+    for (auto &kv : out.vecs) {
+        if (kv.first.compare(0, prefix.size(), prefix) == 0) {
+            std::fill(kv.second.begin(), kv.second.end(), 0.f);
+            hit = true;
+        }
+    }
+}
+
 }  // namespace
 
 int v4GoldenCli(int argc, char **argv) {
@@ -2265,18 +2318,96 @@ int v4GoldenCli(int argc, char **argv) {
             worstH0 = std::max(worstH0, std::fabs(ob["policy"][i] - oa["policy"][i]));
         }
     }
+    // ---- 头表判据（唯一规格 `docs/TRAINER-CPP.md` §6.25；与 Python `v4 check` ⑦/⑦′、Java 侧同一条线）
+    //
+    //   "头是否上线" = **前向路径是否读取**（⛔ 不是"训练过"）：把该头的张量**清零**后重跑同一次前向
+    //   （同一个用例、同一个 `h0`）⇒ 策略头 logits **逐位不变** ⇔ 它不在推理路径上。
+    //   · ① **负向** `heads.value.*`（离线头）⇒ 必须**恰好 0**；
+    //   · ② **正向** `heads.belief_tenpai.*`（经 `policy_gate` 逐候选门控进 policy）⇒ 必须 > 0；
+    //   · ③ **哨兵** `heads.policy_gate.*`（本身就在策略路径上）⇒ 必须 > 0 —— 门控恒等时 ② 会**假绿**
+    //     （零初始化门控的原设计就是"起步恒等"），所以 ③ 必须有牙齿，否则整条判据是空转。
+    //   ⚠ 参照与三次探针都走**夹具那条入口**（显式 `h0`），且只用**第一个用例** —— 与 Java
+    //     `V4Probe --golden` 逐字同口径（三个数字要能跨端直接比）。
+    float dValue = 0.f;
+    float dBelief = 0.f;
+    float dGate = 0.f;
+    // 门控"是活的"的判据 = 前向自己的那个条件（`heads.policy_gate.weight` 在不在）。
+    const bool gatePresent = net.mats.count("heads.policy_gate.weight") != 0;
+    if (haveFirst) {
+        std::map<std::string, std::vector<float>> base;
+        if (!v4ForwardAllH0(net, firstObs, firstH0, base, err)) {
+            std::fprintf(stderr, "[trainer] 头表判据的参照前向失败：%s\n", err.c_str());
+            return 1;
+        }
+        const std::vector<float> &refPolicy = base["policy"];
+        struct Probe {
+            const char *head;
+            float *out;
+        };
+        const Probe probes[3] = {{"value", &dValue},
+                                 {"belief_tenpai", &dBelief},
+                                 {"policy_gate", &dGate}};
+        for (const Probe &pr : probes) {
+            V4Policy zeroed;
+            bool hit = false;
+            zeroHeadInto(net, pr.head, zeroed, hit);
+            if (!hit) {
+                // `value` / `belief_tenpai` 是契约头（`bindAll` 已强制存在）⇒ 这里只可能是
+                // `policy_gate` 这个**可缺张量**；Δ 恰为 0 是**结构性**的，不是测量结果。
+                std::printf("  （%s 无张量可清零：可缺张量缺失 ⇒ 该头不在前向路径上）\n", pr.head);
+                *pr.out = 0.f;
+                continue;
+            }
+            std::map<std::string, std::vector<float>> o;
+            if (!v4ForwardAllH0(zeroed, firstObs, firstH0, o, err)) {
+                std::fprintf(stderr, "[trainer] 头表判据（清零 heads.%s.*）前向失败：%s\n", pr.head,
+                             err.c_str());
+                return 1;
+            }
+            *pr.out = maxAbsDelta(refPolicy, o["policy"]);
+        }
+    }
+    // ③ 的两种"Δ=0"要分开说（⛔ 别混成一句"没测到"）：
+    //   · **张量缺失** = 老网（`normalize_state`：缺 ⇒ 恒等门控）⇒ `belief_tenpai` 本来就不在推理
+    //     路径上，在线集合退化成 `{policy}`（§6.25 明文）⇒ ②③ 不参与判红，只**明确报出来**；
+    //   · **张量在、但全 0** = 夹具空转（`export.py` 那个"零初始化张量一律扰动"没生效）⇒ 判红。
+    const bool gateVacuouslyIdentity = !gatePresent;
+    if (gateVacuouslyIdentity || dGate == 0.f) {
+        std::fprintf(stderr,
+                     "[trainer] ⚠ 门控恒等：%s\n",
+                     gateVacuouslyIdentity
+                             ? "夹具里没有 `heads.policy_gate.weight`（可缺张量 = 老网口径）⇒ 门控恒等，"
+                               "`belief_tenpai` 不在推理路径上、ONLINE_HEADS 退化成 {policy}；②③ 不参与判红"
+                             : "夹具里 `heads.policy_gate.*` 全是 0（扰动没生效）⇒ 门控恒等、② 是假绿："
+                               "这是**夹具空转**，按 FAIL 处理（重新生成夹具，见 export.py 的扰动规则）");
+    }
+    // ② 的期望值随门控是否在线而变：门控恒等时 `btProb` 怎么变都不影响 policy ⇒ 期望**恰好 0**。
+    const bool headsOk = dValue == 0.f
+            && (gateVacuouslyIdentity ? dBelief == 0.f : (dBelief > 0.f && dGate > 0.f));
     const bool pass = feat.worst <= tol && headCmp.worst <= tol && argmaxOk == nCases
-            && worstRed <= 1e-3f && worstH0 > 1e-4f;
+            && worstRed <= 1e-3f && worstH0 > 1e-4f && headsOk;
     if (!pass) {
         feat.dump("特征侧");
         headCmp.dump("前向侧");
     }
     std::printf("golden cases=%d tol=%s 特征 maxΔ=%.3g 前向 maxΔ=%.3g argmax=%d/%d 红证 maxΔ=%.3g"
-                " h0红证 maxΔ=%.3g → %s\n",
+                " h0红证 maxΔ=%.3g → %s"
+                " heads online=%s contract=%s dValue=%s dBelief=%s dGate=%s\n",
                 nCases, javaPercentG(static_cast<double>(tol)).c_str(),
                 static_cast<double>(feat.worst), static_cast<double>(headCmp.worst), argmaxOk,
                 nCases, static_cast<double>(worstRed), static_cast<double>(worstH0),
-                pass ? "PASS" : "FAIL");
+                pass ? "PASS" : "FAIL",
+                // ⚠ `online=` 必须按 **checkpoint** 打印（§6.25：这是"每个 checkpoint 的性质"）：
+                //   门控缺失（老网）时真实在线集合是 `{policy}` —— 那时仍打印常量就等于说谎，
+                //   而且会与 Java 侧同口径的 `online=policy` 对不上（两端要逐字符可比）。
+                (gatePresent ? joinNames(ONLINE_HEADS) : std::string("policy")).c_str(),
+                joinNames(TRAIN_HEADS).c_str(),
+                // ⚠ 三个 d* 必须走 `javaPercentG(…, 3)` 而不是 C 的 `%.3g`：Java 的 `%g` 对 0 保留
+                //   尾随零（`0.00`），C 的抹掉（`0`）—— 两端的汇总行要**逐字符**一样（Java 侧就是
+                //   `String.format("%.3g", …)`），差一个字符就等于"没有可比性"。
+                javaPercentG(static_cast<double>(dValue), 3).c_str(),
+                javaPercentG(static_cast<double>(dBelief), 3).c_str(),
+                javaPercentG(static_cast<double>(dGate), 3).c_str());
     return pass ? 0 : 1;
 }
 

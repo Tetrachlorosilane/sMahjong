@@ -495,6 +495,20 @@ int selftest() {
                   trainer::keepPlayingWest(th, 25000, 2, 1));
             check("西入：nw=3（北）永远不进 → false", !trainer::keepPlayingWest(th, 25000, 3, 1));
             check("西入：top 已达 30000 → false", !trainer::keepPlayingWest(th, 30000, 2, 1));
+            // ⚠ 2026-10 起预设**真的**打开了延长战（此前三套全关 ⇒ 这条链一直睡着）
+            trainer::Rules msExt;
+            msExt.applyPreset("majsoul");
+            trainer::Rules mlExt;
+            mlExt.applyPreset("mleague");
+            check("预设：延长战《天凤》《雀魂》开、M.League 关",
+                  th.westExtension && msExt.westExtension && !mlExt.westExtension);
+            // extensionReached：延长战里"**连庄**也每局看一次门槛"（轮庄那一支由 keepPlayingWest 判）
+            check("延长战终止：有人到 30000 → true",
+                  trainer::extensionReached(th, std::array<int, 4>{25000, 31000, 22000, 22000}));
+            check("延长战终止：都在门槛下 → false",
+                  !trainer::extensionReached(th, std::array<int, 4>{25000, 29900, 22000, 22000}));
+            check("延长战终止：M.League（不开延长战）→ 恒 false",
+                  !trainer::extensionReached(mlExt, std::array<int, 4>{25000, 91000, 22000, 22000}));
         }
         // 种子链（golden 取自 Java 探针的输出，钉住"同种子 → 同轨迹"的地基）
         {
@@ -737,6 +751,21 @@ int selftest() {
             const auto cs = trainer::chiSets(cross, 9);
             check("吃搭子：不吃到相邻花色（8m9m 在手里也算不进 1p 的搭子）",
                   cs.size() == 1 && cs[0][0] == "2p" && cs[0][1] == "3p");
+            // 吃的赤宝取法（与碰/大明杠同口径）：普通在前、用赤在后；只有赤五时写 0x
+            const auto cv1 = trainer::chiVariants({4, 5}, {true, false}, {false, false});
+            check("吃赤宝：只有普通五 → 一条写 5m",
+                  cv1.size() == 1 && cv1[0][0] == "5m" && cv1[0][1] == "6m");
+            const auto cv2 = trainer::chiVariants({4, 5}, {false, false}, {true, false});
+            check("吃赤宝：只有赤五 → 一条写 0m（不谎报成 5m）",
+                  cv2.size() == 1 && cv2[0][0] == "0m" && cv2[0][1] == "6m");
+            const auto cv3 = trainer::chiVariants({4, 5}, {true, false}, {true, false});
+            check("吃赤宝：普通五与赤五都有 → 两条，普通在前",
+                  cv3.size() == 2 && cv3[0][0] == "5m" && cv3[0][1] == "6m"
+                  && cv3[1][0] == "0m" && cv3[1][1] == "6m");
+            const auto cv4 = trainer::chiVariants({3, 4}, {false, true}, {false, true});
+            check("吃赤宝：赤五在另一格时同样成立",
+                  cv4.size() == 2 && cv4[0][0] == "4m" && cv4[0][1] == "5m"
+                  && cv4[1][0] == "4m" && cv4[1][1] == "0m");
         }
 
         // ---- 自家回合的询问内容（`turnOptions`）
@@ -2291,6 +2320,8 @@ int main(int argc, char** argv) {
                      "  v4bench <net.bin> <轨迹.jsonl> [条数上限]  解析 / 特征 / 前向分开计时（只报实测）\n"
                      "  v4golden <夹具> [--tol 1e-4]     读 python/tests/golden/forward-v4.bin（**格式 2**，不是 2 直接报错）：\n"
                      "                                   四张量 + 四个推理头 + `h_evt` + 两条红证（偏置 +1 / 扰动 h0）\n"
+                     "                                   + 三条**头表判据**（§6.25：清零 value 必须逐位不变，清零\n"
+                     "                                   belief_tenpai / policy_gate 必须变，见汇总行的 d* 字段）\n"
                      "                                   全部通过 exit 0 并打印一行汇总；任一不过 exit 1\n");
         return 2;
     }

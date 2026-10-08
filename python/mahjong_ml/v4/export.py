@@ -84,7 +84,7 @@ GOLDEN_DIMS: dict[str, int] = {"d_model": 32, "tile_d": 16, "n_heads": 2, "value
 FULL_DIMS: dict[str, int] = {"d_model": M.D_MODEL, "tile_d": M.TILE_D,
                              "n_heads": M.N_HEADS, "value_bins": M.VALUE_BINS}
 
-#: 每个头的输出宽度（推理头见 `model.inference_heads()`）
+#: 每个头的输出宽度（**契约头**见 `model.contract_heads()`；**推理头**见 `model.ONLINE_HEADS`）
 HEAD_WIDTHS = {"policy": 1, "placement": 4, "belief_hand": 3 * 34, "belief_tenpai": 3,
                "danger": 4, "effect": 3}
 
@@ -256,7 +256,7 @@ def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str |
         "blocks_fingerprint": fingerprint_of(blocks_),
         "registry_fingerprint": spec.fingerprint(),
         "blocks": [list(x) for x in _block_table(blocks_)],
-        "inference_heads": list(M.inference_heads()),
+        "contract_heads": list(M.contract_heads()),  # 旧 key 名 inference_heads（语义=训练与契约必需，2026-10-07 改名）
         "label": label, "source": source,
         "tensors": {k: list(v) for k, v in sorted(expected_shapes(d).items())},
     }

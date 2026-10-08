@@ -55,6 +55,13 @@ int lastWindOf(const Rules &rules);
 /** All Last 轮庄后要不要进延长战（门槛是 `requiredPoints`，场风上限是 `lastWind + 1`，没有北入）。 */
 bool keepPlayingWest(const Rules &rules, int top, int nextRoundWind, int lastWind);
 
+/**
+ * 延长战（南入 / 西入）里是否已经有人达到一位必要点数 ⇒ 当场终止对局。
+ * ⚠ `keepPlayingWest` 只在**轮庄**那一支被问到，而延长战是"谁先到门槛谁就赢"
+ * （《天凤》sudden death）—— **庄家连庄**也要每局看一次。与 Java `RoundScoring.extensionReached` 同口径。
+ */
+bool extensionReached(const Rules &rules, const std::array<int, 4> &scores);
+
 /** 流局满贯的分数增减（不含立直棒；四家之和恒为 0）。 */
 std::array<int, 4> nagashiPayments(int winnerSeat, int dealer);
 

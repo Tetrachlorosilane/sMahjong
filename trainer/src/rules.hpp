@@ -86,7 +86,7 @@ struct Rules {
             aka = 3; kuitan = true; ura = true; kanDora = true; koyaku = false; minHan = 1;
             doubleYakuman = false; renhou = "off"; headBump = false; sanchaAbort = true;
             fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
-            nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+            nagashiMangan = true; tobi = true; agariyame = true; westExtension = true;
             requiredPoints = 30000;
             kuikae = true; pao = true; paoFourKan = false; paoCoversAll = true;
             notenPenalty = 3000; startScore = 25000; returnScore = 30000;
@@ -97,7 +97,7 @@ struct Rules {
             aka = 3; kuitan = true; ura = true; kanDora = true; koyaku = false; minHan = 1;
             doubleYakuman = true; renhou = "off"; headBump = false; sanchaAbort = false;
             fourRiichiAbort = true; fourKanAbort = true; fourWindAbort = true; kyuushuAbort = true;
-            nagashiMangan = true; tobi = true; agariyame = true; westExtension = false;
+            nagashiMangan = true; tobi = true; agariyame = true; westExtension = true;
             requiredPoints = 30000;
             kokushiTenhou13 = true;
             kokushiAnkan = true;

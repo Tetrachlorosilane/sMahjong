@@ -53,6 +53,25 @@ public final class V4Policy implements LogitPolicy {
     /** 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32）。 */
     public static final int HEADER_BYTES = 64;
 
+    /**
+     * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）。
+     *
+     * <p>判据（唯一权威，三端同一把尺子）：把该头的参数**清零**后重跑同一次前向 ⇒ 动作 logits
+     * **逐位不变** ⇔ 它不在推理路径上。**唯一规格 = `docs/TRAINER-CPP.md` §6.25**；三端同值
+     * （Python `model.ONLINE_HEADS` / C++ `v4policy.hpp`）。
+     *
+     * <p>⚠ `belief_tenpai` 在线的**原因**：逐候选门控 `gate = 1 + tanh(policy_gate(sigmoid(bt)))`
+     * （第五十五轮）乘在候选表示上 ⇒ 真的改 argmax。而 `heads.policy_gate.*` 是**可缺张量**
+     * （缺 = 恒等门控）⇒ **老网**的在线集合退化成 `{policy}`：这是"**每个 checkpoint 的性质**"，
+     * 不是代码常量。实测探针见 `tools.V4Probe --golden` 那行里的 `dValue/dBelief/dGate`。
+     */
+    public static final java.util.List<String> ONLINE_HEADS =
+            java.util.List.of("policy", "belief_tenpai");
+
+    /** **训练与契约必需**的头：必须训练 + 过 parity + 进消融/加载器契约（⛔ 与"上线"无关）。 */
+    public static final java.util.List<String> TRAIN_HEADS =
+            java.util.List.of("policy", "value", "belief_tenpai", "danger");
+
     private static final float LN_EPS = 1e-5f;
 
     private final int dModel;
@@ -372,7 +391,8 @@ public final class V4Policy implements LogitPolicy {
     /**
      * 把每一层要用的张量都取一遍 —— **同时**完成"形状核对 + 无多余张量"两件事。
      *
-     * <p>这就是 Java 侧不需要再抄一份 74 行形状表的原因：前向要把每个张量都读一遍，
+     * <p>这就是 Java 侧不需要再抄一份**张量形状表**（当前 **78** 行 = 74 必读 + 2 `heads.policy_gate.*`
+     * + 2 `fusion.mem.*` 两个**可缺**组，见 `NOTES.md` §10.4）的原因：前向要把每个张量都读一遍，
      * 读的时候顺手钉住 `[rows,cols]`，最后 {@link #used} 与文件里的名字集合比对 ⇒
      * 少张量、多张量、改名、形状不符**都在构造期**炸掉（不是等到对局里算出个奇怪的牌）。
      */
@@ -1192,6 +1212,47 @@ public final class V4Policy implements LogitPolicy {
         try {
             return new V4Policy(dModel, tileD, nHeads, valueBins, fingerprint, blocks, missingBlocks,
                     new HashMap<>(mats), v2, new HashSet<>(allNames));
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** 该权重文件里有没有这个张量（头表判据用：`heads.policy_gate.*` 是**可缺张量**）。 */
+    public boolean hasTensor(String name) {
+        return allNames.contains(name);
+    }
+
+    /**
+     * 自检用：返回一份"某个头的全部张量被清零"的副本 —— 头表判据的**探针**
+     * （清零后动作 logits 逐位不变 ⇔ 该头不在推理路径上；规格见 {@link #ONLINE_HEADS}）。
+     *
+     * <p>⚠ 前缀带点（`heads.<head>.`）⇒ `policy` 不会误伤 `policy_gate`（后者是**策略路径**的一部分，
+     * 清零它**必须**改变 logits）。
+     */
+    public V4Policy debugZeroHead(String head) {
+        String prefix = "heads." + head + ".";
+        Map<String, float[][]> m2 = new HashMap<>(mats);
+        Map<String, float[]> v2 = new HashMap<>(vecs);
+        for (String k : allNames) {
+            if (!k.startsWith(prefix)) {
+                continue;
+            }
+            float[][] m = m2.get(k);
+            if (m != null) {
+                float[][] z = new float[m.length][];
+                for (int r = 0; r < m.length; r++) {
+                    z[r] = new float[m[r].length];
+                }
+                m2.put(k, z);
+            }
+            float[] v = v2.get(k);
+            if (v != null) {
+                v2.put(k, new float[v.length]);
+            }
+        }
+        try {
+            return new V4Policy(dModel, tileD, nHeads, valueBins, fingerprint, blocks, missingBlocks,
+                    m2, v2, new HashSet<>(allNames));
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }

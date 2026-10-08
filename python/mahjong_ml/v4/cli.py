@@ -180,8 +180,48 @@ def cmd_check(args: argparse.Namespace) -> int:
     ok(tuple(out["policy"].shape) == (1, t3.cand.shape[0]), f"策略 logits {tuple(out['policy'].shape)}")
     ok(tuple(out["value"].shape) == (1, M.VALUE_BINS), f"分布价值 {tuple(out['value'].shape)}")
     ok(bool(torch.isfinite(out["policy"]).all()), "logits 全有限（掩码用 -inf 但无 NaN）")
-    ok(M.inference_heads() == ("policy", "value", "belief_tenpai", "danger"),
-       f"上线必需头 = {M.inference_heads()}（设计 §6：信念/危险头进押し引き）")
+    ok(M.contract_heads() == ("policy", "value", "belief_tenpai", "danger"),
+       f"训练与契约必需头 TRAIN_HEADS = {M.contract_heads()}（必须训练 + 过 parity；⛔ 与'上线'无关）")
+
+    # ⑦ 头是否"上线" = **前向路径是否读取**（用户裁决 2026-10-07）—— **实测**，不靠文档声明。
+    #   ⚠ 必须先让 `policy_gate` 非退化：`g = 1 + tanh(W_g·sigmoid(bt))`，`W_g = 0` 时恒等
+    #     ⇒ 会把"`belief_tenpai` 被 policy 消费"**测成绿的**（假绿）。这里用固定种子扰动，
+    #     并**同时**跑正向控制（清零 policy 头必须让 logits 变），证明这条判据不是空转。
+    with torch.no_grad():
+        _g = torch.Generator().manual_seed(7)
+        m.heads.policy_gate.weight.normal_(0.0, 0.5, generator=_g)
+        _g = torch.Generator().manual_seed(8)
+        m.heads.policy_gate.bias.normal_(0.0, 0.5, generator=_g)
+
+    def _fwd() -> dict:
+        with torch.no_grad():
+            return m(**x, mask=mask, h=None)
+
+    _ref = _fwd()["policy"].clone()
+    _keep = {k: v.detach().clone() for k, v in m.state_dict().items()}
+    with torch.no_grad():
+        for _k, _v in m.state_dict().items():
+            if _k.startswith("heads.policy."):
+                _v.zero_()
+        _positive_control = not torch.equal(_fwd()["policy"], _ref)
+        m.load_state_dict(_keep)
+    ok(_positive_control, "头判据的正向控制：清零 `heads.policy.*` **必须**改变 logits（否则判据空转）")
+    _measured = M.online_heads(m, _fwd)
+    ok(_measured == ("policy", "belief_tenpai"),
+       f"ONLINE_HEADS（前向实际读取）= {_measured} —— ⚠ 非退化门控下 `belief_tenpai` 经 `policy_gate` "
+       f"进了 policy（`model.py` 的逐候选门控设计）⇒ 声明值必须是 ('policy', 'belief_tenpai')")
+    # ⑦′ **假绿对照**：把 `policy_gate` 归零 ⇒ 门控恒等 ⇒ 同一条判据会**漏掉** `belief_tenpai`。
+    #    这一条把"为什么判据必须带非退化门控"变成常驻判据（否则以后有人把它写回零初始化就静默失效）。
+    with torch.no_grad():
+        for _k, _v in m.state_dict().items():
+            if _k.startswith("heads.policy_gate."):
+                _v.zero_()
+    _degenerate = M.online_heads(m, _fwd)
+    m.load_state_dict(_keep)
+    ok(_degenerate == ("policy",) and _measured == ("policy", "belief_tenpai"),
+       f"假绿对照：零初始化门控下实测 {_degenerate}（漏掉 belief_tenpai）⇒ 判据必须带非退化 `policy_gate`")
+    print(f"  ONLINE_HEADS（推理必需，前向实测）= {_measured}")
+    print(f"  TRAIN_HEADS （训练与契约必需）    = {M.TRAIN_HEADS}")
 
     print()
     if fails:
@@ -418,7 +458,8 @@ def cmd_plan(_: argparse.Namespace) -> int:
         ("训练端 C++ 镜像（obs v3 + sidecar v3）", "green", "trainer/src（同种子逐字节判据）"),
         ("数据集层版本硬闸门（obs v2 / 老 sidecar 一律报错）", "green", "v4/traces.py"),
         ("标签侧落盘（对手手牌/听牌、放铳、和了、顺位）", "green",
-         "Java `TraceRecorder` + `dataset build --aux`（C++ 生产者显式报错）"),
+         "Java `TraceRecorder` + C++ `--aux`（连 npz 容器逐字节相同，`tools/trainer-aux-parity.mjs`）"
+         " + `dataset build --aux`"),
         ("P1 自监督预训练 / P2 teacher 冷启动 / P3 自对抗", "yellow",
          "两轮 teacher 预训练已跑（分阶段训练让辅助头全部收敛；`docs/TRAINING-V4.md`「第二步」）；"
          "P1 的 §7.5 均衡审计与 P3 未做"),

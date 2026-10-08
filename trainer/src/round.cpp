@@ -650,10 +650,14 @@ RoundResult Round::turnKan(int seat, const Cmd &act, int drawn, bool &ended) {
         }
         // **国士抢暗杠**（《雀魂》：判在**杠成立之前** —— 被抢时这次杠整个不成立）
         if (rules.kokushiAnkan) {
-            const std::vector<int> rob = chankanRon(seat, picked[0], true);
-            if (!rob.empty()) {
+            const Claim rob = claimPhase(seat, picked[0], false, true, true);
+            if (!rob.isNull && rob.hasAbort) {
                 ended = true;
-                return agariRon(rob, seat, picked[0], true, false);
+                return abort(rob.abortReason);
+            }
+            if (!rob.isNull && rob.type == Claim::Type::RON) {
+                ended = true;
+                return agariRon(rob.multiRon, seat, picked[0], true, false);
             }
         }
         std::array<int, 4> tiles{picked[0], picked[1], picked[2], picked[3]};
@@ -695,37 +699,42 @@ RoundResult Round::turnKan(int seat, const Cmd &act, int drawn, bool &ended) {
     wall.onKan();
     kanJustHappened = true;
     // 抢杠：**先判抢杠，杠成立之后才翻杠宝牌**（顺序反了会算错分）
-    const std::vector<int> ron = chankanRon(seat, addId, false);
-    if (!ron.empty()) {
+    // ⚠ 与 Java 同口径：抢杠走**询问**（见逃置同巡振听），没人抢则这次杠照常成立
+    const Claim rob = claimPhase(seat, addId, false, true, false);
+    if (!rob.isNull && rob.hasAbort) {
         ended = true;
-        return agariRon(ron, seat, addId, true, false);      // 抢杠：不是燕返
+        return abort(rob.abortReason);                   // 三家和了（抢杠同样适用）
+    }
+    if (!rob.isNull && rob.type == Claim::Type::RON) {
+        ended = true;
+        return agariRon(rob.multiRon, seat, addId, true, false);      // 抢杠：不是燕返
     }
     clearIppatsu();                  // 杠真的成立了，这才打断一发
     revealKanDora(seat);
     return {};
 }
 
-std::vector<int> Round::chankanRon(int kanSeat, int tileId, bool kokushiOnly) const {
-    std::vector<int> ron;
-    for (int d = 1; d < 4; d++) {
-        const int s = (kanSeat + d) % 4;
-        if (isFuriten(s)) {
-            continue;
+/**
+ * **抢杠**的询问内容（Java `Round.chankanOptions` 的镜像）：只给 `ron` + `pass`。
+ * 和了判定**复用 `claimOptions`**（同一把尺子），只把非荣和项滤掉。
+ */
+std::vector<Option> Round::chankanOptions(int seat, int from, int tileId, bool kokushiOnly) {
+    std::vector<Option> out;
+    for (const Option &o : claimOptions(seat, from, tileId)) {
+        if (o.type == kActPass) {
+            out.push_back(o);
+        } else if (o.type == kActRon) {
+            if (!kokushiOnly) {
+                out.push_back(o);
+                continue;
+            }
+            HandScore sc;
+            if (checkWin(seat, tileId, false, false, false, true, false, sc) && isKokushiScore(sc)) {
+                out.push_back(o);
+            }
         }
-        HandScore sc;
-        if (!checkWin(s, tileId, false, false, false, true, false, sc)) {
-            continue;
-        }
-        if (kokushiOnly && !isKokushiScore(sc)) {
-            continue;
-        }
-        ron.push_back(s);
     }
-    // 多家抢杠同样受**头跳**约束
-    if (rules.headBump && ron.size() > 1) {
-        ron.resize(1);
-    }
-    return ron;
+    return out;
 }
 
 // ================================================================= 和了结算
@@ -898,7 +907,8 @@ RoundResult Round::abort(const std::string &reason) {
 
 // ================================================================= 鸣牌
 
-Round::Claim Round::claimPhase(int from, int tileId, bool riichiDiscard) {
+Round::Claim Round::claimPhase(int from, int tileId, bool riichiDiscard, bool chankan,
+                              bool kokushiOnly) {
     (void) riichiDiscard;                  // Java 的形参在这个函数里也没用到（燕返在 agariRon 判）
     // 同一张舍张的选项**只算一次**：`claimOptions` 里要跑完整的和了判定 + 振听扫描
     std::map<int, std::vector<Option>> optsBySeat;
@@ -908,7 +918,8 @@ Round::Claim Round::claimPhase(int from, int tileId, bool riichiDiscard) {
         if (awaySeat(s)) {
             continue;
         }
-        std::vector<Option> o = claimOptions(s, from, tileId);
+        std::vector<Option> o = chankan ? chankanOptions(s, from, tileId, kokushiOnly)
+                                        : claimOptions(s, from, tileId);
         optsBySeat[s] = o;
         // 只有"有得选"的座位才算 eligible（只有 `pass` 一条的**不问**）
         if (o.size() > 1 || (o.size() == 1 && o[0].type != kActPass)) {

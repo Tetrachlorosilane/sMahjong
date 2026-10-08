@@ -38,6 +38,30 @@ inline constexpr int kV4FormatVersion = 2;
 /** 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32）。 */
 inline constexpr int kV4HeaderBytes = 64;
 
+/**
+ * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）—— 与 Python
+ * `model.ONLINE_HEADS`、Java `V4Policy.ONLINE_HEADS` **同名同值**，唯一规格 = `docs/TRAINER-CPP.md` §6.25。
+ *
+ * <p>判据（三端同一把尺子，机械判据）：把该头的张量**清零**后重跑同一次前向 ⇒ 策略头 logits
+ * **逐位不变** ⇔ 它不在推理路径上。C++ 侧的实测在 `trainer v4golden` 那行的 `dValue/dBelief/dGate`
+ * （①清零 `heads.value.*` 必须恰好 0；②清零 `heads.belief_tenpai.*` 必须 > 0；③清零
+ * `heads.policy_gate.*` 必须 > 0 —— ③ 是 ② 的哨兵，门控恒等时 ② 会**假绿**）。
+ *
+ * <p>⚠ `belief_tenpai` 在线的**原因**：逐候选门控 `gate = 1 + tanh(policy_gate(sigmoid(bt)))`
+ * （第五十五轮）**乘在逐候选表示上** ⇒ 真的改 argmax。而 `heads.policy_gate.*` 是**可缺张量**
+ * （缺 = 恒等门控，旧网走 `normalize_state` 补 0）⇒ 老网的在线集合退化成 `{policy}`：
+ * 这是"**每个 checkpoint 的性质**"，不是代码常量（换 checkpoint 要重跑判据）。
+ */
+inline const std::vector<std::string> ONLINE_HEADS = {"policy", "belief_tenpai"};
+
+/**
+ * **训练与契约必需**的头：必须训练 + 过 parity + 进消融与加载器契约（⛔ 与"上线"**无关**）。
+ *
+ * <p>= 唯一规格 `docs/TRAINER-CPP.md` §6.25 的第二张表：训练必需要从来**推导不出**"影响决策"
+ * （两者不能合并 —— 用户裁决）。`placement` / `belief_hand` / `effect` 三个头只训练、不上线。
+ */
+inline const std::vector<std::string> TRAIN_HEADS = {"policy", "value", "belief_tenpai", "danger"};
+
 struct V4Scratch;
 
 /** 一份加载好的 v4 权重（字段与 Java `V4Policy` 同构）。 */

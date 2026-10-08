@@ -135,21 +135,29 @@ export class TestClient {
 }
 
 /**
- * 连上并完成握手：`hello` →（收到 `uuid_ask`）→ `uuid` → 等 `hello_ok` / `uuid_ok`。
+ * 连上并完成握手：`hello`/`rejoin` →（收到 `uuid_ask`）→ `uuid` → 等 `hello_ok` / `uuid_ok`。
  *
  * @param opts.name 昵称
  * @param opts.uuid 本地保存的 uuid（不给 = 第一次玩，服务端会生成一个）
+ * @param opts.rejoin `{pid, token}` 重连凭据 —— 给了就**代替 `hello`** 发 `rejoin`
+ *        （服务端只认 pid+token 才允许接回一个**托管中**的座位，见 A5）
  */
 export async function connectClient(host, port, opts = {}) {
     const c = new TestClient(opts.name || 'T', host, port);
     await c.connect();
-    c.send({ cmd: 'hello', name: opts.name || 'T', ver: 1 });
+    const rj = opts.rejoin;
+    if (rj && rj.pid > 0 && rj.token) {
+        c.send({ cmd: 'rejoin', pid: rj.pid, token: rj.token });
+    } else {
+        c.send({ cmd: 'hello', name: opts.name || 'T', ver: 1 });
+    }
     // 服务端一 accept 就发 uuid_ask（PROTOCOL §2.0）；先等它再回 uuid，顺序与真客户端一致
     await c.waitAfter(0, (e) => e.ev === 'uuid_ask', 5000, 'uuid_ask');
     c.send(opts.uuid ? { cmd: 'uuid', uuid: opts.uuid } : { cmd: 'uuid' });
     const hok = await c.waitAfter(0, (e) => e.ev === 'hello_ok', 5000, 'hello_ok');
     const uok = await c.waitAfter(0, (e) => e.ev === 'uuid_ok', 5000, 'uuid_ok');
     c.pid = hok.pid;
+    c.token = hok.token;
     c.uuid = uok.uuid;
     c.uuidOk = uok;
     return c;

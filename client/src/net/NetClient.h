@@ -50,6 +50,7 @@ private slots:
     void onReadyRead();
     void onSocketError(QAbstractSocket::SocketError err);
     void onPingTimer();
+    void onStaleCheck();
 
 private:
     void fail(const QString& msg);
@@ -59,6 +60,11 @@ private:
     QTcpSocket m_socket;
     QByteArray m_buffer;
     QTimer m_pingTimer;
+    // 「多久没收到任何下行报文就判掉线」（PROTOCOL §0 的约定）。服务端空闲时每 20 秒发一条
+    // `pong` 心跳，所以 60 秒静默 = 链路真的断了（而不是"牌局安静"）。
+    QTimer m_staleTimer;
+    qint64 m_lastRecvMs = 0;      // 最近一次收到**任何字节**的时刻（ms）
+    int m_recvTimeoutMs = 60000;  // 可用 `MAHJONG_RECV_TIMEOUT_MS` 覆盖（测试/排查用）
     QString m_lastError;
     bool m_handshakeDone = false;
 

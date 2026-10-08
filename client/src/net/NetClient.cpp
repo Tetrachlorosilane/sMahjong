@@ -3,6 +3,7 @@
 
 #include "i18n/Lang.h"
 
+#include <QDateTime>
 #include <QHostInfo>
 #include <QJsonObject>
 #include <QStringList>
@@ -10,6 +11,10 @@
 namespace {
 // 心跳间隔（docs/PROTOCOL.md §0：客户端可选发 ping）
 constexpr int kPingIntervalMs = 20000;
+// 收包超时的约定值（PROTOCOL §0：60 秒无任何下行报文可判掉线）
+constexpr int kRecvTimeoutMs = 60000;
+// 静默检查的间隔（上限；超时更短时按超时的 1/3 走，测试里才不会等太久）
+constexpr int kStaleCheckMs = 5000;
 } // namespace
 
 NetClient::NetClient(QObject* parent)
@@ -17,6 +22,15 @@ NetClient::NetClient(QObject* parent)
 {
     m_pingTimer.setInterval(kPingIntervalMs);
     connect(&m_pingTimer, &QTimer::timeout, this, &NetClient::onPingTimer);
+
+    // 收包超时：`MAHJONG_RECV_TIMEOUT_MS` 覆盖（测试/排查用；同 `MAHJONG_SFX_TRACE` 的套路）
+    bool envOk = false;
+    const int envTimeout = qEnvironmentVariableIntValue("MAHJONG_RECV_TIMEOUT_MS", &envOk);
+    if (envOk && envTimeout > 0) {
+        m_recvTimeoutMs = envTimeout;
+    }
+    m_staleTimer.setInterval(qMax(100, qMin(kStaleCheckMs, m_recvTimeoutMs / 3)));
+    connect(&m_staleTimer, &QTimer::timeout, this, &NetClient::onStaleCheck);
 
     connect(&m_socket, &QTcpSocket::connected, this, &NetClient::onConnected);
     connect(&m_socket, &QTcpSocket::disconnected, this, &NetClient::onDisconnected);
@@ -27,6 +41,7 @@ NetClient::NetClient(QObject* parent)
 NetClient::~NetClient()
 {
     m_pingTimer.stop();
+    m_staleTimer.stop();
     if (m_socket.state() != QAbstractSocket::UnconnectedState) {
         m_socket.blockSignals(true);
         m_socket.abort();
@@ -97,6 +112,8 @@ void NetClient::disconnectFromServer()
 {
     m_connecting = false;
     m_pingTimer.stop();
+    m_staleTimer.stop();
+    m_lastRecvMs = 0;
     if (m_socket.state() == QAbstractSocket::UnconnectedState) {
         emit disconnected();
         return;
@@ -131,12 +148,17 @@ void NetClient::onConnected()
     m_lastError.clear();
     m_connecting = false;
     m_pingTimer.start();
+    // 连上就开始算静默：**任何**下行字节都会把它推后（见 onReadyRead）
+    m_lastRecvMs = QDateTime::currentMSecsSinceEpoch();
+    m_staleTimer.start();
     emit connected();
 }
 
 void NetClient::onDisconnected()
 {
     m_pingTimer.stop();
+    m_staleTimer.stop();
+    m_lastRecvMs = 0;
     m_buffer.clear();
     if (!m_handshakeDone)
         return; // 握手前断开由 errorOccurred 负责提示
@@ -181,6 +203,8 @@ void NetClient::onPingTimer()
 
 void NetClient::onReadyRead()
 {
+    // 任何字节（哪怕只是半包）都算"链路还活着"：超时判据是**下行静默**，不是"收到完整报文"
+    m_lastRecvMs = QDateTime::currentMSecsSinceEpoch();
     m_buffer.append(m_socket.readAll());
 
     // 单条上限保护：未找到换行且缓冲已经超限 → 断链
@@ -231,5 +255,43 @@ void NetClient::fail(const QString& msg)
     m_lastError = msg;
     m_connecting = false;
     m_pingTimer.stop();
+    m_staleTimer.stop();
     emit errorOccurred(msg);
+}
+
+/**
+ * 收包超时（A6）：**下行静默**超过约定时长就判掉线。
+ *
+ * <p>为什么需要它：TCP 半开（网线拔了、NAT 表过期、对端进程被 SIGKILL）时 `QTcpSocket`
+ * 不会报错、`disconnected()` 也不来 —— 客户端会一直显示"已连接"、按钮点下去石沉大海
+ * （报障原文：「牌局卡住，什么提示都没有」）。服务端空闲时**每 20 秒**发一条 `pong` 心跳
+ * （PROTOCOL §0），所以 60 秒静默 = 链路真的断了，不是"牌局安静"。
+ *
+ * <p>处理：给一条**明确原因**（`ui.net.recv_timeout`）+ 真关掉这条连接 + 发一次
+ * `disconnected`，让界面回到「未连接」，玩家可以直接重连（不清任何本地状态 ——
+ * 牌局进度在服务端，重连后靠 `rejoin`/`state` 补回来）。
+ */
+void NetClient::onStaleCheck()
+{
+    if (!isConnected() || m_lastRecvMs <= 0) {
+        return;
+    }
+    const qint64 silent = QDateTime::currentMSecsSinceEpoch() - m_lastRecvMs;
+    if (silent < m_recvTimeoutMs) {
+        return;
+    }
+    m_staleTimer.stop();
+    fail(lang::t("ui.net.recv_timeout")
+             .arg((silent + 999) / 1000));
+    // `abort()` 是否再发 `disconnected` 在 Qt 各版本里不完全一致 —— 这里自己发**唯一**那一次
+    //（先屏蔽 socket 信号，免得又走一遍 onDisconnected/onSocketError，提示就重复了）。
+    // ⚠ **不**看 `m_handshakeDone`：连上之后、握手还没完成就静默（服务端 accept 了却卡住）
+    //   同样要回到「未连接」，否则界面一直显示"已连接"而实际上什么都发不出去。
+    m_handshakeDone = false;
+    m_socket.blockSignals(true);
+    m_socket.abort();
+    m_socket.blockSignals(false);
+    m_buffer.clear();
+    m_lastRecvMs = 0;
+    emit disconnected();
 }

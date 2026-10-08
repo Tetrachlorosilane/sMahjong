@@ -125,6 +125,13 @@ public:
     static QVector<int> decodeMeldForTest(int m, QString* kind, int* dir);
 
     /**
+     * 流局原因码（协议 ASCII）→ 天鳳牌譜状态字（只给自检用）。
+     * ⚠ 判据：**这张映射必须与服务端 `rules/YakuCodes.REASON` 的码表同源** —— 2026-10 之前这里
+     * 写的是 `nine_terms`（服务端从不产生），于是九种九牌被静默导成通用「流局」。
+     */
+    static QString drawStatusForTest(const QString& reason);
+
+    /**
      * 写出到文件（`.txt`，内容 = 那一行链接 + 缩进过的 JSON —— 便于人肉查看）。
      * @param path 目标文件；父目录不存在会创建
      */

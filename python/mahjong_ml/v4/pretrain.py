@@ -63,7 +63,7 @@ EVT_TYPE_DIM = 8
 class MaskedEventHead(nn.Module):
     """P1 的**掩码事件重建** pretext 头（`Linear(D_MODEL → 事件类型数)`）。
 
-    ⚠ 它**不进推理**（`inference_heads()` 里没有它）：P1 用它逼事件塔把"上下文里的缺格"
+    ⚠ 它**不进推理**（`contract_heads()` 里没有它）：P1 用它逼事件塔把"上下文里的缺格"
     补出来，训完就丢；checkpoint 里单独存一份（`ssl_head`）以便复现。
     """
 

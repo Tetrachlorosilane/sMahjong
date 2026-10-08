@@ -184,7 +184,8 @@
   绝不替玩家拿另一张顶上（`SelfTest.meldAkaPickTests`）。
 - **客户端（1.8.0 起）把可选项放进副露的子列表**：`ask.options` 里两种取法各占一条，
   界面是**一个「碰」按钮 + 子列表**（子列表每条按"用哪几张牌"写），点哪条就原样回带该条的 `tiles`（见 §3.6）。
-  只有一种取法时不出子列表、文案里也不写赤五。`chi` 的选项里赤五以 `0m` 列出（选它即用赤五）。
+  只有一种取法时不出子列表、文案里也不写赤五。⚠ **吃也一样**（2026-10 起）：`chi` 的 `sets` 里
+  每个搭子按手里真实持有的牌展开取法，赤五以 `0m` 列出（选它即用赤五）。
 
 **`discard.tsumogiri` 为必需字段（老客户端可省略，服务端按 `false` 处理）**：
 服务端要按它决定**从摸牌位取还是从暗手取**，而 `tile` 只是一个牌码，没法表达这件事：
@@ -245,6 +246,16 @@
 {"cmd":"rejoin","pid":12345,"token":"..."}   // 用 hello 回包给的 pid/token 重连
 ```
 
+- **`rejoin` 是新连接的第一条身份命令**（代替 `hello`；`uuid` 仍按 §2.0 先回，顺序不限）。
+  客户端应当把 `hello_ok` 里的 `pid` + `token` 与 `uuid` **一起存下来**，下次连接优先发它。
+- **判据是 `pid` + `token` 都对**（缺一即 `bad_token`，客户端应清掉本地凭据并改走 `hello`）：
+  - 旧连接**还活着** → 直接接管（并把旧连接真正关掉，见 AUDIT S-07/S-08）；
+  - 旧连接**已断开** → 服务端保留的凭据**到 TTL（`REJOIN_TTL_MS` = 2 分钟）**，期间仍可接管。
+- ⚠ **只有 `uuid` 不算凭据**：`settings.json` 可以被复制/同步，所以"按 uuid 接回一个托管中的座位"
+  这件事**必须**有 `rejoin` 的凭据（否则任何人都能顶掉一个"人还在、只是断线"的座位）。
+  没有凭据时客户端退回 `hello`：领一个新身份、从大厅重新入座 —— 不会卡住，只是接不回原座位。
+- TTL 之外（或服务端重启过）凭据作废：客户端收到 `bad_token` 后清凭据重发 `hello` 即可自愈。
+
 ### 2.5 结束对局投票（`vote_end` / `vote`）
 
 任何**在场玩家**（在座、非机器人、连接在线）都能在**对局进行中**发起一次「结束对局」投票：
@@ -279,7 +290,7 @@
 {"ev":"uuid_ok","uuid":"...","issued":true,"new_player":true}
 {"ev":"rooms","rooms":[{"id":"AB12","name":"房间名","players":2,"seats":4,"playing":false}]}
 {"ev":"room_joined","room":"AB12","seat":0}      // 自己入座成功（随后必有一条 room）
-{"ev":"room","id":"AB12","name":"房间名","host":1,"playing":false,
+{"ev":"room","id":"AB12","name":"房间名","host":12345,"playing":false,   // host = 房主的 pid（不是座位号）
  "bot_ai":"ppo2-g04",
  "rules":{...},
  "seats":[{"seat":0,"pid":12345,"name":"甲","ready":true,"bot":false,"away":false,"score":25000},
@@ -293,6 +304,7 @@
 `seats` 中 `null` 表示空位；机器人 `pid=0`、`bot=true`；
 `away=true` 表示这一家**掉线托管中**（座位仍占着、牌局照常推进，见 §3.13）。
 客户端可用 `hello_ok.pid` 在 `seats` 中匹配自己的座位，`room_joined` 是便捷通知。
+⚠ `room.host` 是**房主的 pid**（不是座位号）：找房主用 `seats[].pid == room.host`。
 
 **机器人用哪一代 AI**（`bot_ai` / `bot_ais` / `set_bot_ai`，2026-09）：
 
@@ -315,7 +327,8 @@
 
 `error.code` 的取值（全部 ASCII，文案在客户端 `error.*`）：
 `too_large` / `bad_json` / `internal` / `need_hello` / `bad_token` / `in_room` /
-`no_room` / `not_host` / `bad_seat` / `bad_bot_ai`（`arg` = 那个名字）/ `unknown_cmd`（`arg` = 那个命令名）。
+`no_room` / `not_host` / `bad_seat` / `bad_bot_ai`（`arg` = 那个名字）/ `unknown_cmd`（`arg` = 那个命令名）/
+`replay_not_found`（`arg` = 回放 ID）/ `replay_rate_limited`（回放读取限速，见 §3.11）。
 
 ### 3.2 开局
 
@@ -337,7 +350,7 @@
                                    // hand 已排序 → 位置推不出来，只能点名；缺这个字段的
                                    // 老服务端只能让客户端猜，那正是幽灵手牌的来源（见 §2.2）
  "dora_indicators":["5m"],         // 表宝牌指示牌
- "tiles_left":70,                  // 牌山剩余可摸数
+ "tiles_left":69,                  // 牌山剩余可摸数（配牌 53 张已拿走：122 − 53）
  "dead_wall_left":4,               // 剩余**岭上**牌数（杠后从王牌摸的就是它，见 §3.4）
  "cans":{"riichi":true,"kyuushu":false}   // 本局开局能力（仅供参考）：kyuushu = 该家
                                           // **第一次被问到**时能不能宣九种九牌 —— 与 `ask` 里
@@ -348,8 +361,8 @@
 ### 3.4 摸牌
 
 ```jsonc
-{"ev":"draw","seat":0,"tiles_left":69,"dead_wall_left":4,"rinshan":false,"tile":"7p"}  // 摸牌者收到 tile
-{"ev":"draw","seat":0,"tiles_left":69,"dead_wall_left":4,"rinshan":false}              // 其他玩家不含 tile
+{"ev":"draw","seat":0,"tiles_left":68,"dead_wall_left":4,"rinshan":false,"tile":"7p"}  // 摸牌者收到 tile
+{"ev":"draw","seat":0,"tiles_left":68,"dead_wall_left":4,"rinshan":false}              // 其他玩家不含 tile
 ```
 
 `rinshan = true` 表示这张是**杠后从岭上（王牌）摸的**。两条账要分清：
@@ -392,7 +405,8 @@
 客户端只需照 `sideways` 画即可，不必自己推断。
 
 `meld.kind ∈ {chi, pon, daiminkan, ankan, kakan}`。`from` = 被鸣牌者座位；`ankan` 时 `from = seat`。
-`called_index` = 被鸣走的那张牌在原牌河中的下标（-1 表示无，如暗杠）；客户端可据此把牌河中的该张置灰。
+`called_index` = 被鸣走的那张牌在原牌河中的下标；⚠ **没有牌河位置的鸣牌（暗杠、加杠）根本不发这个键**
+（不是发 `-1`）—— 客户端按「键不存在 = 无位置」处理（老客户端读 `toInt(-1)` 也兼容）。客户端据此把牌河中的该张置灰。
 
 ### 3.6 询问（Ask）—— 客户端据此弹按钮
 
@@ -424,10 +438,24 @@
 - `ask_id`：本次询问的序号，客户端回包时**原样带回**（`{"cmd":"action","ask_id":13,...}`）；
   服务端用它丢弃过期回包。缺省时按座位匹配（**仅**为兼容老客户端；新客户端一律带上，见 §2.2）。
 - `kind ∈ {turn, claim, chankan}`
+- **`chankan`（抢杠，2026-10 起真的会下发）**：别人**加杠**（或《雀魂》里国士抢**暗杠**）那张牌时，
+  能荣和它的每一家各收一条询问：`from` = 杠主、`tile` = 被加杠的那张，
+  `options` **只有 `ron` + `pass`**（抢杠不能碰/吃/杠，见 `Round.chankanOptions`）。
+  - **见逃 = `pass`**（超时未答同理，超时一律 `pass`）：**那次杠照常成立**（副露落成加杠、翻杠宝牌、
+    打断一发），并且见逃者被置**同巡振听**（立直时另加**立直振听** = 到本局结束）——
+    与打牌荣和见逃**同一段记账**（`docs/日本麻将.md` §振听）。
+  - 有人抢 ⇒ 走荣和（`chankan` 役）；**多家抢杠**与多家荣和**同一把尺子**：头跳规则下只认最近那家，
+    《天凤》的三家和了也在抢杠时成立（`claimPhase` 的唯一一条仲裁）。
+  - ⚠ **决策漏斗看到的 `kind` 恒为 `"claim"`**（训练口径），只有**报文**里是 `chankan` ——
+    这样客户端能弹"抢杠"提示，而策略/轨迹/数据集校验器不必认第三种 kind（见 §8.2、`Round.askKindFor`）。
 - `option.type ∈ {discard, riichi, tsumo, kan, chi, pon, ron, pass, kyuushu}`
-- `chi` 选项形如 `{"type":"chi","sets":[["3m","4m"],["2m","4m"],["2m","3m"]]}`（手中取出的两张）
-- **副露赤宝选择（2026-09）**：`pon` 与 `kan(daiminkan)` 的选项带 `tiles` = **这一副用哪几张的精确牌码**
-  （赤五是 `0m/0p/0s`）。手里既有赤五又有普通五时，服务端对两种取法**各下发一条**：
+- `chi` 选项形如 `{"type":"chi","sets":[["3m","4m"],["2m","4m"],["2m","3m"]]}`（手中取出的两张）。
+  ⚠ **与碰同一套口径（2026-10 起）**：每个搭子按手里**真实持有的牌**展开取法 —— 同一个搭子若
+  "普通五与赤五都有"，就**各下发一条**（普通在前、用赤在后），例如
+  `[["5m","6m"],["0m","6m"]]`；**只有赤五可用时那一条直接写 `0m`**（不再谎报成 `5m` 让服务端去回退）。
+- **副露赤宝选择（2026-09，2026-10 扩到吃）**：`pon` / `kan(daiminkan)` 的选项带 `tiles`、`chi` 带 `sets`
+  （每个搭子一种取法）= **这一副用哪几张的精确牌码**（赤五是 `0m/0p/0s`）。
+  手里既有赤五又有普通五时，服务端对两种取法**各下发一条**：
 
   ```jsonc
   {"type":"pon","tiles":["5p","5p"]}                      // 不用赤五（普通牌优先）
@@ -471,8 +499,7 @@
  "score_delta":[8000,-2000,-2000,-2000],
  "scores_after":[33000,23000,23000,23000],
  "pao":{"seat":-1,"seats":[]},
- "riichi_void":-1,
- "ura_revealed":true}
+ "riichi_void":-1}
 ```
 
 - `from = -1` 表示自摸。`limit` ∈ `{"", "mangan","haneman","baiman","sanbaiman","kazoe_yakuman","yakuman"}`
@@ -557,9 +584,21 @@
 
 ```jsonc
 {"ev":"round_end","round":{"bakaze":"E","kyoku":2,"honba":0,"riichi_sticks":0},
- "scores":[26000,24000,25000,25000],"next":{"bakaze":"E","kyoku":2,"honba":0},
- "renchan":false,"game_over":false}
+ "scores":[26000,24000,25000,25000],
+ "agari":true,"abortive":false,"reason":"",
+ "renchan":false,
+ "next":{"bakaze":"E","kyoku":3,"honba":0},   // 「若这一局之后继续打」的下一局
+ "game_over":false}
 ```
+
+- `next` = 下一局的场风/局/本场，**只按推进规则算**（连庄不动场风与局、本场按规则 ±；
+  闲家轮庄时庄家下家坐庄，轮回到起家则场风 +1、局回到 1）。
+  ⚠ **它是"若继续打就是这一局"**：要不要真打由**随后是否收到 `game_end`** 决定
+  （击飞、和了止/听牌止、延长战门槛、投票结束都会让它作废）。
+  ⚠ `round_end.game_over` **目前恒为 `false`**（老字段；真正的终局是 `game_end`）——
+  客户端**别**用它判断"还有没有下一局"，按"有没有 `game_end`"判。
+- `agari` / `abortive` / `reason`：本局是"和了 / 途中流局 / 荒牌流局"以及流局原因码
+  （`YakuCodes.REASON`，如 `kyuushu` / `four_winds` / `exhaustive`）。老服务端不发这三个字段。
 
 整场结束：
 
@@ -594,9 +633,15 @@
 - `tiles_left` / `dead_wall_left` 只是**张数**，不含任何牌面。
 - `furiten` 数组长度仍是 4，但**只有请求者自己那一项可能为 true**，其余恒 false；
   旁观者（`seat = -1`）四项全 false。理由见 §3.10 —— 临时振听等价于「他听牌了」。
-- `dealer` / `drawn_seat` / `turn` 是**公开信息**（谁坐庄、谁手里有 14 张、轮到谁），
+- `dealer` / `drawn_seat` / `turn` 是**公开信息**（谁坐庄、**最后谁摸了牌**、**当前该谁动**），
   2026-09 补的：半场进入的**观战者/重连者**要靠它们一次把牌桌摆对
   （缺 `drawn_seat` 时正在摸牌的那家会被画成 13 张；缺 `dealer` 时四家自风全错）。
+  ⚠ **`turn` 与 `drawn_seat` 不是一件事**（2026-10 修）：`turn` = **当前该行动的人**
+  （摸牌后 = 摸牌者；**打牌后 = 下家**；鸣牌后 = 鸣牌者），`drawn_seat` = **最后摸牌的人**。
+  老实现两个字段都填"最后摸牌者"，于是重连/观战会把**刚打牌那家**高亮成当前手番。
+  ⚠ **「谁手里有 14 张」= `turn == drawn_seat`** 的那一家（最后摸牌者一旦打过牌，手里就是 13 张，
+  此时**没有任何人**有 14 张）—— 客户端 `concealedCount()` 与实时路径（`draw` 记上、`discard` 清掉）
+  必须同一套判据。
   `spectate` 见 §3.9。
 
 ### 3.9 观战（对局中入局 = 观战，**不是**未定义状态）
@@ -815,7 +860,8 @@ M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文�
 {
   "preset": "mleague",       // "mleague"(默认) | "tenhou"《天凤》 | "majsoul"《雀魂》 | "custom"(不铺，保留当前值)
   "length": "hanchan",       // "tonpuu"(东风战) | "hanchan"(半庄)
-  "aka": 3,                  // 赤宝牌数量 0|3（传 4 按 3 处理）
+  "aka": 3,                  // 赤宝牌数量 **0|3**（只有这两种有意义：1/2 说不出"少放哪几张"、4 也没有
+                             //   码位 ⇒ **一律归一化到 0/3**，服务端记一条 WARN，绝不静默保留）
   "kuitan": true,            // 食断
   "ura": true,               // 里宝牌
   "kan_dora": true,          // 杠宝牌
@@ -832,7 +878,10 @@ M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文�
   "nagashi_mangan": false,   // 流局满贯
   "tobi": false,             // 击飞
   "agariyame": false,        // 南4局庄家和了即结束（和了止）
-  "west_extension": false,   // 西入
+  "west_extension": true,    // **延长战**（南入 / 西入）：All Last 轮庄后若**无人达到
+                             //   `required_points`** 就继续打（东风战→南入、半庄→西入，**没有北入**）；
+                             //   延长战里**每一局结束**再看一次，有人达到即当场终止（《天凤》sudden death）。
+                             //   《天凤》《雀魂》= true，M.League = false（打到南 4 局庄家轮庄为止）
   "kuikae": true,            // 禁止食替
   "pao": true,               // 包牌
   "koyaku": false,           // **古役**开关：燕返 / 杠振 / 十二落抬 / 五门齐 / 三连刻 / 一色三顺 /
@@ -845,6 +894,7 @@ M.League 规则）。服务端先按 `preset` 铺一整套值，**再用报文�
   "start_score": 25000,      // 配给原点
   "return_score": 30000,     // 返点（= 精算基准；《雀魂》段位场与原点同为 25000，故无头名赏）
   "required_points": 0,      // **一位必要点数**（0 = 不要求）：决定 ①All Last 轮庄后是否进延长战
+                             //   （配合 `west_extension`；**延长战里每局结束**再判一次"有人达到就终止"）
                              //   ②All Last 庄家能否和了止/听牌止。M.League = 0（打到南4局轮庄为止），
                              //   《天凤》《雀魂》段位场 = 30000。⚠ 与 return_score（精算基准）是两个数
   "kokushi_tenhou_13": false, // **《雀魂》特有**：天和时成立国士无双 → 视作国士无双十三面
@@ -1131,15 +1181,16 @@ Map<String,Object> Table.decideBot(int seat, mahjong.ai.Decision d)
 | `pon:<码>+<码>` | 碰。两张 = **从手里取哪两张**（按槽位升序；`0p` 表示用赤五） |
 | `kan:ankan:<码>` / `kan:kakan:<码>` | 暗杠 / 加杠 |
 | `kan:daiminkan:<码>+<码>+<码>` | 大明杠。三张 = **从手里取哪三张**（按槽位升序） |
-| `chi:<码>+<码>` | 吃（两张按牌种升序） |
+| `chi:<码>+<码>` | 吃（两张按牌种升序；`0p` 表示**用赤五去吃**，与 `pon` 同口径） |
 | `tsumo` / `ron` / `pass` / `kyuushu` | 无参数动作 |
 | `pon`（**兼容形态**） | 不带取法的裸 `pon`：只在**老客户端报文 / 老数据集**里出现。服务端仍然接受它（按默认取法执行），但**轨迹里不会记成裸键**（见下），`selfplay-check.mjs` 也**不再放行**这种键 —— 旧数据集作废、要重采 |
 
-> ⚠ **为什么碰 / 大明杠必须带取法**：手里同时有赤五与普通五时，服务端会为"用普通五"与"用赤五"
-> 各下发一条选项（`tiles` 不同，见 §3.6），**它们是两个不同的合法动作**。旧的动作空间把两者都折成
-> 裸 `pon` → `legal` 里出现**重复键**、`chosen_index` 无从分辨（2026-09 由
-> `tools/selfplay-check.mjs` 的"`legal` 里有重复动作"抓出来）。现在键里带上那两张/三张牌码，
-> 与 `chi:<码>+<码>` 同一套写法。
+> ⚠ **为什么碰 / 大明杠 / 吃都必须带取法**：手里同时有赤五与普通五时，服务端会为"用普通五"与"用赤五"
+> 各下发一条选项（`pon`/`kan` 的 `tiles` 不同、`chi` 的 `sets` 不同，见 §3.6），
+> **它们是两个不同的合法动作**。旧的动作空间把两者都折成
+> 裸 `pon` / 裸 `chi` → `legal` 里出现**重复键**、`chosen_index` 无从分辨（2026-09 由
+> `tools/selfplay-check.mjs` 的"`legal` 里有重复动作"抓出来）。现在键里带上那两张/三张牌码
+> （`chi:0p+6p` 也进键），与 `chi:<码>+<码>` 同一套写法。
 >
 > **裸 `pon` 的解析规则（唯一）**：策略若回一条不带 `tiles` 的 `{"type":"pon"}`（老客户端 / 内置机器人），
 > 服务端按 **"普通牌优先"的默认取法**执行（`Round.pickAuto`）——**恰好是本次 `legal` 里第一条 pon**。

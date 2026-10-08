@@ -8,9 +8,11 @@
  *   ② 拿同一个 uuid 再连一次 → `issued:false`、`new_player:false`（**同一个 uuid = 同一个玩家**，
  *      服务端已经有档案了，不会再"新建一个初始玩家"）；
  *   ③ 形状不对的 uuid → 当作"没有记录"处理（重新生成，**不报错**）；
- *   ④ **掉线接回座位**：牌局进行中掉线（托管）之后，用同一个 uuid 重连会被接回**原座位**
- *      并收到 `state` 快照（手牌还在）；而原来那条连接**还活着**时，第二条同 uuid 的连接
- *      **不能**把人顶掉。
+ *   ④ **掉线接回座位**：牌局进行中掉线（托管）之后，带**重连凭据**（`rejoin{pid,token}`）重连
+ *      会被接回**原座位**并沿用原 pid、收到 `state` 快照（手牌还在）；而原来那条连接**还活着**时，
+ *      第二条同 uuid 的连接**不能**把人顶掉；
+ *   ⑤ **只有 uuid 不算凭据**（A5）：复制一份 `settings.json` 去连**接不回**托管中的座位 ——
+ *      凭据只在断开后保留 `Server.REJOIN_TTL_MS`（2 分钟），过期即删。
  *
  * 用法：node tools/uuid-test.mjs <host> <port>
  *
@@ -97,13 +99,15 @@ async function main() {
     check(twin.seat < 0, `冒充者没有拿到座位（seat=${twin.seat}）`);
     twin.close();
 
-    // 掉线（托管）→ 用同一个 uuid 重连 → 接回原座位 + 收到 state 快照
+    // 掉线（托管）→ **带重连凭据**（pid+token）重连 → 接回原座位 + 收到 state 快照
     a.close();
     await sleep(1200);
-    const back = await connectClient(HOST, PORT, { name: '甲', uuid: a.uuid });
+    const back = await connectClient(HOST, PORT,
+                                     { name: '甲', uuid: a.uuid, rejoin: { pid: a.pid, token: a.token } });
     clients.push(back);
     const rj2 = await back.waitAfter(0, (e) => e.ev === 'room_joined', 6000, 'room_joined');
-    check(rj2.seat === mySeat, `接回**原座位** ${mySeat}（实际 ${rj2.seat}）`);
+    check(rj2.seat === mySeat, `凭据重连：接回**原座位** ${mySeat}（实际 ${rj2.seat}）`);
+    check(back.pid === a.pid, `凭据重连：沿用**原 pid**（${a.pid}，实际 ${back.pid}）`);
     const st = await back.waitAfter(0, (e) => e.ev === 'state' && e.phase === 'playing', 6000, 'state');
     check(st.seat === mySeat, `快照里的座位号也是 ${mySeat}`);
     check((st.hand || []).length >= 13,
@@ -121,6 +125,19 @@ async function main() {
     const myRow = roomEv ? (roomEv.seats || [])[mySeat] : null;
     check(myRow && myRow.away !== true && myRow.bot !== true,
           `接回后那一格不再托管、也不是机器人：${JSON.stringify(myRow)}`);
+
+    // ---------- ⑤ A5：只有 uuid、没有凭据 ⇒ **不许**顶掉那个座位 ----------
+    // 判据：`settings.json` 是可以被复制/同步的 —— 只看 uuid 就等于"谁复制谁顶位"。
+    // 座位仍然是他的（托管中），但这条连接接不回去，只能从大厅重新入座。
+    const forged = await connectClient(HOST, PORT, { name: '甲（复制的设置文件）', uuid: a.uuid });
+    clients.push(forged);
+    const forgedStole = await forged.sawWithin(1500, (e) => e.ev === 'room_joined' && e.seat >= 0);
+    check(!forgedStole, '只有 uuid（复制设置文件）⇒ **接不回**托管中的座位');
+    check(forged.seat < 0, `伪造者没有拿到座位（seat=${forged.seat}）`);
+    const afterRow = back.all((e) => e.ev === 'room' && e.playing).pop();
+    const stillMine = afterRow ? (afterRow.seats || [])[mySeat] : null;
+    check(stillMine && stillMine.away !== true,
+          `座位仍归原主（伪造者没把它搅乱）：${JSON.stringify(stillMine)}`);
 }
 
 try {

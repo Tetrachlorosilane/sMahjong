@@ -490,18 +490,59 @@ public final class V4Probe {
                 worstH0 = Math.max(worstH0, Math.abs(a[i] - b[i]));
             }
         }
+        // 头表判据（唯一规格 `docs/TRAINER-CPP.md` §6.25；与 Python `v4 check` ⑦/⑦′、C++ 侧同一条线）：
+        //   清零某个头后 **policy logits 逐位不变** ⇔ 它不在推理路径上。
+        //   `value` 是离线头 ⇒ 必须**恰好 0**；`belief_tenpai`（经门控进 policy）与 `policy_gate`
+        //   （本身就在策略路径上）必须 > 0 —— 这三条正是"哪张表装哪些头"的**实测**。
+        float dValue = 0f;
+        float dBelief = 0f;
+        float dGate = 0f;
+        if (firstT != null) {
+            float[] ref = net.forwardAll(firstT, firstH0).get("policy");
+            dValue = maxAbsDelta(ref, net.debugZeroHead("value").forwardAll(firstT, firstH0).get("policy"));
+            dBelief = maxAbsDelta(ref,
+                    net.debugZeroHead("belief_tenpai").forwardAll(firstT, firstH0).get("policy"));
+            dGate = maxAbsDelta(ref,
+                    net.debugZeroHead("policy_gate").forwardAll(firstT, firstH0).get("policy"));
+        }
+        // 门控是否"在线" = 前向自己的那个条件（`heads.policy_gate.weight` 在不在）—— 与 C++ 同一把尺子：
+        //   · **缺**（可缺张量 = 老网，`normalize_state` 补 0 ⇒ 恒等门控）：`belief_tenpai` **不在**
+        //     推理路径上 ⇒ 在线集合**退化成 `{policy}`**（§6.25 明文）⇒ ②③ 按"恰好 0"判、只报不红；
+        //   · **在但全 0**（= 夹具空转，扰动没生效）⇒ 判红（否则 ② 是假绿）。
+        boolean gatePresent = net.hasTensor("heads.policy_gate.weight");
+        if (!gatePresent || dGate == 0f) {
+            System.err.println("[V4Probe] ⚠ 门控恒等：" + (gatePresent
+                    ? "夹具里 `heads.policy_gate.*` 全是 0（扰动没生效）⇒ ② 是假绿，按 FAIL 处理"
+                    : "夹具里没有 `heads.policy_gate.weight`（可缺张量 = 老网口径）⇒ "
+                      + "`belief_tenpai` 不在推理路径上、ONLINE_HEADS 退化成 {policy}；②③ 不参与判红"));
+        }
+        boolean headsOk = dValue == 0f
+                && (gatePresent ? (dBelief > 0f && dGate > 0f) : dBelief == 0f);
+        String online = gatePresent ? String.join(",", V4Policy.ONLINE_HEADS) : "policy";
         boolean pass = feat.worst <= tol && head.worst <= tol && argmaxOk == nCases
-                && worstRed <= 1e-3f && worstH0 > 1e-4f;
+                && worstRed <= 1e-3f && worstH0 > 1e-4f && headsOk;
         if (!pass) {
             feat.dump("特征侧");
             head.dump("前向侧");
         }
         System.out.println(String.format(Locale.ROOT,
                 "golden cases=%d tol=%g 特征 maxΔ=%.3g 前向 maxΔ=%.3g argmax=%d/%d 红证 maxΔ=%.3g"
-                        + " h0红证 maxΔ=%.3g → %s",
+                        + " h0红证 maxΔ=%.3g → %s"
+                        + " heads online=%s contract=%s dValue=%.3g dBelief=%.3g dGate=%.3g",
                 nCases, tol, feat.worst, head.worst, argmaxOk, nCases, worstRed, worstH0,
-                pass ? "PASS" : "FAIL"));
+                pass ? "PASS" : "FAIL",
+                online, String.join(",", V4Policy.TRAIN_HEADS),
+                dValue, dBelief, dGate));
         return pass ? 0 : EXIT_ERROR;
+    }
+
+    /** 两个 logits 向量的最大绝对差（头表判据用；"逐位不变"就是这里恰好 0）。 */
+    private static float maxAbsDelta(float[] a, float[] b) {
+        float w = 0f;
+        for (int i = 0; i < Math.min(a.length, b.length); i++) {
+            w = Math.max(w, Math.abs(a[i] - b[i]));
+        }
+        return w;
     }
 
     private static float[][] readMat(ByteBuffer bb, int rows, int cols) {

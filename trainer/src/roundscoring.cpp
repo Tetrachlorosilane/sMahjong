@@ -158,6 +158,18 @@ bool keepPlayingWest(const Rules &rules, int top, int nextRoundWind, int lastWin
     return rules.westExtension && nextRoundWind <= lastWind + 1 && top < rules.requiredPoints;
 }
 
+bool extensionReached(const Rules &rules, const std::array<int, 4> &scores) {
+    if (!rules.westExtension) {
+        return false;
+    }
+    for (int s : scores) {
+        if (s >= rules.requiredPoints) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::array<int, 4> nagashiPayments(int winnerSeat, int dealer) {
     std::array<int, 4> d{};
     const bool dealerWin = winnerSeat == dealer;

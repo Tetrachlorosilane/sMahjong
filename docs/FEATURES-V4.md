@@ -146,8 +146,8 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | | `is_dora` / `is_aka` | 2 | 0/1 | 是不是宝牌 / 赤五牌种 |
 | | `is_yakuhai` / `is_terminal` / `is_honor` | 3 | 0/1 | 静态牌性（役牌/幺九/字牌） |
 | | `suit` | 3 | one-hot | 万/筒/索（字牌三格全 0） |
-| 预留 | `reserved` | 2 | 0 | 版本内扩展位（改动要 +版本，见 §6） |
-| **合计** | | **48** | | |
+| 预留 | `reserved` | 3 | 0 | 版本内扩展位（改动要 +版本，见 §6；⚠ 权威 = `spec.py:75`，`C_TILE = 48`） |
+| **合计** | | **48** | | = 3（自家）+ 30（三家 × 10 组）+ 12（全局）+ 3（预留） |
 
 > `river_before/after_riichi` 与 `tedashi/tsumogiri` 是**四家各自**的通道（上表"数量 3"= 三家对手；
 > 自家这两组用 0 填，因为自家牌河自己完全知道、且 `own_*` 已覆盖；**自家舍牌也进 EVT**）。
@@ -197,7 +197,7 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | 段 | 宽 | 内容 |
 | --- | --- | --- |
 | 基础（沿用 v3，逐字不变） | 88 | `type/9` + `tile/37`（含赤槽位）+ `tiles/37`（取法）+ `tsumogiri/1` + `kan_kind/3` + `noarg/1` |
-| 派生（引擎算） | 11 | ① `after_shanten/8` ② `ukeire_kinds/34` ③ `ukeire_tiles/136` ④ `ukeire_good/34` ⑤ `wait_kinds/34` ⑥ `wait_tiles/136` ⑦ `score_han/13` ⑧ `score_points/32000` ⑨ `score_expected/32000`（打点粗估 × 和了率） ⑩ `danger_after_all/100`（打这**张之后**对四家的最坏危险度） ⑪ `danger_after_riichi/100`（①②④⑤⑥ 就是 v3 的逐候选 8 维里的 7 项） |
+| 派生（引擎算） | 11 | **①–⑧ = v3 的逐候选 8 维**（名称与分母逐字对齐 `server/.../ai/ObsFeatures.perCandidate` 与 `Features.DERIVED_CAND_SCALE` / `features.DERIVED_SCALE_CAND`）：① `shanten/8` ② `advance_types/34` ③ `advance_tiles/136` ④ `wait_types/34` ⑤ `wait_tiles/136` ⑥ `good_wait_types/34` ⑦ `good_wait_tiles/136` ⑧ `dora_count/4`；**⑨–⑪ = v4 新增 3 维**：⑨ `score_expected/32000`（打点粗估 × 和了率） ⑩ `danger_after_all/100`（打这**张之后**对四家的最坏危险度） ⑪ `danger_after_riichi/100` |
 | 预留 | 29 | 0 |
 | **合计** | **128** | = 88 + 11 + 29（⚠ 早期草案写的"24 + 16"是**拍的分法**，落地时按"只留有名有姓的维"改成 11 + 29） |
 
@@ -222,7 +222,7 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | 组 | 通道 | 说明 |
 | --- | --- | --- |
 | 场次 | 8 | 场风（one-hot 4）· 局 `/4` · 本场 `/10` · 供託立直棒 `/4` · 庄家相对偏移 `/3` |
-| 点数 | 12 | 四家点数 `−25000`/`1000`（**自己在下标 0**）· 四家顺位 one-hot（4×4）· 自己与三家分差 `/1000`（3）· 与上一名/下一名分差 `/1000`（2） |
+| 点数 | 12 | 四家点数 `−25000`/`1000`（**自己在下标 0**，4）· **自己顺位 one-hot**（4，`rank == r`，⚠ 不是"四家顺位 4×4"）· 自己与三家**均值**差 `/1000`（1）· 自己点数 `/1000`（1，与点数组下标 0 同值）· 与上一名/下一名差 `/1000`（2） = 4+4+1+1+2 |
 | 牌山 | 8 | 余牌 `/70` · 岭上余 `/4` · 总舍张 `/72` · 杠数 `/4` · 有没有人鸣过 · 海底 · 河底 · 岭上 |
 | 自家 | 10 | 门前 · 自家立直 · 自家一发 · **自家振听** · 自己第几次摸牌 `/18` · 自家副露数 `/4` · 摸到的那张是赤 · 立直巡数 `/18`（未立直 = 0） · 自家舍牌摸切率 `/1` · 自家舍牌数 `/18` |
 | 四家状态 | 12 | 立直布尔（4）· **立直巡数 `/18`**（4，未立直 = 0）· 一发（4） |
@@ -247,7 +247,7 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | `genbutsu_per_seat[3][34]` | 102 | `Danger.of` 的 `genbutsu` | **位图**（F 段，5 B/家） | 0/1 |
 | `suji_per_seat[3][34]` | 102 | `Danger.of` 的 `suji`/`suji_wall`/`wall`（= `suji \|\| wall`） | **位图**（G 段，5 B/家） | 0/1 |
 | `after_shanten` / `value_han` / `value_points` | 3 | `HandEval.afterDiscard` / `estimatedHan` | int16（A 段） | `/8` `/13` `/32000` |
-| 逐候选 24 维（§4.3） | 24 | `HandEval.afterDiscard` + `Danger` + `scoreIfWin` | int16（C 段） | 见 §4.3 |
+| 逐候选 8 维（= v3 的逐候选段；`cand.derived` 块共 **11** 维，见 §4.3） | 8 | `HandEval.afterDiscard`（`shanten` / `advance_types` / `advance_tiles` / `wait_types` / `wait_tiles` / `good_wait_types` / `good_wait_tiles` / `dora_count`） | int16（C 段；16 B/候选 ⇒ 实测 C 段 ~141 B/决策 ≈ 8.8 个候选） | 见 §4.3 |
 
 - **逐家段的方位**：下标 **0 = 下家 / 1 = 対面 / 2 = 上家**（**相对**自己）——
   与 §4.1 的 `danger_all` / `danger_riichi` / `safety_*` 三通道组同一套方位（那里也是"旋转到自己为下标 0"）。
@@ -442,7 +442,8 @@ Dense(Linear) · LayerNorm/RMSNorm · GELU/ReLU · Softmax · MatMul · 加法/�
 | ⑩ | **对手族分层**：信念/危险头在训练池外的族上单独报指标 | 族间指标表（teacher / 脚本基线 / 未参训历史代各一行） |
 
 > 这些判据落在：`python/selfcheck.py`（新增「特征 v4」组，预计 +60 项）、
-> `SelfTest`（新增 `obsV4Tests`）、`tools/trainer-features-parity.mjs`（扩到 4 个张量）。
+> `SelfTest`（新增 `obsV4Tests`）、`tools/trainer-v4-parity.mjs`（v4 前向与四张量逐元素对拍；
+> ⚠ `tools/trainer-features-parity.mjs` 只管 **sidecar**，别把这两件事记成同一个脚本）。
 
 ---
 
@@ -452,7 +453,7 @@ Dense(Linear) · LayerNorm/RMSNorm · GELU/ReLU · Softmax · MatMul · 加法/�
 obs v3 ──► tile[34,48]  ← 增量（只改 1~2 行 + 四家计数器）
         ├► evt [60,96]  ← 只追加（K 窗口 + 循环状态 h 承担更早）
         ├► ctx [64]     ← 每次重算（便宜）
-        └► cand[n,128]  ← 逐候选（引擎派生 24 维）
+        └► cand[n,128]  ← 逐候选（引擎派生 **11** 维；其中 ①–⑧ 由 sidecar C 段填入）
                     │
         ┌───────────┴────────────┐
         │  Teacher 只在初期当起点 │  信息上界 = 人类玩家，不是 teacher

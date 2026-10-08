@@ -71,6 +71,15 @@ public final class Session {
     /** 身份认领只做一次（同一连接上重复发 `uuid` 直接忽略）。 */
     private boolean uuidClaimed;
 
+    /**
+     * 这条连接**证明过**自己是那个客户端（`rejoin` 带对了 `pid` + `token`，见 A5）。
+     *
+     * <p>⛔ 只按 uuid 接回座位是不够的：`settings.json` 可以被复制/同步，那样任何人都能顶掉一个
+     * **托管中**的座位（托管是"人还在、只是断线"）。所以 {@link #tryResumeSeat} 要求这个标志，
+     * 凭据由 {@code Server.retired}（断开时留下的 pid→token，保留到 TTL）在 `rejoin` 里核对。
+     */
+    private boolean resumeAuthorized;
+
     public Session(Server server, Socket socket) throws IOException {
         this.server = server;
         this.socket = socket;
@@ -306,11 +315,7 @@ public final class Session {
                 pid = server.nextPid();
                 token = Long.toHexString(TOKEN_RNG.nextLong());
                 welcomed = true;
-                send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1,
-                        // 服务端可选用的机器人 AI 清单（名字 + 策略串 + 哪个是默认）。
-                        // ⚠ 只发**名字**给客户端选，路径不出服务端：`net:<路径>` 是服务器本机文件，
-                        // 让客户端传串就等于开放任意文件读（见 `mahjong.ai.BotAis` 的说明）。
-                        "bot_ais", mahjong.ai.BotAis.json()));
+                send(helloOk());
                 // 身份这时候才算"人到齐"（uuid + 昵称）：第一次来的人在这里建档案，
                 // 早一步回过 uuid 的人在这里补上昵称、并试着接回掉线的座位。
                 if (uuid != null) {
@@ -325,7 +330,30 @@ public final class Session {
             case "rejoin": {
                 long wantPid = Json.l(msg, "pid", 0);
                 Session old = server.sessionByPid(wantPid);
-                if (old == null || !old.token.equals(Json.str(msg, "token", ""))) {
+                if (old == null) {
+                    // 旧连接已经**断开**了（客户端重启 / 网络断 / 被踢）：看保留到 TTL 的重连凭据。
+                    // ⛔ 判据是 **pid + token 都对** —— 光有 uuid 不算数：复制一份 `settings.json`
+                    //   顶不掉任何人的座位（见 `tryResumeSeat` 的说明与 A5）。
+                    Server.Retired rec = server.retiredFor(wantPid);
+                    if (rec == null || !rec.token.equals(Json.str(msg, "token", ""))) {
+                        sendError("bad_token");
+                        return;
+                    }
+                    welcomed = true;
+                    pid = wantPid;
+                    token = rec.token;
+                    if (rec.name != null && !rec.name.isEmpty()) {
+                        name = rec.name;
+                    }
+                    if (uuid == null) {
+                        uuid = rec.uuid;        // 客户端这一轮没来得及发 `uuid` 时的兜底
+                    }
+                    resumeAuthorized = true;    // 凭据已证明 ⇒ 允许接回托管中的座位
+                    send(helloOk());
+                    tryResumeSeat();
+                    break;
+                }
+                if (!old.token.equals(Json.str(msg, "token", ""))) {
                     sendError("bad_token");
                     return;
                 }
@@ -340,6 +368,7 @@ public final class Session {
                 pid = old.pid;
                 token = old.token;
                 name = old.name;
+                resumeAuthorized = true;        // 同 pid + 同 token = 凭据在手
                 // 身份跟着走：同一个人换了条连接，档案与"接回座位"的能力都该保留
                 uuid = old.uuid;
                 uuidIssued = old.uuidIssued;
@@ -360,11 +389,11 @@ public final class Session {
                     } else {
                         table.spectators.add(this);
                     }
-                    send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1));
+                    send(helloOk());
                     table.broadcastRoom();
                     send(table.stateFor(seat));
                 } else {
-                    send(Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1));
+                    send(helloOk());
                 }
                 // 旧连接必须**真正关掉**，不能只置 closed 标志：置标志的话它的读线程
                 // 还阻塞在 readLine 上、socket 也不关，每 rejoin 一次就永久泄漏
@@ -816,6 +845,20 @@ public final class Session {
     }
 
     /**
+     * `hello_ok` 的统一载荷（首次握手与 `rejoin` 都走它）。
+     *
+     * <p>⚠ 里面必须带 `bot_ais`：客户端大厅的"机器人用哪一代"下拉就靠它（A5 起**每次重连也会
+     * 走 rejoin** —— 少这个字段，重连后大厅的清单会变空）。
+     */
+    private Map<String, Object> helloOk() {
+        return Json.obj("ev", "hello_ok", "pid", pid, "token", token, "name", name, "ver", 1,
+                // 服务端可选用的机器人 AI 清单（名字 + 策略串 + 哪个是默认）。
+                // ⚠ 只发**名字**给客户端选，路径不出服务端：`net:<路径>` 是服务器本机文件，
+                // 让客户端传串就等于开放任意文件读（见 `mahjong.ai.BotAis` 的说明）。
+                "bot_ais", mahjong.ai.BotAis.json());
+    }
+
+    /**
      * 认领身份：**建档 + 更新登录时间**（`PlayerStore.touch`），回 `uuid_ok`，再试着接回座位。
      *
      * <p>幂等：同一个连接只做一次（`hello` 与 `uuid` 谁先到都由这里收口）。
@@ -866,6 +909,13 @@ public final class Session {
         }
         Table t = server.tableWithAwaySeat(uuid);
         if (t == null) {
+            return;
+        }
+        if (!resumeAuthorized) {
+            // ⛔ 只按 uuid 接回座位**不够**：`settings.json` 是可以被复制/同步的，那样任何人都能
+            //   顶掉一个托管中的座位（托管 = 人还在、只是断线）。凭据（`rejoin` 的 pid+token，
+            //   由 `Server.retired` 在断开时留到 TTL）才是"我是那个客户端"的证据。
+            Log.warn("拒绝按 uuid 接回座位（没有 rejoin 凭据，可能是复制了设置文件）：" + uuid);
             return;
         }
         final int idx = t.seatOfUuid(uuid);

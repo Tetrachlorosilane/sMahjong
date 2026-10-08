@@ -65,6 +65,8 @@ public final class SelfTest {
         tsubameTests();
         endGameTests();
         koyakuAndChankanTests();
+        chankanEscapeTests();
+        rejoinCredentialTests();
         roundClaimsTests();
         dropRepliesTests();
         jsonEncodingTests();
@@ -81,6 +83,9 @@ public final class SelfTest {
         mleagueRulesTests();
         replayTests();
         akaRuleTests();
+        nextRoundTests();
+        extensionTests();
+        turnSeatTests();
         meldAkaPickTests();
         seatSwapTests();
         discardAlignTests();
@@ -577,8 +582,13 @@ public final class SelfTest {
         eq("本人快照的 spectate=false", st0.get("spectate"), Boolean.FALSE);
         eq("旁观快照带 dealer（公开：谁是亲）", stSp.get("dealer"), 0);
         r.lastDrawer = 2;                       // 假设刚才是座位 2 摸的牌
-        eq("旁观快照带 drawn_seat（谁手里 14 张）", t.stateFor(-1).get("drawn_seat"), 2);
-        eq("旁观快照的 turn 也指向那一家（高亮当前行动者）", t.stateFor(-1).get("turn"), 2);
+        r.turnSeat = 2;                         // 摸牌后「当前行动者」就是他（此时两者相同）
+        eq("旁观快照带 drawn_seat（**最后摸牌**那家）", t.stateFor(-1).get("drawn_seat"), 2);
+        eq("旁观快照的 turn = 当前行动者（摸牌后与 drawn_seat 相同）", t.stateFor(-1).get("turn"), 2);
+        // ⚠ 两个字段必须**能分开**：打牌之后 `drawn_seat` 还是"最后摸牌那家"，`turn` 已经交给下家。
+        r.turnSeat = 3;
+        eq("打牌后 drawn_seat 不变（最后摸牌者 ≠ 当前行动者）", t.stateFor(-1).get("drawn_seat"), 2);
+        eq("打牌后 turn 交给下家", t.stateFor(-1).get("turn"), 3);
         check("旁观快照带四家点数", stateList(stSp, "scores").size() == 4);
         check("旁观快照带四家牌河", stateList(stSp, "discards").size() == 4);
     }
@@ -862,6 +872,24 @@ public final class SelfTest {
 
         // 字牌不能吃
         eq("字牌不能吃", joinOpts(RoundOptions.chiSets(c34, Tiles.kind(Tiles.id(27, 0)))), "");
+
+        // 吃的赤宝取法（与碰/大明杠同一套口径）：同花色里两种 kind **只可能有**一个是赤五位，
+        // 所以"手里同时有普通五与赤五"时最多两条 —— 普通在前、用赤在后。
+        eq("吃：手里只有普通五 → 一条（写 5m）",
+                joinOpts(RoundOptions.chiVariants(new int[]{4, 5},
+                        new boolean[]{true, false}, new boolean[]{false, false})), "[5m,6m]");
+        eq("吃：手里只有赤五 → 一条，但牌码写 0m（不许谎报成 5m）",
+                joinOpts(RoundOptions.chiVariants(new int[]{4, 5},
+                        new boolean[]{false, false}, new boolean[]{true, false})), "[0m,6m]");
+        eq("吃：普通五与赤五都有 → 两条（普通在前）",
+                joinOpts(RoundOptions.chiVariants(new int[]{4, 5},
+                        new boolean[]{true, false}, new boolean[]{true, false})), "[5m,6m],[0m,6m]");
+        eq("吃：赤五在被吃那一侧时同样成立（搭子两格都试）",
+                joinOpts(RoundOptions.chiVariants(new int[]{3, 4},
+                        new boolean[]{false, true}, new boolean[]{false, true})), "[4m,5m],[4m,0m]");
+        // ⚠ 越界不串花色：吃 1m 只可能配 {2m,3m}
+        eq("吃：chiKinds 与 chiSets 同一套枚举（吃 1m → 只剩 2m3m）",
+                joinOpts(RoundOptions.chiSets(cEdge, Tiles.kind(Tiles.id(0, 0)))), "[2m,3m]");
         // 立直但没摸牌（不该发生）：退化为列出全部可打
         eq("立直未摸牌时退化为常规列表",
                 joinOpts(RoundOptions.discardChoices(hand, true, -1, none)), "1m,2m,3m");
@@ -1517,8 +1545,13 @@ public final class SelfTest {
                 RoundScoring.keepPlayingWest(west, 27000, 2, 1));
         check("1 位 30000 → 结束（达到一位必要点数）",
                 !RoundScoring.keepPlayingWest(west, 30000, 2, 1));
-        check("没开延长战开关 → 结束",
-                !RoundScoring.keepPlayingWest(preset("tenhou"), 27000, 2, 1));
+        // ⚠ 2026-10 起《天凤》《雀魂》预设**真的打开了**延长战（此前三套全关 ⇒ 这条链睡着）：
+        //   所以"没开开关"要用**显式关掉**的规则对象来验，别拿预设当"关着"的例子。
+        Rules noExt = preset("tenhou");
+        noExt.westExtension = false;
+        check("没开延长战开关 → 结束", !RoundScoring.keepPlayingWest(noExt, 27000, 2, 1));
+        check("《天凤》预设现在**开着**延长战 → 27000 < 30000 继续西入",
+                RoundScoring.keepPlayingWest(preset("tenhou"), 27000, 2, 1));
         // S-54：场风上限 = lastWind + 1（东风战 → 南入、半庄 → 西入），**没有北入**
         check("半庄：西入（场风 2）允许", RoundScoring.keepPlayingWest(west, 10000, 2, 1));
         check("半庄：**北入（场风 3）不允许**（旧实现写死 nw<=3 会放行）",
@@ -1598,6 +1631,195 @@ public final class SelfTest {
         }
         eq("实局余棒分配与判据逐位一致", diff.toString(),
                 Json.intList(RoundScoring.endGameSticks(before, sticksOnTable[0])).toString());
+    }
+
+    /**
+     * 延长战（南入 / 西入）：**《天凤》《雀魂》预设开着、M.League 关**（2026-10 起）。
+     *
+     * <p>两条判据：① `keepPlayingWest` 是**轮庄**那一支（进或不进延长战）；
+     * ② `extensionReached` 是**延长战里每局**那一支 —— 连庄也要看，因为《天凤》的延长战是
+     * "谁先到一位必要点数谁就赢"（sudden death）。⚠ 此前三套预设 `westExtension` 全关，
+     * 这条链是**睡着的**（`RoundScoring` 自己写着"休眠缺陷"），所以这两条现在都得钉住。
+     */
+    private static void extensionTests() {
+        Rules th = preset("tenhou");
+        Rules ms = preset("majsoul");
+        Rules ml = preset("mleague");
+        check("预设：延长战《天凤》《雀魂》开、M.League 关",
+                th.westExtension && ms.westExtension && !ml.westExtension);
+
+        // ① 进不进延长战（轮庄那一支）
+        check("南入：东风战 lastWind=0、东 4 轮庄后 nw=1 且 top<30000 → 继续",
+                RoundScoring.keepPlayingWest(th, 25000, 1, 0));
+        check("西入：半庄 lastWind=1、南 4 轮庄后 nw=2 且 top<30000 → 继续",
+                RoundScoring.keepPlayingWest(th, 25000, 2, 1));
+        check("没有北入：半庄 nw=3 → 不进（S-54）",
+                !RoundScoring.keepPlayingWest(th, 25000, 3, 1));
+        check("有人已达 30000 → 直接终局、不进延长战",
+                !RoundScoring.keepPlayingWest(th, 30000, 2, 1));
+        check("M.League 关着延长战 → 永远不进",
+                !RoundScoring.keepPlayingWest(ml, 25000, 2, 1));
+
+        // ② 延长战里的终止（连庄也看）
+        check("延长战终止：有人到 30000 → true",
+                RoundScoring.extensionReached(th, new int[]{25000, 31000, 22000, 22000}));
+        check("延长战终止：都在门槛下 → false",
+                !RoundScoring.extensionReached(th, new int[]{25000, 29900, 22000, 22000}));
+        check("延长战终止：刚好等于门槛也算到（>=，不是 >）",
+                RoundScoring.extensionReached(th, new int[]{30000, 25000, 25000, 25000}));
+        check("延长战终止：M.League 恒 false（它没有延长战）",
+                !RoundScoring.extensionReached(ml, new int[]{25000, 91000, 22000, 22000}));
+        check("延长战终止：门槛是 requiredPoints，不是 returnScore（《雀魂》25000 返点、30000 门槛）",
+                !RoundScoring.extensionReached(ms, new int[]{26000, 25000, 25000, 24000})
+                        && RoundScoring.extensionReached(ms, new int[]{30000, 25000, 25000, 20000}));
+    }
+
+    /**
+     * `state.turn` 与 `state.drawn_seat` 是**两件事**（PROTOCOL §3.8 / AGENTS §6.4）：
+     * `turn` = 当前该行动的人（打牌后 = **下家**、鸣牌后 = 鸣牌者），`drawn_seat` = 最后摸牌的人。
+     *
+     * <p>判据走**实局**：每次广播 `discard` / `draw` 时抓一份 {@link Table#stateFor} 公开快照对账。
+     * 老实现两个字段都填 `lastDrawer`，所以"打牌后 `turn` 必须是下家"这条一定会红；
+     * 客户端拿这两个字段分别算"谁有 14 张"与"高亮谁"，混起来就是重连/观战错一家。
+     */
+    private static void turnSeatTests() {
+        Table ts = new Table("TURNSEAT", "手番桌", Rules.defaults());
+        ts.botDelayMs = 0;
+        ts.roundDelayMs = 0;
+        ts.debugDeterministicSeed = true;
+        ts.debugMaxHands = 2;
+        ts.seedBase = 11;
+        final int[] seen = {0};
+        final int[] melds = {0};
+        final int[] apart = {0};
+        final List<String> bad = new ArrayList<>();
+        ts.debugEventTap = (recipient, ev) -> {
+            if (recipient != -1) {
+                return;
+            }
+            final String e = Json.str(ev, "ev", "");
+            if ("meld".equals(e)) {
+                melds[0]++;
+                return;                        // 鸣牌本身不改张数账，只看后续的 discard 与 draw
+            }
+            if (!"discard".equals(e) && !"draw".equals(e)) {
+                return;
+            }
+            final int seat = Json.i(ev, "seat", -1);
+            final Map<String, Object> st = ts.stateFor(-1);
+            final int turn = Json.i(st, "turn", -9);
+            final int drawn = Json.i(st, "drawn_seat", -9);
+            seen[0]++;
+            if (turn != drawn) {
+                apart[0]++;                    // 两个字段真的分开了（老实现恒相等）
+            }
+            if ("discard".equals(e)) {
+                // 打牌后**当前行动者一定是下家**；`drawn_seat` 不必等于打牌者 ——
+                // 鸣牌者打牌时"最后摸牌的人"是**别人**（他吃/碰之后直接打，没摸牌）。
+                if (turn != (seat + 1) % 4) {
+                    bad.add("discard(seat=" + seat + ") → turn=" + turn + "（应为 " + ((seat + 1) % 4) + "）");
+                }
+            } else if (turn != seat || drawn != seat) {
+                bad.add("draw(seat=" + seat + ") → turn=" + turn + ", drawn_seat=" + drawn);
+            }
+        };
+        for (int i = 0; i < 4; i++) {
+            ts.addBot(i);
+        }
+        ts.playGame();
+        check("state.turn / drawn_seat 逐条对账（看了 " + seen[0] + " 条、含 " + melds[0] + " 次鸣牌）："
+                + bad, seen[0] > 20 && bad.isEmpty());
+        check("turn 与 drawn_seat 确实**分开**（" + apart[0] + " 条快照里两者不同）：老实现恒相等",
+                apart[0] > 0);
+    }
+
+    /**
+     * **重连凭据**（A5）：`rejoin` 只在**原 pid + 原 token** 对得上时才允许接回一个托管中的座位，
+     * 而这份凭据在连接断开后**保留到 TTL**（`Server.REJOIN_TTL_MS`）。
+     *
+     * <p>为什么不能只看 uuid：`settings.json` 是可以被复制/同步的 —— 只看 uuid 就等于
+     * "谁复制谁顶位"。凭据是"我是那个客户端"的证据，过期即删。
+     */
+    private static void rejoinCredentialTests() {
+        mahjong.net.Server srv = new mahjong.net.Server("127.0.0.1", 0);
+        srv.debugRetire(4242, "tok-abc", "uuid-1", "甲", mahjong.net.Server.REJOIN_TTL_MS);
+        check("TTL 内取得到凭据", srv.retiredFor(4242) != null);
+        eq("凭据带着原 token", srv.retiredFor(4242).token, "tok-abc");
+        eq("凭据带着原 uuid（客户端没来得及发 uuid 时兜底）", srv.retiredFor(4242).uuid, "uuid-1");
+        eq("别家 pid 取不到（不串号）", srv.retiredFor(4243) == null ? "null" : "有", "null");
+
+        srv.debugRetire(4242, "tok-old", "uuid-1", "甲", -1);      // 已过期
+        check("过期即删（TTL 之外 rejoin 必须失败）", srv.retiredFor(4242) == null);
+        srv.debugRetire(5252, "tok-x", "uuid-2", "乙", -5);
+        srv.debugRetire(6262, "tok-y", "uuid-3", "丙", mahjong.net.Server.REJOIN_TTL_MS);
+        check("清理过期记录时不影响有效记录",
+                srv.retiredFor(6262) != null && srv.retiredFor(5252) == null);
+        eq("TTL 常量 = 2 分钟", mahjong.net.Server.REJOIN_TTL_MS, 120_000L);
+    }
+
+    /**
+     * `round_end.next`（下一局的场风/局/本场，PROTOCOL §3.7）：**只按推进规则算**。
+     *
+     * <p>两条判据：① 纯函数真值表（连庄 / 闲家轮庄 / 轮回到起家换场风 / 流局的本场账）；
+     * ② **实局对账** —— 第 i 条 `round_end.next` 必须等于第 i+1 条 `round_start.round`
+     * （两者在 `Table` 里由同一次 {@link RoundScoring#nextRound} 调用喂出来，这条断言就是那个"同源"）。
+     */
+    private static void nextRoundTests() {
+        eq("nextRound：连庄 → 场风与局不动、本场 +1",
+                Arrays.toString(RoundScoring.nextRound(0, 1, 2, 0, true, true, false)), "[0, 1, 3]");
+        eq("nextRound：闲家轮庄（没轮回到起家）→ 同一场风、局 +1",
+                Arrays.toString(RoundScoring.nextRound(0, 1, 0, 1, false, true, false)), "[0, 3, 0]");
+        eq("nextRound：轮回到起家 → 场风 +1、局回到 1",
+                Arrays.toString(RoundScoring.nextRound(0, 4, 0, 3, false, true, false)), "[1, 1, 0]");
+        eq("nextRound：荒牌流局庄家不听 → 本场 +1 后再轮庄",
+                Arrays.toString(RoundScoring.nextRound(0, 2, 1, 2, false, false, false)), "[0, 4, 2]");
+        eq("nextRound：流局满贯按和了算 → 本场清零",
+                Arrays.toString(RoundScoring.nextRound(0, 2, 3, 1, false, false, true)), "[0, 3, 0]");
+
+        Table nt = new Table("NEXT", "下一局桌", Rules.defaults());
+        nt.botDelayMs = 0;
+        nt.roundDelayMs = 0;
+        nt.debugDeterministicSeed = true;
+        nt.debugMaxHands = 4;
+        nt.seedBase = 7;
+        final List<String> ends = new ArrayList<>();
+        final List<String> starts = new ArrayList<>();
+        nt.debugEventTap = (recipient, ev) -> {
+            String e = Json.str(ev, "ev", "");
+            if ("round_start".equals(e)) {
+                // ⚠ `round_start` 是**逐个玩家单发**的（PROTOCOL §3.3：手牌只含自己）⇒ recipient 是座位号，
+                //   不是 -1；这里只看座位 0 的那一条，正好一局一条。
+                if (recipient != 0) {
+                    return;
+                }
+                Map<String, Object> rd = Json.map(ev, "round");
+                starts.add(rd == null
+                        ? "<?>"
+                        : Json.str(rd, "bakaze", "?") + Json.i(rd, "kyoku", -1) + "/" + Json.i(rd, "honba", -1));
+                return;
+            }
+            if (recipient != -1 || !"round_end".equals(e)) {
+                return;
+            }
+            Map<String, Object> nx = Json.map(ev, "next");
+            ends.add(nx == null
+                    ? "<没有 next 字段>"
+                    : Json.str(nx, "bakaze", "?") + Json.i(nx, "kyoku", -1) + "/" + Json.i(nx, "honba", -1));
+        };
+        for (int i = 0; i < 4; i++) {
+            nt.addBot(i);
+        }
+        nt.playGame();
+        check("实局：每条 round_end 都带 next（不是老服务端）：" + ends,
+                ends.size() >= 2 && !ends.contains("<没有 next 字段>"));
+        boolean same = ends.size() >= 2 && starts.size() >= 2;
+        for (int i = 0; same && i + 1 < starts.size() && i < ends.size(); i++) {
+            if (!ends.get(i).equals(starts.get(i + 1))) {
+                same = false;
+            }
+        }
+        check("实局：round_end.next == 下一条 round_start.round（同一次推进算出来的）："
+                + ends + " vs " + starts, same);
     }
 
     // ---------------------------------------- 古役 / 役满复合 / 抢杠（下一轮审计）
@@ -1724,7 +1946,7 @@ public final class SelfTest {
 
         // ---------- S-57①：抢杠发生在加杠成立之前，**可以与一发复合** ----------
         List<Map<String, Object>> ckAgari = new ArrayList<>();
-        Round ck = newRound();
+        Round ck = newRoundLike(claimTable(Rules.defaults()));    // 抢杠是**询问**，要有机器人接
         ck.melds[0].add(pon("5p"));                              // 座位 0 碰过 5p
         ck.hand[0].add(Tiles.id(k5p, 3));                        // 手里第 4 张 → 加杠
         ck.hand[1].addAll(parse("1m2m3m4m5m6m7m8m9m1p2p3p5p"));  // 立直听 5p（4 顺子 + 5p 单骑）
@@ -1744,7 +1966,7 @@ public final class SelfTest {
 
         // ---------- S-57②：多家抢杠同样受**头跳**约束 ----------
         List<Map<String, Object>> mlAgari = new ArrayList<>();
-        Round mlCk = newRound(preset("mleague"));                // headBump = true
+        Round mlCk = newRoundLike(claimTable(preset("mleague")));   // headBump = true
         mlCk.melds[0].add(pon("5p"));
         mlCk.hand[0].add(Tiles.id(k5p, 3));
         mlCk.hand[1].addAll(parse("2z2z2z1m1m1m2m2m2m3m3m3m5p")); // 南（役牌）
@@ -1759,7 +1981,7 @@ public final class SelfTest {
                 mlCkr != null && mlCkr.agari && mlAgari.size() == 1 && mlCkr.winner == 1);
         // 《雀魂》无头跳 → 两家都能抢杠
         List<Map<String, Object>> msAgari = new ArrayList<>();
-        Round msCk = newRound(preset("majsoul"));
+        Round msCk = newRoundLike(claimTable(preset("majsoul")));
         msCk.melds[0].add(pon("5p"));
         msCk.hand[0].add(Tiles.id(k5p, 3));
         msCk.hand[1].addAll(parse("2z2z2z1m1m1m2m2m2m3m3m3m5p"));
@@ -1875,13 +2097,128 @@ public final class SelfTest {
     }
 
     /**
+     * **抢杠见逃**（2026-10，用户口径）：抢杠是一次**询问**（`kind = "chankan"`，只给 `ron` + `pass`）。
+     *
+     * <ul>
+     *   <li>见逃 ⇒ 那次杠**照常成立**（加杠落地 + 翻杠宝牌 + 打断一发）+ **同巡振听**
+     *       （立直时另加立直振听 = 到本局结束）；</li>
+     *   <li>超时未答与见逃**同一条路** —— 判据只看"给过 `ron` 选项却没和"（`answers` 缺项与
+     *       `pass` 落在同一分支）；</li>
+     *   <li>有人抢 ⇒ 走荣和（头跳 / 多家和了由 `claimPhase` 那一把尺子判，见 S-57①/②）。</li>
+     * </ul>
+     *
+     * <p>⛔ 老实现是**自动荣和**（`chankanRon` 直接算赢家）：能抢就必须抢 —— 见逃、振听记账、
+     * "见逃后杠成立"这三件事**全都不存在**（而 PROTOCOL §3.6 早就写着 `kind = "chankan"`）。
+     */
+    private static void chankanEscapeTests() {
+        final int k5p = Tiles.parseKind("5p");
+        final String wait5p = "1m2m3m4m5m6m7m8m9m1p2p3p5p";     // 4 顺子 + 5p 单骑（听 5p）
+
+        // ---------- ① 见逃：那次杠照常成立 ----------
+        Table escT = claimTable(preset("mleague"));
+        for (int i = 0; i < 4; i++) {
+            escT.policy[i] = d -> Json.obj("type", "pass");      // 一律见逃（不抢）
+        }
+        Round esc = newRoundLike(escT);
+        esc.melds[0].add(pon("5p"));
+        esc.hand[0].add(Tiles.id(k5p, 3));
+        esc.hand[1].addAll(parse(wait5p));
+        final List<String> escEv = new ArrayList<>();
+        esc.table.debugEventTap = (recipient, ev) -> {
+            if (recipient == -1) {
+                escEv.add(Json.str(ev, "ev", ""));
+            }
+        };
+        mahjong.game.Round.Result escR = esc.debugTurnKan(0, "kakan", "5p");
+        check("见逃：牌局继续（没有 agari）", escR == null && !escEv.contains("agari"));
+        eq("见逃：那次杠**成立**（副露里是 KAKAN）",
+                esc.melds[0].get(0).kind == Meld.Kind.KAKAN ? 1 : 0, 1);
+        eq("见逃：`kanCount` +1（杠真的发生了）", esc.kanCount, 1);
+        check("见逃：翻出杠宝牌（`dora_reveal`）", escEv.contains("dora_reveal"));
+        check("见逃：见逃者置**同巡振听**", esc.furitenTemp[1]);
+        check("见逃：没立直 ⇒ 不是立直振听", !esc.furitenPerm[1]);
+
+        // ---------- ② 询问内容：只有 ron + pass、带 from/tile；报文 kind = chankan ----------
+        List<mahjong.ai.Decision> robDecisions = new ArrayList<>();
+        Table askT = claimTable(preset("mleague"));
+        Round askR = newRoundLike(askT);
+        askR.melds[0].add(pon("5p"));
+        askR.hand[0].add(Tiles.id(k5p, 3));
+        askR.hand[1].addAll(parse(wait5p));            // 13 张、听 5p（多一张就不是和了形）
+        // ⚠ 机器人座位的询问**不走网络**（`table.send` 根本不会被调用），所以要看决策漏斗
+        //   （`debugChoiceTap` 两段都看得见；`debugAskTap` 只看得到自家回合）。
+        askT.debugChoiceTap = (d, cmd) -> robDecisions.add(d);
+        askR.debugTurnKan(0, "kakan", "5p");
+        check("抢杠询问进了决策漏斗（" + robDecisions.size() + " 条）", robDecisions.size() == 1);
+        if (robDecisions.size() == 1) {
+            mahjong.ai.Decision d = robDecisions.get(0);
+            eq("决策漏斗看到的 kind 仍是 claim（训练口径不变）", d.kind, "claim");
+            StringBuilder ts = new StringBuilder();
+            for (Map<String, Object> o : d.options) {
+                if (ts.length() > 0) {
+                    ts.append(',');
+                }
+                ts.append(Json.str(o, "type", "?"));
+            }
+            eq("抢杠**只给 ron + pass**（不能吃碰杠别人加杠的那张）", ts.toString(), "ron,pass");
+            eq("抢杠询问带 from（杠主）", d.extra.get("from"), 0);
+            eq("抢杠询问带 tile（被加杠的那张）", d.extra.get("tile"), "5p");
+        }
+        // 报文里的 kind 与训练口径**分开**：前者给客户端认（UI 要弹"抢杠"），后者不变
+        eq("报文 kind：抢杠 = chankan", Round.askKindFor(true), "chankan");
+        eq("报文 kind：打牌鸣牌 = claim", Round.askKindFor(false), "claim");
+
+        // ②b **过滤**：手里能"碰"这张加杠牌、却和不掉 → 抢杠**不询问**
+        //    （`chankanOptions` 只留 ron/pass；少了这层过滤，一条只有 `pass` 的询问也会发出去）
+        Table ponT = claimTable(preset("mleague"));
+        Round ponR = newRoundLike(ponT);
+        ponR.melds[0].add(pon("5p"));
+        ponR.hand[0].add(Tiles.id(k5p, 3));
+        ponR.hand[1].addAll(parse("1m2m3m4m5m6m7m8m9m1p2p5p5p"));   // 13 张，含两张 5p
+        final int[] ponAsks = {0};
+        ponT.debugChoiceTap = (d, cmd) -> ponAsks[0]++;
+        ponR.debugTurnKan(0, "kakan", "5p");
+        eq("能碰不能和 → 抢杠不询问（pon 被滤掉）", ponAsks[0], 0);
+        eq("没人抢 ⇒ 那次杠照常成立", ponR.kanCount, 1);
+
+        // ---------- ③ 立直见逃 ⇒ 另加立直振听（到本局结束）----------
+        Table rT = claimTable(preset("mleague"));
+        for (int i = 0; i < 4; i++) {
+            rT.policy[i] = d -> Json.obj("type", "pass");
+        }
+        Round rEsc = newRoundLike(rT);
+        rEsc.melds[0].add(pon("5p"));
+        rEsc.hand[0].add(Tiles.id(k5p, 3));
+        rEsc.hand[1].addAll(parse(wait5p));
+        rEsc.riichi[1] = true;
+        rEsc.ippatsu[1] = true;
+        check("立直见逃：牌局继续", rEsc.debugTurnKan(0, "kakan", "5p") == null);
+        check("立直见逃：同巡振听", rEsc.furitenTemp[1]);
+        check("立直见逃：另加**立直振听**", rEsc.furitenPerm[1]);
+        check("立直见逃：杠成立 ⇒ 打断一发", !rEsc.ippatsu[1]);
+
+        // ---------- ④ 对照：抢下来了就是荣和，谈不上见逃（振听一个都不置位）----------
+        Table hitT = claimTable(preset("mleague"));
+        Round hit = newRoundLike(hitT);
+        hit.melds[0].add(pon("5p"));
+        hit.hand[0].add(Tiles.id(k5p, 3));
+        hit.hand[1].addAll(parse(wait5p));
+        mahjong.game.Round.Result hitR = hit.debugTurnKan(0, "kakan", "5p");
+        check("对照：抢下来就是荣和（赢家是听牌那家）",
+                hitR != null && hitR.agari && hitR.winner == 1);
+        check("对照：抢和不算见逃 ⇒ 不置任何振听", !hit.furitenTemp[1] && !hit.furitenPerm[1]);
+    }
+
+    /**
      * 国士抢暗杠用的局面：座位 0（庄）手里 4 张 1z 准备暗杠，座位 1 国士单骑 1z。
      *
      * <p>摆牌而不是等发牌：这条规则要"杠主手里正好 4 张 + 他家正好听那一张"，概率极低。
      * 座位 1 那 12 种幺九 + 1m 雀头 = 13 张，和了 1z 即 13 种 + 一对 → 国士无双。
      */
     private static Round kokushiAnkanRound(Rules rules) {
-        Round r = newRound(rules);
+        // ⚠ 必须用**带机器人的牌桌**：2026-10 起抢杠走**询问**，而 `newRound()` 的座位既不是机器人
+        //   也没有连接（`awaySeat` = 托管）⇒ 询问根本不会下发，抢杠永远不成立（测试会假绿）。
+        Round r = newRoundLike(claimTable(rules));
         r.hand[0].addAll(parse("1z1z1z1z1m2m3m4m5m6m7m8m9m9p"));   // 14 张，含 4 张 1z
         r.hand[1].addAll(parse("1m1m9m1p9p1s9s2z3z4z5z6z7z"));
         return r;
@@ -4295,6 +4632,23 @@ public final class SelfTest {
             }
         }
         check("aka=0 时每种牌仍是 4 张（换掉赤五不改变牌张构成）", fourEach);
+
+        // 归一化：1 / 2（"少放几张"无法表达少哪几张）与 4（两张赤五筒，没有码位）一律 → 3；负数 → 0。
+        // ⚠ 以前 `clamp(aka,0,3)` 会把 1/2 原样留下 ⇒ 牌山发 3 张赤五，而牌谱按 `aka>=3?1:0`
+        //   声明 0 张（自相矛盾，见 AGENTS §2.3-11）。判据只走 `fromJson`（钳制的唯一入口）。
+        java.util.Map<String, Object> rm = new java.util.HashMap<>();
+        rm.put("aka", 1);
+        eq("aka=1 归一化到 3", Rules.fromJson(rm).aka, 3);
+        rm.put("aka", 2);
+        eq("aka=2 归一化到 3", Rules.fromJson(rm).aka, 3);
+        rm.put("aka", 4);
+        eq("aka=4 归一化到 3（编码表达不了两张赤五筒）", Rules.fromJson(rm).aka, 3);
+        rm.put("aka", 0);
+        eq("aka=0 原样保留（整副牌山无赤五）", Rules.fromJson(rm).aka, 0);
+        rm.put("aka", -3);
+        eq("aka=-3 归一化到 0", Rules.fromJson(rm).aka, 0);
+        rm.clear();
+        eq("报文没提 aka 时沿用预设（mleague=3）", Rules.fromJson(rm).aka, 3);
     }
 
     private static void dropRepliesTests() {

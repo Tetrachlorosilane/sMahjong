@@ -550,8 +550,12 @@ M.League 默认取舍：
   实现在 `Round.agariRon`（撤销立直 + 退回 1000 点 + `sticks--`），
   客户端按报文里的 `agari.riichi_void` 清标记与供託 —— **立直成不成立是规则判定，
   客户端不许自己推断哪张是宣言牌**（AGENTS §2.1）。
-- **抢杠两处共用一把尺子**：加杠与暗杠的"谁能抢"都走 `Round.chankanRon(kanSeat, tileId, kokushiOnly)`
-  —— 顺序按距杠主由近到远、过 `isFuriten`、按 `rules.headBump` 归约。区别只有 `kokushiOnly`。
+- **抢杠（2026-10 起走询问）**：加杠与暗杠的"谁能抢"都走**同一条询问通道**
+  `Round.claimPhase(kanSeat, tileId, false, /*chankan=*/true, kokushiOnly)`
+  —— 顺序按距杠主由近到远、过 `isFuriten`、按 `rules.headBump` 归约、询问内容只有 `ron` + `pass`
+  （`Round.chankanOptions`）。区别只有 `kokushiOnly`。⛔ 旧实现是**自动荣和**（`chankanRon` 直接算赢家，
+  能抢就必须抢）：见逃、同巡振听、"见逃后杠照常成立"三件事全都不存在（而 PROTOCOL §3.6 早就写着
+  `kind = "chankan"`）。见逃（含超时未答）复用 `claimPhase` 末尾那段**唯一**的见逃记账。
 - **国士抢暗杠**（文档 §抢杠 L957：《雀魂》允许，《天凤》和 M.League 不允许）：
   `rules.kokushi_ankan` 打开时，暗杠**成立之前**先问一遍"有没有人国士无双听这张"。
   - **口子只开给国士**（`kokushiOnly`）：判据用 `Agari` 拆出来的和了型
@@ -838,7 +842,7 @@ Qt Quick / 浏览器 / Skia 缓存图层都是这个取舍。要像素级一致�
    振听、流局条件、杠与岭上的账、**「吃」的合法性（顺子必须服务端自己验）**、**不听罚符零和**、
    **四杠散了的真值表**、**赤宝牌张数**、鸣牌仲裁、**M.League 与一般规则的取舍两侧钉住**
    （不加倍役满 / 三倍满上限 / 切上满贯 / 连风符 / 立直门槛 / 暗杠保面子 / 包牌 / 精算公式与同点平分），
-   外加 3 次「4 机器人整场半庄」模拟的点数守恒。**当前 1370 项全绿**（判据以 `AGENTS.md` §4 的期望值为准）。
+   外加 3 次「4 机器人整场半庄」模拟的点数守恒。**全绿**（项目数以 `AGENTS.md` §4 为准）。
 2. **L2 客户端自检**：`client\dist\mahjong-client.exe --selftest client\build\st` —— 牌码双向、NDJSON、`TableModel`
    事件应用、风盘布局不变量（点数等距 / 得点框同理 / 宝牌行只占中间列 / 河区不压手牌 / 牌河超 18 张仍逐行）、
    自动开关判据与接线、结算面 4 种情形、**回放索引与牌山归属（含"每小局结算事件可定位"）**、

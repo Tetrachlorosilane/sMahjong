@@ -509,6 +509,9 @@ public final class Round {
             hand[turn].remove((Integer) discardId);
             sortHands();
             final boolean sideways = declareRiichi || sidewaysPending[turn];
+            // 「当前该行动的人」在打牌那一刻就交给下家（见 `turnSeat` 的注释）；
+            // ⚠ 放在 sendDiscard **之前**：行内/观战的实时推进与随后的 `state` 快照必须是同一个值。
+            turnSeat = (turn + 1) % 4;
             sendDiscard(turn, discardId, tsumogiri, declareRiichi, sideways);
             recordDiscard(turn, discardId, tsumogiri, declareRiichi);
             totalDiscards++;
@@ -723,6 +726,7 @@ public final class Round {
         table.noteRoundWall(roundWindName(), kyoku, honba, dealer, wallOrder());
         // 庄家起手的第 14 张 = 他"刚摸到"的那张（第一巡不再摸，见 play()）
         lastDrawer = dealer;
+        turnSeat = dealer;
         for (int s = 0; s < 4; s++) {
             table.send(s, roundStartEvent(s));
         }
@@ -802,8 +806,25 @@ public final class Round {
      */
     public int lastDrawer = -1;
 
+    /**
+     * **当前该行动的人**（`state.turn` 的来源）—— 与 {@link #lastDrawer} 是**两件事**：
+     *
+     * <ul>
+     *   <li>摸牌后：= 摸牌者（他在决定打什么）；</li>
+     *   <li>打牌后：= **打牌者的下家**（没人鸣牌时他立刻摸牌；有人鸣牌时那就是"轮到谁"的默认答案，
+     *       鸣牌一旦成立会被 {@link #applyMeld} 改回鸣牌者）；</li>
+     *   <li>鸣牌后：= 鸣牌者（他接着要打牌）。</li>
+     * </ul>
+     *
+     * ⚠ 老实现把 `state.turn` 与 `drawn_seat` 都填成 `lastDrawer`，于是**半场进入的重连/观战者**
+     * 会把"刚打牌那一家"高亮成当前手番（客户端实时路径用的是 `(打牌者+1)%4`，两条路不一致）。
+     * 客户端实时推进不需要它：那是 `discard` 事件里自己算的（`TableModel`）。
+     */
+    public int turnSeat = -1;
+
     private void broadcastDraw(int seat, int tile, boolean rinshan) {
         lastDrawer = seat;
+        turnSeat = seat;
         // 公开部分先建好：观战者要看到「谁摸了一张」（否则他们的牌桌整局不动），
         // 但**看不到牌面** —— `tile` 只发给摸牌的那一家。
         Map<String, Object> pub = Json.obj(
@@ -1646,9 +1667,12 @@ public final class Round {
             //   不翻杠宝牌、不打断一发（`clearIppatsu()` 在下面）、`kanCount` 也不 +1，
             //   本局直接以荣和收局（与加杠被抢杠走同一套结算）。
             if (rules.kokushiAnkan) {
-                List<Integer> rob = chankanRon(seat, picked.get(0), true);
-                if (!rob.isEmpty()) {
-                    return agariRon(rob, seat, picked.get(0), true, false);
+                Claim rob = claimPhase(seat, picked.get(0), false, true, true);
+                if (rob != null && rob.abortReason != null) {
+                    return abort(rob.abortReason);
+                }
+                if (rob != null && rob.type == ClaimType.RON) {
+                    return agariRon(rob.multiRon, seat, picked.get(0), true, false);
                 }
             }
             int[] tiles = new int[4];
@@ -1698,40 +1722,18 @@ public final class Round {
         // ⚠ 而**一发**也必须等到"杠真的成立"再打断：文档 §一发 L901「吃、碰、杠（包括暗杠）
         //   都会打断一发。**抢杠发生在加杠成立之前，可以与一发复合**」——
         //   旧实现先 `clearIppatsu()` 再判抢杠，于是抢杠白丢一发（少 1 番；AUDIT S-57①）。
-        List<Integer> ron = chankanRon(seat, addId, false);
-        if (!ron.isEmpty()) {
-            return agariRon(ron, seat, addId, true, false);   // 抢杠：不是燕返
+        // ⚠ 2026-10 起抢杠走**询问**（不是自动荣和）：被抢是玩家的选择（见逃要置同巡振听），
+        //   没人抢（含全部见逃 / 超时未答）这次杠就**照常成立** —— 下面两行才执行。
+        Claim rob = claimPhase(seat, addId, false, true, false);
+        if (rob != null && rob.abortReason != null) {
+            return abort(rob.abortReason);        // 三家和了（抢杠同样适用，见 claimPhase）
+        }
+        if (rob != null && rob.type == ClaimType.RON) {
+            return agariRon(rob.multiRon, seat, addId, true, false);   // 抢杠：不是燕返
         }
         clearIppatsu();                  // 杠真的成立了，这才打断一发
         revealKanDora(seat);
         return null;
-    }
-
-    /**
-     * 抢杠的荣和者（按「距杠主由近到远」，含振听过滤）；加杠与暗杠两条路共用。
-     *
-     * @param kokushiOnly 暗杠时**只认国士无双**（《雀魂》的国士抢暗杠）：
-     *                    别的听牌即使能荣和这张牌也不能抢暗杠 —— 那 4 张在杠主手里，
-     *                    「等着那张」是合法局面，口子只开给国士。
-     */
-    private List<Integer> chankanRon(int kanSeat, int tileId, boolean kokushiOnly) {
-        List<Integer> ron = new ArrayList<>();
-        for (int d = 1; d < 4; d++) {
-            int s = (kanSeat + d) % 4;
-            if (isFuriten(s)) {
-                continue;
-            }
-            Evaluator.HandScore sc = checkWin(s, tileId, false, false, false, true, false);
-            if (sc == null || (kokushiOnly && !isKokushiScore(sc))) {
-                continue;
-            }
-            ron.add(s);
-        }
-        // 多家抢杠同样受**头跳**约束（文档 §头跳：头跳 / 多家和了同样适用于抢杠；AUDIT S-57②）
-        if (rules.headBump && ron.size() > 1) {
-            return new ArrayList<>(ron.subList(0, 1));
-        }
-        return ron;
     }
 
     /**
@@ -1784,7 +1786,32 @@ public final class Round {
         String abortReason;
     }
 
+    /**
+     * 询问报文里的 `kind`：抢杠与打牌鸣牌共用**同一条**询问通道（{@link #claimPhase}），
+     * 只有这一个码不同（PROTOCOL §3.6）。
+     *
+     * <p>⚠ 决策漏斗（`Decision.kind`）看到的**恒为** `"claim"` —— 那是训练口径，别跟着改
+     * （改了会让策略/轨迹/校验器都要认第三种 kind，属于训练侧改动）。
+     */
+    public static String askKindFor(boolean chankan) {
+        return chankan ? "chankan" : "claim";
+    }
+
     private Claim claimPhase(int from, int tileId, boolean riichiDiscard) {
+        return claimPhase(from, tileId, riichiDiscard, false, false);
+    }
+
+    /**
+     * 鸣牌阶段（打牌后的吃碰杠荣 + **抢杠**）。
+     *
+     * @param chankan     抢杠询问：告诉被问者「别人在加杠这张牌」（`kind = "chankan"`，
+     *                    询问内容只有 `ron` + `pass`）。⚠ 见逃（含超时未答）照样置**同巡振听** ——
+     *                    走的就是本方法末尾那段**同一份**记账（见逃的判据只有一处）。
+     * @param kokushiOnly 只认国士无双（《雀魂》的国士抢暗杠）：别的听牌即使能和这张也**不给** `ron`
+     *                    选项 —— 那 4 张在杠主手里，"等着那张"是合法局面，口子只开给国士。
+     */
+    private Claim claimPhase(int from, int tileId, boolean riichiDiscard, boolean chankan,
+                            boolean kokushiOnly) {
         // 同一张舍张的选项**只算一次**：claimOptions 里要跑完整的和了判定 + 振听扫描，
         // 而「谁能鸣」和「给谁发什么选项」要的是同一份结果（这里没有任何状态在两次之间变化）。
         final Map<Integer, List<Map<String, Object>>> optsBySeat = new java.util.HashMap<>();
@@ -1796,7 +1823,9 @@ public final class Round {
                 // 连 `claimOptions`（含和了判定）都不跑：省掉一次纯浪费的 DFS。
                 continue;
             }
-            List<Map<String, Object>> o = claimOptions(s, from, tileId);
+            List<Map<String, Object>> o = chankan
+                    ? chankanOptions(s, from, tileId, kokushiOnly)
+                    : claimOptions(s, from, tileId);
             optsBySeat.put(s, o);
             if (o.size() > 1 || (o.size() == 1 && !"pass".equals(o.get(0).get("type")))) {
                 eligible.add(s);
@@ -1870,7 +1899,7 @@ public final class Round {
                     : Math.max(500, Math.min(rules.thinkingMs, 12000));
             long id = ++askSeq;
             table.send(s, Json.obj(
-                    "ev", "ask", "ask_id", id, "seat", s, "kind", "claim",
+                    "ev", "ask", "ask_id", id, "seat", s, "kind", askKindFor(chankan),
                     "deadline_ms", seatDeadlineMs,
                     "base_ms", rules.thinkingBaseMs,
                     "bank_ms", bank,
@@ -2230,6 +2259,36 @@ public final class Round {
     }
 
 
+    /**
+     * **抢杠**的询问内容：只给 `ron` + `pass`（抢杠不能碰/吃/杠）。
+     *
+     * <p>和了判定**直接复用 {@link #claimOptions} 的结果**（振听、无役、人和……全在同一处算），
+     * 只把非荣和项滤掉 —— ⛔ 别在这里另写一套"能不能和"（那就会与打牌荣和分叉）。
+     *
+     * @param kokushiOnly 《雀魂》的国士抢暗杠：**只有国士无双**能开这个口子
+     *                    （其它听牌即使能和这张也不行 —— 那 4 张在杠主手里）。
+     */
+    private List<Map<String, Object>> chankanOptions(int seat, int from, int tileId,
+                                                     boolean kokushiOnly) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> o : claimOptions(seat, from, tileId)) {
+            String t = Json.str(o, "type", "");
+            if ("pass".equals(t)) {
+                out.add(o);
+            } else if ("ron".equals(t)) {
+                if (!kokushiOnly) {
+                    out.add(o);
+                    continue;
+                }
+                Evaluator.HandScore sc = checkWin(seat, tileId, false, false, false, true, false);
+                if (sc != null && isKokushiScore(sc)) {
+                    out.add(o);
+                }
+            }
+        }
+        return out;
+    }
+
     List<Map<String, Object>> claimOptions(int seat, int from, int tileId) {
         List<Map<String, Object>> opts = new ArrayList<>();
         int kind = Tiles.kind(tileId);
@@ -2272,13 +2331,44 @@ public final class Round {
         }
         // 吃：只有下家能吃（见 PROTOCOL），组合枚举是纯计算，见 RoundOptions
         if (seat == (from + 1) % 4) {
-            List<Object> sets = RoundOptions.chiSets(c, kind);
+            // 副露赤宝选择（与碰/大明杠同一套口径）：每个搭子按**手里真实持有的牌**展开取法 ——
+            // "手里同时有普通五与赤五"时给出两条（普通在前、用赤在后），客户端据此画两个按钮。
+            final List<Object> sets = new ArrayList<>();
+            for (int[] kp : RoundOptions.chiKinds(c, kind)) {
+                final boolean[][] flags = handPlateFlags(seat, kp);
+                sets.addAll(RoundOptions.chiVariants(kp, flags[0], flags[1]));
+            }
             if (!sets.isEmpty()) {
                 opts.add(Json.obj("type", "chi", "sets", sets));
             }
         }
         opts.add(Json.obj("type", "pass"));
         return opts;
+    }
+
+    /**
+     * 这一组吃的搭子里，两种牌种各自"手里有没有普通牌 / 有没有赤五" —— 喂给
+     * {@link RoundOptions#chiVariants}（判据是**真实持有的 id**，不是计数：赤五与普通五同 kind）。
+     *
+     * @return `{hasPlain[2], hasRed[2]}`
+     */
+    private boolean[][] handPlateFlags(int seat, int[] kinds) {
+        final boolean[] plain = new boolean[2];
+        final boolean[] red = new boolean[2];
+        for (int id : hand[seat]) {
+            final int k = Tiles.kind(id);
+            for (int i = 0; i < 2; i++) {
+                if (k != kinds[i]) {
+                    continue;
+                }
+                if (Tiles.isRedId(id)) {
+                    red[i] = true;
+                } else {
+                    plain[i] = true;
+                }
+            }
+        }
+        return new boolean[][]{plain, red};
     }
 
     /**
@@ -2366,6 +2456,8 @@ public final class Round {
 
     private void applyMeld(Claim cl, int from, int tileId) {
         int seat = cl.seat;
+        // 鸣牌者是接下来的行动者（他马上要打一张）；他打完牌 `turnSeat` 会交给他的下家
+        turnSeat = seat;
         int kind = Tiles.kind(tileId);
         // ⚠ 大明杠要**先校验再改状态**：手里不足 3 张就什么都不做。
         //   旧写法在 case KAN 里直接 `picked.get(0..2)` —— 客户端伪造一条 `type:"kan"`

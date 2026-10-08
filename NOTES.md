@@ -11,6 +11,35 @@
 > ⚠ 为什么不塞进 AGENTS：AGENTS 是**每次会话自动加载**的，而工作区指令预算只有 **64 KB** ——
 > 它一旦超过，**后半部分会被静默截断**（读到不、也不会报错）。所以判据留在 AGENTS、细节放这里。
 >
+> ⚠ **这条不是理论**（2026-10 实测事故）：一次改动把 `AGENTS.md` 写到 **65,541 B**（比硬上限 65,536
+> 多 5 B），harness 立刻回了 `truncated AGENTS.md from 65541 to 65244 bytes` —— **§9 的尾部整段消失**，
+> 而文件在磁盘上仍是 65,541 B（截断发生在"喂给模型的那一份"，`node tools/doc-refs-check.mjs` 只看大小、
+> 不看"喂进去还剩多少"）。**判据**：改完 AGENTS **必须看 `doc-refs-check` 报的那个字节数**，
+> 而且要留**几百字节**余量（不只是"没超"）；超了就往 NOTES 搬细节，别指望"刚好卡住"。
+> 当时压掉的细节：§6.2 音效段的推导、§6.8 接回座位的协议细节（都已在 NOTES §6.2 / PROTOCOL §2.4）。
+>
+> ⚠ **实测的"有效上限"是 ≈65,244 B，不是 65,536 B**（2026-10 两次复现：`65,337 → 65,244`、`65,345 → 65,244`，
+> 都是 harness 报的那两个数）—— 也就是说 `doc-refs-check` 报 65,3xx "PASS"**并不代表喂得进去**。
+> 判据改成：**保持在 65,000 B 以下**（留 ≥240 B），改完看 `doc-refs-check` 那个数。
+>
+> ⚠ **§1 里那些 git 事实同理，别手抄**（2026-10 实测）：`docs/HANDOVER.md` §1 原来写着父提交 `8b069fa`、
+> 远端头 `daacdc68`、"**已同步**" —— 实际是父 `7daa979`、`origin/Training` 停在 `c026e89`、
+> **未推送 46 个提交**（手抄的 sha 抄完就烂，而且"下一会话读到的第一张表"就是错的）。
+> 现在：`node tools/handover-facts.mjs` 生成那两行、`--check` 验它还成立。**判据有两处细节**：
+> ① 记的是**基线 HEAD**（§1 改动建立在它之上），判据是"**它仍是 HEAD 的祖先**"——
+> ⛔ 不能要求"== HEAD"：§1 就在它后面那个提交里，一提交 sha 就变，那种写法**结构性必错**；
+> ② 远端那行（sha + 日期）只在推送时变，所以可以**逐字比**；另外**未推送 > 0 时不许写"已同步"**。
+>
+> ⚠ **「当前下一步」只允许有一个权威位置**（2026-10-07 立的规矩，起因是审计发现同一份 HANDOVER 里
+> 有**三份互相冲突**的"下一步"清单：§1 的表、§1.1 尾、§3 的整节规划）：
+> **唯一权威 = `docs/HANDOVER.md` §1 的「下一步（唯一清单）」那一行**；其余任何"下一步/规划"节
+> 一律**显式标日期 + 一句话写明"这不是当前下一步，见 §1"**，历史内容**不删**（"当时为什么这么排"要可查）。
+> **判据已机械化**（别靠人盯）：`node tools/handover-facts.mjs --check` 的第 ④ 条 ——
+> ① 断言 §1 里存在那一行；② 扫 HANDOVER 全部 `##/###/####` 标题，凡含"下一步"的（除 §1 那一行）
+> 必须在标题下 8 行内同时出现"**历史**"与"**见 §1**"，否则判红。
+> ⚠ 同理适用于**任何"现状描述"**：跑得起来的夹具优先于文档投票（本轮 `aux.npz` 就是这么定的 ——
+> `node tools/trainer-aux-parity.mjs … --selfcheck` 绿 ⇒ "已落地"，那句"不产 aux.npz"当场作废）。
+>
 > **文档总索引（六个板块 · 按任务/角色查）**：`docs/INDEX.md`。
 
 ## 目录（按板块）
@@ -25,13 +54,14 @@
 | §6.6 | ④ 训练 | §6.6 | 内置机器人**五层取舍**的完整策略说明 + 「机器人用哪一代 AI」（`BotAis` / `bot-ai/`） |
 | §9.5 | ⑤ 运维与发布 | §9 | 服务端包结构、资产命名与摘要、release 流程与两个 GitHub 坑 |
 | §3.1 | ⑥ 验证与文档纪律 | §3.1 | **本机实测的 JDK/Qt/MinGW/CMake/Ninja 位置**（换机器会变，仅供排障） |
-| §3.2 | ⑥ 验证与文档纪律 | §3（`build\` 与 `dist\` 的关系） | 为什么两者**不应该**整目录相同；exe 哈希为什么不能当判据 |
+| §3.4 | ⑥ 验证与文档纪律 | §3.4（`build\` 与 `dist\` 的关系） | 为什么两者**不应该**整目录相同；exe 哈希为什么不能当判据 |
 | §4 | ⑥ 验证与文档纪律 | §4 | 每个回归脚本的**注解**（耗时、退出码 2 的含义、为什么要那样等） |
 | §6.7 | ⑥ 验证与文档纪律 | §6.7 | 那一次全仓清理**删掉的名单**，以及"为什么确实没人调" |
 | §7 | —（速查） | §7 | **全量症状表**（约 70 条，含长解释） |
 | §10 | —（本文件独有） | （无对应节） | **已知限制与状态**（未支持 / 已知偏差 / 刻意取舍 / 欠断言） |
 | §11 | ④ 训练（长链运维） | （无对应节） | **长链自动续跑**（`tools\run-chain.ps1`）：为什么每次都要换系列标签、心跳格式与死链判据、仍会误判的情形 |
 | §12 | ④ 训练（端点判决） | （无对应节） | **两次独立采集的合并判决**（`regate_gate.py --tags`）：方法与数字、假窄 CI 的量化、能说与不能说的话 |
+| §13 | —（历史会话日志） | （无对应节） | **会话日志**：原 `docs/HANDOVER.md` §2「本会话已完成（可判据的）」与 §7（2026-10-02 会话）**整段搬来、正文一字未改**；⚠ 正文里的行内 `§2.x` / `§7.x` 自引**保持原编号**（换算见本节开头的映射表） |
 
 ---
 
@@ -206,7 +236,7 @@
 
 ---
 
-## 3.2 `build\` 与 `dist\` 的关系（注解：为什么两者**不应该**整目录相同）
+## 3.4 `build\` 与 `dist\` 的关系（注解：为什么两者**不应该**整目录相同）
 
 判据一句话在 `AGENTS.md` §3（小节 `build\ 与 dist\ 的关系`）；这里是全貌与踩坑经过。
 
@@ -236,6 +266,17 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 **改完必须跑对应层，"编译通过"不算验证。** 这个项目里绝大多数 bug 是编译期发现不了的。
 
+> ⚠ **`python selfcheck.py` 在本机有三道坑（2026-10-07 实测，三条都要满足才跑得起来）**：
+> ① **解释器**：裸 `python` 会 `ModuleNotFoundError: No module named 'torch'` ⇒ 必须用仓库自带的
+> `python\.venv\Scripts\python.exe`（`.uv-python\...` 基础解释器是 cp312，供 uv 用，别直接调）；
+> ② **数据根**：缺省 `S:\mahjong-training` 会被沙箱拒（子进程写**工作区外**路径 ⇒ `[Errno 13]` / `[WinError 5]`，
+> 连 `%TEMP%` 也不行）⇒ 用 `MAHJONG_DATA_ROOT` 指到**仓库内**临时目录（该目录已 gitignore）；
+> ③ ⚠ **必须写绝对路径**：写相对路径（如 `python\.tmp\selfcheck-root`）会在后面的
+> `shutil.disk_usage()` 上炸 `FileNotFoundError`（相对 CWD 解析后目录不存在）。
+> 可复现的一条（本机实测 **659/0 SELFCHECK PASS**）：
+> `$env:MAHJONG_DATA_ROOT="C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck-root"` 然后
+> 在 `python\` 下跑 `.\.venv\Scripts\python.exe selfcheck.py`。
+
 ### L1 规则引擎（秒级，最常跑）
 
 ```powershell
@@ -250,6 +291,16 @@ java -jar server\build\mahjong-server.jar --selftest
 
 > ⏱ 全量自检约 **110~125 秒**（2026-09 teacher 档 A/B/C 之后 **1149** 项；档 B 时是 1091 项）
 > —— 慢的是里面那十来个"整场模拟"用例（teacher 变聪明了，每步算得更多），不是断言数。
+> ⚠ 上面这些都是**历史读数**；"当前 N 项"只在 `AGENTS.md` §4 记一处（L1 / L2 / `selfcheck.py`），别处写指针。
+
+> ⚠ **本机偶发 JVM 崩溃（2026-10 实测，与代码无关）**：`--selftest` 偶尔在
+> `mahjong.rules.Shanten.dfs` 的 **C2 编译帧**里以 `EXCEPTION_ACCESS_VIOLATION (0xc0000005)` 崩掉：
+> `hs_err_pid*.log` 的 `Problematic frame: J ... c2 mahjong.rules.Shanten.dfs([IIIII[I)V`，
+> **读地址 `0x2c`**，运行约 **9~10 秒**时崩（本机 i9-14900HX / 32 核 / 31G / Win11）。
+> **重跑即过** —— 仓库根现存 4 份同签名日志，最早一份是**改动之前**（2026-10-05）就有的。
+> 与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
+> 判据：**输出里出现 `SELFTEST PASS` 才算过**；看到 `hs_err` 横幅 + 退出码 1 时**先重跑**，别改代码。
+> 真变频繁了再考虑 `-XX:TieredStopAtLevel=1`（只 C1，慢数倍）或换 JDK 构建（21.0.10+7 Microsoft）。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
 > 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：直接摆手牌 + 用现成的钩子问结论
 > （`Round.debugClaimOutcome` 问鸣牌仲裁、`debugRonDeltas` 跑荣和结算、`debugTurnKan` 跑
@@ -756,10 +807,101 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   这就是 `closeResultDialog(confirm=false)` 的用途（参数存在的唯一理由）。
 - 弹窗**已经关掉**时才立刻替玩家 `confirm`（看完了不必干等；现在这条真的能提前开下一局）。
 
+### 6.4.3 客户端收包超时（A6，2026-10）
+
+**报障原型**：「牌局卡住，什么提示都没有」—— TCP 半开（网线拔了、NAT 表过期、对端进程被 SIGKILL）时
+`QTcpSocket` **不报错**、`disconnected()` 也不来，客户端一直显示「已连接」，按钮点下去石沉大海。
+
+- **判据（契约早已写好）**：`PROTOCOL.md` §0 —— 「服务端每 20 秒在 TCP 层没有写数据时发送 `pong`
+  作为心跳；客户端 60 秒无任何下行报文可判定掉线」。服务端那一半在 `Session.writeLoop`（空闲 20 s
+  发一条 `pong`），客户端这一半**一直到 2026-10 才实现**。
+- **实现**：`NetClient` 里 `m_lastRecvMs` + `m_staleTimer`。⚠ **任何字节**都刷新它（`onReadyRead` 第一行），
+  **不是**"收到完整报文"才算 —— 半包也是链路活着的证据（写成后者会在慢链路上频繁误判）。
+- **超时后**：`fail(lang::t("ui.net.recv_timeout"))`（一条**明确原因**）+ 真 `abort()` 掉这条连接 +
+  **自己发一次** `disconnected`（`abort()` 是否再发一次在 Qt 各版本里不一致，所以先 `blockSignals`
+  再 abort，保证只发一次），界面回到「未连接」、可以直接重连。⛔ **不**看 `m_handshakeDone`：
+  连上后握手前就静默（服务端 accept 了却卡住）同样要回「未连接」。
+- **覆盖开关**：`MAHJONG_RECV_TIMEOUT_MS`（读一次、构造期生效）—— 测试与排查共用同一个入口，
+  免得为了验 60 秒真等一分钟。L2 用它压到 300 ms。
+- **判据（L2，真 loopback `QTcpServer`，三个场景）**：① 握手后静默 ⇒ 一条 `ui.net.recv_timeout`
+  + 断开恰好一次 + 连接真的关了；② 每 100 ms 一条 `pong` ⇒ **绝不**误报/误断（防"把自己踢下线"）；
+  ③ 连上后一个字都没发 ⇒ 同样报超时 + 回「未连接」。
+- ⚠ **本会话的一个 L4 注意**：`--shot` 那条 GUI 跑法在**无交互桌面**的会话里会卡住（`Start-Process`
+  起的客户端不落截图，整条命令挂着）—— 判据别只靠截图，优先用上面的 in-process loopback（同一套
+  `NetClient` 信号链）。要出图请在**有交互桌面**时按 `AGENTS.md` §4 L4 跑。
+- ⚠ **文案三件套的一个坑**（这次踩到）：`i18n-apply.mjs` 只**搬源码里的字面量**，
+  **不改语言文件** —— 补 key 是 `i18n-gen.mjs`（不带 `--check`）的活。两步都跑完之后
+  `i18n-gen --check` / `check-i18n` / `i18n-scan --check` 才会全绿；⚠ 新增 key 还要**同步两条计数断言**
+  （`SelfTest.cpp` 里的语言文件总数与 `ui.*` 族数），它们就是为"加 key 忘了计数"设的哨兵。
+
 
 ---
 
 ## 6.5 训练接口（机器学习 / 自对弈）
+
+> **轮次索引**（56 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
+> ⚠ **编号不单调是历史事实**：第六十七轮物理上在第六十六轮**之前**；**1–4 / 48–54 没有独立小节**
+> （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
+> 编号被 `docs/TRAINING-V4.md` / `docs/HANDOVER.md` / 代码注释大量引用。
+> 表由 `node tools/round-index.mjs` 生成，`--check` 会对"加了轮次忘了登记"判红。
+| 轮次 | 日期 | 主题（点进去搜这串就行） |
+| --- | --- | --- |
+| 第五轮 | 2026-09-27 | 第一轮 teacher 预训练（P1/P2 雏形） |
+| 第六轮 | 2026-09-27 | 分阶段训练（辅助头收敛）+ 掩码自监督 + 数据集并行 |
+| 第七轮 | 2026-09-27 | P5 三端 v4 前向 + 两个"静默"真 bug |
+| 第八轮 | 2026-09-27 | §7.5 均衡审计首次执行（它自己先报了一次假绿）+ P3 开局的 RWR |
+| 第九轮 | 2026-09-27 | P3 加强版 —— 1,000 场自对弈 + PPO（，方向翻正但仍证不出） |
+| 第十轮 | 2026-09-28 | 逐决策 reward-to-go 三端落地 + 发布 v1.13.0 |
+| 第十一轮 | 2026-09-28 | v4 增量事件缓存落地（L2；，`docs/TRAINING-V4.md` §5.3） |
+| 第十二轮 | 2026-09-28 | 价值头审计 —— `rtg` 口径的值头已经塌了（，`v4/value_audit.py`） |
+| 第十三轮 | 2026-09-28 | 修 critic —— `value` 口径达标、`rtg` 口径判死 |
+| 第十四轮 | 2026-09-28 | 训练端脱离 Java —— C++ 补标签侧 + v4 回路 Python 化 |
+| 第十五轮 | — | `--aux` 的字节对拍与 JDK zip 的两个细节 |
+| 第十六轮 | 2026-09-28 | PPO 与多头体系的重新规划（，分析轮，代码未改） |
+| 第十七轮 | 2026-09-28 | P0/P1 落地实测—— 工具全部就位，但手级 GAE 没过 critic 门槛 |
+| 第十八轮 | 2026-09-28 | P1b —— 小局口径也不行，瓶颈是"读出头" |
+| 第十九轮 | 2026-09-28 | 天花板合法性 + 读出头探针 + 基线尺度对齐 |
+| 第二十轮 | 2026-09-28 | 路线 A（逐决策 shaping）—— 定理 + 实测双向判死 |
+| 第二十一轮 | 2026-09-28 | PPO 数值口径（路线 B）—— 量级问题比预想大一个数量级 |
+| 第二十二轮 | 2026-09-28 | 训练口径进回路 + 多轮 × 每轮短端到端冒烟 |
+| 第二十三轮 | 2026-09-28 | 值头闸门进回路（目标里那条判据以前断在回路之外） |
+| 第二十四轮 | 2026-09-28 | 采集战役当场抓出真 bug —— 顺位点项与"基线拟合对象" |
+| 第二十五轮 | 2026-09-28 | 第一场「多轮 × 每轮短」战役的实测 —— 两个必须改的口径 |
+| 第二十六轮 | 2026-09-28 | 对照实验把"KL 预算被阶段 a 吃掉"钉出来 —— 值头先行相 |
+| 第二十七轮 | 2026-09-28 | 值头相到底该排哪儿 —— 实测把它挪到 `train` **之后** |
+| 第二十八轮 | 2026-09-28 | 值头相跑通后的三个结论 —— 两个真 bug + 一个决定性负面 |
+| 第二十九轮 | 2026-09-28 | 闸门在**完整规模**的一轮上**通过**了 |
+| 第三十轮 | 2026-09-28 | 把"值头要多少数据"量成一条曲线 |
+| 第三十一轮 | 2026-09-28 | 把"数据量"钉成**守门函数**（`value_gate_feasible`） |
+| 第三十二轮 | 2026-09-28 | 两个轴 —— 1000 场也不够，还得有步数 |
+| 第三十三轮 | 2026-09-28 | 多轮战役开跑 —— `--eval-vs prev`（同牌山配对量"这一轮有没有长进"） |
+| 第三十四轮 | 2026-09-28 | 战役第一跑的两件事 —— 闸门在回路出口**通过**了；以及一个覆盖事故 |
+| 第三十五轮 | 2026-09-28 | 5 轮战役跑完（`v4-camp01`，2.35 h）—— 值头过关、强度无证据 |
+| 第三十六轮 | 2026-09-29 | 竞技场（`v4 arena`）—— 先让"变强"这件事可判 |
+| 第三十七轮 | 2026-09-29 | ② 搜索算子第一版 `search`（teacher 先验 + 一层前瞻否决） |
+| 第三十八轮 | 2026-09-29 | `search` vs `teacher` 的正式判决 —— 第一版**输**了（Δ=+2.03，贴边界） |
+| 第三十九轮 | — | 按"减少坏改判"调三个旋钮（① 打点项 → ② 危险硬约束 → ③ margin） |
+| 第四十轮 | 2026-09-29 | 三旋钮的筛选结果 —— ① ③ 方向对，② 按"硬约束"实现会过火 |
+| 第四十一轮 | 2026-09-29 | ② 改成有界软罚（`FOLD_PENALTY = 400` + `shanten ≥ 2` 门控） |
+| 第四十二轮 | 2026-09-29 | v3 的正式判决 —— 差距砍半，从"显著输"变成"打平" |
+| 第四十三轮 | 2026-09-29 | 在线自对弈 + 结果奖励（补上"对手池"这味药）—— 引擎就绪，但本轮起不来 |
+| 第四十四轮 | 2026-09-29 | 解封与起跑 —— "工作区内的解释器写不了 `S:`"这个坑 |
+| 第四十五轮 | 2026-09-29 | 联赛仍然跑不成 —— 子进程往 `S:` 的写入被静默吞掉 |
+| 第四十六轮 | 2026-09-29 | 真正跑通 —— 沙箱是"按**可执行文件位置**"决定写入是否生效 |
+| 第四十七轮 | 2026-09-29 | 竞技场加"不许写进仓库"的闸 + C: 上 17.1 GB 的清理 |
+| 第五十五轮 | 2026-09-30 | 接受闸门 + 逐候选 belief 门控 + 两条杠杆的"先量" |
+| 第五十六轮 | 2026-10-02 | 闸门符号反向（严重 bug）+ 方向性自证 |
+| 第五十七轮 | 2026-10-02 | 模型接线审计 —— 抓到一处"真的接了个寂寞" |
+| 第五十八轮 | 2026-10-02 | GRU 的裁定（不删，该接）+ 撞上"缓存/口径"绊线 |
+| 第五十九轮 | 2026-10-02 | 第五季判决 —— 5 代全被闸门拒（含一次显著更差）+ 抓到我自己的 harness bug |
+| 第六十轮 | 2026-10-02 | 第六季第 2 代崩（harness 第二处 bug）+ 第七季完整判决 ⇒ "配方不是改进算子" |
+| 第六十一轮 | 2026-10-02 | W1 落地 —— 把 GRU 的 `h_evt` 真正接进融合 |
+| 第六十二轮 | 2026-10-03 | 审计"为什么历季一致退化" ⇒ 结论是"**尺子看不见**"（，用户质疑驱动） |
+| 第六十三轮 | 2026-10-03 | W4-A（引擎牌效标签）是**负结果** —— "贴牌效"会直接换掉打点与和了率 |
+| 第六十四轮 | 2026-10-03 | B 路（搜索算子的候选排序当标签）**不值得做** —— 相对 teacher 的改判率只有 0.95% |
+| 第六十五轮 | 2026-10-03 | 真手牌 oracle（特权监督）也关闭 —— 而且暴露出"危险头的评测口径一直是错的" |
+| 第六十七轮 | 2026-10-06 | 阶段 4 可行性判定 —— oracle 抉择器的上界，以及算这个上界时踩的三个坑 |
+| 第六十六轮 | 2026-10-03 | 已知无用清单 —— 这一轮审计用算力买到的 12 条否证 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -1301,7 +1443,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
       多指示牌）**2/2**、合成边界语料（`called_tile` 缺失的兜底补张 / 非法键 / 赤五取法）**1/1** ——
       全部逐字节一致；`python -m mahjong_ml.dataset build` 正常出 `state 607 / cand 96`（含 `nLegal` 对账，
       反向破坏会报 `ValueError`）。合成语料生成器已进仓库：`tools/trainer-features-synth.mjs`。
-    - **仍未实现**（显式报错，不静默降级）：`teacher`/`net:` 策略、`--teacher-label`（`--features` 已完成）。
+    - ~~**仍未实现**（显式报错，不静默降级）：`teacher`/`net:` 策略、`--teacher-label`~~ —— **这是当时的读数，已作废**：`net:` 见 `docs/TRAINER-CPP.md` §6.16、`teacher` 见 §6.17、`--aux` 见 §6.23，三样都已落地并逐字节验过；**当前唯一缺口 = `--teacher-label`**（`producer.py` 的 `CPP_MISSING` 只余这一项）。
     - **性能实测（本机，20/40 场 × 2 小局 × `first`，同工作量两边比）**：Java 单核 **786** 决策/秒 vs
       C++ 单核 **16,630**（**21.2×**）；Java 8 workers **3,690** vs C++ 8 workers **17,230**（**4.7×**）。
       C++ 的 `--workers` 目前**串行**（8 workers 与单核同速），所以这个倍数还会随真并行继续拉大；
@@ -1909,7 +2051,7 @@ npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14 张、
 **第五轮：第一轮 teacher 预训练（P1/P2 雏形，2026-09-27）**
 
 新增 `v4/dataset.py`（轨迹 → 四张量 + 标签）与 `v4/pretrain.py`（教师模仿 + aux 辅助头）。判据与
-完整指标表在 `docs/TRAINING-V4.md`「第一步已跑」与 `docs/HANDOVER.md` §2.9；这里记**三个真 bug**
+完整指标表在 `docs/TRAINING-V4.md`「第一步已跑」与 `NOTES.md` §13.9；这里记**三个真 bug**
 （都是"跑起来才炸"的那一类）与**怎么读那张指标表**：
 
 1. **`lmax` 是"每份切分各自定宽"的**：train/val 的 `cand.shape[1]` 可能不同（实测 15 vs 27），
@@ -2280,7 +2422,7 @@ npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14 张、
    ⇒ ① **不要再给 PPO 加 critic 轮次**；② 用在线的**小局级**目标跑轮次（RWR/AWR，或"小局级 critic"）；
    ③ 真要 critic 就做**两段分解**（`rtg = 本小局收支 + 其后的后缀`），
    且进 PPO 前先过闸门（⚠ 原文写 **EV ≥ 0.4** —— 第十九轮证明合法天花板只有 0.069，
-   这个门槛**谁都过不去**；已改成"EV ≥ 0.8 × 合法天花板 + `std(A_raw)/std(目标) < 1`"，见 §6.5 第十九轮）。
+   这个门槛**谁都过不去**；已改成"EV ≥ 0.7 × 合法天花板 + `std(A_raw)/std(目标) < 1`"，见 §6.5 第十九轮）。
 
 5. **判据**：`python/selfcheck.py` **519/0**（+4 只训头 + 4 参照：岭回归在"线性可解释"与
    "与特征无关"两侧分别 ≈1 / ≈0 —— 第一版把 train/val 混在一起量，噪声目标也报 0.886 的假绿，已改成分开）。
@@ -2401,7 +2543,7 @@ extra**（`55 54 05 00 01 00 00 00 00`）。照抄这两处之后**逐字节相�
 4. **下一轮第一件事（顺序再改）**：critic 的**时间尺度压到"一小局"** —— 预测"本小局我会赢多少"，
    bootstrap 不跨小局；`--rank-weight` 作终局项单独加。
    ⚠ 原文写"先量 EV 门槛该定多少（0.632 是**可解释上限**）"—— 第十九轮证明 0.632 是作弊上界，
-   合法天花板 **0.0693**，闸门已改成"≥ 0.8 × 合法天花板"。
+   合法天花板 **0.0693**，闸门已改成"≥ 0.7 × 合法天花板"。
 5. **这一轮踩的坑**（三个都会再犯）：
    - **局部变量遮蔽模块**：`train()` 里原本 `spec = str(meta["student"])`，而我新代码用 `spec.block_slices()`
      ⇒ Python 作用域是静态的，整个函数里 `spec` 都成了局部 ⇒ `UnboundLocalError`
@@ -3589,11 +3731,17 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 
 ### 10.1 规则 / 牌张编码
 
+> ⚠ **读法（2026-10-07 补，防"两行互相打脸"）**：本表**现行口径** = **合法值集合是 `{0, 3}`**（第 1 行）。
+> 第 3 行（`aka = 0` 支持）是那个集合里 **`0` 那一侧的细节**（"0 不是'禁用赤五'，而是'发牌期把赤五换成普通五'"），
+> **不是另一个说法**；第 4 行划掉的是**更早的错说法**（"`aka` 只有 0 或 3 张"—— 那句曾把 `0` 说成不支持）。
+> 三行保留不合并，是因为它们记录了**口径怎么变过来的**；合并会丢掉"曾经错过"的痕迹。
+
 | 限制 | 说明 | 证据 |
 | --- | --- | --- |
-| `rules.aka = 4` **不支持** | 牌 id 编码里**每种赤五只有一张**（`0m`/`0p`/`0s`），所以"两张赤五筒"表达不了；传 4 会被**按 3 处理** | `core/Wall.java`（"`aka == 4` 用这套编码表达不了"那段注释）、AUDIT `S-26` |
-| `rules.aka = 0` **支持** | 牌山**不含赤五**，且仍是 136 张、每种牌恒 4 张（换掉赤五不改变牌张构成） | 断言：`SelfTest.akaRuleTests`（`aka=0 时牌山里的赤五张数 == 0`） |
-| ~~"`aka` 只有 0 或 3 张"~~ | 这句**已过时**：`0` 是支持的。`SelfTest` 里还留着一句老注释（"设 `aka = 0` 仍会发赤五"）——那是**审计当时的**现象，现已被上面的断言钉住，别照抄 | `SelfTest.java` `akaRuleTests` 的 javadoc vs 其断言 |
+| `rules.aka` 合法值集合 = **{0, 3}**（现行口径） | 牌 id 编码里**每种赤五只有一张**（`0m`/`0p`/`0s`）⇒ "两张赤五筒"（4）与"少放几张"（1/2）都表达不了；**1/2/4 在 `Rules.clampToSane()` 里归一化到 0/3 并记 WARN**（2026-10 起 —— 此前 `clamp(aka,0,3)` 会把 1/2 静默留下 ⇒ 牌山发 3 张赤五、而牌谱按 `aka>=3?1:0` 声明 0 张） | `core/Rules.clampToSane()`、`core/Wall.java`（"表达不了"那段注释）、AUDIT `S-26`、断言 `SelfTest.akaRuleTests` |
+| **抢杠的 C++ 镜像没有"定向局面"对拍**（2026-10，欠断言） | 抢杠（`chankan`）在 Java 侧有实局断言（`SelfTest.chankanEscapeTests` + `koyakuAndChankanTests`），但 C++ 镜像那条路**只靠"自然出现"**：`tools/trainer-selfplay-parity.mjs` 的语料里 **加杠本身就很稀有**（实测 3 场 × 8 局 = 24 小局，`"kakan"` 事件 **0 次**）⇒ 对拍**逐字节全绿也可能一次都没走到** `chankanOptions` / `claimPhase(chankan=true)`。判据缺口：想要真正的覆盖，得给对拍加一条**造好的抢杠局面**（现成基础设施：`tools/RoundProbe.java` 那一套"真实牌局语料"+ C++ 侧子命令），⛔ 别拿"对拍绿了"当成"这条镜像验过了" | 实测命令与计数：`node tools\trainer-selfplay-parity.mjs 3 8 first,random 20260101` + `Select-String '"kakan"'`；Java 侧判据见 `SelfTest.chankanEscapeTests` |
+| `rules.aka = 0` **支持**（= 上面集合里 `0` 那一侧的细节） | 牌山**不含赤五**，且仍是 136 张、每种牌恒 4 张（换掉赤五不改变牌张构成） | 断言：`SelfTest.akaRuleTests`（`aka=0 时牌山里的赤五张数 == 0`） |
+| ~~"`aka` 只有 0 或 3 张"~~ | 这句**已过时**（它把 `0` 说成不支持）：`0` 是支持的。`SelfTest` 里还留着一句老注释（"设 `aka = 0` 仍会发赤五"）——那是**审计当时的**现象，现已被上面的断言钉住，别照抄 | `SelfTest.java` `akaRuleTests` 的 javadoc vs 其断言 |
 
 ### 10.2 判定与流程上的取舍（**刻意**如此，不是 bug）
 
@@ -3606,6 +3754,7 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 | **观战人数上限 8** | 超过回 `error: no_room` | `Table.MAX_SPECTATORS` |
 | **一局最多 4 次杠** | 规则如此（岭上只有 4 张）：第 4 次之后**不再下发 `kan` 选项** | `docs/PROTOCOL.md` §3.4、`Round.canKan()` |
 | **思考时间"额外+每巡"** | 规格写法是 `20+5` = **额外 20s + 每巡 5s**（大数在前），别写反 | `docs/PROTOCOL.md` §5.1 |
+| **延长战（南入 / 西入）是"活"的**（2026-10 起） | 《天凤》《雀魂》预设 `west_extension = true` —— 此前三套预设**全关**，整条延长战链是睡着的（`RoundScoring` 自己写着"休眠缺陷"）。现行口径：All Last 轮庄后**无人达到** `required_points` 就走延长战（东风战→南入、半庄→西入，没有北入）；**延长战里每局结束**再判一次，**有人达到即当场终止**（《天凤》sudden death，**连庄也判**）。M.League 保持关（打到南 4 局庄家轮庄为止） | `core/Rules.applyPreset`（三套预设）、`RoundScoring.keepPlayingWest` / `extensionReached`、`Table.playGame` 的连庄/轮庄两支、`docs/PROTOCOL.md` §5；断言 `SelfTest.extensionTests` + trainer `main.cpp --selftest` |
 
 ### 10.3 构建 / 客户端能力
 
@@ -3627,6 +3776,7 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 | **观测字段是"合法可见信息"的封闭集合** | 新增字段要先过 `tools/selfplay-check.mjs` 的字段白名单（防泄漏），并给 `Observation.v` 递增 |
 | **数据集不记录规则预设** | `summary.json` / compact `meta.json` 里**没有 `preset` 字段**：当前所有数据都是"服务端默认预设 = M.League"（`Rules.defaults()`；`python/` 侧从不传 `--preset`），但"哪份数据是哪套规则采的"只能靠这个默认事实推断。要钉死就得把 `preset` 写进自对弈汇总 —— ⚠ **改产出格式要三处一起改**（`TraceRecorder`/`SelfPlay` 汇总 + `PROTOCOL.md` §8.4 + `tools/selfplay-check.mjs`）。口径与影响见 `docs/TRAINING.md` §0 |
 | **策略看不见"场外"规则设定** | 网络只吃 `obs`：与规则相关的只有 `hand_red`（赤牌）、宝牌/杠宝、余牌；**uma / 一位必要点数 / 食替设置都不在观测里**。线上房间逐项改规则（`tenhou`/`majsoul`/`custom`）时合法性仍由服务端强制，但"用 M.League 数据训出来的取舍"是否仍然合适，没有据可依 |
+| **`net.bin` 的张量数会随"可选张量"增加**（⚠ **不是笔误**，别去"统一成一个数字"） | 三个读数各有时代：**74**（format 1 / 2026-09 首版）→ **76**（+2，值头相那轮把 `heads.policy_gate.*` 接上，见 §6.5 第十九~二十八轮、`NOTES.md:4480`）→ **78**（W1：+2 可缺张量 `fusion.mem.*`，见 `NOTES.md:4690`）。**当前 = 78**（2026-10-07 复核）。⚠ 可选张量在**所有**加载点走 `normalize_state` 补 0（= 恒等 ⇒ 旧网逐位不变），所以"老网 + 新格式"仍然合法 —— 也正因为它们**可缺**，三处文档才会各写一个数 |
 
 ### 10.5 文档/验证层面仍然欠着的（改动时小心）
 
@@ -3903,7 +4053,9 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   （**593511525**）· `v4-ppo-001.zip` 5,030,883 B `b4995708…`（**593511669**）。
   ⚠ **本版终于能带 v4 包**（P5 的 v4 前向在 v1.12.0 之后落地）：`net.bin` **格式 2**，
   服务端 `NetWeights` 按 `format` 分派到 `V4Policy`；包目录里 `net.json` 是
-  `v4/export.py` 自己写的**张量清单**（74 个张量 / 16 个块 / 指纹 `e1f5dd0fc1e9aba8`），服务端不读它。
+  `v4/export.py` 自己写的**张量清单**（74 个张量 —— ⚠ **这是当时的读数；当前 78**：+2 值头相
+  `heads.policy_gate.*`、+2 W1 `fusion.mem.*`，见 §10.4 那张表）/ 16 个块 / 指纹
+  `e1f5dd0fc1e9aba8`），服务端不读它。
   ⚠ **"包能挂上"与"包能打"要分开验**：① 挂载清单（启动日志的「机器人 AI：…」含 v4 三个）；
   ② `node tools\bot-ai-test.mjs`（清单/建房/换一代/路径串被拒，20/0 PASS）；
   ③ **真打一场**：`--selfplay 1 --policy net:<包里的 net.bin>` → 跑满 8 小局（4.6 s/局 × ... 实测 23.1 s、
@@ -4924,7 +5076,7 @@ S 上 +0.089/+0.085/+0.118（排除 0）；**S2 上 O+−B = −0.001/+0.000/−
 11. **critic / 值头四条已否**（第十九/二十轮）：① **加宽加深读出头没用**（池化全换 **+0.019**、
     MLP 反而过拟合）；② **PBRS shaping 没用**（`Q'=Q−Φ`、`V'=V−Φ` ⇒ **`A'=A`**，定理 + 实测双向否）；
     ③ **绝对门槛判据是错的**（`EV(delta)=0.632` 是**作弊上界** —— `win_flag` 一项就贡献 **0.509** ——
-    **合法天花板只有 0.069**，故闸门必须写成 `EV ≥ 0.7~0.8 × 合法天花板`）；
+    **合法天花板只有 0.069**，故闸门必须写成 `EV ≥ 0.7 × 合法天花板`）；
     ④ **拿标签侧真值当参照**同样无效（`win_flag` 是**本小局结局本身**、`opp_*` 是隐藏真值）。
     ⇒ `NOTES.md` §6.5 第十九/二十轮、`docs/TRAINING-V4.md` §14.8–§14.9。
 12. **把 2000 场级大闸门当"进度表"：用户已否决**（个人 PC 上单条判决 33 分钟起、6000 场一档
@@ -5196,3 +5348,923 @@ $ ... --gate-root python\.tmp\dup-root --tags dup-a,dup-b ...
   两次用**同一对策略串**、16 套墙的**座位布局逐字相同**（A,A,B,B）。缺任何一条都不能池化。
 - ⚠ 想再增强，唯一诚实的路是**再采一批新牌山**（新一轮 tag）再把三次池化 —— 不是换指标、
   不是把同一批牌山反复数。
+
+## 13 会话日志（原 `docs/HANDOVER.md` §2 与 §7；按时间序，正文一字未改）
+
+| 原标号 | 新标号 |
+| --- | --- |
+| `docs/HANDOVER.md` §2.1 | `NOTES.md` §13.1 |
+| `docs/HANDOVER.md` §2.2 | `NOTES.md` §13.2 |
+| `docs/HANDOVER.md` §2.3 | `NOTES.md` §13.3 |
+| `docs/HANDOVER.md` §2.4 | `NOTES.md` §13.4 |
+| `docs/HANDOVER.md` §2.5 | `NOTES.md` §13.5 |
+| `docs/HANDOVER.md` §2.6 | `NOTES.md` §13.6 |
+| `docs/HANDOVER.md` §2.7 | `NOTES.md` §13.7 |
+| `docs/HANDOVER.md` §2.8 | `NOTES.md` §13.8 |
+| `docs/HANDOVER.md` §2.9 | `NOTES.md` §13.9 |
+| `docs/HANDOVER.md` §2.10 | `NOTES.md` §13.10 |
+| `docs/HANDOVER.md` §2.11 | `NOTES.md` §13.11 |
+| `docs/HANDOVER.md` §2.12 | `NOTES.md` §13.12 |
+| `docs/HANDOVER.md` §2.14 | `NOTES.md` §13.14 |
+| `docs/HANDOVER.md` §2.15 | `NOTES.md` §13.15 |
+| `docs/HANDOVER.md` §2.16 | `NOTES.md` §13.16 |
+| `docs/HANDOVER.md` §2.17 | `NOTES.md` §13.17 |
+| `docs/HANDOVER.md` §2.18 | `NOTES.md` §13.18 |
+| `docs/HANDOVER.md` §2.19 | `NOTES.md` §13.19 |
+| `docs/HANDOVER.md` §2.20 | `NOTES.md` §13.20 |
+| `docs/HANDOVER.md` §2.21 | `NOTES.md` §13.21 |
+| `docs/HANDOVER.md` §2.22 | `NOTES.md` §13.22 |
+| `docs/HANDOVER.md` §2.23 | `NOTES.md` §13.23 |
+| `docs/HANDOVER.md` §2.24 | `NOTES.md` §13.24 |
+| `docs/HANDOVER.md` §2.25 | `NOTES.md` §13.25 |
+| `docs/HANDOVER.md` §2.26 | `NOTES.md` §13.26 |
+| `docs/HANDOVER.md` §2.27 | `NOTES.md` §13.27 |
+| `docs/HANDOVER.md` §2.28 | `NOTES.md` §13.28 |
+| `docs/HANDOVER.md` §2.29 | `NOTES.md` §13.29 |
+| `docs/HANDOVER.md` §2.30 | `NOTES.md` §13.30 |
+| `docs/HANDOVER.md` §2.31 | `NOTES.md` §13.31 |
+| `docs/HANDOVER.md` §2.32 | `NOTES.md` §13.32 |
+| `docs/HANDOVER.md` §2.33 | `NOTES.md` §13.33 |
+| `docs/HANDOVER.md` §2.34 | `NOTES.md` §13.34 |
+| `docs/HANDOVER.md` §2.35 | `NOTES.md` §13.35 |
+| `docs/HANDOVER.md` §2.36 | `NOTES.md` §13.36 |
+| `docs/HANDOVER.md` §2.37 | `NOTES.md` §13.37 |
+| `docs/HANDOVER.md` §2.38 | `NOTES.md` §13.38 |
+| `docs/HANDOVER.md` §2.39 | `NOTES.md` §13.39 |
+| `docs/HANDOVER.md` §2.40 | `NOTES.md` §13.40 |
+| `docs/HANDOVER.md` §7.1 | `NOTES.md` §13.41 |
+| `docs/HANDOVER.md` §7.2 | `NOTES.md` §13.42 |
+| `docs/HANDOVER.md` §7.3 | `NOTES.md` §13.43 |
+| `docs/HANDOVER.md` §7.4 | `NOTES.md` §13.44 |
+
+> ⛔ 正文里的**行内** `§2.x` / `§7.x` 一律保持原样 —— 它们指的仍是**原 `HANDOVER.md` 编号**，换算看上面那张映射表。
+> ⚠ **当前状态与「唯一下一步」不在这里**：看 `docs/HANDOVER.md` §1（十秒速览）与 §3（历史规划快照）。
+> ⚠ 原 §2.13 在 `docs/HANDOVER.md` 里本就缺号 ⇒ 本节 13 号段在 13.12 与 13.14 之间同样空一号。
+> ⚠ 原 §2.1–§2.12 在时间上早于 §3 那张历史规划快照、原 §2.14 起接在它之后；本节物理顺序与原文件一致，正文一字未改（只换了小标题编号并追加原编号）。
+
+### 13.1 发布 v1.11.0（已上线）（原 §2.1）
+
+- tag `v1.11.0` → `cff0def`，release **#397557867**，8 个资产（digest 抽查一致）。
+- 随附 3 个机器人包：`ppo-v3-g01-g05`（阶梯 θ 最高、唯一 2+2 排除 0 的一代）· `ppo-v3-g01-g06` ·
+  `ppo-v3-g02-g03`；一律 α=0 纯网络。
+- 本版 `client/`、`server/` **源码没变**（改动全在 `python/` 与文档），玩家可见增量只有包。
+- 记录：`release/RELEASE-v1.11.0.md`（本地，gitignore）+ `NOTES.md` §9.5。
+
+### 13.2 文档重整 + 索引化（原 §2.2）
+
+- 新增 **`docs/INDEX.md`**（六个板块 · 快速索引 · 目录树 · 文档清单）；`AGENTS.md` 从 64,166 B（已超提醒线）
+  压到 **61,345 B**（提醒线 61,440 / 硬上限 65,536 —— **余量只剩 95 B：再加内容必须先往 NOTES 搬，或先瘦身**）。
+- `NOTES.md` 目录按板块分组；18 份文档加"板块头"。
+- `tools/doc-refs-check.mjs` 新增 **④ 索引完整性**（负向对照实测过：漏登记/坏路径都会红）。
+
+### 13.3 S 盘全清（为 v4 腾空，**不可逆**）（原 §2.3）
+
+- 删 **96 项 / 119 GB**：v2 代全部权重与轨迹 + **全部 v3 数据集**（compact/raw）+ `*-src` + v2 台账。
+- 保留：`compact/bc-v3-001`（**不可重建**，`paths.KEEP_NAMES`）· `ckpt/` 13 个 v3 权重
+  （`bc-v3-001` · `iql-v3-001` · `ppo-v3-g01-g01…g08` · `ppo-v3-g02-g01…g03`，**v1.11.0 三个包的源权重**）·
+  `league/{ppo-v3-g01,ppo-v3-g02}`（阶梯/2+2/筛选/release 配对的 summary）。
+- 代价：**v3 谱系不能再续训/重训**（权重只能打对局或当 v4 的基准对手）；文档里 `ckpt/awr-002`、
+  `compact/ppo-v3-g01-g08` 之类路径已是历史记录。记录在 `NOTES.md` §6.5「第三次清理」。
+
+### 13.4 v4 框架落地（训练准备 P0，7/12 绿）（原 §2.4）
+
+新增 `python/mahjong_ml/v4/`（**复用** `budget`/`paths`/`producer`/`eval`/`league`，一行没改）：
+
+| 模块 | 内容 |
+| --- | --- |
+| `spec.py` | 块注册表（id/宽度/依赖 obs 字段/版本）+ **块清单指纹 `e1f5dd0fc1e9aba8`**；断言块宽度铺满四张量 |
+| `blocks.py` | `tile[34,48] / evt[60,96] / ctx[64] / cand[n,128]` 拼装 + 消融开关 + obs v2 逐块记名降级 |
+| `cache.py` | L1 牌河增量 · L2 `EventStream`（GRU 增量，`recompute()` 为基准路径） |
+| `model.py` | 三塔 + 关键张注意力 + 状态⇄增量两轮双向 + 多头（1,360,168 参数 ≤3M） |
+| `harness.py` | 封闭红证（标签不进输入 / 奖励不含隐藏量 / aux 分离）+ 场外均衡审计（`balance.json`，1% / CV 5%） |
+| `cli.py` | `python -m mahjong_ml.v4 {check\|plan\|spec\|fingerprint\|balance}` |
+
+判据：`v4 check` PASS · `python/selfcheck.py` **365 项 / 0 失败**（原 313 + 49 + obs v3 的 3 条）· `doc-refs-check` PASS。
+过程中判据抓出并修掉 **2 个真 bug**：① GRU 增量把头 56 个 padding token 也喂进 GRU（Δ=1.76e-2，改后 0）；
+② HL-Gauss 软标签把长度=bins 的索引向量喂 `scatter_`（行和远大于 1）。另修好契约文档 4 处陈旧数字
+（`state 617 = 544 + 73` → **615 = 544 + 71**）。
+
+### 13.5 obs v3 第 1 轮：Java 权威实现 + 契约（2026-09-27）（原 §2.5）
+
+清单第 **1~3** 步 ✅（下一步见 §3）：
+
+- **`game/Round.java`**：`List<Event> events` 有序公开事件日志（只追加、整局累积），四类各一个漏斗
+  （`recordDiscard()` / `sendMeld()`（吃碰杠的唯一出口）/ `doRiichi()` / `sendDora()`）；
+  `int[] riichiTurn`（**按 `playerDraws` 计** —— 与 `events[].turn` 同一把尺子）。
+  `draw` / `agari` / `ryuukyoku` **刻意不发**（理由写进 `PROTOCOL.md` §8.2）。
+- **`ai/Observation.java`**：`VERSION 2→3`；`events[]`（类型 + 牌码 + 逐张属性）+ `riichi_turn[]`。
+  隐藏量红证扩到 **牌山摸牌顺序 + 里宝指示牌**（新增两个只动隐藏量的自测钩子）。
+- **契约**：`PROTOCOL.md` §8.2 加了事件字段表与三条语义判据；`tools/selfplay-check.mjs` 的 `OBS_KEYS`
+  **按 `obs.v` 分档**（v2 老轨迹照样 PASS），并**独立重建牌河**、对 `riichi_turn` ↔ riichi 事件对账。
+- **判据**：L1 `--selftest` **1388 项 / 0 失败**（+18 条：《事件流 ↔ 广播报文逐条同源》《牌河可由事件流重建》
+  《同小局只追加》《`riichi_turn` 与事件一致》+ 五类事件覆盖闸门）；`node tools\selfplay-check.mjs`
+  对新采 2 场轨迹 **DATASET PASS**（4 条注入式负向对照各自变红）；`python\selfcheck.py` **365/0**
+  （顺手修掉 `v4/cache.py` 只认 `meld` 不认 `kan` 的 `meld_count` 漏账 —— 它会静默破坏判据④）。
+- **代价（实测）**：`events` 按小局累积 ⇒ 轨迹 JSONL **×2.4 ~ ×2.8**（1,608 → 3,798 B/决策；
+  可直接对照的一对：`1 0 pass 20260101` 的 `g0.jsonl` **1,119,860 B → 3,134,525 B**，见 `NOTES.md` §6.5）。
+  想压回去就要把 `events` 改成"只发增量"（消费侧攒），**下一轮想清楚再说**（见 §6 待决问题）。
+
+### 13.6 obs v3 第 2 轮：C++ 训练端镜像 + 三套 parity（硬闸门，2026-09-27）（原 §2.6）
+
+清单第 **5 步的 obs 那一半** ✅（sidecar 那一半留到第 3 轮）：
+
+- **新增 `trainer/src/event.hpp`**：`Event`（Java `Round.Event` 的镜像）+ `eventsJson()`（键序与
+  "没有的字段整个键都不出现"逐条照抄）。⚠ 单独一个头是因为 `Observation` 也要持有它、而
+  `round.hpp` 已 include `observation.hpp`（嵌在 `Round` 里会成环）。
+- **`round.{hpp,cpp}`**：`events` + `riichiTurn`；四类事件各一个漏斗 —— `recordDiscard()`（+ `tsumogiri`）、
+  **新增 `placeMeld()`**（吃/碰/大明杠/暗杠 + 加杠替换共用一个出口）、`doRiichi()`、`revealKanDora(seat)`；
+  `meldKindWire` 挪进 `meld.hpp` 共用。**`observation.hpp`**：`2 → 3`；`events`/`riichiTurn` 插在
+  `visible` 与 `haitei` 之间；`makeObservation()` 构造期快照。
+- **判据（本机实测）**：`trainer-selfplay-parity.mjs` **200 场完整半庄**（`teacher,first,random,pass
+  --rotate --cpp-workers 8`，2,613 小局 / 206,830 决策）**逐字节 200/200**；分层 8 例 8/8；
+  `trainer-opts-parity.mjs` 2,075 行一致；`trainer-features-parity.mjs` sidecar 逐字节；
+  **C++ 产出直接过 `node tools\selfplay-check.mjs`（DATASET PASS，含事件结构 + 独立重建牌河）**；
+  `trainer --selftest` PASS；Java 侧 L1 仍 **1388/0**（无回退）。
+- **覆盖闸门**：五种副露（chi/pon/ankan/kakan/**daiminkan**）与五类事件在逐字节对拍里都真的出现过 ——
+  `first`/`pass` 从不杠，所以专门跑了 teacher 12 场（daiminkan 50）与 random 12 场（daiminkan 282）。
+- **整条链（`trainer-takeover-check.mjs 4 1 teacher 20260101`）PASS**：`MAHJONG_PRODUCER=cpp` 的采集 +
+  派生（都与 Java 逐字节）+ `selfplay-check` + **`dataset build` 出紧凑集**（state 615 / cand 96）
+  ⇒ obs v3 轨迹**不改一行 Python 就能喂进现有 v3 管线**；`trainer-workers-check.mjs` 60/60（1 vs 8 核）。
+- 细节与完整数字：`docs/TRAINER-CPP.md` §6.20。
+
+### 13.7 obs v3 第 3 轮：sidecar v3（逐家四段）+ 数据集层硬闸门（P0 收口，2026-09-27）（原 §2.7）
+
+清单第 **4/5b/6 步**全部 ✅ —— **P0 六步到此收口**：
+
+- **Java**：`ai/ObsFeatures.java` `FEATURE_VERSION 2 → 3` + `PerSeat`/`perSeat()`：
+  `danger_per_seat[3][34]`（实际立直状态）/ `danger_riichi_per_seat[3][34]`（**假设该家已立直**）/
+  `genbutsu_per_seat[3][5]` / `suji_per_seat[3][5]`（位图，**字节内 LSB 在前**；方位**相对**自己：
+  0=下家/1=対面/2=上家）。`train/TraceFeatures.java` 写 **D~G 四段**（sidecar 从三段→七段）。
+- **C++**：`danger.hpp` 的 `DangerReport` 补 `genbutsu`/`suji`/`wall`（原来"没人读"所以没搬 ——
+  位图要读了；**同一份 `dangerOf` 出三个判据**，不在特征里重算）+ `obffeatures.perSeat()`
+  + `features.cpp` 写 D~G。
+- **Python**：`features.py` `DERIVED_VERSION 3` + 段长常量；`dataset.load_sidecar` 按七段算偏移并
+  校验**总长度**；**新增 `mahjong_ml/v4/traces.py`** = v4 数据集层唯一入口（obs v2 / 老 sidecar **硬拒绝**
+  + `sidecar_dict()` 把打包位图展开成 34 宽喂 `blocks.assemble`）。
+- **判据（本机实测）**：L1 `--selftest` **1392/0**（+4 条：逐家段两通路一致 / 非全 0 / 位图互斥 /
+  **换视角就挪格**）· `trainer-features-parity.mjs` **3/3 sidecar 逐字节** ·
+  `trainer-selfplay-parity.mjs`（`DangerReport` 改动后再验）**PASS** ·
+  `trainer-takeover-check.mjs` **PASS**（采集/派生逐字节 + `selfplay-check` + `dataset build` 出紧凑集）·
+  `python selfcheck.py` **381/0** · `v4 check` **PASS**（新增「数据集层」组）· `v4 plan` **11/13 绿**。
+- **顺手修掉一个真 bug**：`v4/blocks.py` 的 `sc.get(key) or []` 在 numpy 数组上抛
+  `truth value of an array is ambiguous` —— 真实 sidecar 第一次接进来才炸（此前测试都传 `None`）。
+- **体积（实测 1,951 条决策）**：sidecar **518.5 B/决策** ⇒ 一轮 6M 决策 ≈ **3.1 GB**
+  （规范原估 ~340 B / 2.0 GB **少算了 D/E 两段 int8**，已按实测改）。
+- 细节与完整数字：`docs/TRAINER-CPP.md` §6.21 · `NOTES.md` §6.5。
+
+### 13.8 标签侧 `aux.npz`（P0 最后一块，2026-09-27）（原 §2.8）
+
+- **Java**：`train/NpzWriter.java`（**零依赖 npz 写出**：JDK `ZipOutputStream` STORED + 固定时间戳
+  ⇒ 同数据两次写出逐字节相同；`.npy` v1.0 头 64 字节对齐）+ `TraceRecorder` 收集 8 类标签
+  （自家"这一手做完"的向听/听牌、三家对手**隐藏真值**手牌/听牌、放铳/和了/收支/**顺位**回填）
+  + `--aux` 开关（`Main` / `SelfPlay.Config`）。
+- **Python**：新增 `mahjong_ml/auxlabels.py`（读侧 + `check_dir` 四条硬拒 + `python -m mahjong_ml.auxlabels check <dir>`）；
+  `dataset build --aux` 并成 6 个**独立标签列**（`aux_*`；`hand_delta`/`placement` 已能从轨迹派生，不重复落）。
+- **C++**：~~`trainer selfplay --aux` **显式报错**（npz 写出未移植）~~ —— **已作废（2026-09）**：
+  `npzwriter.hpp` + `TraceRecorder` 标签侧行落地，**连 npz 容器与 Java 逐字节相同**
+  （判据 `node tools/trainer-aux-parity.mjs`，见 `docs/TRAINER-CPP.md` §6.23）；
+  `producer.py` 的 `CPP_MISSING` 里那条已删除，**现在只余 `--teacher-label`**（DAgger 标注）。
+- **判据（本机实测）**：L1 `--selftest` **1403/0**（+11：**开/不开 `--aux` 的 `g*.jsonl` 逐字节相同**、
+  npz 成员/形状/合法 `.npy` 头、顺位 ∈1..4、三家暗牌 1..14、四类标签都出现过非零）·
+  `python selfcheck.py` **398/0**（+16：读侧四条硬拒 + **开/不开 `--aux` 的紧凑集输入列逐字节相同** +
+  缺标签报错 + cpp 生产者报错）· 端到端：`--selfplay --aux` → `aux check` PASS →
+  `dataset build --aux` 出 6 列（实测 2 场 / 308 决策）。
+- ⚠ 已知缺口（不是 bug）：**C++ 生产者不产 aux**（P1/P2 若要整条走 C++ 得补 npz 写出）；
+  另外 `opp_dealin` 沿用服务端 `Result.winner/loser` 的**单一赢家**口径（多家荣和只记第一位，与轨迹的 `hand_winner` 同源）。
+
+### 13.9 第一轮 teacher 预训练（P1/P2 雏形，2026-09-27）（原 §2.9）
+
+新增两个模块（都在 `python/mahjong_ml/v4/`）：
+
+- **`dataset.py`**：轨迹（obs + sidecar + `aux.npz`）→ **v4 四张量 + 监督标签**
+  （`tile[34,48] / evt[60,96] / ctx[64] / cand[n,128]` float16 + `label`/`label_type`/`effect`/`value`/
+  `placement`/`seat`/`game` + 6 个 `aux_*` 真值列），`meta.json` 带块指纹与版本；四条硬闸门
+  （obs v3、`obs.legal == 行 legal`、`sidecar.nLegal == len(legal)`、`aux` 缺文件报错）。
+- **`pretrain.py`**：**教师模仿为主 + aux 真值辅助头**（policy CE ← teacher 动作；
+  value = HL-Gauss ← `final_scores − 起点`；placement CE；belief_hand/tenpai ← `aux` 真值；
+  danger BCE 只算**被选中的那个候选**；effect MSE ← sidecar 逐候选派生量）。
+  权重一律取 `model.loss_weights()`（注册表），可复现 = 固定洗牌种子。
+
+**第一轮实测**（150 场 teacher / 98,103 训练 + 5,994 验证 / 6 epoch / batch 128 / **270 s** on RTX 5060）：
+
+| 指标 | ep1 | ep6 |
+| --- | --- | --- |
+| **教师动作一致率（val top-1）** | 0.528 | **0.608**（首合法基线 0.168） |
+| policy CE | 1.418 | 1.192 |
+| discard 类 top-1 | 0.40 | **0.50**（n=4,525，平均 8.8 候选） |
+| riichi / pass / ron / tsumo | 0.82 / 1.00 / 1.00 / 1.00 | 0.86 / 1.00 / 1.00 / 1.00 |
+| pon / chi / kan（样本少） | 0.00 / 0.00 / 0.75 | 0.06 / 0.07 / 0.62 |
+| value CE（辅助头） | 3.87 | **6.63** ⚠ 不降反升 |
+| belief_hand / belief_tenpai / danger | 0.597 / 0.144 / 0.313 | 0.608 / 0.173 / 0.328 ⚠ 略升 |
+
+- **结论**：策略头学到了（3.6× 基线），**辅助头这轮没收敛**（多任务权重冲突的典型样子，不是 bug）⇒
+  P1 要处理：按头分层学习率 / 先冻主干只训头 / 或把 aux 头挪到第二阶段。
+- 数据在 `S:\mahjong-training\raw\v4-bc-001`（396 MB）+ `compact\v4-bc-001`（v4 数据集）；
+  checkpoint `ckpt\v4-bc-001\model.pt`（5.5 MB，**还不能上线**：要 P5 的 Java/C++ v4 前向）。
+- 判据：`python/selfcheck.py` **410/0**（含"同种子两次训练 `history` 逐字段相同"）。
+- ⚠ 采集 150 场只花 112 s，但 **v4 数据集构建是单进程**（≈380 决策/s，98k 决策 ≈ 4.5 min）；
+  放量到 P3 的规模前要给它加并行（照 `dataset.py` 的文件分组子进程那套）。
+
+### 13.10 第二轮：分阶段训练 + 掩码事件重建（2026-09-27）（原 §2.10）
+
+第一轮的问题是**辅助头不收敛**（`value` CE 不降反升）。这一轮三件事一起做并**全部达标**：
+
+- **数据 2.7×**：400 场 teacher（262,095 训练 / 14,965 验证）；**v4 数据集构建并行化**
+  （8 进程 75 s，与串行**逐字节相同** —— `selfcheck` 钉着）。
+- **分阶段训练**（`v4/pretrain.py`）：`a` 只训 policy+effect → `b` **冻主干只训头** → `c` 联合微调
+  （余弦降 lr）；头 lr = 主干 ×3。
+- **P1 掩码事件重建**：真实事件 token 置 0、重建类型（pretext 头只训练、不进推理）。
+- **结果（10 epoch / 851 s）**：教师一致率 **0.608 → 0.619**（首合法基线 0.165）；
+  **所有辅助头都收敛了**：`value 6.63 → 3.59`、`belief_hand 0.608 → 0.582`、
+  `belief_tenpai 0.173 → 0.140`、`danger 0.328 → 0.297`、`effect 0.026 → 0.021`。
+  `pon` 从 0.06 涨到 0.28。
+- **两条要记住的**：① `b` 段（冻主干）是辅助头收敛的关键一步；② ⚠ **train loss 不能跨阶段比**
+  （b 段把随机初始化头的损失算进总损失，train 反而涨），**只有 val 的逐头曲线可比**。
+- ⚠ **pretext 太容易**：掩码类型重建一致率 **0.968**（chance 0.125）⇒ 对表示几乎没贡献；
+  下一轮要么换更难的目标，要么砍掉、把权重让给 policy。
+- checkpoint：`S:\mahjong-training\ckpt\v4-bc-002\model.pt`；数据 `compact\v4-bc-002`。
+- 完整表与读数：`docs/TRAINING-V4.md`「第二轮：分阶段训练 + 掩码事件重建」。
+
+### 13.11 提交与发布 v1.12.0（2026-09-27）（原 §2.11）
+
+- **提交**：`8b069fa`（本地）—— obs v3 三端 + sidecar v3 + 标签侧 `--aux` + v4 训练回路两轮预训练；
+  工作树 **0 改动**；改动清单 = **4 个提交 / 50 个文件**（37 改 + 13 增 + 0 删）。
+- **推送（REST）**：远端头 `034dde58` 的 tree `4d3f50ed…` **== 本地 `d8ac9ae` 的 tree**
+  ⇒ 远端内容就是那个本地提交，缺的是它之后的 4 个提交；`git diff --name-status d8ac9ae HEAD`
+  一把算出 50 个文件，用 **`github_commit_files` 一次带过去** ⇒ 远端 `8446ea5b`，
+  其 tree `6c746e4c…` **== 本地 `HEAD` 的 tree**（判据达成）。
+  ⚠ `github_git_push` 本次**走不通**：git 通道（broker）对 github.com 返回 **502**，REST 正常 —— 两条通道互不相干。
+- **发布**：tag `v1.12.0` → `8446ea5b` → release **#397670321**（2 个资产，digest 与本地 sha256 逐一核对一致）：
+  `sMahjong-client-v1.12.0-win64.zip` 38,848,421 B `5b260841…`（asset 593034214）·
+  `sMahjong-server-v1.12.0.zip` 368,820 B `3c6095e0…`（593034070）。
+- **本版性质**：改动全在训练侧（服务端训练接口 + C++ 镜像 + Python v4 回路）与文档；
+  客户端只有版本号 `1.11.0 → 1.12.0`（`-Deploy` 重建，exe 内 UTF-16 串实测 1.12.0），**玩家可见增量 = 无**。
+- **不带机器人包**：v4 权重还不能导出（要等 P5 的 Java/C++ v4 前向）⇒ `bot-ai/` 继续用 v1.11.0 的三个；
+  已**开包读权重头**确认同规格（`magic=MJNN ver=1 sd=615 cd=96`，服务端 `Features.STATE = 544 + 71 = 615`）。
+- 发布前实测：L1 **1403/0** · L2 **854/0** · `selfcheck.py` **419/0** · `v4 check` PASS ·
+  trainer 三套 parity PASS（200 场逐字节）· `doc-refs-check` PASS · 服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、
+  `VERSION` = 1.12.0。
+- 顺手修 **`Features.java` / `NeuralPolicy.java` 注释里 3 处陈旧数字**（`617 = 544 + 73` / `// 607`
+  → `615 = 544 + 71`）：`docs/` 前一轮已改对，**代码注释里的漏了**。发布资产**不重出**
+  （tag 指向的提交就是打包时那份源码，注释与行号变了、类文件语义不变）。
+- 本地草稿与摘要表：`release\RELEASE-v1.12.0.md`（`release\` 已 gitignore）。
+
+### 13.12 P5：v4 前向三端落地 + 两个"静默"真 bug（2026-09-27）（原 §2.12）
+
+**主线**（用户要求"编写 P5 的 Java/C++ v4 前向"）：
+
+- **`net.bin` 格式 2**（`python/mahjong_ml/v4/export.py`）：`MJNN` + `format=2` + 块清单 + 张量表
+  （74 个张量 —— ⚠ **这是当时的读数**；张量数会随"可选张量"增加而变，**当前 78**，
+  口径见 `NOTES.md` §10.4 与 §7.3）；`weights` 与 `golden` 两个子命令；同权重两次导出**逐字节相同**。
+- **Java**：`ai/V4Features.java`（obs → 四张量，实时算 `perSeat`/`perCandidate` 派生量）、
+  `ai/V4Policy.java`（三塔 + 融合 + 七头手写前向）、`ai/NetWeights.java`（按 `format` 分派两代）、
+  `ai/Logits.java` + `LogitPolicy`（v3/v4 共用"argmax/采样/先验"一份实现）；
+  `SelfTest.v4ForwardTests` 用夹具逐元素钉住（L1 1403 → **1423/0**）。
+- **C++**：`trainer/src/v4features.*` / `v4policy.*` + `v4net` / `v4golden` 子命令 +
+  `policies.hpp` 按 `format` 分派（v3 路径一位不变）。
+- **夹具与对拍**：`python/tests/golden/forward-v4.bin`（小网络 32/16/2/5，10 个用例，**带覆盖闸门**）；
+  `tools/V4Probe.java` + `tools/trainer-v4-parity.mjs`
+  （`--golden` / `--selfcheck` / 逐行对拍，退出码 0/1/2/3）。
+- **判据（实测）**：Java golden `特征 maxΔ=5.96e-08 / 前向 maxΔ=5.03e-08 / argmax 10/10 / 红证 0`；
+  C++ 同数字；**Java↔C++ 1,885 条决策逐字符相同、maxΔ=0**；Java 端到端 8 场自对弈 +
+  `selfplay-check` DATASET PASS；`packbot` 能打 v4 包并在服务端挂载成功。
+- ⚠ **性能实测**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策（单线程）——当时那句耗时"预算"
+  **是不现实的指标，已从所有文档删除**（`FEATURES-V4.md` §8）；性能仍列下一轮第一件事（**只求快，不设门槛**）。
+
+**过程中抓到的两个真 bug**（详见 `NOTES.md` §6.5 第七轮）：
+
+1. **`cand[88:128]` 40 列全 0**（`sidecar_dict` 没给逐候选 C 段 + `dataset` 不查 `Tensors.degraded`）
+   ⇒ 修好后同数据同超参：教师一致率 **0.619 → 0.903**（`ckpt\v4-bc-004`）。旧数据集 `v4-bc-001/002` 作废。
+2. **阶段 c 把策略头练塌**（top1 → 首合法基线 0.165）⇒ 新增 `--stage-c-lr-mult`（用 0.1）。
+
+**顺带修的**（都是"对拍/夹具"抓出来的）：obs 里 `hand_red`/`riichi`/`ippatsu` 是**布尔数组**
+（Java 曾把后两个读成 0，8 个通道恒 0 —— 旧夹具恰好没人立直所以没暴露）；`linear()` 的**别名安全**；
+`gruStep` 必须返回新数组；C++ 的 `%.9g` 排版要按 Java 的 dtoa 口径（`javaG9`）。
+
+**推送（本地 `ae065d8` / tree `5b56699a…`，37 个文件 = 24 改 + 13 增）**：
+① **文本 36 个**走 `github_commit_files`（一次带过去，基线 `cf53c76d`）→ 远端 `7f6a4a67`；
+② ⚠ **二进制（`python/tests/golden/forward-v4.bin`，573,336 B）它不收**（只收文本）⇒
+   单独走四步：`POST /git/blobs`（`content` = base64、`encoding: base64`；**大 payload 用 `bodyFile`
+   落盘再发**，别塞进工具参数）→ `POST /git/trees`（`base_tree` = 上一步的 tree + 该文件的
+   `sha` 条目）→ `POST /git/commits`（parent = 上一步提交）→ `PATCH /git/refs/heads/Training`
+   （`force: false`）⇒ 远端 `daacdc68`，其 tree `5b56699a…` **== 本地 HEAD 的 tree**（判据达成）。
+   ⚠ 上传前用 `git hash-object <file>` 对一下 blob sha（本次 `deee0bcd…` 两侧一致）。
+
+### 13.14 P3 开局一轮（自对弈 + RWR）+ §7.5 均衡审计（2026-09-27）（原 §2.14）
+
+- **§7.5 均衡审计（判据⑩，首次执行）**：`raw/v4-sp-001`（C++ 400 场 / 292,724 决策）→
+  **座位最大偏差 0.000%**、配席 net/teacher/random = 400/800/400 与 `--expect` 一致 ⇒
+  **均衡 ✓**、`balance.json` 落盘。⚠ 首跑报了**假绿**（审计把决策行判成老形状 ⇒ 0 决策也算过），
+  修法：两种形状都认 + 空数据/无配席判红 + 夹具改成真形状（一场一个文件）+ 单位改成**座位场**。
+- **P3 开局**：数据 `raw/v4-sp-002`（Java + `--aux`，200 场 / 143,612 决策）→ `compact/v4-sp-002`
+  （学生行 **26.1%**，新增 `is_student`/`delta` 两列）→ RWR 训练 10 epoch（470 s）→
+  `ckpt/v4-p3-001`（学生行 top1 0.763 → 0.847；⚠ danger 头本轮被 RWR 误加权，下一轮起只吃掩码）。
+- **结论（2+2 同牌山配对，n=800 / 每策略 1,600 席）**：vs teacher **Δ=−1.96 [−5.59,+1.69] p=0.358**；
+  vs `v4-bc-004` **Δ=−3.08 [−6.71,+0.69] p=0.322** ⇒ **两条都证不出差别**（点估计略负）。
+  ⇒ 这一轮**没有可测改进**（上一代已经在 teacher 水平）；要检出 Δ=2.0 需 **≈5,500 场**。
+- **下一轮三处改动**：① 量级 1,000–2,000 场（Java + `--aux` 24 workers ≈ 2,600 s/千场；
+  用 C++ 就得先把"aux 只覆盖部分行"的掩码做出来）；② 值头当 critic 的 **PPO**（或"只学赢的小局"的过滤臂）；
+  ③ 评估预算 ≥2,000 场 + 预先注册 Δ。
+
+### 13.15 P3 加强版：1,000 场自对弈 + PPO（2026-09-27）（原 §2.15）
+
+- **采集**：`raw/v4-sp-003` = **1,000 场 / 689,693 决策**（Java + `--aux`，24 workers，1,602 + 273 s）；
+  学生 2 席（`net:.../v4-bc-004/net.bin#1.0`）+ teacher 2 席；**§7.5 审计 0.000% / 配席 2,000/2,000 ✓**。
+- **数据集**：`compact/v4-sp-003`（654,414 / 35,279，学生行 **50.0%**，lmax 29）。
+- **PPO**（`--objective ppo`）：`log π_old` 用 `--behaviour` 现场重算（温度从 `student` 串的 `#T` 解析）、
+  优势 `A=R−E[V]` **只在学生行归一化**、截断替代项只算学生行、`--init` 从上一代起步、`lr 1e-4`。
+  4 epoch / 776 s：学生行 CE 0.861 → **0.601**、**KL 0.069 → 0.021**、截断比例 0.135 → 0.062 ✓。
+- **判决**（3 路同场配对 n=1,200）：vs 上一代 **+0.66 [−3.52,+4.84] p=0.908**、vs teacher
+  **+1.47 [−2.68,+5.68] p=0.583** ⇒ 方向比第四轮翻正，但仍证不出。
+  ⚠ **预先注册的 2,000 场 2+2 主判据给出相反结论**：PPO vs teacher **Δ=−3.54，95%CI [−5.84, −1.24]**
+  （均值自助法**排除 0**）、符号检验 p=0.283（975 胜/1024 负）⇒ **PPO 这一轮没有改进，更强的测量说它略微变差**
+  （上一代与 teacher 持平：+0.81 [−3.07,+4.81]）。
+- ⚠ **三条要记住的**：① **探索的代价**——采集期里 `#1.0` 的学生比 teacher 低 7.6 顺位点（贪心的上一代持平）
+  ⇒ 下一轮把温度降到 `#0.5`；② **优势太粗**——`A = R_整场 − E[V]` 没有逐决策信用分配（要做 GAE 得先在
+  引擎侧记 reward-to-go）；③ **离线指标向好 ≠ 变强**（学生行 CE 0.861→0.601、top1 0.845→0.886，强度 −3.54）；
+  ④ 采样设计：四路各一席 `sd(Δ)=73–74` 是 2+2（≈53）的 ~2 倍 ⇒ 同样预算优先 2+2。
+
+### 13.16 发布 v1.13.0 + 第六轮：逐决策 reward-to-go 三端落地（2026-09-28）（原 §2.16）
+
+- **发布 v1.13.0**（release **#397762262**，6 个资产；逐资产 sha256 / asset id 见 `NOTES.md` §9.5）：
+  **第一次带 v4 的机器人包**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，`net.bin` 格式 2）+ v3 的三个
+  （v4 谱系目前还没有一代打出"比 teacher 强"的结论，所以老包继续随附）+ client/server。
+  ⚠ **"包能挂上"与"包能打"分开验**：启动日志的清单、`bot-ai-test.mjs`（20/0）、
+  以及**真打一场**（`--selfplay 1 --policy net:<包里的 net.bin>`，8 小局 / 483 决策 / 23.1 s）。
+- **第六轮（契约 + 三端）**：轨迹决策行新增 **`reward_to_go`**（点）= `Σ_{本局及其后} delta + 终局余棒`
+  ⇒ 离线 PPO 的 **λ=1 GAE 目标**（`A = R_tg − E[V(s)]`）现成可算，不再只有整场结果。
+  - **Java** `TraceRecorder.rewardToGo`（后缀和 + 余棒，按 `hand_no` 显式对齐）+
+    `SelfTest.rewardToGoTests`（6 项：守恒 / 独立重算的后缀和 / 真逐决策 / 末局口径）；
+  - **C++** `trainer/src/trace.cpp` 同口径 ⇒ `trainer-selfplay-parity.mjs` 2 场 × 6 小局**逐字节一致**，
+    且 C++ 轨迹过 `selfplay-check.mjs` 独立检查器 PASS；
+  - **检查器** `tools/selfplay-check.mjs` 独立重算（红证实测：改一行 `reward_to_go` → 2 条报错、退出码 1）；
+  - **Python**：数据集新增 `rtg` 列（千点；老轨迹写 **NaN**，不填 0）+ `--value-target final|rtg`
+    （同时决定值头目标与优势的 `R`，两处必须同源）；`pretrain` 在 NaN 数据上硬拒。
+  - 判据：L1 **1429/0**、`selfcheck` **488/0**（+20）、trainer `--selftest` PASS、`v4 check` PASS。
+- ⚠⚠ **第一次用 `#0.5` 跑 PPO 撞上两个真 bug（本轮最值钱的产出）**：
+  **① 温度只作用一侧**：`logp_new` 忘了用同一把温度尺子 ⇒ `ρ = exp(65)`、策略损失 2.5e11、
+  **一个 step 整网 NaN**，而训练**照跑完 4 个 epoch、还落盘了一份废 checkpoint**（只有 `val top1` =
+  首合法基线 0.156 是线索）。⚠ 这个 bug 在 `#1.0` 采集下**完全不可见**（`logits/1.0 == logits`）。
+  **② 非学生行的 `inf × 0`**（修完①之后第 757 步又 NaN，指纹完全不同：`parts["policy"]=nan` 而
+  `kl/clip/gap` 全有限、`|θ|max` 不动）：teacher/随机 的动作在学生网下是零概率 ⇒ `ρ` 溢出成 inf，
+  而优势在那些行上的定义值正是 0 ⇒ `inf × 0 = NaN`。
+  **修 + 四道闸门**：`_policy_logits(out, T)`（两处同尺）· `LOG_RATIO_CLAMP = ±4` + 未选中行显式置 0 ·
+  初始化 `KL(π_old‖π_new) > 1e-2` ⇒ 退出（口径闸门）· loss 非有限 ⇒ `SystemExit`（绝不落盘废 checkpoint）；
+  另加 `logp_gap` 诊断与"`--behaviour-temp` 必须与 meta `#T` 一致"的闸门。
+  详情与定位手法见 `NOTES.md` §6.5 第十轮、判据见 `AGENTS.md` §6.5 / `docs/TRAINING-V4.md`「第六轮」。
+- **PPO 重训成功（`v4-ppo-002`）**：4 epoch / 685 s，`train 2.4412 → 2.3314`、
+  `val top1(教师一致) 0.867 → 0.879`、**学生行 top1 0.888 → 0.900**、学生行 CE 0.653 → 0.583、
+  **KL 0.0657 → 0.0105**、截断 0.171 → 0.059、`logp_gap` 2.60 → 1.04（全程有限、稳在信任域内）。
+- **判决（预先注册，各 2,000 场 2+2 同牌山配对；`raw/eval-ppo2-vs-teacher` / `-vs-p3`）**：
+
+  | 对比 | Δ（顺位点） | 95% CI | p（符号检验） | 胜/负/平 | sd(Δ) |
+  | --- | --- | --- | --- | --- | --- |
+  | `v4-ppo-002` vs teacher（**主判据**） | **−1.06** | **[−3.34, +1.29]** | 0.395 | 978/1017/5 | 52.91 |
+  | `v4-ppo-002` vs `v4-p3-001`（起点） | **+0.39** | **[−1.93, +2.72]** | 0.771 | 993/1007/0 | 52.38 |
+  | （参照）`v4-ppo-001` vs teacher（第五轮同设计） | −3.54 | [−5.84, −1.24] | 0.283 | 975/1024/1 | 52.75 |
+
+  ⇒ **两处修把第五轮那个"可测的退步"消掉了**（CI 从排除 0 → 跨 0），与起点也证不出差别；
+  ⚠ **但点估计都没转正：这一轮没打出"比 teacher 强"，只是回到"打平"**
+  （v4 三代 bc-004 / p3-001 / ppo-002 全在 teacher 水平；检出 Δ=2.0 要 ≈5,400 场）。
+  ⚠ **本轮不发新版机器人包**：`v4-ppo-002` 与已发布的三个包**证不出差别**，没有换包的理由
+  （要换也是等某一代 CI 排除 0）。
+- **采集（`#0.5`）**：`raw/v4-sp-004` = 1,000 场 / 11,430 小局 / **693,187 决策**（1,470 s，472 决策/s）；
+  学生 2 席（`net:tools\build\v4-p3-001\net.bin@0#0.5`）+ teacher 2 席；`selfplay-check` PASS、
+  §7.5 审计 **0.000% / 500×4 席 ✓**；`compact/v4-sp-004` = 658,449 / 34,738，**rtg 覆盖 100%**。
+  ⚠ **探索成本的直接对照**（同一把尺子：同批对局里的平均顺位）：
+  `#1.0` 学生 −3.78 顺位点（avg_place 2.5915 vs teacher 2.4085）→ `#0.5` **−1.26**（2.520 vs 2.481）
+  ⇒ 降温度按预期把探索代价压掉约 2/3。
+
+### 13.17 v4 增量事件缓存落地（L2；2026-09-28）（原 §2.17）
+
+- **做了什么**：`mahjong/ai/V4Cache.java` + `V4Policy.forwardCached()`（**默认开**；`--no-v4-cache` 关）。
+  **按座位分槽**（同一份权重常同时挂在两个学生席上，不分槽会互相顶掉），缓存**逐行**的三样：
+  窗口 token 行（校验用）· 事件编码器输出 · 注意力 `in_proj`（`LayerNorm1` 之后）；
+  窗口左移时幸存行**按引用平移**，只有新增 `delta` 行要算；增量 `h` 只在建槽时重放全部事件。
+- **实测**（`tools.V4Probe --cache`，721 条真实决策 / 8 小局 / v4-p3-001）：
+  **38.12 → 22.50 ms/决策（1.70×）**，前向 34.7 → ~18.9（1.83×）；
+  归因：只增量 `h` 25.76 → 再复用编码行 24.35 → 再复用 `in_proj` **22.50**；
+  命中 677 / 建槽 44 / **陈旧 0**，复用 19,516 行 vs 编码 2,287 行（89.5%）；
+  三档深度的七个头**逐位相同**。
+- **判据**：`SelfTest.v4CacheTests`（L1 **1443/0**：真实 obs 序列三档逐位 + **真的命中** +
+  窗口 token 行 == `eventMatrix` + 改坏事件流必须判陈旧 + 关缓存命中 0）·
+  **`node tools/v4-cache-check.mjs <net.bin>`**（同种子开/关缓存 ⇒ 整场轨迹**逐字节相同**；
+  ⚠ 红证实测：把缓存故意做旧 ⇒ 立刻 FAIL）。
+- ⚠ **踩到的坑（比收益本身值钱）**：第一版窗口位置公式写成 `i-(seen-len)`（只在窗口满时对），
+  于是**每小局前 K 条事件全被判成"陈旧"**：600 决策里命中 31 / 退回 533，
+  而"增量 == 全量"那条判据**照样全绿**（退回全量当然等于全量）⇒
+  **缓存类判据必须成对：`相等` 且 `真的命中`**（详见 `NOTES.md` §6.5 第十一轮）。
+- ⚠ **`h` 口径分歧（已知、已断言钉住）**：增量 `h` = 跨决策 carry（全小局事件，= `v4/cache.py` 语义），
+  全量/训练侧 `h` = 窗口 60 token 冷启动；**当前没有任何头消费 `h`**（`Fusion` 收了 `h_evt` 不用），
+  所以七头仍逐位相同。自检断言"**h 不同、七头相同**"——将来把 `h` 接进融合时这条会红，
+  那时必须让训练也改成 carry 语义。
+- **还没做**：L1 张量级缓存（要动 `tileMatrix` 的派生量）· 扁平 `float[]` + 行偏移（**不是大头**：
+  GC 实测占墙钟 0.03%）· int8 · **C++ 侧镜像**（自对弈采集在 C++，收益更大）· 必要时缩 `dModel`（要重训）。
+
+### 13.18 价值头审计（2026-09-28，`python -m mahjong_ml.v4 value-audit`）（原 §2.18）
+
+- **做了什么**：把 §8.2 那套分布判据（CE / 边缘基线 / **EV** / CRPS / 气候学基线 / 覆盖率 / 逐点与小局 ρ）
+  落成可复现工具 `v4/value_audit.py`（只读，`--strict` 可用作闸门），并给 4 个 v4 权重各量了一遍。
+- **实测**（判据口径 = 该权重训练时的值头目标；表在 `docs/TRAINING-V4.md` §8.2）：
+  ① 整场口径的值头**弱但真**：`v4-bc-004` EV 0.44 / ρ 0.66、`v4-p3-001` EV 0.57 / ρ 0.76、
+  `v4-ppo-001` EV 0.46 —— CRPS 比气候学基线好 25–38%、十分位校准单调；
+  ② ⚠ **分布形状一直不对**：只有 `v4-bc-004` 在**它自己的** val 上三条覆盖率都在 3pp 内，
+  自对弈口径下 95% 区间只覆盖 82–87% ⇒ §8.2 的"≤3pp"**当前不通过**；
+  ③ ⛔ **`v4-ppo-002`（`--value-target rtg`）的值头是塌的**：CE 3.6485 vs 边缘 3.6674（只剩 0.019 nats）、
+  预测的逐点标准差 **1.66 千点**（目标 15.15）、**EV 0.006** ⇒ 优势 ≈ 原始回报，
+  **PPO 退化成没有 baseline 的 REINFORCE**（与第五/六轮"两处修只到打平"一致）。
+- ⚠ **更值钱的是目标侧诊断**：`rtg` 在 `(game, hand_no, seat)` 内是常量（逐决策本来没有可分的东西）；
+  而 `Var(value−V)=238 > Var(rtg)=229.5` ⇒ **"整场值头 − 已滚入"这种构造数学上就赢不过 0 EV**
+  （要赢需 `EV_value > 0.44`）；连"知道是哪一小局"的 oracle 也只解释 ~3% 的 rtg 方差。
+  ⇒ **per-decision 的 suffix-sum 是坏 critic 目标**（详见 `NOTES.md` §6.5 第十二轮）。
+- **判据**：`python/selfcheck.py` 新增「价值头审计」组（**21 项**，全套 **511/0**，纯合成夹具 + 红证）；
+  ⚠ 红证当场抓出两个错：合成真值没落在箱中心（假红）与我第一版的 `explained_variance`
+  用了**未去中心**的 MSE（常数预测报 EV=−3.7）。
+- **下一步（当时的顺序）**：先把值头单独训到 EV ≥ 0.4（已在 §2.19 做完：整场口径 0.4115 ✅）；
+  **最新的顺序见 §3 与 §14**（先量 → 换回报与手级 GAE → 补 PPO 口径 → 多头分层/架构 → 小步多轮）。
+
+### 13.19 修 critic 一轮：`value` 口径达标、`rtg` 口径判死（2026-09-28）（原 §2.19）
+
+- **做了什么**：给 `v4/pretrain.py` 加 `--freeze-trunk`（整轮冻主干）与 `--only-heads value`
+  （只训点名的头：其余头权重清零 + 冻结；**绕过 `STAGE_WEIGHTS`** —— 阶段 a 里 `value` 的注册权重就是 0，
+  不绕过会"跑满一轮什么都没学"）。自检 4 项，判据**成对**：主干逐位不变 + `heads.value.*` 真的变了 +
+  其余头逐位不变 + 未知头名当场报错（`selfcheck` **519/0**）。
+- **实测**（`compact/v4-sp-004`，init = `tools/build/v4-p3-001/net.bin`，判据 = `v4 value-audit`）：
+  ① 冻主干 + 只训值头，**整场**口径 6 epoch ⇒ CE 3.504 / 边缘 3.661、**EV 0.4115** ✅（`v4-critic-final-001`）；
+  ② 同配置 **`rtg`** 口径 ⇒ **EV 0.002**；③ **放开主干**（主干 5e-5、头 1e-3）3 epoch ⇒ **EV 0.010**，
+  而且**教师一致率 0.882 → 0.546**（把策略头带坏）⇒ 不是训练不足。
+- **参照证据**（新增 `value-audit --ceiling`：引擎真值线性读出，train 拟合 / val 计量）：
+  **本小局收支 `delta` EV 0.632** · `rtg` 0.090 · 整场 0.059（再给别家真手牌也不涨）
+  ⇒ **可学的粒度是"这一小局"，不是"剩下的整场"**。
+  ⚠ 第十九轮查明：这三行都含**结局列（`win_flag`）/别家隐藏真值** ⇒ 是**作弊上界**；
+  **合法**列是 `delta` **0.0693** · `rtg` 0.0138 · `value` 0.4490（后者大半是 `ctx.points` 的恒等式）。
+  "小局 ≫ 整场"的对比仍然成立（同批列），但**绝对数不能再当门槛用**。
+- ⛔ **结论（PPO 路线要改）**：`rtg` critic 停掉（λ=1 GAE 的目标正是它 ⇒ 优势 = 原始回报减常数，
+  **没有 baseline**；换整场口径的 baseline 更糟：`Var(value−V)=238 > Var(rtg)=229.5`）。
+  改用**小局级**目标（仓库已有的 RWR/AWR 的奖励就是"本小局收支"）；真要 critic 就做两段分解
+  （`本小局收支 + 其后的后缀`）并**先过闸门**（⚠ "EV ≥ 0.4" 已废 —— 第十九轮证明合法天花板 0.069，
+  现改为"EV ≥ 0.7 × 合法天花板 + `std(A_raw)/std(目标) < 1`"，见 §2.24）。
+  细节见 `NOTES.md` §6.5 第十三轮 / 第十九轮、`docs/TRAINING-V4.md` §8.2 / §14.8。
+
+### 13.20 训练端脱离 Java：C++ 补标签侧 + v4 回路 Python 化（2026-09-28）（原 §2.20）
+
+- **卡点**：`--selfplay`/`--features`/v4 前向早就镜像完了，唯一剩的是**标签侧 `--aux`**（只有 Java 能产）
+  ⇒ v4 的信念/危险头监督逼着整轮起 JVM（慢十几倍）。
+- **做了四件事**：
+  ① **C++ 写真正的 npz**（`trainer/src/npzwriter.hpp`，镜像 Java `NpzWriter`：STORED + 固定时间戳 +
+     `.npy` v1.0 64 字节对齐）；
+  ② **标签侧行**（`trace.hpp/cpp`：`AuxRow` + 采集 + 小局/整场回填 + `writeAux()`），
+     决策钩子多带 `const Round&`（上帝视角，输入侧拿不到）；
+  ③ **v4 回路**（`python/mahjong_ml/v4/loop.py` + `python -m mahjong_ml.v4 loop`）：八相编排
+     （计划/采集 C++/派生特征 C++/校验/紧凑集/训练/导出/评测+判据+台账 `league/<label>-v4.json`），
+     `--dry-run` 与 `--no-java`；
+  ④ **守卫**：`MAHJONG_NO_JAVA=1` ⇒ 选到 java 生产者当场报错（防"又能跑了、只是慢十几倍"的静默回退）。
+- **判据（实测）**：
+  · `node tools/trainer-aux-parity.mjs 5 4 teacher 20260101 --rotate --selfcheck` ⇒ `g*.aux.npz`
+    **连 zip 容器一起逐字节相同**（负向对照：翻一个字节必须报出是哪个成员）；
+    混合策略 `net:…,teacher,first,random` 3 场 × 3 小局同样逐字节；
+  · 端到端冒烟 `v4 loop --label v4-smoke --games 4 --hands 2 --epochs 1 --no-java` 一轮走通
+    （紧凑集里 `aux_opp_hand/opp_tenpai/win_flag/opp_dealin` 非空；PPO 口径闸门 `KL≈3e-06`）；
+  · `selfcheck` **528/0**（+9，含"命令里没有 JVM"与 `CPP_MISSING` 不再有 `--aux`）；
+    `trainer --selftest` PASS。
+- ⚠ **仍然只有 Java 能做的两件事**：`--teacher-label`（DAgger）、`net:` 的 `@α` 先验（C++ 显式报错）。
+- **细节与两个坑**（JDK zip 的 EFS 位 + 9 字节扩展时间戳 extra；`loop` 的 cwd 与 argparse 转参）
+  见 `NOTES.md` §6.5 第十四/十五轮、`docs/TRAINER-CPP.md` §6.23、`docs/TRAINING-V4.md` §7.2。
+
+---
+
+### 13.21 PPO 与多头的重新规划（2026-09-28，分析轮，代码未改）（原 §2.21）
+
+- **触发**：用户点名"重新规划 PPO 与多头体系、分析可改进的地方"。规划落在
+  **`docs/TRAINING-V4.md` §14**（三层 + 优先级表 + 判据门槛），代码事实逐条记在 `NOTES.md` §6.5 第十六轮。
+- **六条代码事实**（都可 grep 验证）：① 优势用**当前** V 重算（移动基线）而 `logp_old` 是冻结的；
+  ② 优势是**批内 z-score**；③ **没有 grad-clip / KL 早停**（v3 有 0.5 / 0.03）；
+  ④ **推理端只消费策略头**（value/belief/danger 只过 parity）；⑤ 危险头只在**实际打出的那一个候选**上算 BCE
+  （1/L 监督）；⑥ `Fusion` **收了 `h_evt` 不用**（GRU 是死重）+ 训练回报是点数差而**评测口径是 `rank_points`**。
+- **规划（三层）**：**回报与信用分配**（奖励 = 小局收支 + 顺位点；**手级 GAE**：以 `(game,hand_no,seat)`
+  构造 `next_index`，λ<1 + bootstrap；`V = 已滚入 + 残差头`）→ **critic/PPO 口径**（优势冻结、grad-clip、
+  KL 早停、全局标准化、禁 RWR、双口径 KL、值头温度缩放）→ **多头分层**（上线层 / 训练信号层 / 诊断层；
+  危险头稠密化）。
+- **执行顺序**：P0 **先量**（消融矩阵 + 值头温度校准）→ P1 换回报与手级 GAE → P2 补 PPO 口径 →
+  P3 多头分层/危险头稠密化 → P4 三端架构（接 `h_evt`、专用 state token、Q 头）→ P5 小步多轮在线。
+- **纪律**：critic **没过** `python -m mahjong_ml.v4 value-audit --strict`（EV ≥ 0.4、覆盖率 ≤3pp）**不进 PPO**；
+  每个改动必须配一条**能红**的判据。
+
+**下一轮的起点（顺序已按 §14 改过）**：① **P0 先量**（消融矩阵 + 值头温度校准，Python-only）；
+② **P1 换回报与信用分配**（小局级 GAE，Python-only，证据最强）；③ P2 补 PPO 口径；
+④ 之后才谈 P3/P4（多头分层与三端架构）。
+
+### 13.22 P0/P1 落地（2026-09-28）：工具齐了，手级 GAE 没过 critic 门槛（原 §2.22）
+
+- **P0 消融矩阵已能一键出表**（`python -m mahjong_ml.v4 ablate`）：实测三条 ——
+  **`cand.derived` 是策略命脉**（关掉 top1 0.871 → **0.480**、policy CE 0.35 → 1.52）；
+  **`ctx.points` 主要喂 critic**（关掉 value CE 3.459 → 3.783）；**五个辅助头在当前预算下量不出边际价值**
+  （点估计全在噪声内 ⇒ 要 `--repeats ≥ 3` + 更长预算或 2+2）。
+- **P0 温度校准部分达标**（`value-audit --calibrate`）：T=1.628、CRPS 10.295 → 10.153、
+  覆盖率 0.367→0.447 / 0.674→0.763 / 0.853→0.872（50%/95% 仍差 5.3/7.9pp）⇒ 单标量不够，要 loc-scale。
+- **P1 手级 GAE 已落地**（`--advantage gae-hand`，优势预计算并冻结；`rank_points` 列 + `--backfill-rank`）：
+  ⚠ **方差没降**（`std(A_raw)/std(rtg)` = **1.239×**，因为 `V_old` 是整场口径的、与 `rtg` 相关只有 0.042）；
+  ⚠ **EV +0.0944 < 0.4（门槛未过）**，但 CE(3.626) **低于**边缘基线(3.697)（`rtg` 口径是高于的）、
+  CRPS 优于气候学、覆盖率差 2.9/3.7/4.1pp（原来 12–13pp）⇒ **有信号了，但远不够当 baseline**。
+  ⚠ `EV 0.094 ≈ 引擎真值线性对 rtg 的 0.090` ⇒ **"多手后缀和"这一族目标上限 ~0.1**，换 λ 救不出来。
+  ⚠ 第十九轮补注：那个 0.090（以及下面那个 0.632）都是**含结局列**的作弊上界，合法列是 0.014 / 0.069；
+  机理判断不变，绝对数不要再引用。
+- **⇒ 下一轮第一件事**：critic 的时间尺度**压到"一小局"**（目标 = 本小局收支；
+  bootstrap 不跨小局），`--rank-weight` 作终局项单独加；先量该口径的 EV 门槛（⚠ 门槛已改成
+  "≥ 0.7 × 合法天花板"，见 §2.24）。
+- **判据**：`python/selfcheck.py` **553/0**（+25：手级链/GAE/奖励、块偏移与消融、温度缩放、rank 回填三条不变式）；
+  `docs/TRAINING-V4.md` §14.6 有完整三张表；`NOTES.md` §6.5 第十七轮记了三个坑
+  （局部变量遮蔽模块 spec、`std(A)` 归一化假象、Windows 同名文件 memmap 冲突）。
+
+### 13.23 P1b：小局口径也不行 —— **瓶颈是读出头**（2026-09-28）（原 §2.23）
+
+- **做了什么**：把 critic 的时间尺度压到**一小局**（`--advantage hand --value-target delta`：
+  `A = 本小局收支 − V(s)`、无跨小局 bootstrap、值头目标 = 本小局收支）；顺位点项只进优势。
+  校准从"温度单参数"升级为 **loc-scale（温度 + 平移）**（`fit_calibration`/`shift_distribution`）。
+- **判据（实测，`v4-hand-001/002`，PPO 2 epoch）**：`EV(delta) = +0.055`（门槛 0.4 ❌）；
+  CE 2.550 < 边缘 2.602 ✅；CRPS 2.476 < 气候学 2.559 ✅；覆盖率 50/80/95% = 0.530/0.781/0.936
+  （差 3.0/1.9/1.4pp）⇒ 80/95% ✅；MAE 3.216 **略差于常数基线** 3.185（分布收缩：pred_std 1.30 vs 真值 5.21）。
+- ⛔ **方差依然没降**：`std(A_raw)/std(delta) = 2.671×`。⚠ **第十九轮查明是量纲事故**（§2.24）：
+  行为策略 `v4-p3-001` 的值头学的是**整场**收支（`V_old std 12.392` 千点）、奖励是**小局**收支
+  （`std 5.047`）⇒ `A = r − V` 被放大到 √(5²+12²)≈13。原文把根因写成"必须用行为策略的旧口径 V"
+  是**错的**：基线是状态函数，线性重标定不改梯度期望、只改方差。
+- ⛔ **冻主干只训值头反而更差**（6 epoch）：val CE **3.49 > 边缘 2.60**、`EV −4.34`、`pred_std 11.07`
+  ⇒ **train CE ↓ / val CE ↑ = 在 `mean(u)` 上过拟合**。
+- ⇒ ~~结论：瓶颈是读出头 ⇒ P4-lite（三端）~~ **该结论已被第十九轮推翻**（§2.24）：
+  合法天花板只有 **0.0693**，而网络已拿到 **0.0552 = 80%**；池化/读出深度都试过，**P4-lite 取消**。
+- **校准**：loc-scale 在 `delta` 口径上 T≈0.95 + 平移 −0.10 格 ⇒ 覆盖率差 **2.8/3.4/2.2pp**（三档里两档达标）；
+  合成"系统性偏低"用例上 CRPS 1.911 → **0.381**（温度单用反而 4.85 —— 位置偏差温度修不了）。
+- **判据**：`python/selfcheck.py` **561/0**（+8）；`docs/TRAINING-V4.md` §14.7 + `NOTES.md` §6.5 第十八轮。
+
+### 13.24 第十九轮：天花板合法性 + 读出头探针 + 基线尺度对齐（2026-09-28）（原 §2.24）
+
+**动三端（P4-lite）之前先验"信息到底在不在"** —— 三个探针，只花一次 CPU 前向的时间。
+
+1. **`--ceiling` 按合法性分组（推翻 0.632）**：老的"10 列 state 参照"里 `win_flag` 是**本小局结局本身**
+   （单这一项就贡献 EV(`delta`) **0.5088**）、`opp_*` 是**别家隐藏真值** ⇒ 那是**作弊上界**。
+   合法列（公开状态 64 维 + 逐候选牌效聚合 + 自家向听/听牌 + 引擎牌效，共 92 列）的
+   `delta` 天花板 = **0.0693**；只给"自家向听/听牌 + 引擎牌效"6 列 = 0.0347。
+   顺带查清：整场值头那个 `EV(value) 0.44–0.57` 大半是 `ctx.points` 的**恒等式**（`legit_ctx` 单独 0.4457）。
+2. **读出头探针 `value-audit --readout`（冻结躯干，train 40k / val 20k 行，标准化岭回归）**：
+   `mean_all`（现行）**0.0513**、`mean` 0.0675、`max` 0.0681、`std` 0.0494、`tile_pool` 0.0071、
+   `h_evt` **0.0142**、五块拼起来 **0.0701**；非线性 2×256 MLP：`mean_all` 0.0143 / 960 维上 **−0.3984**。
+   ⇒ 池化全换只值 **+0.019**、读出加深**反而过拟合**、`h_evt` 几乎没信息；
+   而**合法特征天花板 0.0693 ≈ 躯干最好池化 0.0701** ⇒ **读出头不是瓶颈，P4-lite 取消**。
+   值头 `pred_std 1.30` vs 真值 `5.21` 是低信息目标下的**最优收缩**，不是 bug。
+3. **基线尺度对齐 `--baseline-fit {scale,mean,none}`（缺省 `scale`）**：在学生行上对奖励回归
+   `[1, V]`（闭式最小二乘）取 `α+β·V`。基线是**状态函数** ⇒ 线性重标定**不改梯度期望、只改方差**；
+   `β=0` 是嵌套特例 ⇒ 不可能比"只减均值"差（自检红证 + `SystemExit` 守卫）。
+   实测 `β=0.080`（理论 0.083）⇒ `std(A_raw)/std(delta)` **2.671× → 0.998×**（≈√(1−ρ²)）。
+4. **判据修订**：闸门 `EV ≥ 0.4` → **`EV ≥ 0.7 × 合法天花板`**（`--ev-ref legit` 现算，随数据集滚动）+
+   **`std(A_raw)/std(目标) < 1`** + 覆盖率 ≤3pp（不变）。比例取 0.7 的理由：线性参照的抽样噪声 ±7%，
+   0.7 能把"学到信号"（实测 0.72–0.80 ×）与"塌成均值"（0.3 ×）分开。
+   **复判**：`v4-hand-001` = 0.80 ×、`v4-hand-003`（对齐基线的重跑）= 0.72 × ⇒ **值头已到天花板**；
+   `v4-hand-003` 覆盖率三档全过（2.1/2.5/1.6pp）。
+   推论：**`delta`/`rtg` 这类实现值目标上 critic 最多买到 ~5% 的方差削减**（`EV 0.055`）。
+5. **判据**：`python/selfcheck.py` **577/0**（+16，含三个"期望值写错"被红证抓出的修正）；
+   `docs/TRAINING-V4.md` §14.8（含四张表）+ `NOTES.md` §6.5 第十九轮。
+
+### 13.25 第二十轮：逐决策 shaping（路线 A）也被判死（2026-09-28）（原 §2.25）
+
+- **做了什么**：用户选定"换更密的时间尺度"。**先量再写代码** —— 新加 `v4/adv.py`
+  `decision_chain`（逐决策链）+ `pbrs_return`（PBRS 回报）与 `value-audit --shaping`
+  （势函数 × θ 扫描）。判据 = **绝对量纲**下的残差比 `std(y−ŷ)/std(R_c)`（不能用"shaping 目标的 EV"，
+  那会被状态已知成分刷高）。
+- **实测（train 40k / val 20k，`std(R_c)`=5.174 千点）**：残差比在 **θ≈0 最小、两侧都变差**；
+  最好一档（`tenpai`、θ=−2/−4）只到 **0.933**（降 3.2%），`shanten` 最好 0.948 ⇒ 远不够进训练回路。
+- **定理**：PBRS 有 `Q'=Q−Φ`、`V'=V−Φ` ⇒ **`A'=A`**（自检数值红证 `max|ΔA|=7.1e-15`）
+  ⇒ "让 critic 有东西可学"在原则上不成立，只能省近似误差 —— 而实测那点收益被 `Φ_end` 的方差吃掉。
+- ⛔ **结论**：**P4-lite 与 `--shaping-*` 都不做**。剩下两条路（二选一或并行）：
+  ① **偏置 shaping**（`r = 小局收支 + w·逐决策进展`，非 PBRS ⇒ 真会改变 A、真能降方差，
+  但**改变最优策略**，只能用 2+2 对局强度判成败）；
+  ② **完全不碰 critic**：补 PPO 数值口径（`grad-clip` / KL 早停 / 全局优势标准化 / 禁 RWR）
+  + 样本量（`sd(Δ)≈53` ⇒ 检出 Δ=2 要 ~5,400 场）。
+- **判据**：`python/selfcheck.py` **593/0**（+9：逐决策链、望远镜相消、θ=0 退化、θ 线性、
+  Φ≡0 时 θ 无效、未来势增大方差、优势不变性、`Q'=Q−Φ`）；`docs/TRAINING-V4.md` §14.9 +
+  `NOTES.md` §6.5 第二十轮。⚠ 三个写错的测试夹具被红证当场抓出（θ 传错、γ 混比、夹具里没有同小局多决策）。
+
+### 13.26 第二十一轮：PPO 数值口径（路线 B）—— 量级问题比预想大一个数量级（2026-09-28）（原 §2.26）
+
+- **做了什么**（`v4/pretrain.py`）：`--grad-clip`（缺省 **0.5**，v3 口径；返回**裁剪前**范数）、
+  `--kl-early-stop`（缺省 **0.03**）+ `--kl-min-steps`（缺省 100，判据抽成纯函数 `kl_stop_hit`）、
+  **双口径 KL**（`kl` = `KL(π_old‖π_new)`、`kl_inv` = `KL(π_new‖π_old)`）、
+  `assert_ppo_excludes_rwr`（PPO 与 `--rwr-beta>0` 硬拒）、优势**只归一化一次**
+  （手级路径已全局 z-score ⇒ 训练里 `norm="none"`）。
+- **实测（`v4-hand-004` vs `v4-hand-003`：同数据、同行为策略、同 lr，只加数值口径）**：
+
+  | 量 | `v4-hand-003` | `v4-hand-004` |
+  | --- | --- | --- |
+  | 实际步数 | 5144（跑满 2 epoch） | **102**（KL 早停 step 101） |
+  | `\|g\|` 裁剪前 | 未记录 | **6.33** ⇒ 每步被裁到 0.5（**12.7×**） |
+  | 触发步 KL / `kl_inv` | — | **0.0707** / **−0.0116** |
+  | 学生行 val top1 | 0.897 | **0.893（102 步就到）** |
+
+- ⇒ **前几轮的 PPO 跑得远超 KL 预算**：单批 KL 在第一处生效点就 0.0707 > 0.03，而 **102 步**
+  就把学生行 top1 推到 0.893（跑满 5144 步才 0.897）⇒ 多出来的步数买不到一致率。
+  另外**裁剪前梯度范数 6.33**（上限 0.5）说明没有 `grad-clip` 时实际步长是设定值的十几倍 ——
+  这是"KL 看着不大却把策略带歪"那类现象的力学解释。
+- ⇒ **口径改成"多轮 × 每轮短"**（每轮 ~100 步 + **重新采一批**），把"epoch 数"这条杠杆换成
+  "新轨迹 = 新行为策略分布"，与 §3 的在线多轮合并。
+- **判据**：`python/selfcheck.py` **600/0**（+7）；`docs/TRAINING-V4.md` §14.10 +
+  `NOTES.md` §6.5 第二十一轮。
+
+### 13.27 第二十二轮：训练口径进回路 + 多轮端到端冒烟（2026-09-28）（原 §2.27）
+
+- **做了什么**：§2.26 的结论是"一轮的价值在**重新采一批**"，但 `v4 loop` 当时转发不了这些开关
+  （`--value-target` 只认 `final|rtg`、没有 `--advantage`/`--max-steps`/数值口径）⇒ **口径只活在
+  shell 历史里**。补齐：`--value-target {final,rtg,delta}`、`--advantage {auto,gae-hand,hand}`、
+  `--rank-weight`、`--baseline-fit`、`--grad-clip`/`--kl-early-stop`/`--kl-min-steps`（显式进命令）、
+  **`--max-steps`**（「每轮短」，缺省 0 = 不限）。
+- **端到端冒烟（`smoke-short2`，2 代 × 12 场，`--no-java`）**：每代 采集 23–26s → 特征 → 校验 →
+  紧凑集 7s → 训练 22s → 导出 3s → 2+2 评测 57–66s → 台账。第 2 代采集用的是**第 1 代导出的 net.bin**
+  （链起来了）；两代都打出 `基线重标定 β=0.039/0.063`、`std(A_raw)/std(delta)=0.995×/0.992×`
+  ⇒ 小局口径 + 数值口径在回路里真的生效。判据 `Δ=−9.91 (p=1.000,n=40)` / `Δ=−3.25 (p=0.636)`
+  —— `required_n` 是 4,289–5,621，**40 场本来就测不出强度**（冒烟只验管道）。
+- ⚠ **坑**：`--hands 2` 截断半庄 ⇒ `reward_to_go` 退化成整场结果 ⇒ **`selfplay-check` 当场判红、
+  回路中止**（那条检查是对的）。小冒烟用 `--hands 0` 或 ≥8 小局。
+- **判据**：`python/selfcheck.py` **606/0**（+6）；`docs/TRAINING-V4.md` §7.2 +
+  `NOTES.md` §6.5 第二十二轮。
+
+### 13.28 第二十三轮：值头闸门进回路（2026-09-28）（原 §2.28）
+
+- **问题**：目标写的是"判据 = `value-audit` EV/覆盖率"，但回路**只看 2+2 顺位点** ⇒ 一轮跑完
+  **没人验值头**（"覆盖率 ≤3pp"断在回路之外）。
+- **做了什么**（`v4/loop.py`）：新增 `audit` 相（`export` 与 `eval` 之间）跑
+  `value-audit --strict --ev-ref legit`，把 `ev / ev_ref / ev_need / cov0.5·0.8·0.95 / ok`
+  写进台账；口径由 `AUDIT_TARGET`（`final→value` / `rtg→rtg` / `delta→delta`）映射；
+  **读不到审计文件按"未过"**；`--strict-gate` 才拦住回路（缺省只记账）。`_run` 加 `allow_fail`
+  （判据相用退出码 2 表示"没过"，要记账而不是抛异常）。
+- **实测（`smoke-gate`，1 代 × 8 场）**：七个相全跑通（含 **audit 18.8s**），审计**如实判 FAIL**
+  （玩具量级下 EV −5.82、覆盖率 0.45/0.58/0.74）⇒ **闸门不会因"数据太小/模型太烂"静默放行**。
+- **判据**：`python/selfcheck.py` **614/0**（+8，含闸门正反两面与"读不到按未过"）；
+  `docs/TRAINING-V4.md` §7.2 + `NOTES.md` §6.5 第二十三轮。
+
+### 13.29 第二十四轮：战役当场抓出真 bug —— 顺位点项 vs 基线拟合对象（2026-09-28）（原 §2.29）
+
+- **现象**：`v4-mr01`（3 代 × 120 场、`--rank-weight 0.2`）第 1 代训练**被第二十轮的守卫拦下**：
+  `基线重标定后优势方差不降反升（1.1604× > 1.0000×）`。**守卫是对的，代码是错的。**
+- **根因**：顺位点项**只加在链末小局**，而基线拿 **`delta`** 拟合 —— 拟合的不是"要减掉基线的那份奖励"
+  （`delta + θ·顺位点`）。两个后果：① 最小二乘最优性不成立（β 差 24%）；② **守卫的参照也错**：
+  它拿 `min(1.0, 未重标定)` 当上限，而**目标自身方差本来就 > `std(delta)`**（实测 rw=0.2 时
+  `std_ratio_flat` **1.2098×**）⇒ 只要 rank 的方差不小，**最优基线也会被判违规**。
+- **修法**：`fit_target = d_row + rank_row`（含顺位点），**按它拟合**也按它减；守卫改成
+  `raw ≤ min(std_ratio_flat, std_ratio_unfit)`（`flat` = 常数基线参照，同样对 `fit_target` 算）；
+  日志并列打三条参照。⚠ **诚实读数**：残差只降**二阶**（1e-4 量级），一阶收益是**不再误杀合法配置**。
+- **判据**：`python/selfcheck.py` **617/0**（+3）；
+  `NOTES.md` §6.5 第二十四轮（含"红证第一版被实测打回、改成斜率不同才成立"的教训）。
+
+### 13.30 第二十五轮：第一场「多轮 × 每轮短」战役实测（2026-09-28）（原 §2.30）
+
+`v4-mr01`（**3 代 × 120 场**、每轮 `--max-steps 100 --epochs 1`、`--value-target delta
+--advantage hand --rank-weight 0.2`、每轮 `audit` + 2+2 150 场、`--no-java`）跑通，台账逐轮：
+
+| 代 | KL | `\|g\|` | 学生 top1 | 值头 EV（线） | 闸门 | 2+2 Δ |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0.0794 | 5.13 | **0.890** | −0.075 (0.027) | ❌ | −5.22 (p=0.46) |
+| 2 | 0.0131 | 3.84 | **0.798** | −0.004 (0.025) | ❌ | +0.26 (p=0.94) |
+| 3 | 0.0085 | 3.95 | **0.785** | +0.016 (0.049) | ❌ | +4.07 (p=1.00) |
+
+- ⛔ **KL 早停三代一次没触发**：`--max-steps 100` + `--kl-min-steps 100` ⇒ 判据只在 `step ≥ 100`
+  时看，而一轮最多 100 步。**已修**（`effective_kl_min_steps`：钳到轮长 1/5 + 日志提示）。
+- ⛔ **学生行 top1 逐轮掉**（0.890 → 0.798 → 0.785，n≈17k）：每轮 100 步联合微调、KL 又没管住、
+  行为策略每轮换 ⇒ 三代累积磨掉"像老师"的部分。**值头在 100 步里也学不动**（EV ≈0，闸门三代全 FAIL）。
+- ⇒ **下一轮的配方**：`--max-steps` 要给够（几百步 / `--epochs ≥ 2`）或**分段**（先冻躯干只训值头、
+  再放策略）；`kl-min` 必须按轮长给。**"每轮短"必须配"kl-min 短"**，否则短得没有意义。
+- **判据**：`python/selfcheck.py` **619/0**（+2）；`NOTES.md` §6.5 第二十五轮。
+
+### 13.31 第二十六/二十七轮：值头相（`critic`）与它的正确位置（2026-09-28）（原 §2.31）
+
+- **对照实验**：`v4-mr02`（值头给够步数 + 分阶段）与 `v4-mr01-g01` **同 seed** ⇒ 同牌山、同数据，
+  换配方 = 干净 A/B。结果：**KL 早停真的触发了**（step 60，`KL=0.0338 > 0.03`），
+  而 `stop_reason=None` 的坏配方跑满 100 步、KL 到 0.0794 —— 两边的学生 top1 是 0.894 / 0.890，
+  但**早停那份的 policy loss 明显更好**（0.402 vs 0.533）。
+  ⇒ 结论：**KL 预算被阶段 a 吃掉**，值头（要等 stage b/c）**一步没轮到**。
+- **`critic` 相**（`--critic-steps N`，冻主干 + `--only-heads value` ⇒ **KL ≡ 0**、不占预算）。
+  旁证：`v4-mr02` 与 `v4-mr03` 的 2+2 Δ **完全相同（−8.29）** ⇒ 值头相确实**没碰策略头**。
+- ⛔ **顺序错了（实测）**：值头在**冻住的表示**上学好之后，PPO 阶段一推动主干它就失效
+  （同一次运行 `val_loss_value` **3.62 → 5.30**）。⇒ 改成 **`train` 之后**跑 critic，
+  且 `export` 导 critic 那份（`PHASES` / `--init` / `export` 三处一起改，自检钉住）。
+- ⛔ **lr**：`--critic-lr 1e-3` 太大 —— 310 步把值头训到**输出尺度发散**
+  （audit：EV **−6.20**、CRPS **9.35** vs 气候学 2.47、覆盖率 0.33/0.62/0.82）。
+  下一轮用 **1e-4** 重跑。
+- **顺带修的真 bug**：`--init` 的 help 写着"ckpt 目录或 net.bin"，底层只收**文件**
+  ⇒ 给目录会报 `--behaviour 找不到文件：<目录>`（**参数名还指错**）。新增
+  `resolve_weight_path()`：目录按 `<dir>/model.pt` 解（自检三条：目录 / 文件 / 两种坏输入）。
+- **判据**：`python/selfcheck.py` **631/0**；`NOTES.md` §6.5 第二十六/二十七轮。
+
+### 13.32 第二十八轮：值头相跑通后的结论 —— 两个真 bug + 决定性负面（2026-09-28）（原 §2.32）
+
+- **两个真 bug（都修了）**：
+  ① **执行顺序有两份**：`PHASES`（跑哪些相）与 `run_round` 里另写的元组（按什么顺序跑）漂移 ——
+     `--dry-run` 顺序对、真跑把 critic 放到 `train` 前 ⇒ 拿不到 PPO 的 ckpt。修法：
+     `phase_order(r)` 唯一真相 + `PHASE_WHAT` 只管标签，`run_round` 单循环。
+  ② **闸门判的不是要上线的那份权重**：`audit` 写死 `<tag>`、`export` 导 `<tag>-critic`
+     （实测 EV 差 −2.93 vs −6.03）。修法：`final_ckpt_label()` 一处决定，两者都读它。
+- ⛔ **决定性负面**：直接审"要上线"的 critic 权重（`v4-mr04-g01-critic`）：**EV −6.03**、
+  CRPS **9.09**（气候学 2.47）、**`pred_std 13.35` vs `true_std 5.23`**、覆盖率 0.357/0.653/0.822
+  —— 比**不训**更差。而日志里 `val_loss_value` 是**变好**的（5.09 → 3.84；lr 1e-3 那轮 5.30 → 3.62）。
+  ⇒ **HL-Gauss 的 CE 与 EV/CRPS/覆盖率在这里方向相反**：CE 对着**宽软标签**优化出**过散**的头。
+  ⇒ `--critic-steps` **保持缺省 0**；要用 critic 得先改**目标**（直接优化 CRPS / 均值-方差匹配），
+  或者就用 p3 那份值头不动。**别拿 `val_loss_value` 当"critic 变好"的证据。**
+- **四轮值头闸门汇总**（同 seed、同数据，只换配方）：EV −0.075 / −2.934 / −3.330 / −2.934，
+  **四轮全 FAIL**，2+2 Δ 全在噪声里（n=150，`required_n`≈4,500–5,200）。
+- **判据**：`python/selfcheck.py` **636/0**（+5）；`NOTES.md` §6.5 第二十八轮。
+
+### 13.33 第二十九轮：**闸门在完整规模的一轮上通过了**（2026-09-28）（原 §2.33）
+
+- **复验**（`compact/v4-sp-004` 658k 行 / 3.5 万 val；`ckpt/v4-hand-003`：2 epoch PPO、
+  `--advantage hand --value-target delta --baseline-fit scale`）：
+  `value-audit --target delta --strict --ev-ref legit` ⇒ **退出码 0**：
+  `EV(delta) +0.0496 ≥ 0.7 × 0.0693 = 0.0485`、`CE 2.5647 < 边缘 2.6019`、
+  覆盖率 **2.1 / 2.5 / 1.6pp**（三档全过）、`CRPS 2.4902 < 气候学 2.5585`。
+- ⇒ **判据可达且已达成过一次**；第二十八轮那四轮 FAIL 的根因是**规模**（120 场 / 60~100 步
+  学不动值头），不是判据或损失函数。
+- ⇒ 第二十一轮"每轮短"的结论**收范围**：`--kl-early-stop 0.03` 对长轮太紧（60 步越界），
+  而通过的那条路是**没有 KL 闸门、跑满 5144 步**。两种口径各有用途：
+  短轮适合"多轮 × 每轮短"，**但不能训值头**；长轮能训出可用值头、过闸门，但离行为策略远。
+- **本轮实测**：400 场 + `--kl-early-stop 0.15 --max-steps 600 --epochs 2`（台账 `v4-r8`），
+  看闸门能否在**轮的出口**上过。
+
+### 13.34 第三十轮：值头要多少数据 —— 一条曲线（2026-09-28）（原 §2.34）
+
+`v4-r8`（400 场、`--max-steps 600 --epochs 2`、`--kl-early-stop 0.15` ⇒ **1200 步跑满**、
+值头 loss 2.739 → **2.545**）的闸门：EV **+0.0157**（线 0.0422 = 0.7×0.0603）❌、
+CE 过 ✅、覆盖率 **2.9 / 1.1 / 0.3pp 全过** ✅、CRPS 2.386 vs 气候学 2.378 ❌（差 0.008）。
+
+| 一轮的规模 | 步数 | 值头 EV(delta) | EV / 天花板 | 覆盖率差 | 闸门 |
+| --- | --- | --- | --- | --- | --- |
+| 120 场（79k 行） | 61~100 | −0.075 ~ −3.33 | ≤0 | 14~29pp | ❌ |
+| 400 场（263k 行） | 1200 | **+0.0157** | 0.26× | 2.9/1.1/0.3pp | ❌（差 0.026） |
+| 1000 场（658k 行） | 5144 | **+0.0496** | **0.72×** | 2.1/2.5/1.6pp | ✅ **通过** |
+
+- ⇒ **EV 随规模单调上升；闸门需要 ≳1000 场/轮**。400 场已经"学得动"（EV 转正、**校准三档全过**），
+  差的是**信号量**，不是校准。
+- ⇒ 瓶颈是**每轮的数据量**（不是判据 / 损失 / 读出头 —— 那三条在 §2.24/§2.32 都已判过）。
+- ⚠ `--kl-early-stop 0.03` 在长轮里等于"值头一步学不到"（60 步越界）；长轮要用 **0.15**
+  （KL 稳定在 0.035、不触发）。短轮（0.03）只适合动策略。
+- **判据**：`python/selfcheck.py` **636/0**（本轮只加文档）；台账 `league/v4-r8-v4.json`。
+
+### 13.35 第三十一/三十二轮：闸门要"两个轴"都够（2026-09-28）（原 §2.35）
+
+- **第三十一轮**：把数据量曲线做成**守门函数** `value_gate_feasible()`（+回路的警句与台账字段），
+  免得下次拿小轮去读闸门结论、把"数据不够"读成"模型不行"。
+- **第三十二轮：我上一轮"≥1000 场就够"被自己的实测打回。** `v4-r9`（**1000 场**、
+  `--max-steps 600 --epochs 2` ⇒ 1200 步、`--kl-early-stop 0.15` 跑满、学生 top1 0.892 → 0.900）：
+
+| 规模 | 步数 | EV(delta) | EV/天花板 | 覆盖率差 | 闸门 |
+| --- | --- | --- | --- | --- | --- |
+| 120 场 | ~100 | ≤0 | ≤0 | 14~29pp | ❌ |
+| 400 场 | 1200 | +0.0157 | 0.26× | 2.9/1.1/0.3pp | ❌ |
+| **1000 场** | **1200** | **+0.0338** | **0.44×** | **1.5/0.0/0.1pp** | ❌（只差 EV 0.020） |
+| 1000 场 | **5144** | **+0.0496** | **0.72×** | 2.1/2.5/1.6pp | ✅ 通过 |
+
+- ⇒ **EV 同时吃数据量与步数两个轴**：1000 场把步数从 1200 提到 5144，才从 0.44× 到 0.72×。
+  守门函数已改成双轴（`games ≥ 1000` **且** `steps ≥ 3000`），不可读时说清是哪一轴不够。
+- ⇒ **要过闸门的轮次配方**：`--games ≥ 1000` **且** `--max-steps × epochs ≥ 3000`
+  （例 `--max-steps 2000 --epochs 2`）+ `--kl-early-stop 0.15`（否则 60 步就被 KL 掐掉）。
+- **判据**：`python/selfcheck.py` **641/0**（+5）；`NOTES.md` §6.5 第三十一/三十二轮。
+
+### 13.36 第三十三轮：多轮战役开跑（`--eval-vs prev` + S 盘轮换）（2026-09-28）（原 §2.36）
+
+- **用户点名**：跑 5 轮，保持 S 盘阈值，可轮换删除已用的大规模数据集与过时数据。
+- **新增 `--eval-vs {teacher,prev}`**：多轮战役真正的问题是"**这一轮比上一轮强了吗**"，所以
+  `prev` 把上一轮的 net.bin 放对面 ⇒ 2+2 **同牌山配对**（`net:本轮×2 vs net:上一轮×2`）。
+  第 1 代退回 teacher；真跑时缺上一轮的 net **当场报错**（不静默退 teacher，否则两种口径混进同一条曲线）。
+- **配方**（前两轮量出来的两个轴）：`--games 1000` + `--max-steps 2000 --epochs 2`（⇒ 4000 步）
+  + `--kl-early-stop 0.15` + `--critic-steps 0`；评测 200 场/轮 + `--eval-vs prev`，seed 固定。
+- **轮换**：`release/run-campaign.ps1` 每轮成功后删 `raw/<tag>`（3 GB）、`compact/<tag>`（**15 GB**）、
+  `raw/eval-<tag>`（0.4 GB），只留 `ckpt/<tag>`、`tools/build/<tag>/net.bin`、台账与审计 JSON
+  ⇒ 峰值 ≈ 一轮（19 GB），5 轮滚动。⚠ 外层 `python -m` 必须带 `PYTHONPATH=<repo>/python`
+  （第一次跑就栽在这条：`No module named 'mahjong_ml'`）。
+- **判据**：`python/selfcheck.py` **644/0**（+3：`prev` 的标签/策略串、第 1 代退回 teacher、缺文件语义）；
+  台账 `league/v4-camp01-v4.json` 逐轮追加。
+
+### 13.37 第三十五轮：5 轮战役跑完（值头过关、强度无证据）（2026-09-28）（原 §2.37）
+
+`v4-camp01`：5 轮 × 1000 场 × 4000 步、`--kl-early-stop 0.15`、`--critic-steps 0`、
+评测 200 场 `--eval-vs prev`（同牌山）、逐轮链上一轮；**2.35 h**；S 盘全程恒定 138 GB（每轮轮换）。
+
+| 轮 | 值头 EV | 线 | 闸门 | cov 50/80/95 | KL | 学生 top1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| g01 | +0.0507 | 0.0584 | ❌ | 0.500/0.788/0.939 | 0.0395 | 0.8905 |
+| g02 | +0.0623 | 0.0494 | ✅ | 0.517/0.796/0.950 | 0.0232 | 0.8833 |
+| g03 | +0.0675 | 0.0576 | ✅ | 0.517/0.788/0.948 | 0.0211 | 0.8789 |
+| g04 | **+0.0738** | 0.0565 | ✅ | 0.496/0.790/0.946 | 0.0170 | 0.8697 |
+| g05 | +0.0648 | 0.0416 | ✅ | 0.521/0.791/0.933 | 0.0114 | **0.8682** |
+
+- ✅ **值头闸门 4/5 通过**（g01 差 0.0077）+ 覆盖率每轮都在 3pp 内 ⇒ §2.34 那条
+  "1000 场 × 4000 步"的配方在真实轮次里成立。⚠ 判据线逐轮不同（各自的合法天花板不同）
+  ⇒ 跨轮要读 `EV/线`：0.87 / 1.26 / 1.17 / 1.31 / 1.56。
+- ⛔ **强度无证据**：逐轮 2+2（同牌山 n=200、`sd≈53`）Δ = +6.11 (p=0.104) / +0.67 / −3.06 / −2.29，
+  **四个 CI 全跨 0、符号不一致**；合并 ≈ +0.4（SE ~1.7）。检出 Δ=2 要 ~5,000 场/次。
+- ⛔ **单调信号：学生行 top1 逐轮掉 0.8905 → 0.8682（−2.2pp，n≈16k/轮）**，而 KL 一直远低于闸门
+  ⇒ 5 轮各让开一步、累计"不像老师"，不是崩溃（比短轮配方的 3 轮 −10.5pp 缓得多）。
+- **⇒ 判据**：这一轮的价值头口径**站住了**；**强度问题不能靠 200 场/轮回答**。
+- 欠账：`audit` 相没把 CE/CRPS 写进台账（只在 stdout）。
+
+### 13.38 发布 v1.14.0（2026-09-29，已上线）（原 §2.38）
+
+- **性质**：① 服务端 v4 前向走**增量事件缓存**（38.12 → **22.50 ms/决策，1.70×**，七头逐位相同）；
+  ② 训练侧（`python/`，不改变对局行为）：判据相进回路、值头相、数据量守门、`--eval-vs prev`、
+  5 轮战役结论（见 §2.28–§2.37）。
+- ⚠ **客户端源码自 v1.13.0 起没变**（只改版本号两处）；**机器人包与 v1.13.0 逐字节相同**
+  （sha256 全等 ⇒ 不新增 AI 包，v1.13.0 的强度结论沿用）。
+- **发布前实测**：L1 **1443/0**、`selfcheck.py` **646/0**、`v4 check` PASS、`trainer --selftest` PASS、
+  `doc-refs-check` PASS、服务端 zip 5 个 `.sh` 均 `-rwxr-xr-x`、`VERSION` = 1.14.0、
+  exe 内 UTF-16 串含 1.14.0、客户端 zip 不含 `settings.json`。
+- ⚠ **L2 本会话 851 通过 / 13 失败**（13 条全在音效组，`QSoundEffect` 到不了 `Ready`）：
+  **对照**上一版未改动的 exe 在同一会话里同样 851/13 ⇒ 环境（非交互会话的音频初始化），
+  不是代码回归；干净读数要在有音频会话的桌面上跑。
+- ⚠ **本会话 shell 被限制在仓库内**（写 `S:`/`%TEMP%` 被拒）⇒ 跑自检要
+  `MAHJONG_DATA_ROOT=<repo>\python\.tmp\selfcheck-root`（`.tmp` 已 gitignore）。
+  顺手修掉 `selfcheck.py` 里一条**写死 `S:/mahjong-training`** 的断言（换盘/换机本来会假红），
+  并把 `docs/HANDOVER.md` 里错位的 §2.21–§2.37 整块挪回 §2.20 之后（行号单调性现在自检可见）。
+- 记录与摘要表：`NOTES.md` §9.5 的 v1.14.0 条目 + `release/RELEASE-v1.14.0.md`。
+- **已上线**：release id **398826351**（<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.14.0>），
+  tag `v1.14.0` → 远端 `17e15338`（tree == 本地 HEAD tree）；6 个资产的 sha256 与 GitHub `digest` 逐一核对一致。
+  ⚠ 推送通道：`github_git_push` 仍是 **broker 502**（git → github.com 不通）；  `github_commit_files` 本次多次 `建 tree → HTTP 400`（重试即过，**逐个文件推**更稳）；
+  `docs/HANDOVER.md` 工作区是 **CRLF** ⇒ 必须带 `normalizeEol: true`（否则工具直接报错告诉你原因）。
+
+### 13.39 修「好几个版本都没有音效」（2026-09-29，用户点名）（原 §2.39）
+
+- **现场**：L2 每次 **851 通过 / 13 失败**，13 条全在音效组（池子 = 0、`status` 到不了 `Ready`）。
+- **根因**：`QSoundEffect` **只吃 URL** ⇒ 每个音效要先把 WAV **落到临时文件**再 `setSource()`；
+  旧实现写死 `QTemporaryFile(QDir::tempPath() + "/mahjong-sfx-XXXXXX.wav")` 且**只看 `open()` 布尔值、
+  失败就静默 `continue`** ⇒ 系统临时目录**不可写**时（受限沙箱/组策略/漫游配置损坏；本会话实测
+  「拒绝访问」）**8 个音效全部被跳过**：`m_effects` 空 ⇒ `play()` 只留一句 `效果 missing`，
+  玩家**一点声音都没有**；而后端 `qsoundeffect` 与默认设备 `Headphone (Realtek(R) Audio)` 都正常
+  —— 所以"后端可用 / 素材 >1KB"这两条判据全绿也发现不了。
+- **修法**：`tempCacheDir()` 按 `%TEMP%` → `QStandardPaths::CacheLocation` → **exe 同级 `sfx-cache/`**
+  逐个**真写探针**试（`mkpath` 成功 ≠ 能建文件）；`data()` **不再缓存"没取到"**（一次瞬时失败以前会
+  **永久**关掉声音）；临时文件改可预测名字 + `sweepTempFiles()`（自己那份退出删、一天前的 init 清 ——
+  实测旧实现留了 **32 个**）；`init()` 逐音效打"为什么跳过"的日志。
+- ⛔ **过程中自己踩的坑**：选中的目录缓存在函数内 `static QString` ⇒ 静态析构顺序让 `~Player` 读到
+  **已析构**对象 ⇒ **退出时堆损坏 `0xC0000374`**（自检 854/0 全绿，**只有退出码能抓到**）⇒ 改成成员
+  `m_cacheDir`；另加 `SoundShutdownGuard`（在 `QApplication` 还活着时拆音频栈；⛔ 只挂 `aboutToQuit`
+  不够 —— `--selftest`/`--gentiles`/`--fontprobe` 不跑事件循环）。
+- **判据（三档实测）**：正常 `%TEMP%` ⇒ 建池 3 ×8、**L2 854/0 PASS**、退出码 0；
+  `TEMP` 指向拒绝访问的目录 ⇒ **仍然** 854/0 + 退出码 0（走回退目录）；修前 ⇒ 池空 + **851/13**。
+  红证：去掉回退链，在第二种条件下立刻复现 13 条失败。
+- **记录**：`AGENTS.md` §6.2（两条硬判据）、`NOTES.md` §6.2 + §7 症状行。
+
+### 13.40 第三十六轮：竞技场 `v4 arena`（先让"变强"可判）（2026-09-29）（原 §2.40）
+
+用户问"怎么训出超过 teacher 的 bot"，选了 **① 竞技场 + ② 搜索算子** 并行。本轮交付 ①：
+
+- **为什么先做它**：逐场顺位点 `sd≈53` ⇒ 检出 Δ=2 要 **~5,000 场**，而回路每轮只 200 场
+  ⇒ 以前那些 Δ 的 CI 全跨 0、**没有判决力**，却被当结论读过。
+- **`python -m mahjong_ml.v4 arena --policies A,B,C --games N --block M --seed S --out <可写目录>`**：
+  逐对 `--policy A,A,B,B --rotate`（**同牌山配对**、跨对可比）；按块序贯判决
+  （CI 排除 0 提前收工；跑满给 `stop_null` 并报"还差多少场"）；结论只看 CI。
+  ⚠ 分块要**合并逐场值重算**，别合并 CI。
+- **自证（实测）**：`teacher vs first` → Δ **+91.83** CI[+88.78,+94.84]、200/200 胜（判「更好」）；
+  同策略对同策略 → Δ=0、200 平（判「分不出」）；**换标签校准**假阳率 **0.075**（k=200/n=400，名义 0.05）
+  ⇒ CI 略偏窄，序贯判决里"至少跑满一块"就是为它准备的。
+- **踩到的两处**：`--out` 要绝对路径（trainer 在仓库根跑）；`--no-java` 不是 trainer 参数。
+- **判据**：`python/selfcheck.py` **651/0**（+5）。下一步（②）：**搜索算子**（1–2 层前瞻，
+  用引擎现成的 `HandEval`/`Danger`），先直接上场打 teacher —— 这是本仓库唯一能造出"比 teacher 好的
+  标签"的地方；赢了之后再谈蒸馏进网络与在线自对弈。
+- ⚠ **已原地重发（r2，2026-09-29）**：`v1.14.0` **只换客户端 zip**（音效修复），tag 已移到带修复的
+  提交 `cd8d30352b0c87fc2d1c4fc74917c72dda852f60`，release 已重新发布（`draft:false`）；
+  其余 5 个资产沿用 r1（sha256 不变）。客户端包：**38,849,862 B `4fab9d2d…`**（asset 597430144，
+  r1 的 `ee002bfb…`/597257309 已删）。链路与判据见 `NOTES.md` §9.5 的 v1.14.0 条目。
+
+> 以下是原 §7「2026-10-02 会话」整段（含它开头那段说明），同样一字未改：
+
+> 本节写在最后（编号独立），因为 §2.x 是按时间顺序追加的日志，而这次会话的重点是**体系**（阀门与夹具）
+> 与**一次模型接线**，不是新功能。**先读 `docs/VALVES-AND-FIXTURES.md`**（本次会话的产物）。
+
+### 13.41 已发布/待发布的资产（原 §7.1）
+
+- **v1.14.1 资产已打包、tag 已推**，但 `gh` token 失效 ⇒ **发布动作未执行**（一条命令即可，见下）。
+  - `release/sMahjong-server-v1.14.1.zip`（415,633 B）· `release/sMahjong-bot-ai-v1.14.1.zip`（21,097,399 B）
+    · `release/bot-ai/v4-league-g08.zip`（5,025,787 B，新增机器人包）。
+  - `gh auth login -h github.com` 后：`gh release create v1.14.1 --title "…" --notes-file release/RELEASE-v1.14.1.md <三个资产>`。
+- **最强网络 = 第一季 `g08`**（`tools/build/v4-league-g08/net.bin`）：胜过 teacher Δ=+4.62（块依赖）；
+  第二~七季共 16 个候选**没有一个显著更好**（见 `NOTES.md` §6.5 第六十轮），闸门是护栏不是引擎。
+
+### 13.42 体系（本次会话的规则）（原 §7.2）
+
+`docs/VALVES-AND-FIXTURES.md`：**阀门**（方向自证 / 接受闸门 / 值头审计）训练中跑；
+**夹具**（golden / 接线审计 / selfcheck / 三端 selftest / 缓存检查 / 文档 / 打包）**开训前一次性跑完**，
+**不往 `v4 loop` 里塞自检**。
+
+### 13.43 W1（GRU 长程记忆接进融合）—— 代码已落地，训练验证季未跑（原 §7.3）
+
+- 语义：`h0` = **窗口之前**的 carry（进）、`h_evt` = 窗口之后的 carry（喂融合，**逐维门控**）。
+- 三端：`net.bin` 多两个**可缺**张量 `fusion.mem.*`（**当前** 78 张量，2026-10-07 复核）；golden 夹具 **format 2**（带 `h0`+`h_evt`）。
+- 抓到并修掉：① `V4Features.eventRow` **不清零**（复用缓冲 ⇒ 事件位按位累积，藏了六十轮）；
+  ② 夹具三处"假绿"（收缩的 GRU 把 `h0` 洗到 3e-8 / 注意力近均匀使 logits 极差 1e-7 / 缺 `evt_short` 用例）；
+  ③ `wiring_audit` 必须先扰动零初始化参数再量梯度（否则假红）。
+- 判据（均已实测 PASS）：`wiring_audit`（`event.cell` 梯度 6.6e-5）· `selfcheck` 659 项 0 失败
+  （含两条 `maxΔ=0.000e+00` 的逐位判据）· 服务端 `--selftest`（含两条**逐位**缓存判据）·
+  `v4-cache-check`（用**活 `mem` 的探针网**，2 场 × 4 小局逐字节）· `gate --self-check` ·
+  **旧网兼容**：新服务端 vs 已发布 v1.14.1 服务端在 `g08` 上 **747 行 logits 全同**。
+- ⚠ 训练侧 `h0`（W1b）已在紧凑集与 `pretrain` 落地：缺 `h0` 列时 `pretrain` **硬拒**
+  （除非显式 `--no-carry`），不许静默退化成窗口冷启动。
+- **下一步**：起一季验证 W1（与 W3 的 KL 锚**分开**跑）。
+
+### 13.44 文档预算提醒（更新 §6 第 4 条）（原 §7.4）
+
+`AGENTS.md` 现 **64,446 B / 硬上限 65,536 B**（余量 ~1.1 KB，仍高于 61,440 B 的提醒线）。
+下一轮若还要往 §2.3 / §6 加段落，**先把细节搬进 `NOTES.md`**。

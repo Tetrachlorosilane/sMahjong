@@ -96,7 +96,8 @@ public final class Wall {
      * 判役只按 kind 看，客户端也只按牌码显示 —— 于是**"看到的"与"计分的"一致**，
      * 不会出现"画着赤五却不给赤宝牌番数"的那种自相矛盾。
      *
-     * <p>`aka == 4`（两张赤五筒）用这套编码表达不了，仍按 3 张处理（见 NOTES §10 已知限制）。
+     * <p>`aka == 4`（两张赤五筒）与 1/2 都用这套编码表达不了（只有"每种一张"的码位），
+     * 所以它们在 {@code Rules.clampToSane()} 里被**归一化**成 0 / 3（见 NOTES §10 已知限制）。
      */
     private static void stripRedFives(int[] tiles, Rules rules) {
         if (rules == null || rules.aka > 0) {
