@@ -222,6 +222,7 @@ export const MAP = {
     '无法连接 %1:%2（%3）——已尝试 %4': 'ui.net.connect_failed',
     '下行报文超过 1 MiB 上限，连接已断开': 'ui.net.rx_too_large',
     '收到无法解析的报文：%1': 'ui.net.bad_packet',
+    '已 %1 秒没有收到任何下行报文，连接已断开（服务端可能已停止、或网络中断）': 'ui.net.recv_timeout',
   },
 
   // main.cpp 里只有这三处是**界面文案**（按钮文字查找 / 标题断言），
