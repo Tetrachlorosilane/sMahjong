@@ -57,6 +57,9 @@ struct Config {
     int workers = 0;
     std::vector<std::string> seatPolicy{"teacher", "teacher", "teacher", "teacher"};
     bool rotatePolicies = false;
+    /** `--rotate-perm`：按场号枚举 **24 个全排列** 分配座位（`--rotate` 的循环移位只覆盖 4 个排列、
+     *  且保持循环序 ⇒ 一代之内各策略相对彼此的**方位固定**）。与 `--rotate` 同时给时 **perm 优先**。 */
+    bool rotatePerm = false;
     std::string preset;
     std::string outDir;
     int sampleEvery = 1;
@@ -73,6 +76,23 @@ struct GameRow {
     std::array<int, 4> finalScores{};
     std::array<int, 4> placement{};
     std::array<double, 4> rankPoints{};
+    /**
+     * 每场每席的"风格轴"账（**下标 = 座位号**，与 `finalScores` / `placement` 同一套约定）。
+     *
+     * 为什么要 per-game 粒度：闸门对风格轴（打点 / 放铳率 / 和了率）做的是**逐场配对差分**
+     * （`Δ = 候选 − 现任` 的 CI），而整份汇总的比率取不到"每一场每一席"的值 —— 没有它就只能
+     * 拿两个独立汇总相减，那不是配对检验。
+     *
+     * ⚠ 口径与 `by_policy` 那张表**逐项相同**（累加后必须逐位相等）：
+     *   · `wins` 只认 `h.winner == i`（多家荣和时 `winner` 只有离放铳者最近那家 —— 与表同）；
+     *   · `winPoints` 累加 `h.delta[i]`，而表的 `avg_win_score` 累加的正是同一个数
+     *     （收点 + 本场棒 + 供託一起算，别在这里另立"纯打点"口径，否则对不上表）；
+     *   · `deals` / `dealPoints` 是同一本账的**镜像**：`h.loser == i` 的那些小局，付出 = `-h.delta[i]`。
+     */
+    std::array<int, 4> wins{};
+    std::array<int, 4> winPoints{};
+    std::array<int, 4> deals{};
+    std::array<int, 4> dealPoints{};
     std::array<std::string, 4> labels{};
     std::vector<HandRow> hands;
 };
@@ -114,6 +134,16 @@ std::string rankPointList(const std::array<double, 4> &pts) {
     return o;
 }
 
+/** `{0,1,2,3}` 的 24 个全排列，**按字典序**手写列全（`kPerm24[g % 24]`）。
+ *  ⚠ 刻意不用运行时生成、也不用随机数：同种子必须逐位可复现，且 `g % 24` 的取值要一眼可查。
+ *  ⚠ **不改变 `--rotate-perm` 缺省关闭时的任何行为**（那条路径不读这张表）。 */
+static const int kPerm24[24][4] = {
+    {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2}, {0, 3, 2, 1},
+    {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0}, {1, 3, 0, 2}, {1, 3, 2, 0},
+    {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3}, {2, 1, 3, 0}, {2, 3, 0, 1}, {2, 3, 1, 0},
+    {3, 0, 1, 2}, {3, 0, 2, 1}, {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0},
+};
+
 /** 单场（Java `SelfPlay.oneGame`）。 */
 GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, int g,
                 const std::string &outDir, std::string &fatal) {
@@ -126,8 +156,11 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
     t.debugMaxHands = c.maxHands;
     t.seedBase = seed;
     std::array<std::string, 4> labels{};
+    // 座位分配：`--rotate-perm` 时按 **场号枚举 24 个全排列**（一代之内 4! 种方位关系都平均到）；
+    // 否则 **逐位保持旧口径**（`--rotate` 的循环移位 / 不轮转），历季结果要能原样复现。
+    const int *perm = c.rotatePerm ? kPerm24[static_cast<size_t>(g % 24)] : nullptr;
     for (int i = 0; i < 4; i++) {
-        const int src = (i + (c.rotatePolicies ? g : 0)) % 4;
+        const int src = perm ? perm[i] : (i + (c.rotatePolicies ? g : 0)) % 4;
         labels[static_cast<size_t>(i)]
             = c.seatPolicy[static_cast<size_t>(src) % c.seatPolicy.size()];
         t.policy[static_cast<size_t>(i)]
@@ -163,6 +196,21 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
     }
     row.finalScores = finalScores;
     row.placement = placementOf(finalScores);
+    // 每场每席的和了 / 放铳 / 打点账（`per_game[]` 的四个新数组）。
+    // 唯一数据源就是小局行里的 `winner` / `loser` / `delta` —— 与 `run()` 里给 `by_policy`
+    // 累计的那三分支**同一把尺子**，所以"按场累加 == 表里那一行"是构造出来的，不是巧合。
+    for (const HandRow &h : row.hands) {
+        for (int i = 0; i < 4; i++) {
+            if (h.winner == i) {
+                row.wins[static_cast<size_t>(i)]++;
+                row.winPoints[static_cast<size_t>(i)] += h.delta[static_cast<size_t>(i)];
+            }
+            if (h.loser == i) {
+                row.deals[static_cast<size_t>(i)]++;
+                row.dealPoints[static_cast<size_t>(i)] += -h.delta[static_cast<size_t>(i)];
+            }
+        }
+    }
     // 顺位点：**复用生产的精算**（同点拆分/马点/头名赏一把尺子），不在这里另写一份公式
     const Settlement st = settle(finalScores, rules);
     row.rankPoints = st.point;
@@ -270,6 +318,17 @@ Summary run(const Config &c, std::string &fatal) {
             jsonIntArray(o, row.placement.data(), 4);
             o += ",\"rank_points\":";
             o += rankPointList(row.rankPoints);
+            // 四个风格轴数组（下标 = 座位号）：闸门按场配对做 CI 时读它们。
+            // 键序只在这里定一次 —— 新键插在 `rank_points` 与 `hands` 之间（追加在尾部会打乱
+            // "每场一行的可读性"，而这两个数正是同一件事的两个粒度：场级 vs 小局级）。
+            o += ",\"wins\":";
+            jsonIntArray(o, row.wins.data(), 4);
+            o += ",\"win_points\":";
+            jsonIntArray(o, row.winPoints.data(), 4);
+            o += ",\"deals\":";
+            jsonIntArray(o, row.deals.data(), 4);
+            o += ",\"deal_points\":";
+            jsonIntArray(o, row.dealPoints.data(), 4);
             o += ",\"hands\":";
             o += std::to_string(row.hands.size());
             o += ",\"ryukyoku\":";
@@ -408,7 +467,8 @@ void printFormat(const Summary &s) {
 void selfplayUsage(std::FILE *out) {
     std::fprintf(out,
                  "用法：trainer selfplay <games> [--workers K] [--policy P] [--seed S] [--hands H]\n"
-                 "                                [--rotate] [--sample K] [--no-claims] [--preset NAME]\n"
+                 "                                [--rotate] [--rotate-perm] [--sample K] [--no-claims]\n"
+                 "                                [--preset NAME]\n"
                  "                                [--out DIR]\n"
                  "  --workers K   并行工作线程数：K 个线程从 g=0..games-1 里抢场号，各写各的 g<g>.jsonl；\n"
                  "                **缺省 / 0 = 1**（不按核数自动并发），钳制到 [1, games]，与 Java 同式\n"
@@ -420,7 +480,11 @@ void selfplayUsage(std::FILE *out) {
                  "                （见 docs/TRAINER-CPP.md §6.16 与 §6.17）\n"
                  "  --seed S      基准种子（缺省 20260101）；每场种子只与 (S, 场号) 有关\n"
                  "  --hands H     每场最多 H 小局（0 = 完整半庄）；缺省 0\n"
-                 "  --rotate      按场轮转座位\n"
+                 "  --rotate      按场轮转座位（循环移位：只覆盖 4 个排列、且**保持循环序** ⇒\n"
+                 "                一代之内各策略相对彼此的**方位是固定的**）\n"
+                 "  --rotate-perm 座位按 **24 个全排列**（字典序 `kPerm24[场号 % 24]`）分配 —— 一次训练里\n"
+                 "                4! 种座次关系各占 1/24（相对偏移 +1/+2/+3 各 1/3）。**缺省关**（不开时\n"
+                 "                代码路径与旧口径逐位相同）；与 `--rotate` 同时给时 **本开关优先**\n"
                  "  --sample K    每 K 次决策记 1 条（缺省 1 = 全记）\n"
                  "  --no-claims   不记录鸣牌决策\n"
                  "  --aux         额外落**标签侧**文件 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位；\n"
@@ -474,6 +538,8 @@ int selfplayCli(int argc, char **argv) {
             c.outDir = next("--out");
         } else if (a == "--rotate") {
             c.rotatePolicies = true;
+        } else if (a == "--rotate-perm") {
+            c.rotatePerm = true;
         } else if (a == "--sample") {
             c.sampleEvery = std::atoi(next("--sample"));
         } else if (a == "--no-claims") {

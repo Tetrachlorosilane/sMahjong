@@ -2559,6 +2559,90 @@ _lo = v4_loop.plan_commands(_lo_cfg, 1, _lo_net, 100)
 _lo_bins = [Path(str(c[0])).name.lower() for c in _lo.commands.values()]
 ok(not any(b.startswith("java") for b in _lo_bins),
    "v4 回路：默认命令里没有 JVM（脱离 Java 的判据）", str(_lo_bins))
+
+# ---- 「风格桌」（2026-10-08 用户指定）：训练某风格时，**四席 = 学生 1 + 每个风格 1** --------------
+# 为什么钉它：风格线的旧口径是"学生×2 + teacher + **1 个**轮换对手" ⇒ 桌上 2/4 席与学生同风格、
+# 对手只有 1 席 ⇒ 学不到"对另外两种风格怎么打"，而结果奖励里关于风格强度的信息几乎是常数。
+# 用户口径：训 A 型时对手要**同时**是 A/B/C（位置排布平均化）。这里把口径变成机械断言 + 红证。
+_style_pools = {
+    "atk": ("X:/atk-g01.bin", "X:/atk-g02.bin"),
+    "def": ("X:/def-g01.bin",),
+    "win": ("X:/win-g01.bin", "X:/win-g02.bin", "X:/win-g03.bin"),
+}
+_style_cfg = v4_loop.LoopConfig(label="v4-sc-style", init="X:/net.bin", no_java=True,
+                               producer="cpp", style="atk", style_pools=_style_pools)
+
+
+def _style_seats(g: int) -> list[str]:
+    """第 `g` 代采集命令 `--policy` 的四席策略串（风格桌的**唯一**落点就是它）。"""
+    cmd = v4_loop.plan_commands(_style_cfg, g, _lo_net, 10).commands["collect"]
+    ok("--policy" in cmd, "风格桌：采集命令里必须有 `--policy`（四席策略串的载体）")
+    return str(cmd[cmd.index("--policy") + 1]).split(",")
+
+
+_style_gens = [1, 2, 3, 4, 5, 6]
+_style_all = [_style_seats(g) for g in _style_gens]
+_student = _style_cfg.student_spec(_lo_net)
+ok(all(len(s) == 4 for s in _style_all), "风格桌：恒 4 席", str([len(s) for s in _style_all]))
+eq("风格桌：学生**恰好 1 席**（旧口径是 2 席 —— 这条就是本次修正的判据）",
+   max(sum(1 for x in s if x == _student) for s in _style_all), 1)
+_style_opp = [[x for x in s if x != _student] for s in _style_all]
+_style_names = [[Path(x[4:].split("@")[0]).stem.split("-g")[0] for x in s] for s in _style_opp]
+ok(all(sorted(names) == ["atk", "def", "win"] for names in _style_names),
+   "风格桌：**每个风格恰好 1 席**（每代桌上都有全部三代风格）", str(_style_names[0]))
+# 对手取"最新模型"（2026-10-08 用户裁决；缺省 style_pick=latest）：每个风格那一席必须是**该风格池里最新的一代**
+_latest_names = [_style_names[0][i] for i in range(3)]
+_latest_want = {}
+for _st, _pool in _style_pools.items():
+    _cand = sorted(p for p in _pool if str(Path(p)) != str(_lo_net))
+    _latest_want[_st] = Path(sorted(_cand)[-1]).stem.split("-g")[0] if _cand else None
+eq("风格桌：对手取**最新模型**（latest）—— 三席各自是本风格池里最新的一代",
+   sorted(_latest_names), sorted(_latest_want[s] for s in ("atk", "def", "win")))
+_rot = v4_loop.LoopConfig(label="v4-sc-rot", init="X:/net.bin", no_java=True, producer="cpp",
+                          style="atk", style_pools=_style_pools, style_pick="rotate")
+_rot_names = [Path(x[4:].split("@")[0]).stem for x in
+              v4_loop.plan_commands(_rot, 1, _lo_net, 10).commands["collect"]
+              [v4_loop.plan_commands(_rot, 1, _lo_net, 10).commands["collect"].index("--policy") + 1]
+              .split(",")][1:]
+ok(len({n.split("-g")[0] for n in _rot_names}) == 3,
+   "风格桌：`style_pick=rotate` 仍可用（旧口径留存，便于复现）", str(_rot_names))
+ok(all(Path(x[4:].split("@")[0]) != _lo_net for s in _style_opp for x in s),
+   "风格桌：本线风格的对手 ≠ 学生自己的网（`--rotate` 要求四席策略互异）")
+# ⚠ 跨代等频要取**风格数的整数倍**代（3 个风格 ⇒ 6 代）：席序位 k 的风格 = styles[(g+k) % 3]，
+#   只跑 4 代会出现 def/win/atk 的 2:1:1 ⇒ 那不是 bug，是样本没取整圈。
+ok(all(len({names[k] for names in _style_names}) == 3 for k in range(3))
+   and all(all(sum(1 for names in _style_names if names[k] == st) == 2
+               for st in ("atk", "def", "win")) for k in range(3)),
+   "风格桌：跨代看每种风格在每个席序位上等频（生成级轮转；游戏级靠下面那条 --rotate-perm）")
+ok("--rotate" in v4_loop.plan_commands(_style_cfg, 1, _lo_net, 10).commands["collect"],
+   "风格桌：采集命令必须带 `--rotate`（C++ 侧每场把策略串循环移位 ⇒ 每 4 场每席轮到每种风格一次）")
+# ⚠ 2026-10-08 用户指正：**只做循环移位不够** —— 它只覆盖 4 个排列且保持循环序 ⇒ 一代之内每个风格
+#   相对其他三家的方位被钉死（实测 400 场：def 恒 +1 下家、win 恒 +2 対面、atk 恒 +3 上家）。
+#   口径 = 一次训练里把 4! = 24 种座次关系都平均 ⇒ 采集桌必须带 C++ 的 `--rotate-perm`。
+_style_collect = v4_loop.plan_commands(_style_cfg, 1, _lo_net, 10).commands["collect"]
+ok("--rotate-perm" in _style_collect,
+   "风格桌：采集命令必须带 `--rotate-perm`（4! = 24 排列；只 `--rotate` 会漏掉相对方位）")
+_style_eval = v4_loop.plan_commands(_style_cfg, 1, _lo_net, 10).commands.get("eval", [])
+ok("--rotate-perm" in _style_eval,
+   "风格桌：**评测**桌也必须带 `--rotate-perm`（2026-10-08 用户裁决：训练与闸门同一套座次口径）")
+_no_full = v4_loop.LoopConfig(label="v4-sc-nofull", init="X:/net.bin", no_java=True, producer="cpp",
+                              style="def", style_pools=_style_pools, rotate_full=False)
+ok("--rotate-perm" not in v4_loop.plan_commands(_no_full, 1, _lo_net, 10).commands["collect"],
+   "风格桌：`rotate_full=False` 能强制关掉 24 排列（复现旧口径 / 与历季对齐时用）")
+# 红证：旧口径（`--opponents`）在"学生恰好 1 席"上**必须**是 2 席 —— 所以它不能用于风格线
+_old_cfg = v4_loop.LoopConfig(label="v4-sc-old", init="X:/net.bin", no_java=True, producer="cpp",
+                              opponents=("X:/opp1.bin", "X:/opp2.bin"))
+_old_cmd = v4_loop.plan_commands(_old_cfg, 1, _lo_net, 10).commands["collect"]
+_old_seats = str(_old_cmd[_old_cmd.index("--policy") + 1]).split(",")
+eq("风格桌红证：旧口径确实是**学生 2 席**（因此风格线不许用它）",
+   sum(1 for x in _old_seats if x == _old_cfg.student_spec(_lo_net)), 2)
+# 错配必须报错（静默降级 = 少一个风格的桌子，正是要修的病）
+try:
+    v4_loop.LoopConfig(label="x", init="X:/net.bin", no_java=True, producer="cpp",
+                       style="zzz", style_pools=_style_pools).policy(_lo_net, 0)
+    ok("风格桌：本线风格不在池里必须报错（不许静默降级）", False)
+except ValueError:
+    ok("风格桌：本线风格不在池里必须报错（不许静默降级）", True)
 ok("--aux" in _lo.commands["collect"] and "--aux" in _lo.commands["compact"],
    "v4 回路：采集与紧凑集都带 `--aux`（信念/危险头的监督不能因为换生产者就没了）")
 eq("v4 回路：学生策略串逐字一致（`is_student` 靠字符串相等判定）",
@@ -3309,6 +3393,448 @@ except SystemExit as _bf_e:
 
 
 
+# ================================================================ 风格奖励塑形（`--style-bonus`）
+# 判据四条（2026-10-09 加这条通道时立的）：
+#   ① **默认关闭 ⇒ 逐位不变**：命令行里一个字符都不多、`style_bonus` 列不建、训练一行都不走；
+#      红证：把"列存在但全 0"的紧凑集与"列不存在"的紧凑集各训一次，**权重逐字节相同**；
+#   ② **白化正确性**：白化后的指示量在数据集上均值 ≈ 0、方差 ≈ 1（数字要从真数据上量出来）；
+#   ③ **成对质量轴真的生效**：合成一个"立直了但放铳"的小局 ⇒ 它**拿不到**奖励；
+#   ④ 审计账齐全（每个轴的 w / μ / σ / 付奖小局数 / 付奖总额）。
+print("== 风格奖励塑形（`--style-bonus`）==")
+from mahjong_ml.v4 import style_reward as v4_sr                    # noqa: E402
+from mahjong_ml.v4 import loop as v4_loop_sr                       # noqa: E402（本段自带别名）
+import hashlib as _hashlib                                         # noqa: E402
+
+# ---- ① 文法：未登记的轴 / 权重不是数 / 重复轴 / 坏 PAIR 一律**报错**（静默忽略 = 塑形没了却不报）
+eq("风格奖励：`riichi=1.0:no_deal` 解析出权重与质量轴",
+   (lambda s: (s.axes[0].name, s.axes[0].weight, s.axes[0].pair))(v4_sr.parse_bonus("riichi=1.0:no_deal")),
+   ("riichi", 1.0, "no_deal"))
+eq("风格奖励：空串 = **关闭**（缺省路径）", bool(v4_sr.parse_bonus("")), False)
+for _bad, _why in (("riichi", "没写质量轴"), ("riichi=1.0", "没写质量轴"),
+                   ("zzz=1:no_deal", "未登记的轴"), ("riichi=nan:no_deal", "权重不是有限数"),
+                   ("riichi=1:no_deal,riichi=2:win", "同一个轴出现两次"),
+                   ("riichi=1:nope", "质量轴不认识")):
+    try:
+        v4_sr.parse_bonus(_bad)
+        ok(False, f"风格奖励：`{_bad}`（{_why}）必须报错")
+    except v4_sr.BonusSpecError:
+        ok(True, f"风格奖励：`{_bad}`（{_why}）被硬拒 ✓")
+# ⛔ 这条是这次改动的**核心承诺**：不许"只按立直了付奖"（那会学出无脑立直）。
+ok(v4_sr.PAIR_KEYS and all(k in v4_sr.PAIR_KEYS for k in ("no_deal", "win")),
+   "风格奖励：成对质量轴的候选表里有 `no_deal` / `win`", str(sorted(v4_sr.PAIR_KEYS)))
+_eq_cfg = v4_loop_sr.LoopConfig(label="v4-sr-cfg", init="X:/net.bin", no_java=True, producer="cpp",
+                                style="def", style_pools={
+                                    "def": ("X:/d1.bin",), "atk": ("X:/a1.bin",),
+                                    "win": ("X:/w1.bin",)})
+_sr_cfg_on = v4_loop_sr.LoopConfig(label="v4-sr-cfg", init="X:/net.bin", no_java=True, producer="cpp",
+                                   style="def", style_pools={
+                                       "def": ("X:/d1.bin",), "atk": ("X:/a1.bin",),
+                                       "win": ("X:/w1.bin",)},
+                                   style_bonus="riichi=1.0:no_deal")
+_sr_cfg_off = v4_loop_sr.LoopConfig(label="v4-sr-cfg", init="X:/net.bin", no_java=True, producer="cpp",
+                                    style="def", style_pools={
+                                        "def": ("X:/d1.bin",), "atk": ("X:/a1.bin",),
+                                        "win": ("X:/w1.bin",)})
+_sr_cmd_on = v4_loop_sr.plan_commands(_sr_cfg_on, 1, Path("X:/net.bin"), 100).commands["compact"]
+_sr_cmd_off = v4_loop_sr.plan_commands(_sr_cfg_off, 1, Path("X:/net.bin"), 100).commands["compact"]
+ok(not any("style" in str(x) for x in _sr_cmd_off),
+   "风格奖励：**默认关闭**时紧凑集命令行里没有 `style` 字面量（逐字不变）", str(_sr_cmd_off[-4:]))
+eq("风格奖励：开启时只多出两个开关（不多不少）",
+   [x for x in _sr_cmd_on if x not in _sr_cmd_off],
+   ["--style-bonus", "riichi=1.0:no_deal", "--style-bonus-whiten", "student"])
+
+# ---- 合成一条**可控**的轨迹（4 场 × 2 小局；小局级的立直/放铳/和了都写死，不用随机）
+# 为什么要合成而不是拿真轨迹：判据要能**逐个断言**（"这一小局立直了且没放铳 ⇒ 必须付奖"），
+# 真轨迹里这种小局是随机的、数量也不够；而口径本身由 `style-vector.py` 的对账钉住（见报告）。
+# 小局布局（**小局级**：四席取或之后的值，见 `style_reward._merge_cells`）：
+#   hand0 立直=1 放铳=0（有人立直、没人放铳 ⇒ μ 那一半）
+#   hand1 立直=0 放铳=1（没人立直、有人放铳 ⇒ 低一半）
+#   hand2 立直=1 放铳=1（**立直者就是放铳者** ⇒ 质量轴必须拦下它）
+#   hand3 立直=0 放铳=0（都没发生）
+#   hand4 立直=1 放铳=0 / hand5 立直=0 放铳=1 / hand6 立直=1 放铳=1 / hand7 立直=0 放铳=0
+# ⇒ 立直 p=0.5、σ=0.5（白化参数不退化），且有"立直+没放铳"（该付奖）与"立直+放铳"（不该付奖）两种。
+_sr_src = scratch("v4-style-reward")
+_sr_rows_per_hand = 3                       # 每个小局 3 条决策 ⇒ 验"同一小局的行同值"
+_sr_R = {0: 1, 1: 0, 2: 1, 3: 0, 4: 1, 5: 0, 6: 1, 7: 0}        # 小局 → 有人立直
+_sr_deal = {0: 0, 1: 1, 2: 1, 3: 0, 4: 0, 5: 1, 6: 1, 7: 0}     # 小局 → 有人放铳
+_sr_win = {0: 0, 1: 3, 2: 2, 3: -1, 4: 3, 5: 0, 6: 2, 7: -1}    # 小局 → 和了者（-1 = 流局）
+_sr_agari = {h: (_sr_win[h] >= 0) for h in range(8)}
+_sr_L = {h: (2 if _sr_deal[h] else -1) for h in range(8)}       # 放铳者 = 2 号席（固定）
+_sr_delta = {h: [6000 if _sr_win[h] == s else (-8000 if s == _sr_L[h] else 0)
+                 for s in range(4)] for h in range(8)}
+for _g in range(4):
+    _jl = _sr_src / f"g{_g}.jsonl"
+    _rows = []
+    _side_rows = []
+    for _h in (2 * _g, 2 * _g + 1):
+        for _s in range(4):
+            # 立直：小局级 R=1 时只要**偶数席**宣言 ⇒ 小局级取或 = 1；R=0 时没人宣言
+            _riichi = bool(_sr_R[_h]) and (_s % 2 == 0)
+            # ⚠ 小局 2/6（立直=1 且放铳=1）刻意让**立直的那两席**里有一席是放铳者：
+            #   这样"立直的人自己点了炮"与"别家点的炮"两种情形都出现过，质量轴的判据才不是空的。
+            if _sr_R[_h] and _sr_deal[_h] and _s == 0:
+                _loser_row = 0
+            else:
+                _loser_row = _sr_L[_h]
+            for _i in range(_sr_rows_per_hand):
+                _legal = list(_v4obs["legal"])[:2]
+                _obs = dict(_v4obs, v=3, seat=_s, legal=_legal, player_draws=1 + _i,
+                            riichi=[False, False, False, False], riichi_turn=[0, 0, 0, 0],
+                            melds=[[], [], [], []])
+                _rows.append({
+                    "type": "decision", "game": _g, "hand_no": _h, "step": _i, "seat": _s,
+                    "policy": ("teacher" if _s % 2 else "net:T:\\x\\stu.bin"), "kind": "turn",
+                    "legal": _legal,
+                    "chosen": ("riichi:1m" if (_riichi and _i == 0) else _legal[_i % 2]),
+                    "chosen_index": _i % 2,
+                    "hand_delta": _sr_delta[_h], "hand_winner": _sr_win[_h],
+                    "hand_loser": _loser_row, "hand_agari": _sr_agari[_h],
+                    "placement": [1, 2, 3, 4],
+                    "final_scores": [26000, 25000, 24000, 25000], "obs": _obs})
+                _side_rows.append(dict(PER_SEAT_ROW, danger=DANGER, cand=CAND0))
+    with _jl.open("w", encoding="utf-8") as _fh:
+        for _r in _rows:
+            _fh.write(json.dumps(_r, ensure_ascii=False) + "\n")
+        _fh.write(json.dumps({"type": "game", "game": _g, "seed": _g, "policies": ["teacher"] * 4,
+                              "start_score": 25000, "final_scores": [26000, 25000, 24000, 25000],
+                              "placement": [1, 2, 3, 4]}) + "\n")
+    write_sidecar(_jl, _side_rows)
+
+# ---- ③ 逐小局指示量：直接对着合成数据核一遍（分子/分母口径与 `style-vector.py` 的轴定义同源）
+_sr_hands = list(v4_sr.iter_hands(_sr_src / "g0.jsonl"))
+eq("风格奖励：合成轨迹 2 个小局", len(_sr_hands), 2)
+_cells = [(h, s, v) for _g, h, st in _sr_hands for s, v in v4_sr.indicator_cells(st, None)]
+eq("风格奖励：指示量按 (小局 × 座位) 展开 = 4 席", len(_cells), 8)
+eq("风格奖励：小局 0 的立直席（偶数席）",
+   sorted(s for h, s, v in _cells if h == 0 and v["riichi"] > 0), [0, 2])
+# 小局 0 的布局是"有人立直、**没人放铳**"（布局表见上面合成轨迹那一段），
+# 小局 1 是"没人立直、**有人放铳（2 号席）**" ⇒ 这两条正好把两种情形都钉住。
+eq("风格奖励：小局 0 没有任何放铳（布局=立直且无人放铳）",
+   sorted(s for h, s, v in _cells if h == 0 and v["deal"] > 0), [])
+eq("风格奖励：小局 1 的放铳只落在 hand_loser 那一席",
+   sorted(s for h, s, v in _cells if h == 1 and v["deal"] > 0), [2])
+eq("风格奖励：`no_deal` 是 `deal` 的补（流局与无人放铳都算未放铳）",
+   sorted(s for h, s, v in _cells if h == 1 and v["no_deal"] > 0), [0, 1, 3])
+# 小局级合并（`_merge_cells`）：`no_deal` 按"这一小局有没有人放铳"归一 ——
+# ⛔ 不能用 `max(no_deal)`，那会在"三家没放铳、一家放铳"时把放铳洗成 1。
+_st1 = [st for _g, h, st in v4_sr.iter_hands(_sr_src / "g0.jsonl") if h == 1][0]
+_eq_merged = v4_sr._merge_cells([v for _s, v in v4_sr.indicator_cells(_st1, None)])
+eq("风格奖励：小局级合并里 `no_deal` = 0（只要这一小局有人放铳）", _eq_merged["no_deal"], 0.0)
+eq("风格奖励：小局级合并里 `riichi` = 1（小局 0：任何一家立直都算）",
+   v4_sr._merge_cells([v for _s, v in v4_sr.indicator_cells(_sr_hands[0][2], None)])["riichi"], 1.0)
+
+# ---- ② 白化：μ/σ 从**本数据集**实测，且白化后均值 ≈ 0、方差 ≈ 1（数字要真量出来）
+_sr_all_hands = [hh for f in sorted(_sr_src.glob("g*.jsonl")) for hh in v4_sr.iter_hands(f)]
+_sr_stats, _sr_audit = v4_sr.whitening_stats(
+    v4_sr.parse_bonus("riichi=1.0:no_deal"), iter(_sr_all_hands),
+    student_policies=None, quiet=True)
+_sr_w = _sr_stats["riichi"]
+# 期望值**从合成数据现算**（不写死常数）：Bernoulli 的 μ 就是指示量的均值、σ 就是 √(p(1−p))。
+# ⚠ 统计单位必须是**小局**（四席取或成一份）—— 与 `whitening_stats` / 付奖单位一致；
+#   按逐席算会得到另一个均值（实测 0.25 vs 0.5，第一版就是这么假红的）。
+_sr_p = float(np.mean([v4_sr._merge_cells([vv for _s, vv in v4_sr.indicator_cells(st, None)])["riichi"]
+                       for _g, _h, st in _sr_all_hands]))
+ok(abs(_sr_w.mu - _sr_p) < 1e-12 and abs(_sr_w.sd - (_sr_p * (1 - _sr_p)) ** 0.5) < 1e-12,
+   "风格奖励：Bernoulli 的白化参数 = p、√(p(1−p))（与样本均值/标准差逐位一致）",
+   f"μ={_sr_w.mu} σ={_sr_w.sd}（数据 p={_sr_p}）")
+ok(0.1 < _sr_p < 0.9, "风格奖励：合成数据的 p 不退化（否则白化参数会撞上 σ=0 的负向闸门）",
+   f"p={_sr_p}")
+_sr_chk = v4_sr.audit_whitening(
+    v4_sr.parse_bonus("riichi=1.0:no_deal"), _sr_stats, iter(_sr_all_hands),
+    student_policies=None)
+ok(_sr_chk["_all_ok"]["ok"], "风格奖励：白化自检通过（均值 ≈ 0、方差 ≈ 1）",
+   f"mean={_sr_chk['riichi']['mean']:+.2e} var={_sr_chk['riichi']['var']:.12f}")
+ok(abs(_sr_chk["riichi"]["var"] - 1.0) < 1e-9,
+   "风格奖励：白化后方差**真的**是 1（不是 ≈1 的摆设）", f"{_sr_chk['riichi']['var']!r}")
+# 负向：常数轴（所有人都不立直）⇒ σ=0 ⇒ **必须报错**（不许 1/0，也不许默默跳过这一轴）
+_sr_flat = scratch("v4-style-flat")
+(_sr_flat / "g0.jsonl").write_text("", encoding="utf-8")
+with (_sr_flat / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    for _i in range(4):
+        _fh.write(json.dumps({
+            "type": "decision", "game": 0, "hand_no": 0, "step": _i, "seat": _i,
+            "policy": "teacher", "kind": "turn", "legal": ["discard:1m"], "chosen": "discard:1m",
+            "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": -1,
+            "hand_agari": False,
+            "obs": dict(_v4obs, v=3, seat=_i, legal=["discard:1m"],
+                        riichi=[False] * 4, riichi_turn=[0] * 4, melds=[[], [], [], []])}
+        ) + "\n")
+try:
+    v4_sr.whitening_stats(v4_sr.parse_bonus("riichi=1.0:no_deal"),
+                          v4_sr.iter_hands(_sr_flat / "g0.jsonl"), quiet=True)
+    ok(False, "风格奖励：常数轴（σ=0）必须报错")
+except v4_sr.BonusSpecError as _e:
+    ok("σ" in str(_e), "风格奖励：常数轴 σ=0 被硬拒（不静默跳过那一轴）✓", str(_e)[:70])
+
+# ---- ③ 成对质量轴**红证**：合成一个"立直了但放铳"的小局 ⇒ 它拿不到奖励
+#   ⚠ 奖励是**小局级**的（`hand_bonus`）：四席取或成一份之后按 `Σ w·1[PAIR]·(x−μ)/σ` 付。
+_sr_spec = v4_sr.parse_bonus("riichi=1.0:no_deal")
+_red = v4_sr.HandState()
+_red.riichi[2] = True
+_red.loser = 2                                   # 这一席立直了，**但它是放铳者**
+_red.agari = False
+_red.delta = [-1000, -1000, -8000, -1000]
+_red_v = v4_sr.indicator_values(_red)[2]
+eq("风格奖励红证：合成小局的立直指示量 = 1（它确实立直了）", _red_v["riichi"], 1.0)
+eq("风格奖励红证：伴随质量轴 `no_deal` = 0（它放铳了）", _red_v["no_deal"], 0.0)
+eq("风格奖励红证：**立直但放铳 ⇒ 付奖指示量为 0**（⛔ 不许只按立直付奖）",
+   v4_sr.paid_indicator(_sr_spec.axes[0], _red_v), 0.0)
+_red_total, _red_detail, _red_n, _red_merged = v4_sr.hand_bonus(_sr_spec, _sr_stats, _red)
+eq("风格奖励红证：这一小局拿到的塑形 = **0 − μ/σ 的负偏移**（不是 +1/σ 的正奖励）",
+   round(_red_total, 12), round(-_sr_w.mu / _sr_w.sd, 12))
+# 反向对照：同一个立直席**没放铳**（本小局无人放铳）⇒ 必须付奖（否则上一条可能只是"恒不付奖"）
+_green = v4_sr.HandState()
+_green.riichi[2] = True
+_green.loser = -1
+_green.agari = True
+_green.winner = 3                                # 和了的是别家（不是立直那家、也不是放铳者）
+_green.delta = [0, 0, 0, 6000]
+_green_total, _gd, _gn, _gmerged = v4_sr.hand_bonus(_sr_spec, _sr_stats, _green)
+eq("风格奖励：对照小局的合并后 `no_deal` = 1（无人放铳）", _gmerged["no_deal"], 1.0)
+eq("风格奖励对照：同样立直、**没放铳** ⇒ 付奖（(1−μ)/σ）",
+   round(_green_total, 12), round((1.0 - _sr_w.mu) / _sr_w.sd, 12))
+ok(_green_total > _red_total,
+   "风格奖励：放铳那一小局的塑形**严格低于**没放铳那一小局（质量轴在起作用）",
+   f"放铳 {_red_total:+.3f} < 没放铳 {_green_total:+.3f}")
+# 四席取或：立直的是**别家**、放铳的也是**别家**（同一家）⇒ 仍然拿不到奖励
+_mix = v4_sr.HandState()
+_mix.riichi[0] = True
+_mix.loser = 0
+_mix.agari = False
+_mix.delta = [-8000, 1000, 3000, 4000]
+_mix_total, _md, _mn, _ = v4_sr.hand_bonus(_sr_spec, _sr_stats, _mix)
+eq("风格奖励：四席取或下「立直的就是放铳的那个」同样拿不到奖励", round(_mix_total, 12),
+   round(-_sr_w.mu / _sr_w.sd, 12))
+ok(abs(_mix_total - _red_total) < 1e-12,
+   "风格奖励：谁立直谁放铳不影响判定（`no_deal` 按「本小局有没有人放铳」归一，不被 max 洗掉）")
+
+# ---- 数据集层：`style_bonus` 列 + 白化参数 + 审计账；且**格内同值、格间不同**
+_sr_out = _sr_src / "ds"
+_sr_meta = v4_ds.build(_sr_src, _sr_out, val_frac=0.5, split_seed=0, aux=False, quiet=True,
+                       student="net:T:\\x\\stu.bin", style_bonus="riichi=1.0:no_deal")
+_sr_d = v4_ds.load_split(_sr_out, "train")
+ok(_sr_d[v4_sr.COLUMN] is not None, "风格奖励：数据集写出 `style_bonus` 列",
+   str(_sr_meta["style_reward"]["column"]))
+ok(_sr_meta["style_reward"]["enabled"] and _sr_meta["style_reward"]["whitening"],
+   "风格奖励：meta 记下「开了」+ 白化参数（μ/σ 可审计）")
+eq("风格奖励：meta 的白化范围 = student（缺省口径）",
+   _sr_meta["style_reward"]["whiten_scope"], "student")
+ok(Path(_sr_meta["style_reward"]["audit_path"]).is_file()
+   and json.loads(Path(_sr_meta["style_reward"]["audit_path"]).read_text(encoding="utf-8"))["axes"],
+   "风格奖励：奖励账落盘（`style-reward.json`）且逐轴有 w/μ/σ/付奖小局数/付奖总额")
+_ax0 = json.loads(Path(_sr_meta["style_reward"]["audit_path"]).read_text(encoding="utf-8"))["axes"][0]
+ok(all(k in _ax0 for k in ("axis", "weight", "mu", "sd", "paid_hands", "paid_sum")),
+   "风格奖励：账里每一轴的字段齐（w / μ / σ / 付奖小局数 / 付奖总额）", str(sorted(_ax0))[:90])
+# 小局内同值 / 小局间不同（`style_bonus` 是**小局级**量，不是全局常量、也不是逐席量）
+_sc = {"train": np.asarray(_sr_d[v4_sr.COLUMN], dtype=np.float64),
+       "val": np.asarray(v4_ds.load_split(_sr_out, "val")[v4_sr.COLUMN], dtype=np.float64)}
+_all_sp: dict = {}
+for _sp, _cv in _sc.items():
+    _dd = v4_ds.load_split(_sr_out, _sp)
+    _k = (np.asarray(_dd["game"], dtype=np.int64) * 100003
+          + np.asarray(_dd["hand_no"], dtype=np.int64))
+    _o = np.argsort(_k, kind="stable")
+    _ks, _vs = _k[_o], _cv[_o]
+    _same = _ks[1:] == _ks[:-1]
+    ok(float(np.abs(_vs[1:][_same] - _vs[:-1][_same]).max()) == 0.0 if bool(_same.any()) else True,
+       f"风格奖励：{_sp} 切分里同一个**小局**的每一行**同值**（含不同席位的那几行）")
+    _all_sp[_sp] = _cv
+# 反面对照：**整个数据集**上 `style_bonus` 必须真的随小局变化（否则"同值"那条判据可能只是
+# "全列常数"）。⚠ 不能要求**每个切分**都有差异：合成集只有 8 个小局，而切分是按**场**分的
+# ⇒ 某个切分里恰好全是"没人立直"（同一个值）是**正常**的（实测 train 就是这种）。
+# 真数据上两个切分都有差异（`std > 0`），这一条在报告里用真数据集再验一次。
+_merged_all = np.concatenate([_all_sp[k] for k in ("train", "val")])
+ok(float(np.std(_merged_all)) > 0.0,
+   "风格奖励：`style_bonus` 不是全局常量（真有逐小局的差异）",
+   f"std={float(np.std(_merged_all)):.4f}")
+ok(len(set(np.round(_merged_all, 12).tolist())) > 1,
+   "风格奖励：数据集上至少出现**两种**不同的塑形值（付奖/不付奖都在）",
+   f"{sorted(set(np.round(_merged_all, 6).tolist()))}")
+# 负向：成对质量轴恒假（`:none`）⇒ 列是"未付奖的负偏移"，但**必须**与"完全没付奖"区分开 ——
+# 这里用它做 ① 的对照集：列存在、但没有一笔奖励（= 训练里加成 0）。
+_sr_zero_meta = v4_ds.build(_sr_src, _sr_src / "ds0", val_frac=0.5, split_seed=0, aux=False,
+                            quiet=True, student="net:T:\\x\\stu.bin",
+                            style_bonus="riichi=1.0:none")
+_sr_zero = json.loads(Path(_sr_zero_meta["style_reward"]["audit_path"]).read_text(
+    encoding="utf-8"))["axes"][0]
+eq("风格奖励：`:none`（恒假质量轴）⇒ 付奖小局数 0、付奖总额 0（红证的负向对照）",
+   (_sr_zero["paid_hands"], _sr_zero["paid_sum"]), (0, 0.0))
+
+# ---- 审计账的**持久副本**（`MAHJONG_STYLE_AUDIT_DIR`，2026-10-09 加）------------------------
+# 为什么要有这一段：账默认落在 `compact\<tag>\style-reward.json`，而 `tools\run-league.ps1`
+#   **每代结束把 `compact\<tag>` 整目录轮换删掉** ⇒ 上一轮 4 代的账一份都没活下来。
+#   ⛔ `run-league.ps1` 不许改 ⇒ 口径在工具侧：给了环境变量就另写一份到**不参与轮换**的路径。
+# 判据三条：① 落盘位置 = 持久目录；② 与 compact 里那份**逐字节相同**（不是第二套口径）；
+#   ③ **没给环境变量时老口径不变**（仍然写在 `<紧凑集>/style-reward.json`，meta 指向它）。
+_sr_persist = _sr_src / "audit-persist"
+_old_audit_env = os.environ.get(v4_sr.AUDIT_DIR_ENV)
+os.environ[v4_sr.AUDIT_DIR_ENV] = str(_sr_persist)
+try:
+    _sr_pmeta = v4_ds.build(_sr_src, _sr_src / "ds-persist", val_frac=0.5, split_seed=0, aux=False,
+                            quiet=True, student="net:T:\\x\\stu.bin",
+                            style_bonus="riichi=1.0:no_deal")
+finally:
+    if _old_audit_env is None:
+        os.environ.pop(v4_sr.AUDIT_DIR_ENV, None)
+    else:
+        os.environ[v4_sr.AUDIT_DIR_ENV] = _old_audit_env
+_p_path = Path(_sr_pmeta["style_reward"]["audit_path"])
+ok(_p_path.parent == _sr_persist and _p_path.is_file(),
+   "风格奖励：给了 `MAHJONG_STYLE_AUDIT_DIR` ⇒ 账写到**不参与轮换**的持久路径，且 meta 指向它",
+   str(_p_path))
+ok(_p_path.read_bytes() == (_sr_src / "ds-persist" / "style-reward.json").read_bytes(),
+   "风格奖励：持久副本与 compact 里那份**逐字节相同**（同一份 payload，不是第二套口径）")
+ok((_sr_src / "audit-persist" / "ds-persist.json").is_file(),
+   "风格奖励：持久副本的文件名 = `<紧凑集目录名>.json`（= `tag`，与 `run-league.ps1` 的 tag 对齐）")
+ok(Path(_sr_meta["style_reward"]["audit_path"]) == _sr_out / "style-reward.json",
+   "风格奖励：**没给**环境变量时老口径逐字不变（账仍在 `<紧凑集>/style-reward.json`）",
+   str(_sr_meta["style_reward"]["audit_path"]))
+# ---- ①**默认关闭 ⇒ 逐位不变**的两条判据 ------------------------------------------------
+# 判据 a：同一个数据目录，`style_bonus=""`（缺省）与"根本不提这个参数"产出的列**完全相同**
+#   （p3：判断"关闭路径"真的没建列、也没改别列）。
+_off_cmd = v4_loop_sr.plan_commands(
+    v4_loop_sr.LoopConfig(label="v4-sr-off", init="X:/net.bin", no_java=True, producer="cpp"),
+    1, Path("X:/net.bin"), 10).commands["compact"]
+ok("--style-bonus" not in _off_cmd and "style_bonus" not in " ".join(_off_cmd),
+   "风格奖励：缺省（不传）时命令行里没有 `--style-bonus`（判据 a）")
+_off_dir = _sr_src / "ds-off"
+v4_ds.build(_sr_src, _off_dir, val_frac=0.5, split_seed=0, aux=False, quiet=True,
+            student="net:T:\\x\\stu.bin")
+ok(v4_ds.load_split(_off_dir, "train")[v4_sr.COLUMN] is None,
+   "风格奖励：关闭时不建 `style_bonus` 列（读回是 None，训练端据此一行都不走）")
+ok("style_bonus" not in {p.name.split(".")[-2] for p in _off_dir.glob("train.*.npy")},
+   "风格奖励：关闭时磁盘上根本没有 `train.style_bonus.npy`")
+# 判据 b（**权重哈希**）：把**同一份**紧凑集复制两份，其中一份**删掉** `style_bonus` 列
+#   （= 老版本产物），各训一步，`model.pt` 必须**逐字节相同**。
+#   ⚠ 为什么不能拿"另一份 `dataset build` 的产物"来比：切分（哪几场进 val）与列清单都会随
+#   调用参数变 ⇒ 那样比出来的是"两份数据集不同"，不是"这一列被忽略"（第一版就是这么假红的）。
+_sr_cmp = scratch("v4-sr-cmp")
+shutil.copytree(_sr_out, _sr_cmp / "no-col")
+(_sr_cmp / "no-col" / f"train.{v4_sr.COLUMN}.npy").unlink()
+(_sr_cmp / "no-col" / f"val.{v4_sr.COLUMN}.npy").unlink()
+ok(v4_ds.load_split(_sr_cmp / "no-col", "train")[v4_sr.COLUMN] is None,
+   "风格奖励：删掉那一列之后读回是 None（= 老版本紧凑集的形状）")
+# ⚠ 两份的 `meta.json` 里 `style_reward` 段不同（一份记着"开了"）—— 但训练**不读那一段**
+#   （列在不在才是判据）⇒ 权重仍然必须逐字节相同；这本身也是一条判据（meta 不参与数值）。
+_sr_t0 = scratch("v4-sr-train-nocol")
+_sr_t1 = scratch("v4-sr-train-zerocol")
+# ⚠ `--advantage hand` 要一份**真权重**当行为策略（`_behaviour_values` 要载网）——
+#   自己导一份小的（`save_net` 是 `v4 loop` 导出的同一份实现，别手搓格式）。
+_sr_beh = _sr_src / "beh.bin"
+_sr_beh_model = v4_model.build(seed=5)
+v4_export.save_net(_sr_beh_model.state_dict(), dict(_sr_beh_model.dims()), _sr_beh)
+_ptbase_sr = dict(epochs=1, batch=2, eval_batch=2, lr=1e-3, max_steps=1,
+                  seed=13, threads=1, device="cpu", stage_a=0.0, stage_b=0.0, head_lr_mult=1.0,
+                  mask_frac=0.0, ssl_weight=0.0, stage_c_lr_mult=1.0, rwr_beta=0.0,
+                  # ⚠ **必须**走 `--advantage hand` 那条路：只有它在 `_hand_advantage` 里读
+                  #   `style_bonus`。缺省（`advantage=auto`）走的是"整场结果 + 批内 z-score"那条
+                  #   老路，根本不碰这一列 ⇒ 拿它测会得到一个恒红的假判据（第一版就是这么踩的）。
+                  advantage="hand", value_target="delta", behaviour=str(_sr_beh))
+v4_pt.train(argparse.Namespace(**{**_ptbase_sr, "data": str(_sr_cmp / "no-col"),
+                                  "label": "v4-sr-nocol"}))
+_pt0 = paths.DATA_ROOT / "ckpt" / "v4-sr-nocol" / "model.pt"
+v4_pt.train(argparse.Namespace(**{**_ptbase_sr, "data": str(_sr_out), "label": "v4-sr-zerocol"}))
+_pt1 = paths.DATA_ROOT / "ckpt" / "v4-sr-zerocol" / "model.pt"
+ok(_pt0.is_file() and _pt1.is_file(), "风格奖励：两次训练的 checkpoint 都落盘")
+
+
+def _weight_hash(p) -> str:
+    """checkpoint 里**权重**的哈希（逐张量名 + 原始字节）。
+
+    ⚠ 为什么不是整个 `model.pt` 的字节哈希：checkpoint 里还存着 `dataset_meta`
+    （而 `meta.json` 的 `style_reward` 段在两份之间必然不同）⇒ 整文件哈希会把"元数据不同"
+    误报成"权重不同"。判据要落在**权重**上（那才是"逐位不变"说的东西）。
+    """
+    _ck = torch.load(p, map_location="cpu", weights_only=False)
+    _h = _hashlib.sha256()
+    for _k in sorted(_ck["model"]):
+        _v = _ck["model"][_k]
+        _h.update(_k.encode())
+        _h.update(str(tuple(_v.shape)).encode())
+        _h.update(str(_v.dtype).encode())
+        _h.update(_v.detach().cpu().contiguous().numpy().tobytes())
+    return _h.hexdigest()
+
+
+ok(_weight_hash(_pt0) == _weight_hash(_pt1),
+   "风格奖励：**列不存在 vs 列存在 ⇒ 权重逐位相同**（默认关闭 = 逐位不变）",
+   f"{_weight_hash(_pt0)[:16]} vs {_weight_hash(_pt1)[:16]}")
+# 判据 c：**把那一列改成"不可被基线吸收"的随机非 0 值** ⇒ 权重必须变。
+#   ⚠ 两个坑（第一版都踩过，别改回去）：
+#   ① 常数加成（每行 +500）**必须**逐位相同：优势在末尾按学生行 z-score 归一化，
+#      常数会被那一步整个减掉 —— 那是**正确的性质**，拿它当判据会写出一个恒红的假判据；
+#   ② 平滑递增（0,1,2,…）也**几乎**没影响：基线是 `α+β·V`（最小二乘），一行行递增的奖励
+#      基本是状态的函数、会被拟合掉（实测 std(A_raw)/std(reward) 0.969× ⇒ 差一点测不出）；
+#   ③ **合成集本身量级不够**：12 个学生小局、每小局只有 2 条学生行 ⇒ 即使 ±1000 点的随机奖励，
+#      训练一步后权重仍**逐位相同**（实测）。不是 bug，是"效应小于一步更新的分辨率"
+#      ⇒ 幅度提到与收支同量级（±6000 点），并把 batch 放大到 48（一步见更多行）。
+_sr_nz = scratch("v4-sr-nz")
+shutil.copytree(_sr_out, _sr_nz / "ds")
+_nz_rng = np.random.default_rng(7)
+for _sp in ("train", "val"):
+    _p = _sr_nz / "ds" / f"{_sp}.{v4_sr.COLUMN}.npy"
+    _dd = v4_ds.load_split(_sr_nz / "ds", _sp)
+    # ⚠ 读数组要用 `np.array(..., copy=True)` **脱离内存映射**再 `np.save` 覆盖同一个文件：
+    #   Windows 上"映射还开着又去 open(..., 'wb')"会报 `OSError: [Errno 22] Invalid argument`
+    #   （`np.load` 的 `mmap_mode="r"` 就是映射；`backfill_rank_points` 那边踩过同一条）。
+    _k = np.array(np.asarray(_dd["game"], dtype=np.int64) * 100003
+                  + np.asarray(_dd["hand_no"], dtype=np.int64), copy=True)
+    del _dd
+    _uk, _inv = np.unique(_k, return_inverse=True)
+    # **按小局**给一份随机值（与 `hand_bonus` 的口径一致：同一小局每一行同值）
+    np.save(_p, _nz_rng.normal(0.0, 6000.0, size=_uk.size).astype(np.float32)[_inv])
+v4_pt.train(argparse.Namespace(**{**_ptbase_sr, "data": str(_sr_nz / "ds"), "batch": 48,
+                                  "eval_batch": 48, "lr": 1e-2, "label": "v4-sr-nz"}))
+_pt2 = paths.DATA_ROOT / "ckpt" / "v4-sr-nz" / "model.pt"
+ok(_weight_hash(_pt2) != _weight_hash(_pt0),
+   "风格奖励：非 0 的塑形**真的改变了权重**（否则上一条会退化成「这一列被忽略」）",
+   f"{_weight_hash(_pt0)[:16]} vs {_weight_hash(_pt2)[:16]}")
+# 判据 d：`gae` 模式下**不许**静默忽略塑形（那条路径的链上奖励由 `v4adv.hand_reward` 现算，
+#   塑形项没接进去）—— 直接喂一个"带 style_bonus 列"的最小数据集给 `_hand_advantage(mode="gae")`，
+#   它必须**报错**而不是当没看见（静默忽略 = 以为在塑形、其实没有）。
+_gae_probe = {"nlegal": np.zeros(4, dtype=np.int64),
+              "delta": np.array([100, -100, 200, -200], dtype=np.int32),
+              "game": np.zeros(4, dtype=np.int32), "hand_no": np.zeros(4, dtype=np.int16),
+              "seat": np.array([0, 0, 0, 0], dtype=np.int8),
+              "is_student": np.ones(4, dtype=np.int8),
+              v4_sr.COLUMN: np.array([900.0, 900.0, 900.0, 900.0], dtype=np.float32)}
+try:
+    v4_pt._hand_advantage(_gae_probe, np.zeros(1), gamma=1.0, lam=0.9, rank_weight=0.0,
+                          is_student=np.ones(4), mode="gae")
+    ok(False, "风格奖励：`gae` 模式下的塑形必须报错（不许静默忽略）")
+except SystemExit as _e:
+    ok("style-bonus" in str(_e) or "塑形" in str(_e) or "advantage hand" in str(_e),
+       "风格奖励：`gae` 模式 + 塑形列 ⇒ 当场报错（⛔ 不静默忽略这笔奖励）✓", str(_e)[:80])
+# 判据 e：`hand` 模式**真的把它加进了奖励** ——
+#   ⚠ `adv` 在函数末尾被**按学生行 z-score 归一化**过（std 恒 ≈1）⇒ 直接比 `adv` 的数值会被
+#   归一化掩掉。判据要落在**归一化之前**的量上：`std(A_raw) = std(reward − V)`。
+#   奖励里多了一笔"每小局恒定 +X"⇒ 被减的奖励的 std 不变（常数不改变方差），
+#   而 `V_old` 不变 ⇒ **`std(A_raw)` 也不变**；所以正确的判据是 `reward_std` 与
+#   `ref_std`（被减的那个奖励的 std）—— 不开塑形时 `ref_std == std(delta)`，
+#   开了之后 `ref_std` 会把塑形算进去。
+_ha_off = v4_pt._hand_advantage({k: v for k, v in _gae_probe.items() if k != v4_sr.COLUMN},
+                                np.zeros(1), gamma=1.0, lam=0.0, rank_weight=0.0,
+                                is_student=np.ones(4), mode="hand")
+_ha_on = v4_pt._hand_advantage(_gae_probe, np.zeros(1), gamma=1.0, lam=0.0, rank_weight=0.0,
+                               is_student=np.ones(4), mode="hand")
+ok(abs(_ha_off["stats"]["ref_std"] - float(np.std([0.1, -0.1, 0.2, -0.2]))) < 1e-12,
+   "风格奖励：不开塑形时「被减的奖励」就是 `delta`（ref_std == std(delta/1000)）",
+   f"{_ha_off['stats']['ref_std']}")
+ok(abs(_ha_on["stats"]["ref_std"] - _ha_off["stats"]["ref_std"]) < 1e-9,
+   "风格奖励：每小局恒定的那笔塑形**不改变被减奖励的方差**（同时证明它进了那一项）",
+   f"{_ha_off['stats']['ref_std']:.6f} → {_ha_on['stats']['ref_std']:.6f}")
+ok(_ha_on["stats"].get("style_reward") and not _ha_off["stats"].get("style_reward"),
+   "风格奖励：开了才有那条体检读数（关掉时 stats 里连这个键都不存在）")
+# 判据 e2：塑形是**逐小局变化**的（这才是它有用的情形）⇒ 奖励的 std 必须变大
+_ha_var = v4_pt._hand_advantage({**_gae_probe,
+                                 v4_sr.COLUMN: np.array([0.0, 0.0, 4000.0, -4000.0],
+                                                        dtype=np.float32)},
+                                np.zeros(1), gamma=1.0, lam=0.0, rank_weight=0.0,
+                                is_student=np.ones(4), mode="hand")
+ok(_ha_var["stats"]["ref_std"] > _ha_off["stats"]["ref_std"] + 1e-9,
+   "风格奖励：逐小局变化的塑形**把奖励的方差推上去**（= 它真的在推那一轴）",
+   f"{_ha_off['stats']['ref_std']:.6f} → {_ha_var['stats']['ref_std']:.6f}")
+
 # ---------------------------------------------------------------- 汇总
 
 # 收尾清掉 scratch（它是**手写**的目录，删得掉；`tempfile` 建的那种在本沙箱下删不掉 —— 见文件头）
@@ -3318,6 +3844,29 @@ try:
     SCRATCH.parent.rmdir()
 except OSError:
     pass
+
+# ---- 风格轴（"闸门重心向风格化倾斜"，2026-10-08 用户裁决）--------------------------------------
+# 判据：① 线 → 目标轴映射固定；② `deals` 取负（约定"正数 = 更好" ⇒ `decide` 不必知道方向）；
+# ③ **缺字段必须报错**（⛔ 不许静默当 0 —— 那会把"没测到"读成"没发生"）；④ 护栏容忍带 = 1.0 顺位点。
+from mahjong_ml import eval as _ml_eval_axis                                   # noqa: E402
+from mahjong_ml.v4 import gate as _v4_gate                                     # noqa: E402
+
+eq("风格轴：线→目标轴的映射", _v4_gate.LINE_METRIC,
+   {"atk": "win_points", "def": "deals", "win": "wins"})
+ok(all(m in _ml_eval_axis.METRICS for m in ("wins", "deals", "win_points")),
+   "风格轴：三个轴已登记进 `eval.METRICS`", str(_ml_eval_axis.METRICS))
+_axis_row = {"policies": ["a", "a"], "wins": [1, 2], "deals": [3, 0], "win_points": [7000, 8000],
+             "rank_points": [45.0, 5.0], "placement": [1, 4], "final_scores": [40000, 10000]}
+eq("风格轴：`deals` 取负（放铳越少越好 ⇒ 与'正数=更好'约定一致）",
+   _ml_eval_axis.seat_values(_axis_row, "a", "deals"), [-3.0, -0.0])
+eq("风格轴：`win_points` 原样（打点轴）",
+   _ml_eval_axis.seat_values(_axis_row, "a", "win_points"), [7000.0, 8000.0])
+try:
+    _ml_eval_axis.seat_values({k: v for k, v in _axis_row.items() if k != "wins"}, "a", "wins")
+    ok("风格轴：缺字段必须报错（不许静默当 0）", False)
+except ValueError:
+    ok("风格轴：缺字段必须报错（不许静默当 0）", True)
+eq("风格轴：护栏容忍带 = 1.0 顺位点（预注册）", _v4_gate.GUARD_RANK, 1.0)
 
 print(f"\n自检：检查项 {count}，失败 {len(fails)}")
 for f in fails:

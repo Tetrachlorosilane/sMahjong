@@ -67,8 +67,25 @@ class LoopConfig:
     student_temp: float = 0.5
     teacher_seats: int = 2
     #: 对手池（历史快照的 `net.bin` 路径）：把一个非学生座位换成它、按代轮换。
-    #: 见 `policy()` 的注释 —— 固定对手时「结果奖励」几乎不含通用强度信息。
+    #: ⚠ **风格线不要用这个**（它只换 1 席、另外 2 席还是学生自己）—— 风格线用 `style` + `style_pools`。
     opponents: tuple[str, ...] = ()
+    #: **风格桌**（2026-10-08 用户指定）：`{风格名: (该线快照的 net.bin, ...)}`，配 `style` = **本线风格名**。
+    #: 四席 = **学生 1 席** + **每个风格 1 席**（本线那一席取**别的**快照，不是学生自己）；见 `_style_policy`。
+    style_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    style: str = ""
+    #: **24 种座次关系全排列**（`producer.selfplay_cmd` 的 `--rotate-perm`）：`True/False` 显式指定；
+    #: `None`（缺省）= **自动** —— 有风格桌（`style` + `style_pools`）时开、否则关
+    #: （关 = 沿用历季的循环移位，保证既有多季读数可比）。
+    #: 为什么风格桌**必须**开（2026-10-08 用户指正 + 实测）：循环移位只覆盖 4 个排列、且**保持循环序**
+    #: ⇒ 一代之内相对方位被钉死（400 场：`def` 恒 +1 下家、`win` 恒 +2 対面、`atk` 恒 +3 上家，各 400/400）。
+    #: 判据：`python tools/seat-balance.py <该代 raw 目录> --check`（② 绝对座位 / ③ 24 种座次关系 / ④ 相对方位）。
+    rotate_full: bool | None = None
+    #: 风格桌上**对手怎么选**（2026-10-08 用户裁决：对手同样采用**最新模型**）：
+    #: · `"latest"`（缺省）= 每个风格取**该风格最新的一代**（按名字排序的最后一个；排除学生自己的网）
+    #:   —— 对手随本线推进而更新，永远是"最近练出来的那一版"；
+    #: · `"rotate"` = 按代在**整条历史池**里轮转（之前的口径：对手是历次快照的混合）。
+    #: ⚠ 这是**配方**的一部分：两口径下的读数不可互比（`def7` 那轮用的是 `rotate`）。
+    style_pick: str = "latest"
     objective: str = "ppo"
     value_target: str = "final"
     epochs: int = 4
@@ -119,6 +136,15 @@ class LoopConfig:
     #: 目标候选由 `dataset.engine_best_index` 从 `cand.derived`（引擎的逐候选牌效：打后向听/进张/
     #: 听牌形）现算 —— 稠密、无采样噪声、不花闸门算力，且**每一份现有紧凑集里都有**。
     il_weight: float = 0.0
+    #: ★ **风格奖励塑形**（`--style-bonus`，2026-10-09 加）：空串（缺省）= **关闭** ——
+    #: 紧凑集的命令行里一个字符都不多、`style_bonus` 列不建、`pretrain` 一行都不走
+    #: ⇒ 与加这个功能之前**逐位相同**（判据：`python/selfcheck.py` 的命令逐字断言 + 权重哈希）。
+    #: 文法见 `v4.style_reward.parse_bonus`（例：`riichi=1.0:no_deal` = 立直率 ↑，
+    #: 但只有**该小局未放铳**才付奖 —— 成对质量轴，防止学出无脑立直）。
+    #: ⚠ 白化参数 μ/σ **每代从这一份数据集现算**（不是历史常数）⇒ 回路里不存任何标定值。
+    style_bonus: str = ""
+    #: 白化参数的统计总体：`student`（缺省，= 训练里真正进梯度的那些行）/ `all`。
+    style_whiten: str = "student"
     #: 验证集早停**读哪个头的 CE**：`policy`（缺省，= 行为标签）/ `il`（引擎标签）。
     #: ⚠ 开了 `il_weight` 就**必须**配 `--val-metric il`：IL 臂的行为 CE 必然抬高（实测 0.512 → 0.62），
     #: 按行为 CE 判"没改善"会在引擎 CE 还在降的时候把这一轮掐掉（见 `docs/TRAINING-V4.md` §14.12）。
@@ -141,14 +167,27 @@ class LoopConfig:
         return f"net:{net}@0#{self.student_temp:g}"
 
     def policy(self, net: Path, generation: int = 0) -> str:
-        """四席策略串：学生 N 席 + teacher +（可选）**对手池**里的一个历史快照。
+        """四席策略串。**两种口径**（`style` 非空且有 `style_pools` ⇒ 风格桌）：
+
+        **① 风格桌（风格线专用，2026-10-08 用户指定）**：见 `_style_policy` ——
+        学生 1 席 + **每个风格各 1 席**（含本线风格的一枚**别的**快照）。座位平均化由
+        `selfplay_cmd(rotate=True, rotate_full=True)` 保证（C++ 侧按场号枚举 **4! = 24 个全排列** ⇒
+        绝对座位与**相对方位**都被平均；⛔ 只做循环移位不够 —— 见 `rotate_full` 字段的注释与实测）。
+
+        **② 旧口径（通用联赛）**：学生 N 席（`4 - teacher_seats`）+ teacher +（可选）**对手池里的一个**历史快照。
 
         ⚠ 为什么要 `--opponents`（第四十三轮）：v4 回路原来固定"自己×2 + teacher×2"，
         于是**结果奖励里关于"通用强度"的信息很少** —— 对手永远是同一批（teacher 与自己的上一代），
         你变强变弱都在同一张桌子上。v3 谱系唯一出过正结果的那条路，采集桌上有**历史快照**。
         这里按代轮换对手池（`generation % len(opponents)`），其余座位不变；
         **学生席位数不变**（`--student` 串照旧逐字匹配，见 `student_spec`）。
+
+        ⚠⚠ 但**风格线不能用口径②**（2026-10-08 用户指正）：桌上 2/4 席是学生自己的风格、对手只有 1 席
+        ⇒ 学不到"对另外两种风格怎么打"，而"结果奖励"里关于风格强度的信息几乎是常数
+        （改动前的实测配置：`-PoolSeed atk2-g09,league14-g05` ⇒ 每代只有 1 个风格对手上桌）。
         """
+        if self.style and self.style_pools:
+            return self._style_policy(net, generation)
         students = [self.student_spec(net)] * (4 - self.teacher_seats)
         others = ["teacher"] * self.teacher_seats
         if self.opponents and others:
@@ -156,6 +195,57 @@ class LoopConfig:
             pick = self.opponents[generation % len(self.opponents)]
             others[-1] = f"net:{pick}"
         return ",".join(students + others)
+
+    def _style_policy(self, net: Path, generation: int) -> str:
+        """**风格桌**：学生 1 席 + 3 席对手，**每个风格恰好 1 席**（风格数 ≠ 3 时按下述规则）。
+
+        规则（一条公式 `slots = [风格[(generation + k) % n] for k in 0..2]` 覆盖三种情形）：
+
+        - **n == 3（本仓现状：atk / def / win）**：三席正好三个风格各一 ⇒ **每代桌上都有全部三种风格**；
+        - **n > 3**：按代轮转起点取连续 3 个风格 ⇒ 长期每个风格等频（每 n 代覆盖一遍）；
+        - **n < 3**：轮转补齐（某风格占 2 席），起点按代轮转 ⇒ 长期"谁多占一席"也等频。
+
+        ⛔ **别在这里引入随机数**：对手必须是 `(generation, 池内容)` 的**确定**函数 ——
+        否则 `run-chain` 的续跑与"同代可复现"都会破（历季的伪重复事故见 `NOTES.md` §6.5 第八季审计）。
+
+        判据（`python/selfcheck.py` 的「风格桌」组，逐条机械断言）：
+        ① 恒 4 席；② 学生**恰好 1 席**；③ 覆盖的风格集合 == `style_pools` 的全部风格；
+        ④ 本线风格的对手 ≠ 学生自己的网（`--rotate` 要求四席策略互异，见 `league.py:140` 的"撞车"判据）；
+        ⑤ 跨代看，每个风格在每个**席序位**上等频（这层是**生成级**轮转；**游戏级**必须靠
+        `--rotate-perm` 的 24 排列把全部座次关系覆盖 —— 只有 `--rotate` 的循环移位会漏掉相对方位）。
+        """
+        styles = sorted(self.style_pools)
+        if not styles:
+            raise ValueError("style_pools 为空 —— 风格桌至少要有一个风格")
+        if self.style not in self.style_pools:
+            raise ValueError(f"style={self.style!r} 不在 style_pools={styles} 里 —— 风格桌必须包含本线的池")
+        n = len(styles)
+        slots = [styles[(generation + k) % n] for k in range(3)]
+        opp = [self._style_pick(s, net, generation, k) for k, s in enumerate(slots)]
+        return ",".join([self.student_spec(net)] + [f"net:{p}" for p in opp])
+
+    def _style_pick(self, style: str, student_net: Path, generation: int, k: int) -> str:
+        """从某个风格的池里**确定地**取一枚快照，并**避开学生自己的网**。
+
+        两种口径（`style_pick`）：
+        · `"latest"`（缺省，2026-10-08 用户裁决"对手同样采用最新模型"）= 取**该风格最新的一代**
+          （排除学生自己的网之后按名字排序的最后一个 —— 网络名是 `g%02d` 零填充 ⇒ 字典序 = 代序）；
+          本线的对手因此永远是"上一次练出来的那一版"（学生自己那一版不能上台：`--rotate` 要求四席互异）。
+        · `"rotate"` = `pool[(generation + k) % len(pool)]`（旧口径：历次快照的混合）。
+
+        为什么必须避开学生自己的网：`--rotate` 要求四席策略互异（同一份权重坐两席 = `league.py:140`
+        的"撞车"判据，轻则座位运气被记成风格强弱、重则那条判据直接报错）。
+        """
+        pool = [p for p in self.style_pools[style] if str(Path(p)) != str(Path(student_net))]
+        if not pool:
+            pool = list(self.style_pools[style])
+        if not pool:
+            raise ValueError(f"风格 {style!r} 的池是空的 —— 风格桌每个风格至少要有一枚快照")
+        if self.style_pick == "latest":
+            return sorted(pool)[-1]
+        if self.style_pick != "rotate":
+            raise ValueError(f"style_pick 只能是 'latest' / 'rotate'，收到 {self.style_pick!r}")
+        return pool[(generation + k) % len(pool)]
 
 
 @dataclass
@@ -189,6 +279,23 @@ def _py() -> str:
     return sys.executable
 
 
+def _parse_style_pools(items: list[str]) -> dict[str, tuple[str, ...]]:
+    """`--style-pool NAME=path1,path2`（可重复）⇒ `{NAME: (path1, path2)}`。
+
+    ⚠ 写成 `NAME=` 空池或漏 `NAME=` 一律**报错**（静默当成"没有这个风格"会让风格桌悄悄退化成
+    少一个风格的桌子 —— 那正是这次要修的病，绝不能留一个静默降级的入口）。
+    """
+    out: dict[str, list[str]] = {}
+    for it in items:
+        name, sep, paths = it.partition("=")
+        name = name.strip()
+        got = [p.strip() for p in paths.split(",") if p.strip()]
+        if not sep or not name or not got:
+            raise SystemExit(f"--style-pool 要写成 NAME=path1,path2（收到 {it!r}）")
+        out.setdefault(name, []).extend(got)
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) -> Round:
     """生成一轮的全部命令（**不执行、不建目录**）—— `--dry-run` 与执行共用同一份。"""
     generation = generation + cfg.gen_offset          # 绝对代号（跨调用唯一）
@@ -205,15 +312,26 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     )
     spec = cfg.student_spec(net_in)
     p = cfg.producer
+    # ⚠ **采集桌**用 24 排列（风格桌自动开）：一次训练里把 4! = 24 种座次关系都平均到。
+    #   评测/闸门桌**刻意不动**（仍走 `--rotate` 循环移位）—— 它是判据；改判据的座位方案会让
+    #   本季与历季（def/def2/def3/defrep…）的判决不可比。
+    rf = cfg.rotate_full if cfg.rotate_full is not None else bool(cfg.style and cfg.style_pools)
     r.commands["collect"] = producer.selfplay_cmd(
         games, cfg.workers, cfg.policy(net_in, generation), cfg.seed + generation, r.raw,
-        hands=cfg.hands, sample=cfg.sample, rotate=True, aux=True, name=p)
+        hands=cfg.hands, sample=cfg.sample, rotate=True, rotate_full=rf, aux=True, name=p)
     r.commands["features"] = producer.features_cmd(r.raw, cfg.workers, name=p)
     r.commands["check"] = ["node", "tools/selfplay-check.mjs", str(r.raw)]
     r.commands["compact"] = [
         _py(), "-m", "mahjong_ml.v4.dataset", str(r.raw), str(r.compact),
         "--aux", "--student", spec, "--workers", str(max(1, cfg.workers // 2)),
     ]
+    # ★ 风格奖励塑形：**只在给了 spec 时才进命令行**（与 `--ref-beta` / `--il-weight` 同一个做法）
+    #   ⇒ 空串时打出来的命令与加这个功能之前**逐字相同**（"默认关闭 = 逐位不变"的第一条判据）。
+    #   ⚠ 口径都在 `dataset build` 里（指示量从轨迹的事件算、μ/σ 从这一份数据实测、付奖账落盘），
+    #   回路只负责把 spec 传下去 —— 别在这里再实现一遍风格量（两份实现必漂移）。
+    if cfg.style_bonus:
+        r.commands["compact"] += ["--style-bonus", cfg.style_bonus,
+                                  "--style-bonus-whiten", cfg.style_whiten]
     train = [
         _py(), "-m", "mahjong_ml.v4.pretrain", "--data", str(r.compact),
         "--label", r.ckpt_label, "--objective", cfg.objective,
@@ -292,6 +410,7 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     r.commands["eval"] = [
         str(producer.TRAINER), "selfplay", str(cfg.eval_games), "--workers", str(cfg.eval_workers),
         "--rotate",
+        *(["--rotate-perm"] if rf else []),
         "--policy", (f"net:{r.net_out},net:{r.net_out},net:{b_net},net:{b_net}" if use_prev
                      else f"net:{r.net_out},net:{r.net_out},teacher,teacher"),
         "--seed", str(cfg.seed + 5000 + generation), "--out", str(r.eval_dir),
@@ -543,6 +662,10 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
         "generation": generation, "label": r.label, "games": games, "seed": cfg.seed + generation,
         "producer": cfg.producer, "objective": cfg.objective, "value_target": cfg.value_target,
         "student_spec": cfg.student_spec(net_in), "net_in": str(net_in), "net_out": str(r.net_out),
+        # ★ 风格奖励塑形：**记进台账**（复现那一代要知道"奖励是怎么塑的"）——
+        #   空串 = 关闭（老台账里没有这个键，读的时候按"没有塑形"看待）。
+        "style_bonus": (cfg.style_bonus or ""),
+        "style_bonus_whiten": (cfg.style_whiten if cfg.style_bonus else ""),
         "ckpt": str(paths.DATA_ROOT / "ckpt" / r.ckpt_label), "raw": str(r.raw),
         "compact": str(r.compact), "eval_dir": str(r.eval_dir),
         "seconds": {k: round(v, 1) for k, v in seconds.items()},
@@ -572,7 +695,21 @@ def main(argv: list[str] | None = None) -> int:
                     help="代号的偏移：一次只跑一代、由外面轮换大件时，用它把第 i 次调用编成第 i 代"
                          "（否则每轮都编 -g01，后一轮会覆盖前一轮的产物）")
     ap.add_argument("--opponents", action="append", default=[],
-                    help="对手池（可重复）：把一个非学生座位换成这个历史快照的 net.bin，按代轮换")
+                    help="对手池（可重复）：把一个非学生座位换成这个历史快照的 net.bin，按代轮换。"
+                         "⚠ **风格线别用它**（只换 1 席、另 2 席还是学生自己）—— 风格线用 --style/--style-pool")
+    ap.add_argument("--style", default="",
+                    help="**本线风格名**（与 `--style-pool` 合用 ⇒ **风格桌**：学生 1 席 + 每个风格 1 席）。"
+                         "例：`--style atk`。空（缺省）= 走旧的 teacher/opponents 口径")
+    ap.add_argument("--style-pool", action="append", default=[], metavar="NAME=path1,path2",
+                    help="某风格线的快照池（可重复，路径逗号分隔）。**风格桌上每个风格恰好 1 席**")
+    ap.add_argument("--style-pick", choices=["latest", "rotate"], default="latest",
+                    help="风格桌上对手怎么选：`latest`（缺省，用户裁决）= 每个风格取**最新一代**；"
+                         "`rotate` = 按代在整条历史池里轮转（旧口径，读数不可与 latest 互比）")
+    ap.add_argument("--rotate-full", dest="rotate_full", action="store_true", default=None,
+                    help="**24 种座次关系全排列**（C++ `--rotate-perm`）：按场号枚举 4! = 24 个排列 ⇒ "
+                         "绝对座位与**相对方位**都平均。缺省（不给这个开关）= 有风格桌就自动开、否则关")
+    ap.add_argument("--no-rotate-full", dest="rotate_full", action="store_false",
+                    help="强制关（只做 `--rotate` 循环移位）—— 复现旧口径或与历季对齐时用")
     ap.add_argument("--eval-workers", type=int, default=24)
     ap.add_argument("--objective", choices=["bc", "rwr", "ppo"], default="ppo")
     ap.add_argument("--value-target", choices=["final", "rtg", "delta"], default="final",
@@ -613,6 +750,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--il-weight", type=float, default=0.0,
                     help="**W4 第一步**：引擎逐候选标签的模仿项权重"
                          "（`loss += w·CE(logits, 引擎最优候选)`，只在学生行上）。0（缺省）= 今天的行为")
+    ap.add_argument("--style-bonus", default=(os.environ.get("MAHJONG_STYLE_BONUS") or "").strip(),
+                    metavar="SPEC",
+                    help="**风格奖励塑形**（缺省空 = 关闭，与加这个功能之前逐位相同）。"
+                         "文法 `NAME[=w]:PAIR[,...]`，例 `riichi=1.0:no_deal`"
+                         "（立直率 ↑，只在该小局**未放铳**时付奖）。轴表见 `v4/style_reward.py`。"
+                         "⛔ 不写 PAIR 直接报错（不许只按立直付奖）。"
+                         "⚠ 缺省值也可由环境变量 `MAHJONG_STYLE_BONUS` 给 —— "
+                         "那是给**不改 `tools/run-league.ps1`**（本仓不许动它）准备的入口")
+    ap.add_argument("--style-bonus-whiten", choices=["student", "all"],
+                    default=(os.environ.get("MAHJONG_STYLE_WHITEN") or "student").strip(),
+                    help="白化参数 μ/σ 的统计总体：`student`（缺省）= 只用学生座位的小局"
+                         "（= 训练里真正进梯度的行）；`all` = 全部座位。"
+                         "⚠ 缺省值也可由 `MAHJONG_STYLE_WHITEN` 给（与 `--style-bonus` 同理）")
     ap.add_argument("--strict-gate", action="store_true",
                     help="值头闸门（`value-audit --strict --ev-ref legit`：EV ≥ 0.7×合法天花板 + "
                          "覆盖率 ≤3pp）不过就**停整条回路**；缺省只记账不停（先看几轮再决定）")
@@ -637,6 +787,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LoopConfig(
         label=args.label, init=args.init, student_temp=args.student_temp,
         teacher_seats=args.teacher_seats, opponents=tuple(args.opponents),
+        style=args.style, style_pools=_parse_style_pools(args.style_pool),
+        style_pick=args.style_pick,
+        rotate_full=args.rotate_full,
         objective=args.objective,
         value_target=args.value_target, epochs=args.epochs, batch=args.batch, lr=args.lr,
         stage_a=args.stage_a, stage_b=args.stage_b, workers=args.workers,
@@ -648,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
         kl_early_stop=args.kl_early_stop, kl_min_steps=args.kl_min_steps,
         ref_beta=args.ref_beta, val_every=args.val_every, val_patience=args.val_patience,
         val_metric=args.val_metric, il_weight=args.il_weight,
+        style_bonus=args.style_bonus, style_whiten=args.style_bonus_whiten,
         strict_gate=args.strict_gate, critic_steps=args.critic_steps, critic_lr=args.critic_lr,
     )
     net_in = Path(args.init)

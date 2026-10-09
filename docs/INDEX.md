@@ -124,7 +124,8 @@ mahjong/
 ├─ trainer/       板块④ 训练端 C++ 自对弈引擎（与 Java 逐字节同源；build/ 不进仓库）
 ├─ tools/         板块⑥ 验证与打包：*-test.mjs（真 socket）· i18n-*（文案三件套）· mock-server（L4）·
 │                  trainer-*-parity.mjs（对拍）· selfplay-check.mjs · tenhou-log-check.mjs ·
-│                  doc-refs-check.mjs / handover-facts.mjs / round-index.mjs / head-tables-check.mjs（文档与头表自检）· package-release.ps1 + make-zip.mjs
+│                  doc-refs-check.mjs / handover-facts.mjs / round-index.mjs / head-tables-check.mjs（文档与头表自检）·
+│                  seat-balance.py（**座次平均化**判据：数轨迹里每个策略坐过每个座位几次；接在 run-league 每代采集之后）· package-release.ps1 + make-zip.mjs
 └─ 运行时数据（都不进仓库，见 .gitignore）：replays/ · players/ · bot-ai/（与 jar/start.sh 同层）
 ```
 

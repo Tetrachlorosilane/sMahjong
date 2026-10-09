@@ -88,10 +88,19 @@ def _guard(p: str, opts: dict[str, object]) -> None:
 
 
 def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path, *,
-                 hands: int = 0, sample: int = 0, rotate: bool = True,
+                 hands: int = 0, sample: int = 0, rotate: bool = True, rotate_full: bool = False,
                  teacher_label: bool = False, aux: bool = False,
                  name: str | None = None) -> list[str]:
     """自对弈采集命令（Java 与 C++ 两版**参数口径相同**，所以调用方不必分叉）。
+
+    @param rotate_full **24 种座次关系全排列**（`--rotate-perm`，2026-10-08 用户口径）：
+                按场号 `g % 24` 枚举 4! = 24 个全排列 ⇒ 一次训练里**绝对座位与相对方位都被平均**。
+                ⚠ 与 `rotate`（循环移位）的差别是**实测出来的**：后者只覆盖 4 个排列、且**保持循环序**
+                ⇒ 一代之内每个策略相对其他三家的方位被钉死（400 场里 `def` 恒在下家、`win` 恒在対面、
+                `atk` 恒在上家，各 400/400）。判据 = `python tools/seat-balance.py <raw> --check`
+                （② 绝对座位 / ③ 座次关系 24 种 / ④ 相对方位）。
+                ⛔ **Java 生产者没有这个开关** ⇒ 用 java 跑风格桌**显式报错**，不悄悄降级成循环移位
+                （那正是"看起来平均了、其实没有"的假绿）。
 
     @param aux 额外落标签侧 `g*.aux.npz`（**Java 与 C++ 两个生产者都支持**，且连 npz 容器
                一起**逐字节相同**：C++ 侧是 `npzwriter.hpp` + `TraceRecorder` 的标签侧行，
@@ -102,12 +111,17 @@ def selfplay_cmd(games: int, workers: int, policy: str, seed: int, out_dir: Path
     p = producer(name)
     guard_java_free(name)
     _guard(p, {"--sample": sample, "--teacher-label": teacher_label, "--aux": aux})
+    if rotate_full and p != "cpp":
+        raise SystemExit(f"生产者 {p!r} 没有 `--rotate-perm`（24 排列座位）：要求座次全排列平均的采集"
+                         f"**必须**用 cpp 生产者（MAHJONG_PRODUCER=cpp）")
     if p == "java":
         cmd = ["java", "-jar", str(JAR), "--selfplay", str(games), "--workers", str(workers)]
     else:
         cmd = [str(TRAINER), "selfplay", str(games), "--workers", str(workers)]
     if rotate:
         cmd += ["--rotate"]
+    if rotate_full:
+        cmd += ["--rotate-perm"]
     if teacher_label:
         cmd += ["--teacher-label"]
     if aux:

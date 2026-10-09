@@ -52,6 +52,10 @@ from . import blocks, spec, traces
 #: ⚠ `cache` 只在模块层导入（它自己**惰性**引 torch，见 `cache.torch_encoder`）——
 #: `model` / `export` 是 torch 重依赖，只在**真的带 carry 构建**时才在 `build` 里导入。
 from . import cache as v4cache
+#: **风格奖励塑形**（`--style-bonus`）：解析 / 逐小局指示量 / 白化 / 付奖账**都在那一份**里，
+#: 这里只负责"什么时候调它"。⚠ 缺省（`--style-bonus ''`）时下面每一处都**一行都不走**
+#: ⇒ 与加这个功能之前逐位相同（判据在 `python/selfcheck.py`）。
+from . import style_reward as _style
 
 #: 张量的存盘 dtype（float16：显存/磁盘减半，训练时再转 float32 —— 与 v3 紧凑集同一个取舍）
 TENSOR_DTYPE = np.float16
@@ -409,6 +413,11 @@ _COLUMNS: dict[str, tuple] = {
     #   ⚠ 用 float32 而**不是** float16（其它张量列）：它是隐状态、逐维门控 `fusion.mem` 的输入，
     #   16 位尾数（~1e-3 相对误差）会让"h0 是不是同一个量"这条判据失去意义。
     "h0": (np.float32, ("dm",)),
+    # `style_bonus`（风格奖励塑形）：**点**，逐决策行；同一小局的四行同值（它是小局级量）。
+    #   ⚠ 缺省（`--style-bonus ''`）**不建这一列**（与 `h0` 同一个做法）⇒ 老紧凑集读回 `None`，
+    #   `pretrain` 一行都不走。⛔ 它**不**折进 `delta` 列：奖励只在优势那一处叠一次，
+    #   折进 `delta` 会波及 `_row_weights`（RWR）与 audit 的口径（"叠几次"就说不清了）。
+    _style.COLUMN: (np.float32, ()),
     "aux_opp_hand": (np.uint8, (3, 34)),
     "aux_opp_tenpai": (np.uint8, (3,)),
     "aux_opp_dealin": (np.uint8, (3,)),
@@ -419,18 +428,24 @@ _COLUMNS: dict[str, tuple] = {
 
 
 def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
-                 mode: str = "w+", dm: int | None = None) -> dict[str, np.memmap]:
+                 mode: str = "w+", dm: int | None = None,
+                 style: bool = False) -> dict[str, np.memmap]:
     """建/开这一份切分的全部列（`mode="w+"` 建、`"r+"` 由子进程开）。
 
     @param dm 学生网的 `d_model` —— 它只用来定 `h0` 列的宽度（`_COLUMNS` 里的 `"dm"` 占位符）。
         **`dm=None` ⇒ 不建 `h0` 列**（= 这一份没有长程 carry 的老行为；`build` 已经在 meta 里
         记了 `has_h0=False` 并打了醒目提示）。给了 `dm` 就必须是整数：形状错在这里、写盘时才炸
         的话，症状是"训练跑起来了但 h0 全是垃圾"，而那是静默的。
+    @param style 是否建**风格奖励**那一列 `style_bonus`（`--style-bonus` 给了才 True）。
+        ⚠ 与 `dm` 同一个做法：**没开就不建这一列**（不建一个全 0 的列 —— 那会让训练端
+        "以为有塑形"却拿到 0，正是本仓最忌讳的静默降级）。
     """
     if dm is not None and int(dm) <= 0:
         raise spec.ContractError(f"dm 必须是正的 d_model（给了 {dm!r}）")
     out: dict[str, np.memmap] = {}
     for name, (dt, tail) in _COLUMNS.items():
+        if name == _style.COLUMN and not style:
+            continue
         shape = [n]
         for t in tail:
             if t == "lmax":
@@ -484,7 +499,7 @@ def _rank_points_of(f: Path) -> dict[int, list[float]]:
 
 
 def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
-                student: str | None = None, carry=None) -> None:
+                student: str | None = None, carry=None, bonus=None) -> None:
     """把一个文件的**前 `take` 条**决策写进 `mm` 的 `[i0, i0+take)` 行。
 
     ⚠ 串行与并行**共用这一份行逻辑**（并行只是把不同文件分给不同进程，各写各的连续行区间）
@@ -493,14 +508,26 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
     @param carry `seat -> CarryTracker` 的**工厂**（`None` = 这一份没有 `h0` 列）。
         ⚠ 工厂而不是实例：一个文件里四家的决策是**交错**的（同一手事件流被四条座位各自推进），
         所以按座位各留一个 tracker，在**这个文件内复用**（同一手的事件只重放一次）。
+    @param bonus `style_reward.BonusTracker`（`None` = 这一份没有 `style_bonus` 列）。
+        ⚠ 它必须**已经 `prebuild` 过这个文件**：`style_bonus` 是小局级量，而小局的结局只有扫完
+        整小局才知道 ⇒ "边走边算"写不出第一行（详见 `BonusTracker` 的 docstring）。
+        查不到小局**当场报错**（不填 0）。
     """
     if carry is not None and "h0" not in mm:
         raise spec.ContractError(
             "要写 `h0` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 `dm`（并行分支要从 "
             "req.json 读回同一个 dm）。**不静默跳过**：跳过就等于训练端拿到一份没有长程 carry 的"
             "数据，而上线端用整手 carry")
+    if bonus is not None and _style.COLUMN not in mm:
+        raise spec.ContractError(
+            f"要写 `{_style.COLUMN}` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 `style=True`"
+            f"（并行分支要从 req.json 读回同一个开关）。**不静默跳过**：跳过就等于这些行的风格奖励"
+            f"恒为 0，而训练照跑")
     start = _game_start_score(f)
     rp_of_game = _rank_points_of(f)
+    if bonus is not None:
+        # ★ 风格奖励：**先把这个文件的每个小局都算出来**（查表 ⇒ 行序无关、第一行也有值）。
+        bonus.prebuild(f)
     ax = _aux.load_aux(_aux.aux_path(f)) if aux else None
     axcols = _aux_arrays(ax, int(ax["n"]) if ax else 0)
     sc = traces.load_sidecar(_v3.sidecar_path(f))
@@ -516,6 +543,9 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
             if j >= take:
                 break
             i = i0 + j
+            # ★ 风格奖励：**查表**取这一行的 bonus（`prebuild` 已经把本文件所有小局算好了）。
+            #   查不到 ⇒ `BonusTracker.value` **当场报错**（不填 0 —— 填 0 是静默丢奖励）。
+            b_row = 0.0 if bonus is None else float(bonus.value(row))
             obs = row.get("obs")
             if not isinstance(obs, dict):
                 raise spec.ContractError(f"{f.name}:{ln} 决策行没有 obs")
@@ -628,7 +658,18 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
                 mm["aux_own_shanten_after"][i] = axcols["own_shanten_after"][j]
                 mm["aux_own_tenpai"][i] = axcols["own_tenpai"][j]
                 mm["aux_win_flag"][i] = axcols["win_flag"][j]
+            if bonus is not None:
+                # ★ 风格奖励塑形的那一列（点；同一小局四行同值 —— 它是**小局级**量）。
+                mm[_style.COLUMN][i] = b_row
             j += 1
+    if bonus is not None:
+        # 判据：预扫出来的小局必须覆盖写出去的每一行（`value` 已经对"查不到"报错了，
+        # 这里再钉一条"本文件查到的次数 == 本文件写的行数"——两边漏一边都会让奖励错位而训练照跑）。
+        got = bonus.cache_hits - bonus.hits0
+        if got != j:
+            raise spec.ContractError(
+                f"{f.name}: `style_bonus` 查到的行数 {got} != 写出去的行数 {j} "
+                f"—— 有行没查到（会被填 0）或有行查重了")
     if j != take:
         raise spec.ContractError(f"{f.name} 实际 {j} 条 != 第一遍数的 {take} 条")
     if j != int(sc["n"]):
@@ -725,7 +766,8 @@ def student_net_path(spec_or_path: str | None) -> str | None:
 def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split_seed: int = 0,
           aux: bool = False, limit_files: int | None = None, workers: int = 0,
           quiet: bool = False, student: str | None = None,
-          carry_model: str | None = None) -> dict:
+          carry_model: str | None = None, style_bonus: str = "",
+          style_whiten: str = "student") -> dict:
     """轨迹目录 → v4 数据集（`train.*.npy` / `val.*.npy` 各一组列 + `meta.json`）。
 
     @param aux 是否要求并读取标签侧 `g*.aux.npz`（信念/危险头的监督来源）
@@ -734,6 +776,15 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         解析（`net:<路径>[@α][#T]` → `<路径>`）。`None` ⇒ **不建 `h0` 列**（老行为）：
         meta 里 `has_h0=false` / `carry_model=null`，并打一行醒目提示（训练端会因此**硬拒**，
         除非显式 `--no-carry` —— 见 `pretrain.train`）。
+    @param style_bonus **风格奖励塑形**（`--style-bonus`）：`"riichi=1.0:no_deal"` 这种写法
+        （文法见 `style_reward.parse_bonus`）。**空串（缺省）= 不建 `style_bonus` 列、一行都不走**
+        ⇒ 与加这个功能之前逐位相同。非空时：先按**本数据集**实测算白化参数 μ/σ（范围见
+        `style_whiten`），再把逐小局的 `Σ w·1[PAIR]·(x−μ)/σ`（点）写进 `style_bonus` 列，
+        并把 w/μ/σ/付奖小局数/付奖总额落盘到 `<out>/style-reward.json`（**可审计**）。
+    @param style_whiten 白化参数的**统计总体**：`student`（缺省）= 只用学生座位的小局
+        （= 训练里真正进梯度的那些行）；`all` = 全部座位。
+        ⚠ 用 `all` 会把 teacher/对手的行为分布混进 μ/σ（风格桌上学生只占 1/4）⇒ 缺省 student；
+        没给 `--student` 时自动退回 `all`（没有学生掩码可用，且**会打印出来**）。
     @param workers 并行进程数（0 = 自动，≤75% 的核、上限 12）；**产物与串行逐字节相同**是判据
         （各进程只写自己那段连续行区间，行逻辑只有 `_write_file` 一份）
 
@@ -813,6 +864,49 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
     files = trace_dir_files(src)
     if limit_files:
         files = files[:limit_files]
+    # ---- ★ 风格奖励塑形：**这一份数据集上的**白化参数（μ/σ）-------------------------------
+    # 口径三条（`style_reward` 的模块 docstring 里是同一份，别两处抄歪）：
+    #   ① μ/σ **每代现算**（策略分布、桌上对手每代都在变；拿上一代的 μ/σ 白化这一代 = 白化到错的分布）；
+    #   ② 白化的**统计总体** = 学生座位（缺省）—— 训练里真正进梯度的就是那些行；
+    #   ③ 白化正确性当场自证（均值 ≈ 0、方差 ≈ 1），数字进日志与 `<out>/style-reward.json`。
+    spec_raw = (style_bonus or "").strip()
+    bonus_spec = _style.parse_bonus(spec_raw) if spec_raw else None
+    bonus_on = bool(bonus_spec)
+    student_policies: set[str] | None = None
+    whitening: dict = {}
+    style_audit = None
+    style_check: dict | None = None
+
+    def _all_hands():
+        """全量小局流（白化统计与自证**共用同一个生成器函数** ⇒ 两遍扫的是同一批样本）。"""
+        for f in files:
+            yield from _style.iter_hands(f)
+
+    if bonus_on:
+        if style_whiten == "student":
+            if student:
+                student_policies = {student}
+            else:
+                # 没有学生掩码 ⇒ 只能按全部座位白化。**打印出来**（口径变了必须看得见）。
+                print("⚠ `--style-bonus` 要按**学生座位**白化，但没给 `--student`："
+                      "没有学生掩码可用 ⇒ 白化退回**全部座位**（μ/σ 里会混进 teacher/对手的分布）")
+                student_policies = None
+        elif style_whiten == "all":
+            student_policies = None
+        else:
+            raise spec.ContractError(
+                f"`--style-bonus-whiten` 只认 student|all（收到 {style_whiten!r}）")
+        whitening, style_audit = _style.whitening_stats(
+            bonus_spec, _all_hands(), student_policies=student_policies)
+        style_check = _style.audit_whitening(
+            bonus_spec, whitening, _all_hands(), student_policies=student_policies)
+        # ⛔ 白化自证不过就**当场报错**：白化是这次改动的**全部要点**（不白化 = 方差不均照旧支配梯度）。
+        if not style_check["_all_ok"]["ok"]:
+            raise spec.ContractError(
+                f"风格奖励的白化自检没过（要求均值 ≈ 0、方差 ≈ 1）："
+                f"{ {k: v for k, v in style_check.items() if k != '_all_ok'} }")
+    elif style_whiten not in ("student", "all"):
+        raise spec.ContractError(f"`--style-bonus-whiten` 只认 student|all（收到 {style_whiten!r}）")
     train_files, val_files = _v3.split_files(files, val_frac, split_seed)
 
     def one_split(part: list[Path], tag: str) -> dict:
@@ -825,7 +919,7 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         n = sum(counts)
         if n == 0:
             raise spec.ContractError(f"{tag} 切分里没有决策（val_frac={val_frac} 太小？）")
-        mm = open_columns(out_dir, tag, n, lmax, mode="w+", dm=dm)
+        mm = open_columns(out_dir, tag, n, lmax, mode="w+", dm=dm, style=bonus_on)
         # 每个文件的**行区间**（行号只由"文件顺序 + 文件内行序"决定，与并行度无关）
         tasks: list[tuple[Path, int, int]] = []
         off = 0
@@ -833,6 +927,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
             if c > 0:
                 tasks.append((f, off, c))
             off += c
+        # 串行分支自己累积一份风格奖励的账（并行分支由子进程各写各的行，那一份账只在串行时可得）
+        serial_audit: dict = {}
         if workers > 1 and len(tasks) > 1:
             # 并行：按文件分组切块 → **无管道子进程**（沙箱禁命名管道，见 `_spawn` 的注释）
             chunks = _chunk_split(tasks, workers)
@@ -849,14 +945,27 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                 #   漏了 `dm` 就会少建 `h0` 列（`open_columns` 只在给了 dm 时才建它），
                 #   而"少一列"在写盘时才炸 ⇒ 这里两个键都要有，`_chunk` 也会再校验一次。
                 "carry_model": carry_spec, "dm": (None if dm is None else int(dm)),
+                # ⚠ 风格奖励的**三样**都要带过去：开关、白化参数（μ/σ，父进程按**全量**算的）、
+                #   以及 spec 原文（子进程自己解析）。漏一样都会静默写出错的列 —
+                #   漏 `style` 会让子进程少写一列（写盘时才炸），漏 `stats` 会让负号反过来。
+                "style": bool(bonus_on),
+                "style_spec": (spec_raw if bonus_on else None),
+                "style_stats": (_style.stats_to_json(whitening) if bonus_on else None),
+                # ⚠ `own_policies` 也要带：子进程要按同一批"学生席"算小局级奖励 ——
+                #   不带的话子进程会按四席取或算（并行产物 ≠ 串行产物，而那是判据）。
+                "style_own": (sorted(student_policies) if student_policies else None),
                 "chunks": [[[str(f), int(i0), int(take)] for f, i0, take in ch] for ch in chunks],
             }, ensure_ascii=False), encoding="utf-8")
             _spawn([["_chunk", str(req), str(k)] for k in range(len(chunks))], tmp / "logs")
             shutil.rmtree(tmp, ignore_errors=True)
         else:
+            tracker = _style.BonusTracker(bonus_spec, whitening,
+                                          own_policies=student_policies) if bonus_on else None
             for f, i0, take in tasks:
                 _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student,
-                            carry=carry_factory)
+                            carry=carry_factory, bonus=tracker)
+            if tracker is not None:
+                serial_audit.update(tracker.audit())
             for m in mm.values():
                 m.flush()
         # 逐决策 reward-to-go 的**覆盖率**（NaN = 老轨迹没有这个字段 ⇒ `--value-target rtg`
@@ -884,8 +993,38 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                     f"查 ① `carry_model` 是不是学生网那份权重；② 事件流有没有真的喂进 tracker"
                     f"（`CarryTracker.advance` 的前缀校验是不是每次都判失败、退化成冷启动）。"
                     f"**不写出一个全 0 的列**")
+        # ★ 风格奖励那一列的**覆盖率自证**（与 `h0` 同一套精神，但判据不同）：
+        #   这一列**允许**有 0（没被付奖的小局就是 0），所以不能拿"非全 0"当判据。
+        #   ⚠ 判据是"**同一小局的每一行同值**"。奖励是**小局级**量（`style_reward.hand_bonus` 的
+        #   ★★ 注释解释了为什么必须如此：训练端按小局取第一行的值 ⇒ 按席位给会被行序偶然吃掉）。
+        style_info: dict | None = None
+        if bonus_on:
+            col = np.asarray(np.load(out_dir / f"{tag}.{_style.COLUMN}.npy", mmap_mode="r")[:n],
+                             dtype=np.float32)
+            nz = int((col != 0.0).sum())
+            if nz == 0:
+                raise spec.ContractError(
+                    f"`{_style.COLUMN}` 列**全 0**（{tag}：{n} 行）—— 一件奖励都没付出去。"
+                    f"只可能是：① 成对质量轴恒假（`{spec_raw}` 里的 PAIR 在本桌上从不成立）；"
+                    f"② 白化把 `(x−μ)/σ` 算成了 0；③ 预扫根本没喂进去。**不写出一个全 0 的列**")
+            gm = np.asarray(np.load(out_dir / f"{tag}.game.npy", mmap_mode="r")[:n], dtype=np.int64)
+            hn = np.asarray(np.load(out_dir / f"{tag}.hand_no.npy", mmap_mode="r")[:n],
+                            dtype=np.int64)
+            key = gm * 100003 + hn          # 小局键（`hand_no` 远小于 100003 ⇒ 不撞车）
+            order = np.argsort(key, kind="stable")
+            ks, vs = key[order], col[order]
+            same = ks[1:] == ks[:-1]
+            spread = float(np.abs(vs[1:][same] - vs[:-1][same]).max()) if bool(same.any()) else 0.0
+            if spread > 0.0:
+                raise spec.ContractError(
+                    f"`{_style.COLUMN}` 在同一个 (game, hand_no) 内**不同值**"
+                    f"（最大偏差 {spread:g}）—— 它是**小局级**量，同一小局的每一行必须同值。"
+                    f"预扫/查表的键写错了")
+            style_info = {"nonzero_rows": nz, "rows": int(n), "nonzero_frac": nz / max(1, n),
+                          "hands": int(np.unique(key).size), "same_value_within_hand": True}
         return {"files": [f.name for f in part], "decisions": n, "lmax": lmax,
-                "rtg_frac": rtg_frac, "rank_frac": rank_frac, "h0_frac": h0_frac}
+                "rtg_frac": rtg_frac, "rank_frac": rank_frac, "h0_frac": h0_frac,
+                "style": style_info, "serial_style_audit": dict(serial_audit)}
 
     train = one_split(train_files, "train")
     val = one_split(val_files, "val")
@@ -893,6 +1032,24 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
     h0_frac_all = (None if dm is None else
                    (train["h0_frac"] * train["decisions"] + val["h0_frac"] * val["decisions"])
                    / n_all)
+    # ---- ★ 风格奖励：付奖账（逐轴 w/μ/σ/付奖小局数/付奖总额）落盘，**可审计** ---------------
+    reward_audit_path = None
+    if bonus_on:
+        # 账按**训练切分**重算一遍（父进程；与写列时用的是同一份 `indicator_values`/`bonus_of`）。
+        # 目的：给出"每个轴付了多少小局、一共付了多少点" —— 这是"奖励有没有真的生效"的第二条读数
+        # （第一条是 `style_bonus` 列非全 0，由 `one_split` 断言）。
+        accounting = _style.paid_accounting(bonus_spec, whitening, _all_hands())
+        for row in style_audit.axes:
+            pa = accounting["per_axis"].get(row["axis"], {})
+            row["paid_hands_all_seats"] = pa.get("paid_hands")
+            row["paid_sum_all_seats"] = pa.get("paid_sum")
+            row["raw_sum_all_seats"] = pa.get("raw_sum")
+        reward_audit_path = _style.write_audit(
+            out_dir, style_audit, style_check,
+            extra={"accounting_all_seats": accounting,
+                   "column": {"train": train["style"], "val": val["style"]},
+                   "serial_tracker_train": train["serial_style_audit"],
+                   "serial_tracker_val": val["serial_style_audit"]})
     meta = {
         "dataset_version": DATASET_VERSION,
         "feature_version": spec.FEATURE_VERSION_V4,
@@ -920,6 +1077,18 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         # 非全 0 的行占比（**全 0 会被上面的 build 直接判错**；这里留数字给验收/台账）
         "h0_nonzero_frac": h0_frac_all,
         "h0_nonzero_frac_splits": {"train": train["h0_frac"], "val": val["h0_frac"]},
+        # ---- ★ 风格奖励塑形（`--style-bonus`）：**默认关闭**（`enabled=False`，不建列）----
+        # 口径：白化参数从**本数据集**实测（`whiten_scope` 说明用的是哪一份总体），
+        # 逐行 bonus（点）写在 `style_bonus` 列；奖励在 `pretrain._hand_advantage` 里**只叠一次**。
+        "style_reward": {
+            "enabled": bool(bonus_on),
+            "spec": (spec_raw or None),
+            "column": (_style.COLUMN if bonus_on else None),
+            "whiten_scope": (style_audit.whiten_scope if bonus_on else None),
+            "whitening": (_style.stats_to_json(whitening) if bonus_on else None),
+            "whitening_check": (style_check if bonus_on else None),
+            "audit_path": (str(reward_audit_path) if reward_audit_path else None),
+        },
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -942,6 +1111,24 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
             print(f"  长程 carry：`h0[{dm}]` 非全 0 的行 "
                   f"train {train['h0_frac']:.1%} / val {val['h0_frac']:.1%}"
                   f"（其余行的事件数 ≤ K={spec.K_EVT} ⇒ 窗口之前没有事件、carry 全 0 是正确的）")
+        if not bonus_on:
+            print("  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，"
+                  "训练与加这个功能之前逐位相同")
+        else:
+            print(f"  风格奖励塑形：`{spec_raw}`（白化范围 {style_audit.whiten_scope}；"
+                  f"μ/σ 从**本数据集**实测）")
+            for row in style_audit.axes:
+                print(f"    轴 {row['axis']}: w={row['weight']:g} 质量轴={row['pair']}  "
+                      f"μ={row['mu']:.6f} σ={row['sd']:.6f}  "
+                      f"付奖小局(学生范围) {row['paid_hands']}  总额(学生范围) {row['paid_sum']:+.1f}  "
+                      f"| 全部座位 {row.get('paid_hands_all_seats')} / "
+                      f"{row.get('paid_sum_all_seats'):+.1f}")
+            print(f"    白化自检（均值≈0、方差≈1）："
+                  f"{ {k: (round(v['mean'], 12), round(v['var'], 12)) for k, v in style_check.items() if k != '_all_ok'} }"
+                  f" ⇒ {'✅ 通过' if style_check['_all_ok']['ok'] else '❌ 没过'}")
+            print(f"    逐行 `{_style.COLUMN}` 非 0 行占比：train {train['style']['nonzero_frac']:.1%} / "
+                  f"val {val['style']['nonzero_frac']:.1%}（同一小局四行同值已断言）")
+            print(f"    奖励账（可审计）：{reward_audit_path}")
     return meta
 
 
@@ -1035,12 +1222,13 @@ def load_split(out_dir: str | Path, split: str) -> dict:
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
                  "placement", "seat", "game", "hand_no", "is_student", "delta", "rtg",
-                 "rank_points", "h0",
+                 "rank_points", "h0", _style.COLUMN,
                  "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"
-        # ⚠ 缺席写 `None`（**存在才读**）：`h0` 是 W1b 才有的列，老紧凑集没有它 ——
-        #   训练端据此**硬拒**（见 `pretrain.train`），不静默退化成窗口冷启动。
+        # ⚠ 缺席写 `None`（**存在才读**）：`h0` 是 W1b 才有的列、`style_bonus` 是风格奖励才有的列，
+        #   老紧凑集/没开塑形的紧凑集都没有它们 —— 训练端据此**硬拒**或**一行都不走**
+        #   （见 `pretrain.train`），不静默退化成冷启动、也不静默把塑形当成 0。
         out[name] = np.load(p, mmap_mode="r") if p.is_file() else None
     return out
 
@@ -1067,6 +1255,15 @@ def main(argv: list[str] | None = None) -> int:
                          "给了它却找不到文件会**报错**（不静默跳过这一列）")
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数（0 = 自动，≤75%% 的核、上限 12）；产物与串行逐字节相同")
+    ap.add_argument("--style-bonus", default="", metavar="SPEC",
+                    help="**风格奖励塑形**（缺省空 = 关闭，与加这个功能之前逐位相同）。"
+                         "文法 `NAME[=w]:PAIR[,NAME2=w2:PAIR2]`，例如 `riichi=1.0:no_deal`"
+                         "（立直率 ↑，但**只有该小局未放铳**才付奖）。轴表见 "
+                         "`mahjong_ml/v4/style_reward.py`；⛔ 不写 PAIR 直接报错（不许只按立直付奖）")
+    ap.add_argument("--style-bonus-whiten", choices=["student", "all"], default="student",
+                    help="白化参数 μ/σ 的统计总体：`student`（缺省）= 只用学生座位的小局"
+                         "（= 训练里真正进梯度的行）；`all` = 全部座位。"
+                         "⚠ 没给 `--student` 时自动退回 `all` 并打印告警")
     ap.add_argument("--backfill-rank", action="store_true",
                     help="**只回填 `rank_points` 列**（src = 采集目录（含 summary.json），"
                          "out = 已存在的紧凑集；不重算张量）—— 老数据集升级用")
@@ -1110,7 +1307,15 @@ def main(argv: list[str] | None = None) -> int:
                 return v4cache.CarryTracker(_enc, int(seat))
 
             carry_factory = _make
-        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+", dm=dm)
+        # ★ 风格奖励：子进程用**父进程算好的** μ/σ（它按全量算的，子进程只看得到自己那几场文件 ——
+        #   各算各的会得到**不同的**白化参数，那是最隐蔽的一类"并行产物 ≠ 串行产物"）。
+        style_on = bool(req.get("style"))
+        style_spec = _style.parse_bonus(req.get("style_spec")) if style_on else None
+        style_stats = _style.stats_from_json(req.get("style_stats") or {}) if style_on else {}
+        if style_on and not style_stats:
+            raise spec.ContractError("req.json 里有 `style` 却没有 `style_stats`（μ/σ）—— "
+                                     "并行分支漏传了白化参数，写出来的列会与串行不同")
+        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+", dm=dm, style=style_on)
         if carry_factory is not None:
             # `open_columns(mode="r+")` 是**打开已有文件**（numpy 会忽略传入的 shape/dtype、
             # 按文件头走）⇒ 这里再自己核一次宽度：错了就会把别的宽度写进去（静默）。
@@ -1120,8 +1325,12 @@ def main(argv: list[str] | None = None) -> int:
             if got != int(dm):
                 raise spec.ContractError(f"{tag}.h0.npy 的宽度 {got} != req 的 dm={dm}")
         for f, i0, take in tasks:
+            tracker = (_style.BonusTracker(style_spec, style_stats,
+                                           own_policies=set(req["style_own"])
+                                           if req.get("style_own") else None)
+                       if style_on else None)
             _write_file(mm, f, i0, take, lmax=int(req["lmax"]), aux=bool(req["aux"]),
-                        student=req.get("student"), carry=carry_factory)
+                        student=req.get("student"), carry=carry_factory, bonus=tracker)
         for m in mm.values():
             m.flush()
         return 0
@@ -1132,7 +1341,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     build(args.src, args.out, val_frac=args.val_frac, split_seed=args.split_seed, aux=args.aux,
           limit_files=args.limit_files, workers=args.workers, student=args.student,
-          carry_model=args.carry_model)
+          carry_model=args.carry_model, style_bonus=args.style_bonus,
+          style_whiten=args.style_bonus_whiten)
     return 0
 
 

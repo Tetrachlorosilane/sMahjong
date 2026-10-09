@@ -46,6 +46,10 @@ from . import adv as v4adv
 from . import dataset as v4ds
 from . import model as M
 from . import spec
+#: **风格奖励塑形**：这里只借它的**列名常量**（`style_bonus`）——
+#: ⛔ 训练端**不**自己算风格量（那是 `dataset build` 的活），也不 import 判据侧
+#: （`tools/style-vector.py` 是**独立实现**，本仓的分工：判据独立实现、两边各自算再由对账钉住）。
+from . import style_reward as _style_reward
 
 #: 牌效头 3 维的归一化分母（= `features.DERIVED_SCALE_CAND[:3]`：向听 / 进张种数 / 进张枚数）
 EFFECT_SCALE = (8.0, 34.0, 136.0)
@@ -249,7 +253,8 @@ def kl_stop_hit(kl: float, *, threshold: float, step: int, min_steps: int) -> bo
 
 def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
                     rank_weight: float, is_student: np.ndarray | None,
-                    mode: str = "gae", baseline_fit: str = "scale") -> dict:
+                    mode: str = "gae", baseline_fit: str = "scale",
+                    style_col: str = "style_bonus") -> dict:
     """小局级信用分配 → 逐决策的 `(adv, vtarget)` + 体检数字。
 
     两种模式（`docs/TRAINING-V4.md` §14.6）：
@@ -262,8 +267,21 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
       依据：本小局收支的可解释方差实测 **0.632**（引擎真值 10 列线性），而多手后缀和只有 0.090。
       终局的顺位点项**只加在优势上**（不进取值头目标）：顺位点四家零和 ⇒ 期望 0 就是它的基线。
 
-    ⚠ 归一化**在这里一次算完**（学生行上的全局 mean/std）：放进每个 batch 里做 z-score 的话
-    优势的绝对尺度会随 batch 变，PPO 的 clip ε 就失去语义（§14 P2-②）。
+    ## ★ 风格奖励塑形（`style_bonus` 列）：**只叠一次**，且只进优势、不进值头目标
+
+    `adv = (delta + style_bonus + 顺位点) − V(s)`，而 `vtarget` 仍然是**纯 `delta`**。三条理由：
+
+    ① **塑形是奖励，不是结局**：值头要学的是"这个状态值多少分"（`delta` 的期望），
+       把塑形灌进值头会让它去预测一个**被人为加上去的量**，critic 的读数（EV/覆盖率）当场失真；
+       这与"顺位点项只加在优势上"是同一条口径（见上面那句话）。
+    ② **基线的拟合目标必须等于被减的那个量**（第二十四轮那个 bug 的同一条）：
+       所以 `fit_target` 把 `style_bonus` 一起算进去 —— 否则最小二乘的最优性不成立，
+       而守卫（`std_ratio_raw ≤ min(...)`）**会在日志里先炸**（不是悄悄训完）。
+    ③ ⛔ **不许在别处再叠一次**：数据集里那一列是**唯一**来源；把奖励折进 `delta` 列会同时
+       污染 RWR 权重与 audit 的口径。
+
+    @param style_col 风格奖励那一列的列名（`dataset.load_split` 没这一列时给 `None` ⇒ 一行都不走，
+        与加这个功能之前**逐位相同**）。⚠ 名字只在这里出现一次（值引用 `style_reward.COLUMN`）。
     """
     n = int(data["nlegal"].shape[0])
     rp = data.get("rank_points")
@@ -290,16 +308,34 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     #   最小二乘解 ≤ 常数基线 的结论才重新成立（自检把两条都钉住）。
     rank_row = (rank_weight * np.where(term_hand[hand_of_row], rp_row, 0.0)
                 if (rank_weight and rp_row is not None) else None)
-    fit_target = d_row if rank_row is None else d_row + rank_row
+    # ★★ 风格奖励塑形（`--style-bonus`）：**唯一**叠加点。
+    #   `style_row` = 数据集的 `style_bonus` 列（**千点**，与 `d_row` 同量纲）。
+    #   ⚠ 没这一列（没开塑形）⇒ `style_row is None` ⇒ 下面每一处都退化成加 0
+    #   ⇒ 与加这个功能之前**逐位相同**（判据在 `python/selfcheck.py`：权重哈希）。
+    style_row = None
+    if style_col and data.get(style_col) is not None:
+        style_row = np.asarray(data[style_col][:n], dtype=np.float64) / 1000.0
+    base_reward = d_row if style_row is None else d_row + style_row
+    fit_target = base_reward if rank_row is None else base_reward + rank_row
+    # ⚠ 归一化**只做一次**（学生行上的全局 mean/std）：放进每个 batch 里做 z-score 的话
+    #   优势的绝对尺度会随 batch 变，PPO 的 clip ε 就失去语义（§14 P2-②）。
     alpha, beta = _fit_baseline(v_row, fit_target, keep_m, baseline_fit)
     v_used_h = alpha + beta * v_h
     v_used_row = alpha + beta * v_row
     if mode == "hand":
         adv = fit_target - v_used_row                     # 小局级 baseline，无跨小局 bootstrap
-        vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点；**不含**顺位点）
-        r_h = d_row[reward_rows]
+        vtarg = d_row.copy()                             # 值头目标 = 本小局收支（千点；**不含**塑形/顺位点）
+        r_h = base_reward[reward_rows]
         stat_extra = {"mode": "hand", "bootstrap": 0.0}
     else:
+        # ⚠ `gae` 模式的奖励是 `v4adv.hand_reward` 现算的（不是这里的 `base_reward`）——
+        #   所以塑形在 gae 路径上**不生效**。这是刻意的（当前只有 `hand` 口径在用；
+        #   要开 gae + 塑形就得先把"链上奖励"那一份也改掉，那件事没做就不许假装做了）。
+        if style_row is not None:
+            raise SystemExit(
+                "`--style-bonus` 只与 `--advantage hand` 口径配套（gae 的链上奖励由 "
+                "`v4adv.hand_reward` 现算，塑形项没有接进去）。要么用 `--advantage hand`，"
+                "要么去掉 `--style-bonus` —— ⛔ 不静默忽略这笔奖励")
         r_h = v4adv.hand_reward(data["delta"][:n], rp_row, hand_of_row, next_hand, reward_rows,
                                 rank_weight=rank_weight)
         adv_h, vt_h = v4adv.gae_hand(r_h, v_used_h, next_hand, gamma=gamma, lam=lam)
@@ -318,6 +354,32 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
              "v_old_std": float(v_h.std()), "baseline_fit": baseline_fit,
              "baseline_alpha": float(alpha), "baseline_beta": float(beta),
              "v_used_std": float(v_used_h.std()), **stat_extra}
+    # ★ 风格奖励塑形的体检数字（**只有开了那一列才有**；不开时这几个键根本不存在 ⇒
+    #   日志/自检的"关掉时逐位相同"不会被一行多余的输出破坏）。
+    #   ⚠ 口径：`style_row` 是**千点**（与 `d_row` 同量纲）⇒ 下面统一按**点**记录并打印。
+    #   ⚠⚠ 这个"尺度读数"是本实验里最该看的一个数（见 `docs`/报告）：`w=2` 时它只有
+    #   **0.04%**（实测 log 里那行 `std 1.9 点 vs 结果奖励 std 5299.2 点`）—— 也就是说
+    #   这一轴在梯度里**几乎不存在**。要它真的推得动，`w` 得按 `结果奖励 std / 塑形 std`
+    #   这个倍数往上抬（本数据集实测 ≈ 5000/1.9 ≈ 2600 ⇒ `w≈2000` 才是 1:1 的方差）。
+    if style_row is not None:
+        _rw = reward_rows if reward_rows.size else np.arange(style_row.size)
+        _s_h = style_row[_rw] * 1000.0               # 千点 → 点
+        _base_std_pts = float(np.std(base_reward[_rw])) * 1000.0
+        stats.update({
+            "style_reward": {
+                "rows": int(n),
+                "nonzero_rows": int((style_row != 0.0).sum()),
+                "hand_mean": float(_s_h.mean()), "hand_std": float(_s_h.std()),
+                # ★ **这一轴相对"结果奖励"有多大** —— 也就是"它会不会支配梯度"的直接读数。
+                #   ⚠ 别拿它跟 `std(delta)` 比：基线（`α+β·V`）会吸收掉塑形里可被状态预测的那一部分，
+                #   剩下的才是真正进梯度的；这个比值只是**尺度**，用来定 `w` 的量级。
+                "hand_std_vs_reward": (float(_s_h.std() / _base_std_pts) if _base_std_pts > 0
+                                       else float("nan")),
+                "reward_base_std": _base_std_pts,     # 点
+                # 建议的 `w`（= 把这一轴抬到与结果奖励 1:1 所需的比例；见 `hand_std_vs_reward`）
+                "w_for_parity": (float(_base_std_pts / _s_h.std()) if _s_h.std() > 0
+                                 else float("inf")),
+            }})
     ref = raw if keep is None else raw[keep]
     # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
     #   整列 std ≈0.5 ⇒ 拿它比参考量会得到"看起来砍掉 95%"的假象（第一版报的 0.054×）。
@@ -334,16 +396,24 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
     _fit_s = fit_target if keep is None else fit_target[keep]
     _d_s = d_row if keep is None else d_row[keep]
     _v_s = v_row if keep is None else v_row[keep]
+    # ⚠ 参考量：**没开塑形时**用 `delta`（= 老口径，日志逐字不变）；**开了塑形时**用
+    #   `base_reward`（= delta + 塑形）—— 因为此时"被拟合/被减"的量本来就是它，
+    #   拿 `delta` 当参照会算出一个"看着像方差爆炸"的数（塑形本来就带自己的方差）。
+    _ref_name = "delta" if style_row is None else "reward(delta+style)"
+    _ref_s = base_reward if style_row is not None else d_row
+    _ref = _ref_s if keep is None else _ref_s[keep]
     stats.update({
         "base_name": base_name, "base_std": float(np.std(base)),
+        # 「基线有没有用」的**直接度量**：归一化前的 std(A) ÷ 被减的那个奖励的 std（<1 = 削减）
+        "ref_name": _ref_name, "ref_std": float(np.std(_ref)),
         "adv_std_raw": float(ref.std()),
-        "std_ratio_raw": float(ref.std() / np.std(base)) if np.std(base) > 0 else float("nan"),
+        "std_ratio_raw": float(ref.std() / np.std(_ref)) if np.std(_ref) > 0 else float("nan"),
         # 未重标定（β=1,α=0）与"只减均值"（β=0）两条参照 —— **都对同一个 `fit_target` 算**：
         # ⚠ 拿 `d_row` 去当参照是第二十四轮那个 bug 的同一条（顺位点项漏在外面）。
-        "std_ratio_unfit": float(np.std(_fit_s - _v_s) / np.std(base))
-        if np.std(base) > 0 else float("nan"),
-        "std_ratio_flat": float(np.std(_fit_s - _fit_s.mean()) / np.std(base))
-        if np.std(base) > 0 else float("nan"),
+        "std_ratio_unfit": float(np.std(_fit_s - _v_s) / np.std(_ref))
+        if np.std(_ref) > 0 else float("nan"),
+        "std_ratio_flat": float(np.std(_fit_s - _fit_s.mean()) / np.std(_ref))
+        if np.std(_ref) > 0 else float("nan"),
         "adv_std_norm_student": float(adv[keep].std()) if keep is not None else float(adv.std()),
     })
     # ★ 红证：重标定后**不可能**比"只减均值"更差，也不该比"原样相减"更差
@@ -1325,7 +1395,8 @@ def train(args) -> dict:
                               rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
                               is_student=np.asarray(train_data["is_student"]) if keep_tr is not None
                               else None, mode=mode,
-                              baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"))
+                              baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"),
+                              style_col=_style_reward.COLUMN)
         adv_tr = res["adv"]
         vtar_tr = res["vtarget"]
         res_va = _hand_advantage(val_data, v_old_va,
@@ -1333,7 +1404,8 @@ def train(args) -> dict:
                                  lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
                                  rank_weight=float(getattr(args, "rank_weight", 0.0) or 0.0),
                                  is_student=None, mode=mode,
-                                 baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"))
+                                 baseline_fit=str(getattr(args, "baseline_fit", "scale") or "scale"),
+                                 style_col=_style_reward.COLUMN)
         val_extra = {"vtarget": res_va["vtarget"]}
         s = res["stats"]
         print(f"  小局 {int(s['hands'])} 个 / 模式 {s['mode']} / γ={s['gamma']:g} λ={s['lam']:g} "
@@ -1353,6 +1425,19 @@ def train(args) -> dict:
             print(f"  优势体检（**归一化之前**）：std(A_raw) {s['adv_std_raw']:.3f} vs "
                   f"std({s['base_name']}) {s['base_std']:.3f} ⇒ **{s['std_ratio_raw']:.3f}×**"
                   f"（<1 = 方差被削减；这就是 critic 有没有用的直接度量）{extra}")
+        if s.get("style_reward"):
+            # ★ 风格奖励塑形的读数（**只有开了那一列才打**；关掉时这里一行都不出现 ⇒
+            #   "关掉时逐位相同"连日志都不受影响）。
+            sr = s["style_reward"]
+            print(f"  风格奖励塑形：`{_style_reward.COLUMN}` 列覆盖 {sr['nonzero_rows']}/{sr['rows']} 行"
+                  f"（非 0 = 那一小局被付奖）；"
+                  f"小局级 mean {sr['hand_mean']:+.1f} std {sr['hand_std']:.1f} **点** "
+                  f"vs 结果奖励 std {sr['reward_base_std']:.1f} 点 ⇒ "
+                  f"**{sr['hand_std_vs_reward']:.5f}× 结果奖励的尺度**"
+                  f"（= 「这一轴会不会支配梯度」的**尺度**读数：远小于 1 就推不动；"
+                  f"要 1:1 大约要 `w={sr['w_for_parity']:.0f}`）")
+            print(f"    被减的那个奖励（delta + 塑形 + 顺位点）的 std：{s['ref_std']:.3f} 千点；"
+                  f"std(A_raw)/std({s['ref_name']}) = {s['std_ratio_raw']:.3f}×")
             print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
                   f"（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）")
         print(f"  （用时 {time.perf_counter() - t_v:.1f}s；优势已冻结、不再随 critic 变动）")

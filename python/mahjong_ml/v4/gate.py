@@ -1,4 +1,4 @@
-"""训练的**接受闸门**：新一代要替换"现任"，必须在**多套牌山集合**上赢下来。
+r"""训练的**接受闸门**：新一代要替换"现任"，必须在**多套牌山集合**上赢下来。
 
 <h2>为什么必须有它（2026-09-30 第二季的教训）</h2>
 
@@ -17,6 +17,21 @@
 ⚠ 合并时必须给每套牌山一个**键偏移**：`per_game_series` 的键是场次 id，不同 `--seed` 之间会撞车，
 直接 `update` 会把上一套的场次覆盖掉（配对关系也跟着错位）。
 
+<h2>⚠⚠ 手动跑本模块必须照抄 run-league 的两条环境（2026-10-08 实测各踩一次）</h2>
+
+```
+$env:PYTHONPATH = "<repo>\python;<repo>\python\.venv\Lib\site-packages"
+$env:MAHJONG_DATA_ROOT = 'S:\mahjong-training'
+$env:MAHJONG_TRAINER = 'S:\mahjong-training\tools\trainer\trainer.exe'   # ⛔ 不能用仓库里那份
+& 'S:\mahjong-training\tools\py312\python.exe' -m mahjong_ml.v4.gate ...
+```
+
+1. **解释器用 S: 上那份 `py312`，不要用仓库里的 `.venv`** —— 仓库内的解释器**不能在工作区外建目录**，
+   症状是 `PermissionError: [WinError 5] ... gate\<tag>`（`arena.run_pair` 的 `mkdir` 就炸）。
+2. **`MAHJONG_TRAINER` 必须指向 S: 上那份 trainer** —— 工作区里的 `trainer.exe` 写数据根会被
+   **静默吞掉**：实测它满载跑了 11 分钟（CPU 7,896 s / 12 线程）、**一个文件都没落盘**、也不报错。
+   （这正是 `run-league.ps1` 每次开跑先按时间戳把仓库 exe 同步到 S: 的原因。）
+
 用法：
 
     python -m mahjong_ml.v4.gate --incumbent <net.bin> --candidate <net.bin> \\
@@ -34,6 +49,17 @@ from mahjong_ml import eval as ml_eval
 from mahjong_ml import paths
 
 from . import arena
+
+#: **风格线 → 目标轴**（2026-10-08 用户裁决"闸门重心向风格化倾斜"）：主判据换成该线的风格轴，
+#: 通用强度（顺位点）退为**护栏**。⚠ 方向约定：`eval.seat_values` 里**正数一律 = 更好**
+#: （`deals` 已在那边取负）⇒ `decide` 不必知道每个指标的方向。
+LINE_METRIC = {
+    "atk": "win_points",   # 打点线：目标轴 = 每场**和了所得点数合计**（"平均打点"的分子）
+    "def": "deals",        # 防守线：目标轴 = 每场**放铳次数**（已在 `seat_values` 取负 ⇒ 越少越好）
+    "win": "wins",         # 和了线：目标轴 = 每场**和了次数**（"和了率"的分子）
+}
+#: 护栏的预注册容忍带：通用强度（顺位点）的 CI **下界**不得低于 −1.0（即"为了风格最多让 1 点"）。
+GUARD_RANK = 1.0
 
 #: 跨牌山集合合并时的键偏移（每套给一段互不重叠的场次号）
 _KEY_STRIDE = 1_000_000
@@ -76,16 +102,25 @@ def decide(sa: dict[int, float], sb: dict[int, float], a: str, b: str,
 
 def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: int,
          out_root: Path, *, workers: int = 16, metric: str = "rank_points",
-         tag: str = "gate", prod: str | None = None) -> dict:
-    """跑闸门：多套牌山集合 × 分块，最后按**合并后的**配对差分判决。"""
+         metric_guard: str = "rank_points", guard: float | None = 1.0,
+         tag: str = "gate", prod: str | None = None, rotate_perm: bool = True) -> dict:
+    """跑闸门：多套牌山集合 × 分块，最后按**合并后的**配对差分判决。
+
+    ⚠ `rotate_perm`（2026-10-08 起缺省 True）：闸门与**训练**桌用**同一套座次口径**（24 全排列）。
+    """
     root = out_root / tag
     series: list[tuple[dict[int, float], dict[int, float]]] = []
+    guard_series: list[tuple[dict[int, float], dict[int, float]]] = []
     wall_deltas: list[float] = []
     print(f"闸门：现任={Path(incumbent).parent.name} vs 候选={Path(candidate).parent.name}"
           f"；{len(seeds)} 套牌山 × 每套至多 {games} 场（block={block}）")
+    print(f"  主口径 = **{metric}**" + (f"（风格轴）；护栏 = **{metric_guard}**"
+          + (f"，预注册：下界 ≥ −{guard}" if guard is not None else "，不设护栏")
+          if metric != metric_guard else "（通用强度口径，无独立护栏）"))
     for s in seeds:
         d = root / f"s{s}"
-        arena.run_pair(d, incumbent, candidate, block, s, workers=workers, prod=prod)
+        arena.run_pair(d, incumbent, candidate, block, s, workers=workers, prod=prod,
+                       rotate_perm=rotate_perm)
         x, y = arena.judge_series(d, incumbent, candidate, metric)
         # ⚠ **逐牌山这行必须与下面的合并判决同一个符号**（候选 − 现任）。`judge_pair(sa, sb, a, b)`
         #   的约定是 `Δ = a − b`，所以这里要按 `(y, x, 候选, 现任)` 调 —— 写成 `(x, y, 现任, 候选)`
@@ -93,8 +128,14 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
         #   症状极具误导性：两套牌山 `+2.34 / −0.08` 而合并是 `−1.13`，读日志的人会以为
         #   "候选赢了一套"。（实测踩过：第八季 g01；判决逻辑没错，错的是这行 printf。）
         part = arena.judge_pair(y, x, candidate, incumbent, metric)
+        extra = ""
+        if metric != metric_guard:
+            gx, gy = arena.judge_series(d, incumbent, candidate, metric_guard)
+            gpart = arena.judge_pair(gy, gx, candidate, incumbent, metric_guard)
+            guard_series.append((gx, gy))
+            extra = f" · 护栏 {metric_guard} Δ={gpart.delta:+5.2f}"
         print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}"
-              f"（候选 − 现任）")
+              f"（候选 − 现任）{extra}")
         wall_deltas.append(float(part.delta))
         series.append((x, y))
     sa, sb = pooled_diffs(series)
@@ -102,6 +143,26 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
     out["seeds"] = list(seeds)
     out["incumbent"] = incumbent
     out["candidate"] = candidate
+    out["metric"] = metric
+    # ---- 护栏（2026-10-08 用户裁决"闸门重心向风格化倾斜"）--------------------------------------
+    # 主口径换成**该线的风格轴**之后，必须防"为了风格把通用强度换掉"（历史上真发生过：纯牌效
+    # IL 项把和了率与打点一起换掉、闸门 Δ=−12.65）。所以护栏 = **通用强度（顺位点）的 CI 下界
+    # 不得低于 −guard**（预注册的容忍带回撤）。⛔ 护栏**只用来否掉**，不用来"采纳"。
+    if metric != metric_guard:
+        gsa, gsb = pooled_diffs(guard_series)
+        g = decide(gsa, gsb, incumbent, candidate, metric_guard)
+        out["guard_metric"] = metric_guard
+        out["guard_delta"], out["guard_lo"], out["guard_hi"] = g["delta"], g["lo"], g["hi"]
+        out["guard_ok"] = (guard is None) or (float(g["lo"]) >= -float(guard))
+        out["adopt_primary"] = bool(out["adopt"])
+        out["adopt"] = bool(out["adopt"] and out["guard_ok"])
+        print(f"  护栏（{metric_guard}）：Δ={g['delta']:+.2f} CI[{g['lo']:+.2f},{g['hi']:+.2f}]"
+              + ("" if guard is None else f" ⇒ {'不破' if out['guard_ok'] else '破了'}"
+                 f"（预注册：下界须 ≥ −{guard}）"))
+        print(f"  合并判决：主口径（{metric}）Δ={out['delta']:+.2f} "
+              f"CI[{out['lo']:+.2f},{out['hi']:+.2f}]"
+              f" {'✓' if out['adopt_primary'] else '✗'} + 护栏 {'✓' if out['guard_ok'] else '✗'}"
+              f" ⇒ **{'采纳' if out['adopt'] else '不采纳'}**")
     # ⚠ **套间散布要打出来**（第八季审计）：合并 CI 只含"套内"的配对噪声，而"换一套牌山"本身
     #   能把 Δ 摆动好几个点（实测同一候选：闸门 −2.26 vs 换牌山的自评 +1.32）。所以
     #   ① 判决只能读成"**条件于这几套牌山**"；② 套间极差 ≫ CI 半宽时，这个判决不该被当成
@@ -129,7 +190,8 @@ def _policy(spec: str) -> str:
     return s if s.startswith(("net:", "teacher", "first", "pass", "random")) else f"net:{s}"
 
 
-def self_check(out_root: Path, *, workers: int = 12, prod: str | None = None) -> int:
+def self_check(out_root: Path, *, workers: int = 12, prod: str | None = None,
+               rotate_perm: bool = True) -> int:
     """闸门自证：**方向必须对**（空对照抓不出方向问题，所以这里用强弱对照）。
 
     两组对照（用竞技场自证那对已知强弱的策略，200 场足够把 Δ≈90 拉开）：
@@ -144,7 +206,7 @@ def self_check(out_root: Path, *, workers: int = 12, prod: str | None = None) ->
     print("== 闸门自证①：弱现任 vs 强候选 ⇒ 必须采纳 ==")
     d = {"incumbent": "first", "candidate": "teacher"}
     arena.run_pair(out_root / "selfcheck-weak-to-strong", "first", "teacher", 200, 20260930,
-                   workers=workers, prod=prod)
+                   workers=workers, prod=prod, rotate_perm=rotate_perm)
     sa, sb = arena.judge_series(out_root / "selfcheck-weak-to-strong", "first", "teacher")
     r1 = decide(sa, sb, "first", "teacher")
     r1_wrong = decide(sb, sa, "teacher", "first")          # 故意写反
@@ -160,7 +222,7 @@ def self_check(out_root: Path, *, workers: int = 12, prod: str | None = None) ->
 
     print("== 闸门自证②：强现任 vs 弱候选 ⇒ 必须拒绝 ==")
     arena.run_pair(out_root / "selfcheck-strong-to-weak", "teacher", "first", 200, 20260930,
-                   workers=workers, prod=prod)
+                   workers=workers, prod=prod, rotate_perm=rotate_perm)
     sa2, sb2 = arena.judge_series(out_root / "selfcheck-strong-to-weak", "teacher", "first")
     r2 = decide(sa2, sb2, "teacher", "first")
     print(f"   Δ={r2['delta']:+.2f} CI[{r2['lo']:+.2f},{r2['hi']:+.2f}] "
@@ -186,21 +248,36 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--games", type=int, default=2000, help="每套的场次上限（配合 --block 提前收工）")
     ap.add_argument("--block", type=int, default=1000)
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--metric", default="rank_points")
+    ap.add_argument("--metric", default="rank_points",
+                    help=f"主判据口径（{', '.join(ml_eval.METRICS)}）；给 `--line` 时被它覆盖")
     ap.add_argument("--out", default=None, help="输出根（缺省 <数据根>/gate）")
     ap.add_argument("--tag", default="gate")
     ap.add_argument("--producer", choices=["cpp", "java"], default="cpp")
+    ap.add_argument("--line", choices=sorted(LINE_METRIC), default="",
+                    help="**风格线**：主判据自动换成该线的目标轴（" +
+                         " / ".join(f"{k}={v}" for k, v in LINE_METRIC.items()) +
+                         "），通用强度退为护栏")
+    ap.add_argument("--guard", type=float, default=GUARD_RANK,
+                    help=f"护栏容忍带：{ml_eval.METRICS[0]} 的 CI 下界须 ≥ −guard（缺省 {GUARD_RANK}）")
+    ap.add_argument("--rotate-perm", dest="rotate_perm", action="store_true", default=True,
+                    help="**24 全排列座次**（缺省开；与训练桌同一口径，2026-10-08 用户裁决）")
+    ap.add_argument("--no-rotate-perm", dest="rotate_perm", action="store_false",
+                    help="退回旧的循环移位（只用于复现 2026-10-08 之前的读数）")
     args = ap.parse_args(argv)
     out_root = Path(args.out).resolve() if args.out else paths.DATA_ROOT / "gate"
     arena.guard_out(out_root)
     if args.self_check:
-        return self_check(out_root, workers=args.workers, prod=args.producer)
+        return self_check(out_root, workers=args.workers, prod=args.producer,
+                          rotate_perm=args.rotate_perm)
     if not (args.incumbent and args.candidate):
         ap.error("要么给 --incumbent/--candidate，要么用 --self-check")
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    # 风格线 ⇒ 主口径换成目标轴、通用强度退护栏（`--metric` 显式给定时以它为准）
+    metric = LINE_METRIC[args.line] if args.line else args.metric
     r = gate(_policy(args.incumbent), _policy(args.candidate), seeds, args.games, args.block,
-             out_root, workers=args.workers, metric=args.metric, tag=args.tag,
-             prod=args.producer)
+             out_root, workers=args.workers, metric=metric,
+             metric_guard="rank_points", guard=args.guard, tag=args.tag,
+             prod=args.producer, rotate_perm=args.rotate_perm)
     return 0 if r["adopt"] else 3
 
 

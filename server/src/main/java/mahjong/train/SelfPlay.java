@@ -160,6 +160,28 @@ public final class SelfPlay {
         List<Object> placement;
         /** 四家的**顺位点**（精算点数，按座位索引）—— 顺位意识的评测口径。 */
         double[] rankPoints;
+        /**
+         * 每场每席的"风格轴"账（**下标 = 座位号**，与 {@code finalScores} / {@code placement}
+         * 同一套下标约定；与 C++ 侧 `trainer/src/selfplay.cpp` 的 `GameRow` 逐项同源）。
+         *
+         * <p>为什么要有 per-game 粒度：闸门对风格轴（打点 / 放铳率 / 和了率）做的是**逐场配对差分**
+         * （{@code Δ = 候选 − 现任} 的 CI），整份汇总的比率取不到"每一场每一席"的值。
+         *
+         * <p>⚠ 口径与 {@link Summary#byPolicy} 那张表**逐项相同**（累加后必须逐位相等），
+         * 唯一数据源就是小局行里的 {@code winner} / {@code loser} / {@code delta}：
+         * <ul>
+         *   <li>{@code wins} 只认 {@code winner == i}（多家荣和时 {@code winner} 只有离放铳者
+         *       最近那家 —— 与表的 {@code win_rate} 分子同一把尺子）；</li>
+         *   <li>{@code winPoints} 累加 {@code delta[i]}，而表的 {@code avg_win_score} 累加的正是
+         *       同一个数（收点 + 本场棒 + 供託一起算，别在这里另立"纯打点"口径）；</li>
+         *   <li>{@code deals} / {@code dealPoints} 是同一本账的**镜像**：{@code loser == i} 的那些
+         *       小局，付出 = {@code -delta[i]}。</li>
+         * </ul>
+         */
+        int[] wins;
+        int[] winPoints;
+        int[] deals;
+        int[] dealPoints;
         String[] labels;
         List<Map<String, Object>> hands;
     }
@@ -248,6 +270,13 @@ public final class SelfPlay {
                     "final_scores", Json.intList(row.finalScores),
                     "placement", row.placement,
                     "rank_points", rankPointList(row.rankPoints),
+                    // 四个风格轴数组（下标 = 座位号）：闸门按场配对做 CI 时读它们。
+                    // 键序只在上面那处构造里定一次 —— 新键插在 `rank_points` 与 `hands` 之间
+                    // （与 C++ 侧同位置；`python/mahjong_ml/eval.py` 的 `_STYLE_FIELDS` 正在等它们）。
+                    "wins", Json.intList(row.wins),
+                    "win_points", Json.intList(row.winPoints),
+                    "deals", Json.intList(row.deals),
+                    "deal_points", Json.intList(row.dealPoints),
                     "hands", row.hands.size(),
                     "ryukyoku", row.ryukyoku));
             // 顺位按策略标签累计
@@ -334,6 +363,29 @@ public final class SelfPlay {
             row.finalScores[i] = t.seat(i).score;
         }
         row.placement = TraceRecorder.placementOf(row.finalScores);
+        // 每场每席的和了 / 放铳 / 打点账（`per_game[]` 的四个风格轴数组）。
+        // 唯一数据源就是小局行里的 `winner` / `loser` / `delta` —— 与 run() 里给 `by_policy`
+        // 累计的那三分支**同一把尺子**，所以"按场累加 == 表里那一行"是构造出来的，不是巧合。
+        row.wins = new int[4];
+        row.winPoints = new int[4];
+        row.deals = new int[4];
+        row.dealPoints = new int[4];
+        for (Map<String, Object> h : row.hands) {
+            int winner = Json.i(h, "winner", -1);
+            int loser = Json.i(h, "loser", -1);
+            List<Object> delta = Json.list(h, "delta");
+            for (int i = 0; i < 4; i++) {
+                int d = delta == null || i >= delta.size() ? 0 : ((Number) delta.get(i)).intValue();
+                if (winner == i) {
+                    row.wins[i]++;
+                    row.winPoints[i] += d;
+                }
+                if (loser == i) {
+                    row.deals[i]++;
+                    row.dealPoints[i] += -d;
+                }
+            }
+        }
         // 顺位点：**复用生产的精算**（同点拆分/马点/头名赏一把尺子），不在这里另写一份公式
         RoundScoring.Settlement settle = RoundScoring.settle(row.finalScores, rules);
         row.rankPoints = settle.point.clone();

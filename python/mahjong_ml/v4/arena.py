@@ -132,15 +132,22 @@ def _label_of(policy: str) -> str:
 
 
 def run_pair(dir_out: Path, a: str, b: str, games: int, seed: int, *,
-             workers: int = 16, hands: int = 0, prod: str | None = None) -> None:
-    """跑一对：`--rotate` + `a,a,b,b`（同牌山配对的唯一正确跑法）。
+             workers: int = 16, hands: int = 0, prod: str | None = None,
+             rotate_perm: bool = True) -> None:
+    """跑一对：`--rotate`（+ `--rotate-perm`）+ `a,a,b,b`（同牌山配对的唯一正确跑法）。
 
     ⚠ `prod` 走 `producer.selfplay_cmd`（java / cpp **参数口径相同**）：C++ trainer 快，
     但它只认识 `teacher` / `net:` / `first`… 这几个名字；**Java 侧独有的策略（如 `search`）**
     必须用 `--producer java`（慢，但能跑）。
+
+    ⚠ `rotate_perm`（2026-10-08 起**缺省 True**，用户裁决 = **训练与闸门同一套座次口径**）：
+    按场号枚举 4! = 24 个**全排列** ⇒ 绝对座位与**相对方位**都被平均；只 `--rotate` 的循环移位
+    只覆盖 4 个排列且**保持循环序** ⇒ 方位被钉死（实测 48 场：`def` 恒 +1、`win` 恒 +2、`atk` 恒 +3）。
+    这与 `loop.py` 采集桌的 `rotate_full` 是**同一个开关**；要复现 2026-10-08 之前的历次读数，
+    显式传 `rotate_perm=False`（⛔ 但用户已明确"不再直接参考以前的测量数据"）。
     """
     cmd = producer.selfplay_cmd(games, workers, f"{a},{a},{b},{b}", seed, dir_out,
-                                hands=hands, name=prod)
+                                hands=hands, rotate_full=rotate_perm, name=prod)
     dir_out.mkdir(parents=True, exist_ok=True)
     print("  $ " + " ".join(cmd), flush=True)
     rc = subprocess.run(cmd, cwd=str(producer.ROOT)).returncode

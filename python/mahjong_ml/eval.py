@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-METRICS = ("rank_points", "place", "score")
+METRICS = ("rank_points", "place", "score", "wins", "deals", "win_points")
 ALPHA = 0.05
 POWER_DEFAULT = 0.8            # `required_n` 的默认功效（通行口径；50% 功效会低估约一半场次）
 BOOT_DEFAULT = 10_000
@@ -73,6 +73,20 @@ def load_run(d: str | Path) -> Run:
 
 # ------------------------------------------------------------------ 逐场取值
 
+#: 风格轴（2026-10-08 加）：训练端 summary 的 `per_game[]` 里每场每席都有这四个数组
+#: （**下标 = 座位**，与 `final_scores`/`placement` 同一套下标约定）。闸门用它做**风格轴**的配对 CI。
+_STYLE_FIELDS = ("wins", "win_points", "deals", "deal_points")
+
+
+def _style_field(row: dict, name: str) -> list:
+    """取某个风格轴字段；缺了就**明确报错**（⛔ 别静默退化成 0 —— 那会把"没测到"读成"没发生"）。"""
+    if name not in row:
+        raise ValueError(
+            f"per_game 缺 `{name}`（风格轴需要它）—— 训练端 summary 必须带 "
+            f"{'/'.join(_STYLE_FIELDS)}；先重建 trainer（`pwsh -File trainer\\build.ps1`）再跑自对弈")
+    return row[name]
+
+
 def seat_values(row: dict, label: str, metric: str) -> list[float]:
     """一场里该策略占的座位上的指标值（一般 1 个；同标签多座位时取平均）。"""
     out = []
@@ -89,6 +103,18 @@ def seat_values(row: dict, label: str, metric: str) -> list[float]:
             if "final_scores" not in row:
                 raise ValueError("per_game 缺 final_scores（按得点排序需要它）—— 重新跑自对弈")
             out.append(float(row["final_scores"][i]) - START_SCORE)
+        elif metric == "wins":
+            # **和了次数**（每场每席）—— 风格轴之一（"和了线"的目标轴；`win_rate` 的分子，
+            # 分母 `hands` 对四席相同 ⇒ 配对 CI 与用比率等价）。
+            out.append(float(_style_field(row, "wins")[i]))
+        elif metric == "deals":
+            # **放铳次数**（每场每席）—— ⚠ **取负**：本模块的约定是"正数 = 更好"，
+            # 而放铳越少越好 ⇒ 与 `place` 同样取负，于是 `decide` 不必知道每个指标的方向。
+            out.append(-float(_style_field(row, "deals")[i]))
+        elif metric == "win_points":
+            # **和了所得点数合计**（每场每席）—— "打点线"的目标轴。**刻意不用比率**：
+            # 没有和了的场次会让"平均打点"没有定义；用合计则每场都有定义，且它就是平均打点的分子。
+            out.append(float(_style_field(row, "win_points")[i]))
         else:
             raise ValueError(f"未知指标 {metric}（可用：{', '.join(METRICS)}）")
     return out

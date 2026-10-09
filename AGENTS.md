@@ -255,7 +255,7 @@ node tools\bot-ai-test.mjs 127.0.0.1 10086       # 机器人 AI：清单/建房 
 node tools\check-i18n.mjs        # 服务端每个码都有客户端译文（词表哨兵）
 node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
-python\selfcheck.py              # 训练侧自检（当前 **659** 项；必须在 python\ 下跑）
+python\selfcheck.py              # 训练侧自检（当前 **676** 项；必须在 python\ 下跑）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4：前向 = trainer-v4-parity.mjs、增量缓存 = v4-cache-check.mjs
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
@@ -527,6 +527,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 - **"一轮"由时间预算定**（缺省 `--target-minutes 20`）且**只跑缓存档**（`--cache-gb`=0.8×内存；
   越档直接掉进 45 分钟那档）：场次由 `budget.py` 从**台账实测回填**反推 + 闸门夹逼（**点名谁限制的**）；
   跨代选人与续训见 NOTES §6.5（`online screen` / `--opponents` / `--student-seats`）。
+- ⛔ **风格线用"风格桌"**：四席 = 学生 1 + **每个风格各 1**（座位要 `--rotate-perm` 的 **24 排列**平均，循环移位不够）；⛔ 别用 `-PoolSeed`。见 NOTES §6.5。
 - 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
 - **v4 前向的增量事件缓存**（默认开，`--no-v4-cache` 关）：判据必须**成对** —— **增量 == 全量（逐位）**
   *且* **真的命中**（只有"相等"是假绿）。回归：`SelfTest.v4CacheTests` + `tools\v4-cache-check.mjs`。

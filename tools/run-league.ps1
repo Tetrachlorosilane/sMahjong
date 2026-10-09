@@ -25,11 +25,15 @@
 #     本脚本自己**不建**数据集（没有别的 `dataset build` 调用点）—— 要改口径请改 `v4/loop.py`。
 #
 # 用法：pwsh -File tools\run-league.ps1 [-Generations 5] [-Games 1000] [-GateBlock 1000] [-Label <季标签>]
+#   `-Style <名>` + `-StylePools "atk=a1,a2;def=d1,d2;win=w1,w2"`：**风格桌**（2026-10-08 用户指定）——
+#     训某风格线时，桌上**每个风格各 1 席**（学生 1 席 + 三种风格对手各 1 席），座位由 `--rotate` 平均。
+#     ⚠ 这与 `-PoolSeed` 是**两件事**：后者只把 1 个座位换成池里的一员（桌上还有学生×2）⇒ 不许用于风格线。
 #   `-DryRun`：打印这一季真会跑的命令行（含 `--il-weight` / `--val-metric` 的实际取值）后退出，不训练。
 #   `-Label`：不传就用下面那个缺省标签（**换季不必改脚本** —— 改脚本正是"标签被复用"的来源之一）。
 # ⚠ `-IlWeight` 的缺省**必须是 0**（2026-10-03 第六十三轮的负结果）：见下面 `--il-weight` 那一段。
 param([int]$Generations = 5, [int]$Games = 1000, [int]$GateBlock = 1000, [int]$Seed = 0,
-      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty, [string]$PoolSeed = [string]::Empty)
+      [double]$IlWeight = 0.0, [double]$RefBeta = 0.5, [string]$Label = '', [switch]$DryRun, [switch]$NoGate, [string]$Incumbent = [string]::Empty, [string]$PoolSeed = [string]::Empty,
+      [string]$Style = [string]::Empty, [string]$StylePools = [string]::Empty)
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = 'utf-8'
 $ErrorActionPreference = 'Stop'
@@ -199,6 +203,27 @@ for ($g = 1; $g -le $Generations; $g++) {
                # "开始记数据"）；配合原有的 5% 验证切分 + grad-clip 0.5 + KL 锚，三件一起才算护栏。
                '--eval-games', '200', '--eval-vs', 'prev', '--seed', "$seed", '--no-java')
     foreach ($p in $opp) { $largs += @('--opponents', $p) }
+    # ---- 风格桌（2026-10-08 用户指定）：训某风格时，桌上**每个风格各 1 席** ----------------------
+    # 用法：-Style atk -StylePools "atk=a1,a2;def=d1,d2;win=w1,w2"
+    # ⚠ 为什么不能沿用 -PoolSeed：那个口径只把**一个**非学生座位换成池里的一员（其余座位是学生×2 + teacher）
+    #   ⇒ 桌上 2/4 席与学生同风格、每代只有 1 个风格对手 ⇒ 学不到"对另外两种风格怎么打"（用户指正）。
+    # ⚠ 给了 -Style 就必须给 -StylePools，且本线必须在池里 —— 缺一个就**报错退出**，
+    #   绝不静默降级成"少一个风格的桌子"（那正是这次要修的病）。
+    if ($Style) {
+        if (-not $StylePools) { Log '⛔ -Style 必须配 -StylePools（NAME=path1,path2;...）'; exit 1 }
+        $poolNames = @()
+        foreach ($grp in $StylePools.Split(';')) {
+            if (-not $grp.Trim()) { continue }
+            $poolNames += ($grp.Split('=')[0].Trim())
+            $largs += @('--style-pool', $grp.Trim())
+        }
+        if ($poolNames -notcontains $Style) {
+            Log ("⛔ -Style {0} 不在 -StylePools 的风格里（{1}）" -f $Style, ($poolNames -join ',')); exit 1
+        }
+        $largs += @('--style', $Style)
+        Log ("风格桌：本线 {0}；每代桌上 = 学生 1 席 + 每个风格各 1 席（{1}）；座位靠 `--rotate-perm` 的 24 全排列平均" -f `
+             $Style, ($poolNames -join '/'))
+    }
     if ($DryRun) {
         # 空跑：把**真会跑的那条命令行**按 token 打印出来（`--il-weight` / `--val-metric` 一眼可见），
         # 顺带报这一季的 `$label` / `$seed` / 闸门牌山，然后退出（不训练、不碰 S 盘）。
@@ -208,11 +233,30 @@ for ($g = 1; $g -le $Generations; $g++) {
     }
     Log ("=== 第 {0} 代（{1}）init={2} 对手池={3} ===" -f $g, $tag,
          (Split-Path $incumbent -Parent | Split-Path -Leaf),
-         $(if ($opp.Count) { ($opp | ForEach-Object { Split-Path $_ -Parent | Split-Path -Leaf }) -join ',' } else { '（无）' }))
+         $(if ($Style) { "风格桌（本线 $Style + 每个风格各 1 席）" }
+          elseif ($opp.Count) { ($opp | ForEach-Object { Split-Path $_ -Parent | Split-Path -Leaf }) -join ',' }
+          else { '（无）' }))
     $log = Join-Path $root "release\$tag.log"
     & $py @largs *> $log
     $rc = $LASTEXITCODE
     if ($rc -ne 0) { Log ("第 {0} 代失败（退出码 {1}）—— 保留现场并停止" -f $g, $rc); break }
+
+    # ---- 座次平均化判据（2026-10-08）：每代采集完**立刻**数轨迹 --------------------------------
+    # 为什么要它：桌子的**构成**由 `loop.py` 的 `policy()` 决定、**座次平均化**由 `--rotate` 决定，
+    #   两者都是"设计上应该有"；而"忘了开 rotate"或"桌上有两个同一个策略"（老风格线的学生×2）
+    #   只会表现为**某个策略的座位次数不齐** —— 等到几个月后看强弱是完全查不出来的。
+    # 判据（`tools/seat-balance.py --check`）：每个策略在四个座位上次数**完全相等** + 每场学生席位数正确。
+    #   ⚠ 期望学生席位随口径变：风格桌 1 席；旧口径（学生× teacher_seats）2 席。
+    $sb = Join-Path $root 'tools\seat-balance.py'
+    if (Test-Path $sb) {
+        $wantStud = $(if ($Style) { 1 } else { 2 })
+        & $py $sb (Join-Path $S "raw\$tag") --expect-students $wantStud --check *>> $log
+        if ($LASTEXITCODE -ne 0) {
+            Log ("第 {0} 代**座次平均化判据判红**（期望每场 {1} 个学生席）—— 保留现场并停止；详见 release\{2}.log" -f $g, $wantStud, $tag)
+            break
+        }
+        Log ("第 {0} 代座次平均化判据 PASS（每场 {1} 个学生席；四席次数均等）" -f $g, $wantStud)
+    }
 
     foreach ($d in @("raw\$tag", "compact\$tag", "raw\eval-$tag")) {
         $p = Join-Path $S $d
