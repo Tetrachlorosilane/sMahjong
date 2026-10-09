@@ -255,7 +255,7 @@ node tools\bot-ai-test.mjs 127.0.0.1 10086       # 机器人 AI：清单/建房 
 node tools\check-i18n.mjs        # 服务端每个码都有客户端译文（词表哨兵）
 node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
-python\selfcheck.py              # 训练侧自检（当前 **676** 项；必须在 python\ 下跑）
+python\selfcheck.py              # 训练侧自检（当前 **739** 项；必须在 python\ 下跑）
 node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4：前向 = trainer-v4-parity.mjs、增量缓存 = v4-cache-check.mjs
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
