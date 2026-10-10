@@ -153,6 +153,15 @@ PAIR_AXES = (
     #   初始化的 ⇒ 裸名永远不存在）—— 实测 HEAD 上 `post` 到这一步必死在 `_paired_delta`。
     ("fold_rows_per_game", "f_fold_rows", "games", "abs"),
     ("fold_rate", "f_fold_rows", "f_threat_rows", "pct"),
+    # ★★ `pon` 轴（**副露种类 = 碰取向**，2026-10-11）：**主**读数 = 逐场配对的**行级**
+    #   `pon_type_rate` = 碰的行 / 鸣牌行（= 奖励侧付奖行的**同一集合**当分子；分母 = `chi:`/
+    #   `pon:`/`kan:` 的**全部**鸣牌行）；**辅** = 每场每席碰的行数（`games` 当分母 = 1）。
+    #   ⚠ 分母 `pt_meld_rows` 是**每一场自己的**行数 ⇒ 该场没有鸣牌行时这一场不进
+    #   `pon_type_rate` 的配对（`_paired_delta` 的既有约定）；**辅判据不受此影响，1000 场全用**。
+    #   ⚠ 分子/分母键必须与 `_student_per_game` 的逐场字典同名（`MELDTYPE_KEYS`，带 `pt_` 前缀）
+    #   —— ⛔ 写裸名会让 `_paired_delta` 对每一条链都 `KeyError`（那一组是无条件初始化的）。
+    ("pon_rows_per_game", "pt_pon_rows", "games", "abs"),
+    ("pon_type_rate", "pt_pon_rows", "pt_meld_rows", "pct"),
 )
 #: 95% CI 的正态近似系数（与 `tools/w-ladder-gate-table.py` / `eval._paired_from_diffs` 同族做法）。
 Z95 = 1.96
@@ -826,6 +835,26 @@ FOLD4_KEYS = ("f4_decision_rows", "f4_threat_rows", "f4_fold_rows", "f4_push_row
 #: 由 `_verify_fold_totals` 对账（审计账里带 `row_rule` / `genbutsu_src`）—— 只抄不查 = 同义反复。
 #: 判据侧的出牌前缀与牌种归一（赤五 `0m` → `5m`）：
 FOLD_DISCARD_PREFIX = "discard:"
+#: ★★ **副露种类轴**（`pon` = 碰取向，2026-10-11）的判据侧记账键 —— 与 `DECLINE_KEYS` /
+#: `RIICHI_TURN_KEYS` / `FOLD_KEYS` 同级：⛔ **刻意不进 `COUNT_KEYS`**（那组必须与
+#: `style-vector.py` 的**手级** `counts` 逐项相等，而这里是**行级**量，对账对象是
+#: **奖励侧的审计账** `audit/<tag>.json` 的 `axes[].meld_rows/pon_rows/chi_rows/kan_rows`）：
+#:   * `pt_decision_rows` = 学生席决策行数（审计账 `n_used`）；
+#:   * `pt_meld_rows` = 其中**鸣牌动作行**（`chosen` 以 `chi:`/`pon:`/`kan:` 开头）
+#:     = **主判据 `pon_type_rate` 的分母**（审计账同名键 `meld_rows`）；
+#:   * `pt_pon_rows` = 其中**碰**的（= **付奖行候选** = 审计账 `action_rows` / `pon_rows`）；
+#:   * `pt_chi_rows` / `pt_kan_rows` = 其中吃 / 杠的（⛔ **一分钱不付**的那一侧；它们必须真的
+#:     存在，否则"种类"这个维度塌成 `meld` 轴）；
+#:   * `pt_paid_rows` / `pt_blocked_rows` = 付奖行里"学生该小局未放铳"/"学生放铳"。
+#: ⚠ 总体 = **学生席**（与 `fold` 同一份总体：奖励侧 `meld_type_row_numbers` 的
+#:   `rows_in_scope(st, student_policies)`）。
+#: ⛔ 判据侧**独立实现**（本文件按动作键前缀自己数，**不 import** `style_reward.MELD_TYPE_PREFIX`）：
+#: 两套实现各算一套、由 `_verify_meldtype_totals` 对账 —— 只抄不查 = 同义反复。
+MELDTYPE_KEYS = ("pt_decision_rows", "pt_meld_rows", "pt_pon_rows", "pt_chi_rows", "pt_kan_rows",
+                 "pt_paid_rows", "pt_blocked_rows")
+#: 判据侧的鸣牌动作前缀与**付奖那一侧**（`pon` = 碰取向）：⛔ 与奖励侧各自写一份。
+MELDTYPE_PREFIXES = ("chi:", "pon:", "kan:")
+MELDTYPE_PAID_PREFIX = "pon:"
 
 
 def student_counts(sv: dict) -> dict:
@@ -1102,6 +1131,32 @@ def _student_per_game(tdir: Path) -> dict:
                     c["fold_blocked_rows"] += 1     # 伴随量 `no_deal` 拦下（切了現物照样可能放铳）
                 else:
                     c["fold_paid_rows"] += 1
+        # ★★ **副露种类轴**（`pon` = 碰取向）的记账（`MELDTYPE_KEYS`；口径见那一段注释）---------
+        #   ⛔ **独立实现**：只按**动作键前缀**数（`chi:`/`pon:`/`kan:`），⛔ 不 import 奖励侧、
+        #   也不看 `obs.melds`（那是**手级公开状态**，答不了"**这一手**鸣的是哪一种"）。
+        #   与 `fold` 同一份总体（**学生席**）⇒ 与审计账 `axes[].meld_rows/pon_rows/...` 逐项可比。
+        c.update({k: 0 for k in MELDTYPE_KEYS})
+        for _i3, seat, hn, chosen, *_rest in dec_rows:
+            if seat != stu:
+                continue
+            c["pt_decision_rows"] += 1
+            _ch = str(chosen or "")
+            _pf = next((p for p in MELDTYPE_PREFIXES if _ch.startswith(p)), "")
+            if not _pf:
+                continue
+            c["pt_meld_rows"] += 1
+            if _pf == MELDTYPE_PAID_PREFIX:
+                c["pt_pon_rows"] += 1
+                # ⚠ 这一格只数学生席、且质量轴 `no_deal` 只看**学生自己**那一小局放铳了没有
+                #   （与奖励侧 `paid_rows`/`blocked_rows` 同一个谓词）。
+                if loser_of_hand.get(hn, -1) == stu:
+                    c["pt_blocked_rows"] += 1
+                else:
+                    c["pt_paid_rows"] += 1
+            elif _pf == "chi:":
+                c["pt_chi_rows"] += 1
+            else:
+                c["pt_kan_rows"] += 1
         out[game if game is not None else int(f.name[1:-6])] = c
     return out
 
@@ -1445,6 +1500,113 @@ def _hands_of_dir(tdir: Path):
         yield from v4sr.iter_hands(f)
 
 
+def _meldtype_totals(per_game: dict) -> dict:
+    """把逐场的 `MELDTYPE_KEYS` 加总（**行级 · 学生席**口径；对账对象是奖励侧审计账 `axes[]`）。"""
+    return {k: sum(g[k] for g in per_game.values()) for k in MELDTYPE_KEYS}
+
+
+def _meldtype_selfcheck(tot: dict, tag: str) -> dict:
+    """**口径自洽**（不需要奖励侧也有账就能查）：四格互不重叠、总体确实是学生席、付奖账不漏。"""
+    bad = []
+    g = tot["pt_pon_rows"] + tot["pt_chi_rows"] + tot["pt_kan_rows"]
+    if g != tot["pt_meld_rows"]:
+        bad.append(f"碰 + 吃 + 杠 = {g} != 鸣牌行 {tot['pt_meld_rows']}"
+                   f"（四格互不重叠、合起来必须等于分母）")
+    if tot["pt_pon_rows"] and (tot["pt_paid_rows"] + tot["pt_blocked_rows"]
+                               != tot["pt_pon_rows"]):
+        bad.append(f"付奖 {tot['pt_paid_rows']} + 拦下 {tot['pt_blocked_rows']} != 碰的行 "
+                   f"{tot['pt_pon_rows']}（累计点漏了/重了）")
+    if tot["pt_decision_rows"] and tot["pt_meld_rows"] > tot["pt_decision_rows"]:
+        bad.append(f"鸣牌行 {tot['pt_meld_rows']} > 学生席决策行 {tot['pt_decision_rows']}"
+                   f"（⇒`MELDTYPE_KEYS` 的总体**不是**学生席，两边必然不是同一集合）")
+    if not tot["pt_meld_rows"]:
+        bad.append("鸣牌行 = 0 —— 分母取不到（这一轴的付奖行率与 `pon_type_rate` 都无定义）；"
+                   "奖励侧对同一情形**硬拒**（`MELD_TYPE_ERR`），判据侧同样不出数")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：行级「副露种类（碰取向）」账**自相矛盾** —— 读数不予发布：\n"
+                         + "\n".join("   " + b for b in bad))
+    return tot
+
+
+def _meldtype_aggregate(tot: dict, games: int) -> dict:
+    """**聚合**读数（与"逐场配对"并列的那一份）：四数 + `pon_type_rate` + 每场每席碰的行数。"""
+    n = games or 0
+    return {"games": int(n), "meld_rows": tot["pt_meld_rows"], "pon_rows": tot["pt_pon_rows"],
+            "chi_rows": tot["pt_chi_rows"], "kan_rows": tot["pt_kan_rows"],
+            "decision_rows": tot["pt_decision_rows"],
+            "pon_type_rate": ((tot["pt_pon_rows"] / tot["pt_meld_rows"]) if tot["pt_meld_rows"]
+                              else float("nan")),
+            "paid_rows_frac": ((tot["pt_pon_rows"] / tot["pt_decision_rows"])
+                               if tot["pt_decision_rows"] else float("nan")),
+            "pon_rows_per_game": ((tot["pt_pon_rows"] / n) if n else float("nan")),
+            "paid_rows": tot["pt_paid_rows"], "blocked_rows": tot["pt_blocked_rows"]}
+
+
+def _verify_meldtype_totals(per_game: dict, tag: str, audit: dict | None = None) -> dict:
+    """★★ **判据与奖励对账**（`pon` 轴）：行级判据的每一格 == 奖励侧审计账的对应键。
+
+    为什么这条是硬判据：奖励侧的付奖行 = "**鸣牌动作行 ∧ `chosen` 以 `pon:` 开头**"，判据侧必须量
+    **同一个集合**（否则"推的是不是这个行为"没法证伪）。独立性边界：判据侧
+    `_student_per_game` **只看轨迹**（自己按动作键前缀数，⛔ 不 import `style_reward`），
+    奖励侧的数从 `audit/<tag>.json` 读（或由 `_reward_meldtype_account` 用**当前**奖励代码重算）
+    —— 口径句（`row_rule` / `type_src`）也必须存在（不写下来就没法复判这一列）。
+
+    ★ **总体必须同口径**：审计账 `axes[]` 那一份是**学生席**（`meld_type_row_numbers(...,
+    student_policies)`，与 `n_used` 同一份总体）⇒ 主对账用 `MELDTYPE_KEYS`（学生席）；
+    ⛔ 不拿四席去对学生席。
+    """
+    if audit is None:
+        au = read_audit(tag)
+        src = str(AUDIT / f"{tag}.json")
+    else:
+        au, src = audit, str(audit.get("tool") or "（调用方传入的奖励账）")
+    if not au:
+        raise SystemExit(f"⛔ 审计账不存在：{AUDIT / (tag + '.json')} —— 没有奖励侧的账就**没法**做"
+                         f"「判据与奖励对齐」的对账（⛔ 不出读数）")
+    ax = next((a for a in (au.get("axes") or []) if a.get("axis") == "pon"), None)
+    if ax is None:
+        raise SystemExit(f"⛔ 审计账 {AUDIT / (tag + '.json')} 里没有 `pon` 那一轴"
+                         f"（spec={au.get('spec')!r}）—— 这条链不是用这根轴跑的？")
+    tot = _meldtype_selfcheck(_meldtype_totals(per_game), tag)
+    pairs = (("pt_meld_rows", "meld_rows"),
+             ("pt_pon_rows", "pon_rows"),
+             ("pt_pon_rows", "action_rows"),      # 奖励侧的"动作行"就是这个集合
+             ("pt_chi_rows", "chi_rows"),
+             ("pt_kan_rows", "kan_rows"),
+             ("pt_paid_rows", "paid_rows"),
+             ("pt_blocked_rows", "blocked_rows"),
+             ("pt_decision_rows", "n_used"))
+    bad = [f"{mine:<24} 判据侧 {tot[mine]:>7} vs 审计账 `{theirs}` {ax.get(theirs)}"
+           for mine, theirs in pairs if int(ax.get(theirs, -1)) != tot[mine]]
+    for _k in ("row_rule", "type_src"):
+        if not ax.get(_k):
+            bad.append(f"审计账缺口径句 `{_k}`（不写下来就没法复判这一列）")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：**判据与奖励对不上**（`pon`）—— 读数不予发布（先修判据）：\n"
+                         + "\n".join("   " + b for b in bad)
+                         + f"\n   （审计账 {AUDIT / (tag + '.json')}，spec={au.get('spec')!r}）")
+    return {"tag": tag, "audit": src, "spec": au.get("spec"),
+            "axis": ax.get("axis"), "row_rule": ax.get("row_rule"),
+            "type_src": ax.get("type_src"), "totals": tot, "reconciled": True,
+            "caliber": "student", "audit_is_recomputed": audit is not None}
+
+
+def _reward_meldtype_account(tdir: Path, spec_text: str, stu: str) -> dict:
+    """★ **用当前奖励代码**在同一份轨迹上重算 `pon` 的账（= `_verify_meldtype_totals` 的基准）。
+
+    与 `_reward_fold_account` 同一条纪律：`audit/<tag>.json` 是**训练当时**那一版代码的产物，
+    落后就照实报差 ⇒ 对账基准 = 当前奖励代码在同一份轨迹上重算的账。
+    ⛔ 不改 `style_reward`（奖励侧的账只能由奖励侧自己算）—— 本函数只**调**它一次（学生席口径）。
+    """
+    spec = v4sr.parse_bonus(spec_text)
+    _s1, au1 = v4sr.whitening_stats(spec, _hands_of_dir(tdir), student_policies={stu},
+                                    quiet=True, mode="decision")
+    ax1 = next(a for a in au1.axes if a["axis"] == "pon")
+    return {"tool": f"tools/w-ladder.py `_reward_meldtype_account`（当前奖励代码重算 · {tdir.name}）",
+            "note": "⛔ 不是 `audit/<tag>.json`（那是训练当时的账）",
+            "spec": spec_text, "axes": [ax1]}
+
+
 def _paired_delta(pre: dict, post: dict, axes=PAIR_AXES) -> dict:
     """逐场配对：`Δ_g = post_rate_g − pre_rate_g`（**按场配**，不是把分子分母各自累加）。
 
@@ -1597,6 +1759,8 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
     _has_dama = "dama" in _axis_names
     _has_rt = "riichi_turn" in _axis_names
     _has_fold = "fold" in _axis_names
+    # ★★ `pon`（副露种类 = 碰取向，2026-10-11）：与 `fold` 同一条纪律 —— 按**轴名**判这条链用没用它。
+    _has_mt = "pon" in _axis_names
     dec_pre = (_verify_decline_totals(per_pre, f"{label}-g01") if _has_dama else
                {"tag": f"{label}-g01", "totals": _decline_totals(per_pre), "audit": None,
                 "reconciled": False,
@@ -1658,6 +1822,37 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                        "**至少一家**威胁家是現物**（= 奖励侧 `fold_row_ok(obs, chosen, seat)` 的"
                        "**同一集合**；⚠ 2026-10-11 第三轮由 `all` 放宽为 `any`）；"
                        "⛔ 对谁都不安全的「押し」那一侧一行都不付。"}
+    # ★★ **副露种类轴**（`pon` = 碰取向）的对账：判据侧的行级账 vs 奖励侧审计账。
+    #   ⚠ 与 `fold` 同理：对账基准 = **当前奖励代码在同一份轨迹上重算的账**（`_reward_meldtype_account`），
+    #   ⛔ 不是 `audit/<tag>.json`（那是训练当时那一版的产物，落后就照实报差）；
+    #   `post` 补采不挂奖励 ⇒ 那一侧只做口径自洽。⛔ 只有这条链真的用了这根轴时才做。
+    mt = None
+    if _has_mt:
+        _sp2 = (_au_pre.get("spec") or "")
+        if not _sp2:
+            raise SystemExit(f"⛔ 冻结账 {AUDIT / (f'{label}-g01.json')} 里没有 `spec` —— 不猜"
+                             f"奖励口径（对账基准必须是同一版代码重算的账）")
+        _acc2 = _reward_meldtype_account(pre_dir, _sp2, pre_student)
+        _pre_v2 = _verify_meldtype_totals(per_pre, f"{label}-g01", audit=_acc2)
+        _frozen2 = next((a for a in (_au_pre.get("axes") or []) if a.get("axis") == "pon"), None)
+        _delta2 = ({k: int(_frozen2.get(k, -1)) - int(_pre_v2["totals"][m])
+                    for k, m in (("meld_rows", "pt_meld_rows"), ("pon_rows", "pt_pon_rows"),
+                                 ("action_rows", "pt_pon_rows"), ("chi_rows", "pt_chi_rows"),
+                                 ("kan_rows", "pt_kan_rows"),
+                                 ("paid_rows", "pt_paid_rows"),
+                                 ("blocked_rows", "pt_blocked_rows"),
+                                 ("n_used", "pt_decision_rows"))} if _frozen2 else {})
+        mt = {"pre": _pre_v2,
+              "frozen_audit": {"path": str(AUDIT / f"{label}-g01.json"), "spec": _sp2,
+                               "axis": _frozen2, "delta_vs_recomputed": _delta2,
+                               "used_for_reconciliation": False},
+              "post": {"tag": tag_post, "totals": _meldtype_selfcheck(
+                  _meldtype_totals(per_post), tag_post), "audit": None, "reconciled": False},
+              "aggregate": {"pre": _meldtype_aggregate(_meldtype_totals(per_pre), len(per_pre)),
+                            "post": _meldtype_aggregate(_meldtype_totals(per_post), len(per_post))},
+              "note": "行级「副露种类（碰取向）」：付奖行 = **鸣牌动作行 ∧ `chosen` 以 `pon:` 开头**"
+                      "（= 奖励侧 `ROW_ACTION_PREFIX['pon']` 的**同一集合**）；主语料 = 碰的行 / 鸣牌行；"
+                      "⛔ 吃/杠那一侧一行都不付。"}
     res = {"tool": "tools/w-ladder.py post", "label": label, "generations": n,
            "final_net": str(net), "student_spec": labs[si], "policy": labs,
            "games": games, "seed": seed, "log": str(log),
@@ -1673,6 +1868,7 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                                "`riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"},
            "riichi_turn": rt,
            "fold": fd_,
+           "meld_type": mt,
            "paired_delta": _paired_delta(per_pre, per_post)}
     (PAIRED / f"{tag_post}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2),
                                              encoding="utf-8")
@@ -1772,6 +1968,39 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
               f"＝ Δ {dd2.get('delta_pp', float('nan')):+.4f}（SE {dd2.get('se_pp', float('nan')):.4f}，"
               f"95% CI [{dd2.get('lo_pp', float('nan')):+.4f},{dd2.get('hi_pp', float('nan')):+.4f}]，"
               f"n={dd2.get('n_games')}）", flush=True)
+    # ★★ **副露种类轴**（`pon`）的原始输出：先贴**对账**（判据 vs 奖励），再贴**主判据**。
+    if mt is not None:
+        _fa2 = mt["frozen_audit"]
+        print(f"[post] ⚠ `pon` 的**冻结审计账**（{_fa2['path']}）若与当前奖励代码有差："
+              f"{_fa2['delta_vs_recomputed']} ⇒ 对账基准 = `_reward_meldtype_account`"
+              f"（当前奖励代码在同一份轨迹上重算）", flush=True)
+        tp4, tq4 = mt["pre"]["totals"], mt["post"]["totals"]
+        for _tag, _t, _rec in ((mt["pre"]["tag"], tp4,
+                                "✓ 与**当前奖励代码重算**的账逐项相等（学生席口径）"),
+                               (tag_post, tq4, "口径自洽（无审计账 · 补采不挂奖励）")):
+            _rt2 = (_t["pt_pon_rows"] / _t["pt_meld_rows"]) if _t["pt_meld_rows"] else float("nan")
+            print(f"[post] ★ 副露种类（碰取向）· {_tag}：**鸣牌动作行** {_t['pt_meld_rows']}"
+                  f"（⛔ 主判据分母）｜其中**碰** {_t['pt_pon_rows']}（= 付奖行候选）"
+                  f"｜**吃** {_t['pt_chi_rows']}｜**杠** {_t['pt_kan_rows']}"
+                  f"｜碰的行/鸣牌行 {100 * _rt2:.3f}%｜付奖 {_t['pt_paid_rows']} / 拦下 "
+                  f"{_t['pt_blocked_rows']}｜付奖行/决策行 "
+                  f"{100 * _t['pt_pon_rows'] / max(_t['pt_decision_rows'], 1):.4f}% ⇒ {_rec}",
+                  flush=True)
+        dr3 = res["paired_delta"].get("pon_type_rate") or {}
+        dg3 = res["paired_delta"].get("pon_rows_per_game") or {}
+        ap4, aq4 = mt["aggregate"]["pre"], mt["aggregate"]["post"]
+        print(f"[post] ★★ **主判据** `pon_type_rate`（逐场配对的**行级** 碰的行/鸣牌行；**方向为升**）："
+              f"{ap4['pon_type_rate']:.4%} → {aq4['pon_type_rate']:.4%}"
+              f"（{ap4['pon_rows']}/{ap4['meld_rows']} → {aq4['pon_rows']}/{aq4['meld_rows']}）"
+              f"＝ **Δ {dr3.get('delta_pp', float('nan')):+.3f}pp**（SE {dr3.get('se_pp', float('nan')):.3f}，"
+              f"t={dr3.get('t', float('nan')):.2f}，95% CI "
+              f"[{dr3.get('lo_pp', float('nan')):+.3f},{dr3.get('hi_pp', float('nan')):+.3f}]，"
+              f"n={dr3.get('n_games')}）", flush=True)
+        print(f"[post] ★ 辅判据 `pon_rows_per_game`（每场每席碰的行数）："
+              f"{dg3.get('pre', float('nan')):.4f} → {dg3.get('post', float('nan')):.4f}"
+              f"＝ Δ {dg3.get('delta_pp', float('nan')):+.4f}（SE {dg3.get('se_pp', float('nan')):.4f}，"
+              f"95% CI [{dg3.get('lo_pp', float('nan')):+.4f},{dg3.get('hi_pp', float('nan')):+.4f}]，"
+              f"n={dg3.get('n_games')}）", flush=True)
     print(f"[post] 落盘 {PAIRED / (tag_post + '.json')}")
     if not keep_traces:
         mb = 0.0

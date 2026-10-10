@@ -177,6 +177,32 @@
 它在**结构上**不是一个问题：`obs` 只在**询问那一刻**构造（PROTOCOL §8.2 判据 3），和了/流局之后**不再有询问**
 ⇒ 出现"某家已立直"的行本身就意味着**这一小局还没结束、那个威胁仍然活着**。这就是"威胁活跃性"的全部重建。
 
+## `pon` 轴（**副露种类 = 碰取向**，2026-10-11 加）
+
+**动机（`AXIS-CENSUS.md` 路线 1 的第二根轴：`D 副露种类`）**：`meld` 轴只问"**鸣不鸣**"，完全不问
+**鸣哪一种** —— 而吃/碰是两种代价不同的行为（碰能碰役牌/宝牌、吃常为速度）。普查（学生席）实测：
+鸣牌行里 **碰 2150 / 吃 1107 / 杠 308**；占决策行 **1.257% / 0.647% / 0.180%**
+⇒ ⛔ **`chi` 与 `kan` 单独立轴过不了 1%/行 门槛**（`AXIS-CENSUS.md` §"D 内部细分"），
+所以本轴只做**一个方向**：**碰**（量最大的那一侧）。付奖行率实测见
+`S:\\mahjong-training\\w-ladder\\PREREGISTRATION-MELD-TYPE.md` §1（含判据侧同口径的复核）。
+
+| | `pon` 轴 |
+| --- | --- |
+| 付奖行（**唯一**口径） | **鸣牌动作行**（`chosen` 以 `chi:`/`pon:`/`kan:` 开头）**∧** `chosen` 以 **`pon:`** 开头 |
+| 手级指示量 | 该席本小局**至少有一行**是碰（`HandState.pon_hit`；与行级**同一把尺子**） |
+| 方向 | ⛔ **单向：只推"碰"** —— 吃/杠那一侧**一分钱都不付**（不做负奖、也不做"越碰越多"） |
+| 伴随质量轴 | `no_deal`（该小局未放铳）—— ⛔ **不是恒真**：碰完照样可能放铳（普查 `D:pon`×`no_deal` 81.3%）⇒ 由 `ROW_PAIR_MUST_BLOCK` 的**实测**闸门钉住 `blocked_rows > 0` |
+| 判据侧 | `tools/w-ladder.py` 的**行级** `pon_type_rate` = 碰的行 / 鸣牌行（+ 每场每席碰的行数；**独立实现**，⛔ 不进 `style-vector.py`） |
+
+⚠ **与既有 `meld` 轴正交、可共存**：两轴在同一份轨迹上分别开时，`meld` 管**手级**（有没有副露、
+`obs.melds[seat]`），`pon` 管**行级**（这一手是不是碰，动作键前缀）；
+⛔ 缺省（不给 `--style-bonus`）与既有各轴**逐位不变**（新轴的四个数只在这类轴的审计账里出现）。
+
+⛔ **`pon` 只允许在 `decision` 模式下当付奖轴**（`DECISION_ONLY_AXES`）：`hand` 模式的合并量是
+"四席取或的'这一小局有人碰过吗'"，**不是**"这一手是不是碰" ⇒ 与 `dama`/`riichi_turn`/`fold` 同理，
+那不叫同一根轴 ⇒ 当场报错。⚠ 范围里**一行鸣牌行都没有**时由 `MELD_TYPE_ERR` **当场硬拒**
+（分母取不到 ⇒ 付奖行率与 `pon_type_rate` 都无定义，⛔ 不静默付 0）。
+
 ## ⛔ 退化成恒真的组合：当场报错（`IMPLIED_PAIRS`）
 
 **判据**：若伴随质量轴的指示量**被付奖行本身蕴含**，则它在付奖行上恒真 ⇒ 等于 `PAIR = none`
@@ -227,6 +253,17 @@ SEATS_PER_TABLE = 4
 RIICHI_PREFIX = "riichi:"
 MELD_PREFIXES = ("chi:", "pon:", "kan:")
 
+#: ★★ **副露种类轴**（`pon` = **碰取向**，2026-10-11 加）：轴 → **付奖那一侧**的动作键前缀。
+#: 付奖行 = **鸣牌动作行**（`chosen` 以 `chi:`/`pon:`/`kan:` 开头）**且** `chosen` 以它开头。
+#: ⛔ **方向单向**：另一侧（吃 / 杠）**一分钱都不付** —— 不做负奖、也不做"越碰越多"。
+#: 选 `pon` 而不是 `chi` 的**理由是数据**（普查 + 本批 50 场冒烟实测，见
+#: `S:\\mahjong-training\\w-ladder\\PREREGISTRATION-MELD-TYPE.md` §1）：`pon` 行占了鸣牌行的
+#: **六成**（`chi` 只有约三成），而 `chi` 单独的行占比 **0.65%/行** **过不了 1%/行 门槛**
+#: （`AXIS-CENSUS.md` §4/§"D 内部细分"）⇒ 单独立 `chi` 轴会被噪声地板吃掉。
+#: ⚠ 它与既有 `meld` 轴（只数"鸣不鸣"）**正交**：同一份轨迹上两轴分别开时各管一个维度
+#: （`meld` = 手级"有没有副露"、`pon` = 行级"这一手是不是碰"）；⛔ 缺省与既有各轴**逐位不变**。
+MELD_TYPE_PREFIX: dict[str, str] = {"pon": "pon:"}
+
 #: 数据集里那一列的名字（唯一字面量：`dataset.py` / `pretrain.py` / 自检都引用它）。
 COLUMN = "style_bonus"
 
@@ -257,6 +294,9 @@ def check_mode(mode: str) -> str:
 ROW_ACTION_PREFIX: dict[str, tuple[str, ...]] = {
     "riichi": (RIICHI_PREFIX,),
     "meld": MELD_PREFIXES,
+    # ★★ **副露种类轴**（`pon` = 碰取向）：付奖行 = 鸣牌动作行 ∧ `chosen` 以 `pon:` 开头。
+    #   ⛔ 另一侧（`chi:`/`kan:`）**一分钱不付**（单向）；与 `meld` 轴正交（那只问"鸣不鸣"）。
+    "pon": (MELD_TYPE_PREFIX["pon"],),
 }
 #: 轴 → "**这一行**是不是那个动作"的**整串相等**判据（`tsumo` / `ron` 是无参数动作）。
 ROW_ACTION_EXACT: dict[str, tuple[str, ...]] = {
@@ -314,14 +354,28 @@ IMPLIED_PAIRS: dict[str, tuple[str, ...]] = {
 #: ★★ `fold`（2026-10-11）：`hand` 的合并量 = "这一小局四席取或的降り行有过吗"，**不是**"这一行" ——
 #: 而本轴的全部意义就是**逐行**把钱落到"被威胁时切了安全牌"那一手（弱口径、单向）⇒ `hand` 模式下用它
 #: 等于静默换轴，当场报错。
-DECISION_ONLY_AXES: tuple[str, ...] = ("dama", "riichi_turn", "fold")
+DECISION_ONLY_AXES: tuple[str, ...] = ("dama", "riichi_turn", "fold", "pon")
 
 #: ⛔★ **实测层面的"恒真"闸门**（比 `IMPLIED_PAIRS` 的静态表更硬）：轴 → 必须在真数据上**真的拦下过行**
 #: 的那些伴随量。`IMPLIED_PAIRS` 只能登记"结构上必然蕴含"的组合（`win` 那两条），而 `riichi_turn`+`no_deal`
 #: **不蕴含**（立直之后照样可能放铳）—— 所以只能靠**实测**：`blocked_rows == 0` ⇒ 伴随量在付奖行上恒真
 #: ⇒ 质量轴形同虚设 = 对同一件事重复加权（`win=w:no_deal` 的病）⇒ 当场报错（⛔ 不静默放行）。
 ROW_PAIR_MUST_BLOCK: dict[str, tuple[str, ...]] = {"riichi_turn": ("no_deal",),
-                                                   "fold": ("no_deal",)}
+                                                   "fold": ("no_deal",),
+                                                   # ★ 碰取向：碰完**照样可能放铳**（普查 `D:pon`×`no_deal`
+                                                   #  81.3% 真门）⇒ 实测必须真的拦下过行。
+                                                   "pon": ("no_deal",)}
+
+#: ⛔★ **"取不到鸣牌行"⇒ 硬拒**（`pon` 轴的负向判据）。
+#: 为什么必须硬拒而不是"μ=0 于是 σ=0 报错就算了"：这一轴的**第一条判据**就是"碰的行有多少"
+#: （≥1%/行门槛 + 主判据 `pon_type_rate` 的分母），而"统计范围里一行鸣牌都没有"意味着
+#: **分母取不到** —— 那时任何读数都无定义。⛔ 不静默付 0、也不退化成"另一种副露"，
+#: 而是当场报错（要么轨迹里根本没有鸣牌决策行，要么 `--style-bonus-whiten`/`--student` 的
+#: 范围与轨迹对不上）。⚠ 只对**真的用了**这根轴的配置生效 ⇒ 别的轴 / 缺省路径一字不动。
+MELD_TYPE_ERR = ("副露种类轴（`pon`）：统计范围里**一行鸣牌决策行都没有**（`chosen` 以 "
+                 "`chi:`/`pon:`/`kan:` 开头的行 = 0）⇒ 这一轴的**分母取不到**、付奖行率与"
+                 "`pon_type_rate` 都无定义。⛔ 不静默付 0（那等于把这条轴悄悄关掉）；"
+                 "要么这份轨迹里有鸣牌决策行，要么别用这条轴")
 
 #: ⛔★ **"取不到威胁状态 / 現物"⇒ 硬拒**（比"静默按 False 付 0"硬；`fold` 轴的负向判据）。
 #: 为什么必须硬拒而不是跳过那几行：`obs.riichi` 取不到 = "这一行**有没有**被威胁"这件事**无定义**，
@@ -740,6 +794,17 @@ AXES: dict[str, dict] = {
         "style_vector": ("⛔ 不在 `tools/style-vector.py` 里（那是**手级**口径的独立实现）："
                          "本轴的判据是 `tools/w-ladder.py` 的**行级** `fold_rate` = 付奖行 / 被威胁行"),
     },
+    "pon": {
+        "kind": "bernoulli",
+        "meaning": ("副露种类（**碰取向**：用碰而不是吃）：行级付奖行 = **鸣牌动作行** ∧ "
+                    "`chosen` 以 `pon:` 开头；手级指示量 = 该席本小局至少有一行这样的"
+                    "（只服务结构不变量）"),
+        "src": ("行级：`chosen` 以 `pon:` 开头（`ROW_ACTION_PREFIX['pon']` / `MELD_TYPE_PREFIX`；"
+                "⛔ 吃/杠那一侧一分钱不付）；手级：`HandState.pon_hit`（同一个前缀判据）"),
+        "style_vector": ("⛔ 不在 `tools/style-vector.py` 里（那是**手级**口径的独立实现）："
+                         "本轴的判据是 `tools/w-ladder.py` 的**行级** `pon_type_rate` = "
+                         "碰的行 / 鸣牌行（+ 每场每席碰的行数）"),
+    },
 }
 
 #: `PAIR` 里被允许的两个"恒假"哨兵（**只用于红证/负向对照**，不参与任何正推）：
@@ -943,6 +1008,14 @@ class HandState:
     #: ⛔ 它**不是**"降り率"（那是个比值、在 `tools/w-ladder.py` 的判据侧）—— 手级量在这里只服务
     #: "手级=1 ⇔ 有动作行"这条结构不变量。
     fold_hit: list[bool] = field(default_factory=lambda: [False] * SEATS_PER_TABLE)
+    #: ★★ 逐行：这一行的**副露种类前缀**（`chi:` / `pon:` / `kan:`；不是鸣牌行 = `""`）。
+    #: `feed` 时按**同一个** `MELD_PREFIXES` 判出来存下来 —— `meld_type_row_numbers` 与
+    #: 写列那条路都读它（⛔ 不在别处按 `chosen` 重算一遍：两条来源必然漂移）。
+    row_meld_type: list[str] = field(default_factory=list)
+    #: ★★ 逐席：本小局**有没有至少一行**是 `pon` 轴的付奖行（= 真的碰了；`AXES['pon']` 的**手级**
+    #: 指示量）。⚠ 它与行级判据**同一把尺子**（同一个 `MELD_TYPE_PREFIX`）⇒ `decision_violations`
+    #: 的"手级=1 ⇔ 有动作行"这条蕴含成立。⛔ 它**不是** `pon_type_rate`（那是判据侧的比值）。
+    pon_hit: list[bool] = field(default_factory=lambda: [False] * SEATS_PER_TABLE)
 
     def seat_is_student(self, seat: int, student_policies: set[str]) -> bool:
         """该席本小局是不是"学生"（= 白化统计要不要算它）。
@@ -969,6 +1042,10 @@ class HandState:
         # ★ 逐行的 `step`（**付钱路的坐标系**：`_decision_value` 只有 `row["step"]`；见 `row_step`）。
         _stp = row.get("step")
         self.row_step.append(int(_stp) if isinstance(_stp, int) and not isinstance(_stp, bool) else -1)
+        # ★★ 逐行的**副露种类**（`pon` 轴的付奖行判据与判据侧记账的**唯一**来源）：
+        #   ⛔ 只按动作键前缀判（`chi:`/`pon:`/`kan:`），不读 `obs.melds` 的形状 —— 后者是
+        #   **手级公开状态**（"这一席有没有副露"），答不了"**这一手**鸣的是哪一种"。
+        self.row_meld_type.append(next((p for p in MELD_PREFIXES if chosen.startswith(p)), ""))
         # ★ 逐行的"这一行能立直吗"（`dama` 轴的付奖行判据）。行上的 `legal` 与 `obs.legal`
         #   必须一致（`dataset.py` 会硬校验这一条）⇒ 优先取行上的，行上没有再看 obs，都没有 = None。
         legal = row.get("legal")
@@ -1021,6 +1098,9 @@ class HandState:
             self.riichi_turn[seat] = max(self.riichi_turn[seat], _riichi_turn(obs))
             if chosen.startswith(MELD_PREFIXES):
                 self.meld[seat] = True
+            # ★★ **碰取向**（`pon`）的**手级**指示量：这一行真的碰了（与行级判据同一个前缀表）。
+            if self.row_meld_type[-1] == MELD_TYPE_PREFIX["pon"]:
+                self.pon_hit[seat] = True
         # 副露是**公开状态**：随便哪一席的 obs 都能读出别家（`--no-claims` 只丢鸣牌决策行）
         melds = obs.get("melds") or []
         for s in range(min(SEATS_PER_TABLE, len(melds))):
@@ -1067,6 +1147,10 @@ def indicator_values(st: HandState) -> list[dict[str, float]]:
             #   （与行级判据**同一把尺子** ⇒ `decision_violations` 的蕴含成立）。
             #   ⛔ 它**不是**"降り率"（比值）—— 那是判据侧 `tools/w-ladder.py` 的 `fold_rate`。
             "fold": 1.0 if st.fold_hit[s] else 0.0,
+            # ★★ **碰取向**（`pon`，副露种类轴）的**手级**指示量 = 该席本小局真的碰过
+            #   （与行级判据**同一把尺子**：同一个 `MELD_TYPE_PREFIX`）⇒ `decision_violations`
+            #   的"手级=1 ⇔ 有动作行"这条蕴含成立。⛔ 它**不是** `pon_type_rate`（那在判据侧）。
+            "pon": 1.0 if st.pon_hit[s] else 0.0,
         }
         out.append(vals)
     return out
@@ -1339,6 +1423,39 @@ def fold_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[str] 
     return out
 
 
+def meld_type_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[str] | None) -> dict:
+    """★ **副露种类轴的四个数**（`pon` 专用；与 `decline_row_numbers` / `fold_row_numbers` 对称）。
+
+    口径（每一行只落在其中一格；四格**互不重叠**、加总 = `meld_rows`）：
+      * `meld_rows` = 范围内 **鸣牌动作行**（`chosen` 以 `chi:`/`pon:`/`kan:` 开头）= **主判据**
+        `pon_type_rate` 的**分母**（= 判据侧 `tools/w-ladder.py` 的 `pt_meld_rows`）；
+      * `pon_rows` = 其中**碰**的（= 奖励侧 `action_rows` = **付奖行候选**）；
+      * `chi_rows` / `kan_rows` = 其中吃 / 杠的（⛔ **一分钱不付**的那一侧；它们必须真的存在，
+        否则"种类"这个维度塌成了 `meld` 轴）。
+
+    ⚠ 它读的是 `HandState.row_meld_type`（`feed` 里按**同一个** `MELD_PREFIXES` 存下来的）——
+    与 `row_is_axis_action('pon', …)` 是**两处独立计数**（同一个尺子、各自数）
+    ⇒ "`pon_rows == 审计账 action_rows`"才是一条**对账**，而不是同义反复。
+    """
+    out = {"meld_rows": 0, "pon_rows": 0, "chi_rows": 0, "kan_rows": 0}
+    if not any(a.name in MELD_TYPE_PREFIX for a in spec.axes):
+        return out
+    for i, _s, c in rows_in_scope(st, student_policies):
+        if not (0 <= i < len(st.row_meld_type)):
+            raise BonusSpecError(
+                f"副露种类轴（`pon`）的付奖行判据要**这一行自己的**动作键，但取不到第 {i!r} 行的"
+                f"记录（`HandState.row_meld_type`）—— 两条来源漂移了（⛔ 不按非鸣牌行静默处理）")
+        mt = st.row_meld_type[i]
+        if not mt:
+            continue
+        out["meld_rows"] += 1
+        _k = {"pon:": "pon_rows", "chi:": "chi_rows", "kan:": "kan_rows"}.get(mt)
+        if _k is None:
+            raise BonusSpecError(f"副露种类轴：认不出的鸣牌前缀 {mt!r}（`MELD_PREFIXES` 漂移了）")
+        out[_k] += 1
+    return out
+
+
 def spec_axis_pay(spec: BonusSpec, stats: dict[str, Whitening], ax: BonusAxis) -> float:
     """`decision` 模式里**动作行**拿到的那笔钱（点）：`w·(1−μ)/σ`（**唯一落点**，别处再算一遍必漂移）。"""
     w = stats[ax.name]
@@ -1483,6 +1600,15 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
     fnum: dict[str, dict] = {a.name: {"threat_rows": 0, "fold_rows": 0,
                                       "push_rows": 0, "threat_missing_rows": 0}
                              for a in spec.axes}
+    #: ★★ **副露种类轴**（`pon`）的四个数（口径见 `meld_type_row_numbers`）：
+    #: `meld_rows`（分母）/ `pon_rows`（= 动作行）/ `chi_rows` / `kan_rows`（⛔ 不付奖那一侧）。
+    #: ⛔ 只对这类轴累加 ⇒ riichi/meld/dama/riichi_turn/fold 的审计账**一个键都不多**。
+    mtnum: dict[str, dict] = {a.name: {"meld_rows": 0, "pon_rows": 0,
+                                      "chi_rows": 0, "kan_rows": 0}
+                              for a in spec.axes}
+    #: ★★ `pon` 的**硬拒计数**（见 `MELD_TYPE_ERR`）：统计范围里的鸣牌行数（= 0 ⇒ 当场报错）。
+    #: ⛔ 非 0 才对；只在真的用了这根轴时检查（别的轴 / 缺省路径一字不动）。
+    meld_rows_total = 0
     #: ★★ `fold` 的**硬拒计数**（见 `FOLD_GENBUTSU_ERR`）：出牌行里"取不到威胁状态 / 現物"的行数。
     #: ⛔ 非 0 ⇒ 当场报错（**只在真的用了 `fold` 轴时**检查；别的轴 / 缺省路径一字不动）。
     fold_missing_total = 0
@@ -1534,6 +1660,13 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                     for k, v in fn.items():
                         fnum[ax.name][k] += v
                     fold_missing_total += fn["threat_missing_rows"]
+            # ★★ **副露种类轴**的四个数（与 `acts` 同一份总体、但**独立数**出来 ⇒ 对账才有意义）。
+            mn = meld_type_row_numbers(spec, st, student_policies)
+            for ax in spec.axes:
+                if ax.name in MELD_TYPE_PREFIX:
+                    for k, v in mn.items():
+                        mtnum[ax.name][k] += v
+                    meld_rows_total += mn["meld_rows"]
             bad = decision_violations(spec, st, student_policies)
             if bad:
                 # ★ 计数**无条件** +1；样例才受上限约束（`len(viol)` 不是总数 —— 见 `n_viol` 的注释）。
@@ -1572,6 +1705,15 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
             f"要么这份轨迹里没有记下那个动作键，要么范围（`--style-bonus-whiten` / `--student`）"
             f"与轨迹对不上")
 
+    # ★★ **`pon` 的硬拒**（见 `MELD_TYPE_ERR`）：统计范围里一行鸣牌决策行都没有 ⇒
+    #   这一轴的**分母取不到**（付奖行率 / `pon_type_rate` 都无定义）⇒ 当场报错。
+    #   ⚠⚠ 必须放在**白化的 σ 检查之前**：没有鸣牌行 ⇒ μ = 0 ⇒ σ = 0，那条通用闸门会先炸，
+    #   报出来的是"这一轴是常数"（症状相同但**诊断错位** —— 真正的原因是**分母取不到**）。
+    #   ⛔ 不静默付 0（那等于把这条轴悄悄关掉）；只在**真的用了**这根轴时检查。
+    if any(a.name in MELD_TYPE_PREFIX for a in spec.axes) and not meld_rows_total:
+        raise BonusSpecError(f"{MELD_TYPE_ERR}（本次实测：范围内 {n_rows} 行决策、"
+                             f"鸣牌行为 0）")
+
     stats: dict[str, Whitening] = {}
     for ax in spec.axes:
         x = acc[ax.name]
@@ -1607,6 +1749,10 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
             raise BonusSpecError(
                 f"{FOLD_GENBUTSU_ERR}（本次实测：出牌行里**取不到**的 {fold_missing_total} 行"
                 f"，共 {n_rows} 行决策）")
+        # ★★ **`pon` 的硬拒**（见 `MELD_TYPE_ERR`）：统计范围里一行鸣牌决策行都没有 ⇒
+        #   这一轴的**分母取不到**（付奖行率 / `pon_type_rate` 都无定义）⇒ 当场报错。
+        #   ⛔ 不静默付 0（那等于把这条轴悄悄关掉）；只在**真的用了**这根轴时检查。
+        #   ⚠ 这道闸门在上面（白化的 σ 检查**之前**）已经查过一次 —— 这里**不重复**。
         for ax in spec.axes:
             d = dav[ax.name]
             if d["paid_rows"] + d["blocked_rows"] != d["action_rows"]:
@@ -1693,7 +1839,20 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                                      "进过河不与荣）；仅公开信息"),
                     "row_rule": ("`chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对"
                                  "**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）")}
-                   if (mode == MODE_DECISION and ax.name in ROW_ACTION_FOLD) else {})}
+                   if (mode == MODE_DECISION and ax.name in ROW_ACTION_FOLD) else {}),
+                # ★★ **副露种类轴**（`pon`）的四个数 + 口径：同样**只在这类轴上进账**
+                #   ⇒ 既有轴的审计账逐字节不变。判据侧（`tools/w-ladder.py`）拿这几个键对账
+                #   "付奖行数 == 碰的行数"，并且**分母**（`meld_rows`）与判据侧同版同源。
+                **({"meld_rows": mtnum[ax.name]["meld_rows"],
+                    "pon_rows": mtnum[ax.name]["pon_rows"],
+                    "chi_rows": mtnum[ax.name]["chi_rows"],
+                    "kan_rows": mtnum[ax.name]["kan_rows"],
+                    "type_prefix": MELD_TYPE_PREFIX[ax.name],
+                    "row_rule": (f"`chosen` 以 {MELD_TYPE_PREFIX[ax.name]} 开头（= 这一手是**碰**；"
+                                 "⛔ `chi:`/`kan:` 那一侧一分钱不付 —— 方向单向）"),
+                    "type_src": ("动作键前缀直接区分（`docs/PROTOCOL.md` §8.3）；分母 `meld_rows` = "
+                                 "`chi:`/`pon:`/`kan:` 的**全部**鸣牌行（判据侧独立实现同一把尺子）")}
+                   if (mode == MODE_DECISION and ax.name in MELD_TYPE_PREFIX) else {})}
               for ax in spec.axes],
     )
     if not quiet:
@@ -1749,8 +1908,8 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                           f"；付奖行 + 拦下 == 动作行 "
                           f"({'✓' if d['paid_rows'] + d['blocked_rows'] == d['action_rows'] else '✗'}）")
                 if ax.name in ROW_ACTION_FOLD:
-                    # ★★ **被威胁时降り**的四个数（需求 ②③ 的原始输出）：被威胁行 / 其中降り / 其中押し /
-                    #   取不到（現物重建不出来）。
+                    # ★★ **被威胁时降り**的四个数（需求 ②③ 的原始输出）：被威胁行 / 其中降り /
+                    #   其中押し / 取不到（現物重建不出来）。
                     fn = fnum[ax.name]
                     _rate = (d["action_rows"] / fn["threat_rows"]) if fn["threat_rows"] else float("nan")
                     print(f"     ★ 被威胁时降り（`{ax.name}`，弱口径 = 現物，"
@@ -1766,6 +1925,24 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                           f"({'✓' if fn['threat_rows'] == fn['fold_rows'] + fn['push_rows'] + fn['threat_missing_rows'] else '✗'}）")
                     print(f"     ★ **降り率** = 降り行 / 被威胁行 = {fn['fold_rows']}/{fn['threat_rows']}"
                           f" = {100 * _rate:.3f}%；白化总体 = 该轴的**决策行**（{w.n} 行）")
+                if ax.name in MELD_TYPE_PREFIX:
+                    # ★★ **副露种类**的四个数（原始输出）：鸣牌行 / 其中碰 / 吃 / 杠。
+                    mn = mtnum[ax.name]
+                    _tr = (d["action_rows"] / mn["meld_rows"]) if mn["meld_rows"] else float("nan")
+                    print(f"     ★ 副露种类（`{ax.name}` = **碰取向**，动作键前缀 "
+                          f"`{MELD_TYPE_PREFIX[ax.name]}`）：**鸣牌动作行** {mn['meld_rows']}"
+                          f"（⛔ 主判据的分母）｜其中**碰** {mn['pon_rows']}（= 付奖行候选）"
+                          f"｜**吃** {mn['chi_rows']}｜**杠** {mn['kan_rows']}"
+                          f"（⛔ 吃/杠那一侧一分钱不付 —— 方向单向）")
+                    print(f"     ★ 对账：碰的行 {mn['pon_rows']} == 动作行 {d['action_rows']}"
+                          f"（{'✓' if mn['pon_rows'] == d['action_rows'] else '✗ **对不上**'}）"
+                          f"；付奖行 {d['paid_rows']} + 拦下 {d['blocked_rows']} == 动作行 "
+                          f"（{'✓' if d['paid_rows'] + d['blocked_rows'] == d['action_rows'] else '✗'}）"
+                          f"；鸣牌行 == 碰 + 吃 + 杠 "
+                          f"({'✓' if mn['meld_rows'] == mn['pon_rows'] + mn['chi_rows'] + mn['kan_rows'] else '✗'}）")
+                    print(f"     ★ **碰的行 / 鸣牌行** = {mn['pon_rows']}/{mn['meld_rows']}"
+                          f" = {100 * _tr:.3f}%；白化总体 = 该轴的**决策行**（{w.n} 行）"
+                          f"｜付奖行 / 决策行 = {100 * d['action_rows'] / max(w.n, 1):.3f}%")
     return stats, audit
 
 
@@ -1835,7 +2012,7 @@ def _merge_cells(cells: list[dict[str, float]]) -> dict[str, float]:
     #   （`DECISION_ONLY_AXES`）—— 合并量**不是**付奖行判据，但 `decision_violations` 的
     #   "手级=1 ⇔ 有动作行"这条蕴含需要它（否则 `merged['fold']` 取不到 = KeyError，而那是静默崩）。
     out = {k: max(v[k] for v in cells) for k in ("riichi", "meld", "win", "win_points", "dama",
-                                                 "riichi_turn", "fold")}
+                                                 "riichi_turn", "fold", "pon")}
     out["deal"] = 1.0 if any_deal else 0.0
     out["no_deal"] = 0.0 if any_deal else 1.0
     return out

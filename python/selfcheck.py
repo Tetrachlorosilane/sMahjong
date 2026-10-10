@@ -3906,9 +3906,10 @@ for _bad_m in ("Decision", "row", "per-decision"):
     except v4_sr.BonusSpecError:
         ok(True, f"逐决策：未登记的模式 {_bad_m!r} 被硬拒 ✓")
 # 行级动作的轴表：能定位到行的有 riichi / meld / win（动作键）+ **dama（"能立而不立"）**
-# + **riichi_turn（"宣言行 ∧ 巡目 ≤ T"）**；**结局量**一律报错（不许猜一行）
+# + **riichi_turn（"宣言行 ∧ 巡目 ≤ T"）** + **pon（"这一手是碰" = 副露种类轴）**；
+# **结局量**一律报错（不许猜一行）
 eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES,
-   ("dama", "fold", "meld", "riichi", "riichi_turn", "win"))
+   ("dama", "fold", "meld", "pon", "riichi", "riichi_turn", "win"))
 for _ax in ("deal", "no_deal", "win_points"):
     try:
         v4_sr.row_is_action(_ax, "discard:1m")
@@ -4134,7 +4135,7 @@ eq("早立直：阈值表（唯一一条巡目轴 ⇒ 手级镜像只实现这�
 eq("早立直：动作前缀 = 立直宣言（与 `riichi` 轴**同一行规则**）", dict(v4_sr.ROW_ACTION_TURN),
    {"riichi_turn": "riichi:"})
 eq("早立直：**实测**恒真闸门（付奖行必须真被伴随量拦下）", dict(v4_sr.ROW_PAIR_MUST_BLOCK),
-   {"riichi_turn": ("no_deal",), "fold": ("no_deal",)})
+   {"riichi_turn": ("no_deal",), "fold": ("no_deal",), "pon": ("no_deal",)})
 ok("riichi_turn" in v4_sr.DECISION_ONLY_AXES and "riichi_turn" in v4_sr.ROW_ACTION_AXES,
    "早立直：登记为 `decision` 专用 + 行级付奖轴", f"{v4_sr.DECISION_ONLY_AXES}")
 eq("早立直：行级判据 = 宣言行 ∧ 巡目 ≤ T（> T 与'非宣言行'都 False）",
@@ -4202,7 +4203,8 @@ print("== `fold` 轴（**被威胁时的降り率** · 弱口径 = 現物）==")
 eq("降り：动作前缀 = 出牌（`discard:`；鸣牌询问 / pass / riichi / win 都不是降り行）",
    dict(v4_sr.ROW_ACTION_FOLD), {"fold": "discard:"})
 eq("降り：**实测**恒真闸门（付奖行必须真被伴随量拦下）",
-   dict(v4_sr.ROW_PAIR_MUST_BLOCK), {"riichi_turn": ("no_deal",), "fold": ("no_deal",)})
+   dict(v4_sr.ROW_PAIR_MUST_BLOCK),
+   {"riichi_turn": ("no_deal",), "fold": ("no_deal",), "pon": ("no_deal",)})
 ok("fold" in v4_sr.DECISION_ONLY_AXES and "fold" in v4_sr.ROW_ACTION_AXES,
    "降り：登记为 `decision` 专用 + 行级付奖轴",
    f"DECISION_ONLY_AXES={v4_sr.DECISION_ONLY_AXES}")
@@ -4424,6 +4426,80 @@ try:
 except v4_sr.BonusSpecError as _e:
     ok("取不到威胁状态" in str(_e) and "付奖行率" in str(_e),
        "降り：取不到威胁状态 / 現物 ⇒ **硬拒**（⛔ 不静默压低付奖行率）✓", str(_e)[:90])
+
+# ===========================================================================================
+# `pon` 轴（**副露种类 = 碰取向**，2026-10-11 加）
+#   ① 付奖行 = 鸣牌动作行 ∧ `chosen` 以 `pon:` 开头（吃/杠那一侧**一分钱不付**）；
+#   ② 四格（鸣牌行 / 碰 / 吃 / 杠）互不重叠、加总自洽，`pon_rows == action_rows`（两处独立累加）；
+#   ③ 伴随量 `no_deal` **非恒真**（碰完照样可能放铳）⇒ `ROW_PAIR_MUST_BLOCK` 的实测闸门；
+#   ④ 白化自检 + 付钱路按 **`step`** 查集合（⛔ 不混用行内下标）；⑤ 两条硬拒（`hand` 模式 / 分母为 0）。
+# ⚠ 布局（学生席 = 0）：h0 碰（未放铳 ⇒ 付奖）；h1 吃；h2 杠且放铳；h3 出牌（让 μ 不退化）；
+#   h4 碰且放铳（⇒ `blocked_rows == 1`，⛔ 若全是未放铳的合成数据，③ 会当场判红）。
+print("== `pon` 轴（**副露种类 = 碰取向**）==")
+_sr_pon_spec = v4_sr.parse_bonus("pon=1000:no_deal")
+_sr_pon = scratch("v4-style-pon")
+_sr_pon_rows = ((0, "pon:5z", -1), (1, "chi:1m2m", -1), (2, "kan:1m", 0),
+                (3, "discard:9m", -1), (4, "pon:3m", 0))
+with (_sr_pon / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    for _h, _c, _l in _sr_pon_rows:
+        _fh.write(json.dumps({
+            "type": "decision", "game": 0, "hand_no": _h, "step": _h, "seat": 0,
+            "policy": _STU, "kind": "claim", "legal": [_c], "chosen": _c, "chosen_index": 0,
+            "hand_delta": ([0, 0, 0, 0] if _l < 0 else [-1000, 1000, 0, 0]),
+            "hand_winner": -1, "hand_loser": _l, "hand_agari": False,
+            "obs": dict(_v4obs, v=3, seat=0, riichi=[False] * 4, riichi_turn=[0] * 4,
+                        legal=[_c], events=[])},
+            ensure_ascii=False) + "\n")
+_sr_pon_stats, _sr_pon_audit = v4_sr.whitening_stats(
+    _sr_pon_spec, v4_sr.iter_hands(_sr_pon / "g0.jsonl"), student_policies={_STU}, quiet=True,
+    mode="decision")
+_pa = _sr_pon_audit.axes[0]
+eq("副露种类：四格（鸣牌行 / 碰 / 吃 / 杠）= (4, 2, 1, 1) 且加总自洽",
+   (_pa["meld_rows"], _pa["pon_rows"], _pa["chi_rows"], _pa["kan_rows"]), (4, 2, 1, 1))
+eq("副露种类：碰的行 == action_rows（两处独立累加）", _pa["pon_rows"], _pa["action_rows"])
+eq("副露种类：付奖 + 拦下 == 碰的行（2 = 1 + 1；碰完照样可能放铳 ⇒ 伴随量非恒真）",
+   (_pa["paid_rows"], _pa["blocked_rows"]), (1, 1))
+ok("row_rule" in _pa and "type_src" in _pa and _pa.get("type_prefix") == "pon:",
+   "副露种类：账里带口径句（row_rule / type_src / type_prefix）", f"{_pa.get('row_rule', '')[:50]}")
+_sr_pon_chk = v4_sr.audit_whitening(_sr_pon_spec, _sr_pon_stats,
+                                    v4_sr.iter_hands(_sr_pon / "g0.jsonl"),
+                                    student_policies={_STU}, mode="decision")
+ok(_sr_pon_chk["_all_ok"]["ok"] and abs(_sr_pon_chk["pon"]["var"] - 1.0) < 1e-9,
+   "副露种类：白化自检通过（范围内的**行**上均值 ≈ 0、方差 == 1）",
+   f"mean={_sr_pon_chk['pon']['mean']:+.2e} var={_sr_pon_chk['pon']['var']!r} n={_sr_pon_chk['pon']['n']}")
+_sr_pon_cells = [(h, s, v) for _g, h, st in v4_sr.iter_hands(_sr_pon / "g0.jsonl")
+                 for s, v in v4_sr.indicator_cells(st, {_STU})]
+eq("副露种类：手级指示量 = 该席本小局**至少碰过一次**（小局 0/4 ⇒ 1，其余 ⇒ 0）",
+   sorted(h for h, _s, v in _sr_pon_cells if v["pon"] > 0.5), [0, 4])
+_sr_pon_tr = v4_sr.BonusTracker(_sr_pon_spec, _sr_pon_stats, own_policies={_STU}, mode="decision")
+_sr_pon_tr.prebuild(_sr_pon / "g0.jsonl")
+_sr_pon_money = [round(_sr_pon_tr.value({
+    "type": "decision", "game": 0, "hand_no": _h, "step": _h, "seat": 0,
+    "chosen": _c, "legal": [_c]}), 3) != 0.0 for _h, _c, _l in _sr_pon_rows]
+eq("副露种类：★ 付钱路**只给碰**（碰且未放铳那一行付、被拦下的碰不付、吃/杠/出牌一行都不付；"
+   "按 `step` 查集合）", _sr_pon_money, [True, False, False, False, False])
+try:
+    v4_sr.whitening_stats(_sr_pon_spec, v4_sr.iter_hands(_sr_pon / "g0.jsonl"),
+                          student_policies={_STU}, quiet=True, mode="hand")
+    ok(False, "副露种类：`hand` 模式用它必须报错")
+except v4_sr.BonusSpecError as _e:
+    ok("decision" in str(_e), "副露种类：`hand` 模式用它 ⇒ 当场报错（不静默换轴）✓", str(_e)[:70])
+_sr_pon_bad = scratch("v4-style-pon-nomeld")
+with (_sr_pon_bad / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({
+        "type": "decision", "game": 0, "hand_no": 0, "step": 0, "seat": 0,
+        "policy": _STU, "kind": "turn", "legal": ["discard:9m"], "chosen": "discard:9m",
+        "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": -1,
+        "hand_agari": False,
+        "obs": dict(_v4obs, v=3, seat=0, riichi=[False] * 4, riichi_turn=[0] * 4,
+                    legal=["discard:9m"], events=[])}, ensure_ascii=False) + "\n")
+try:
+    v4_sr.whitening_stats(_sr_pon_spec, v4_sr.iter_hands(_sr_pon_bad / "g0.jsonl"),
+                          student_policies={_STU}, quiet=True, mode="decision")
+    ok(False, "副露种类：一行鸣牌都没有必须当场报错")
+except v4_sr.BonusSpecError as _e:
+    ok("一行鸣牌决策行都没有" in str(_e),
+       "副露种类：**分母取不到**（鸣牌行 = 0）⇒ **硬拒**（⛔ 不静默付 0）✓", str(_e)[:90])
 
 # ---------------------------------------------------------------- 汇总
 
