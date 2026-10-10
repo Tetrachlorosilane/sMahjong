@@ -853,11 +853,14 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                "paid_hands": paid[ax.name]["hands"],
                "paid_sum": paid_sums[ax.name],
                "raw_sum": paid[ax.name]["raw_sum"],
-               # `decision` 模式才有意义的四项（`hand` 模式下它们是 None，不污染老账）
+               # `decision` 模式才有意义的**五项**（`hand` 模式下这些键**根本不出现** ——
+               # ⛔ 不是"出现但为 None"：那样 `hand` 模式的审计账会多一个键，
+               #    "其它轴/缺省逐位不变"就只能靠嘴说；现在是**逐字节**相同）。
                "granularity": ("row" if mode == MODE_DECISION else "hand"),
                # ★ `win` 轴的行级判据多一条合取（"我就是被记录的那家"）—— 账里必须留下这件事，
                #   否则同一份 `action_rows` 在"有没有这条合取"下含义不同（多家荣和）。
-               "row_self_seat": (ROW_SELF_SEAT.get(ax.name) if mode == MODE_DECISION else None),
+               **({"row_self_seat": ROW_SELF_SEAT.get(ax.name)}
+                  if mode == MODE_DECISION else {}),
                "action_rows": (dav[ax.name]["action_rows"] if mode == MODE_DECISION else None),
                "paid_rows": (dav[ax.name]["paid_rows"] if mode == MODE_DECISION else None),
                "blocked_rows": (dav[ax.name]["blocked_rows"] if mode == MODE_DECISION else None),
