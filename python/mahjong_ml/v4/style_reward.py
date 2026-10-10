@@ -104,6 +104,41 @@
 （备选方案 (a)：把生产端的 `hand_winner` 改成"多家都算"—— 那要同时改 `style-vector.py` 与
 服务端 `winners[0]` 口径，属于**未来的语义升级**，本轮不做。）
 
+## `dama` 轴（**能立而不立**，2026-10-10 加）：付奖行必须是**真实的行为选择**
+
+**动机（`win` 轴的教训，实测写在 `S:\\mahjong-training\\w-ladder\\PROBE-dec6170-4g.md` 一族里）**：
+`win=5000:no_deal` 的付奖行 = "和了那一行"，而**和了者的 `no_deal` 恒真**
+（审计账实测 `action_rows == paid_rows == 2230`、`blocked_rows == 0`）⇒ 伴随质量轴形同虚设，
+奖励退化成**对结果（和了）的重复加权**；实测和了率 **−1.02pp**、立直率 **−1.60pp**。
+**一般判据**：可奖励的轴必须对应**真实的行为选择**；结果量（和了/放铳/打点）用行级动作奖励去推，
+只会变成对同一个结果的重复加权。所以本模块新增 `dama` 轴时付奖行**不是结局行**：
+
+| | `dama` 轴 |
+| --- | --- |
+| 行级付奖行（**唯一**口径） | `legal` 里有 `riichi:*` **且**这一行**没选** `riichi:*`（= 能立而不立的那一手；`ROW_ACTION_DECLINE`） |
+| 手级指示量（`AXES['dama']`） | 该席本小局**未立直**（`dama_wins` 的分子谓词，与 `style-vector.py` 的 `dama_rate` 同源） |
+| 伴随质量轴 | `no_deal`（该小局未放铳）—— 付奖行**不是和了行** ⇒ **不退化**（放铳者当小局照样能被拦下，实测 `blocked_rows > 0`） |
+| 判据侧口径 | ⛔ 一个字不动：`tools/style-vector.py` 的 `dama_rate = dama_wins / wins` |
+
+⚠ **两套口径是刻意的不同对象**（判据侧量"未立直而和了"这个**结果**、奖励侧量"能立而不立"这个**决策**）
+⇒ 所以 `dama` **没有**"手级=1 必有动作行"那条蕴含（`decision_violations` 对它换成两条**可证伪**的结构检查：
+付奖行那一刻 `obs.riichi[seat]` 必须还是 false、且必须发生在该席第一次宣言**之前**）。
+两边由**对账**钉住（见 `S:\\mahjong-training\\w-ladder\\_dama-reconcile.py`），⛔ 不靠改判据侧去凑。
+
+⛔ **`dama` 只允许在 `decision` 模式下当付奖轴**（`DECISION_ONLY_AXES`）：`hand` 模式的合并量是
+"四席取或的未立直"，**不是**"能立而不立" —— 付出去的奖励与轴名无关（那是静默换轴），所以**当场报错**。
+
+## ⛔ 退化成恒真的组合：当场报错（`IMPLIED_PAIRS`）
+
+**判据**：若伴随质量轴的指示量**被付奖行本身蕴含**，则它在付奖行上恒真 ⇒ 等于 `PAIR = none`
+（= "只按动作付奖"，正是本模块唯一要防的事）。所以 `parse_bonus` 对这类组合**当场报错**：
+
+* `win` + `no_deal`：和了者不可能是放铳者（实测 `blocked_rows == 0`，记账见上）；
+* `win` + `win`：付奖行本身要求"我就是被记录的和了者"。
+
+`dama` + `no_deal` **不在**这张表里：付奖行是打牌行（该小局可能以**学生自己放铳**结束）
+⇒ 伴随量真的会拦下东西（实测；预注册里写明这条闸门是"付奖行数 > 被拦下的行数"）。
+
 ## 列与"叠加一次"的纪律
 
 数据集里存一列 `style_bonus`（float32，**点**，逐决策行）。⚠ 它的**行内结构随模式变**：
@@ -178,8 +213,27 @@ ROW_ACTION_PREFIX: dict[str, tuple[str, ...]] = {
 ROW_ACTION_EXACT: dict[str, tuple[str, ...]] = {
     "win": ("tsumo", "ron"),
 }
-#: 能在 `decision` 模式下当**付奖轴**的那些轴。
-ROW_ACTION_AXES: tuple[str, ...] = tuple(sorted(set(ROW_ACTION_PREFIX) | set(ROW_ACTION_EXACT)))
+#: ★ **"能而不为"型**的行级判据（`dama`，2026-10-10 加）：轴 → **本来可以选、这一行偏偏没选**的动作前缀。
+#: 判据 = "这一行的 `legal` 里有该前缀的动作" **∧** "这一行的 `chosen` 不是它"。
+#: 为什么必须是这一条（而不是"手级未立直"）：付奖行要么对应**真实的行为选择**，要么就是把一个
+#: 结果量换个名字重复加权（`win` 轴的实测教训，见模块 docstring）——"能立而不立"正是那个选择本身。
+ROW_ACTION_DECLINE: dict[str, str] = {"dama": RIICHI_PREFIX}
+
+#: 能在 `decision` 模式下当**付奖轴**的那些轴（含"能而不为"那条）。
+ROW_ACTION_AXES: tuple[str, ...] = tuple(sorted(set(ROW_ACTION_PREFIX) | set(ROW_ACTION_EXACT)
+                                                 | set(ROW_ACTION_DECLINE)))
+
+#: ⛔ **退化成恒真的组合**（付奖行**蕴含**了伴随量 ⇒ 质量轴形同虚设 = `PAIR_NEVER`）。
+#: 键 = 轴，值 = 该轴上**恒真**的伴随量（`parse_bonus` 见到就报错，⛔ 不静默放行）。
+#: 加这一条的直接原因：`win=5000:no_deal` 在真数据上实测 `action_rows == paid_rows == 2230`
+#: 且 `blocked_rows == 0`（和了者不可能是放铳者）⇒ 奖励退化成"对和了的重复加权"。
+IMPLIED_PAIRS: dict[str, tuple[str, ...]] = {
+    "win": ("no_deal", "win"),
+}
+
+#: ⛔ **只在 `decision` 模式成立**的付奖轴：它们的手级合并量**不是**那个行为（见模块 docstring）
+#: ⇒ `hand` 模式下用它们等于**静默换轴**，所以 `check_mode_axes` 当场报错。
+DECISION_ONLY_AXES: tuple[str, ...] = ("dama",)
 
 #: ★ **多家荣和的语义陷阱**（2026-10-10 加，见模块 docstring 同名小节）：行级判据除了"这一行
 #: 执行了该轴的动作"，有些轴还要"**我就是被记录的那家**"。只有 `win` 需要它 —— 双响时两家都
@@ -193,11 +247,29 @@ ROW_SELF_SEAT: dict[str, str] = {"win": "winner"}
 VIOL_SAMPLES = 8
 
 
-def row_is_action(axis: str, chosen: str) -> bool:
+def legal_has(legal, prefix: str) -> bool:
+    """这一行的 `legal` 里有没有以 `prefix` 开头的动作（`dama` 轴的行级判据要的那一半）。
+
+    ⚠ `legal` 取不到（`None`）**不是** False：那是"这一行的合法动作集在轨迹里根本没有"，
+    对"能立而不立"这种**依赖 legal** 的判据等于**无定义** ⇒ 由 `row_is_action` 当场报错
+    （⛔ 不猜、也不静默按 False 处理 —— 那会让整条轴悄悄付 0）。
+    """
+    if legal is None:
+        raise BonusSpecError(
+            "这一行的 `legal` 取不到，而当前轴的行级判据**必须**知道'合法动作里有没有它'"
+            "（`dama` = 能立而不立，见 `ROW_ACTION_DECLINE`）。⛔ 不猜、不静默按 False 付 0："
+            "要么这份轨迹带 `legal` 字段（PROTOCOL §8.3），要么别用这条轴")
+    return any(str(k).startswith(prefix) for k in legal)
+
+
+def row_is_action(axis: str, chosen: str, legal=None) -> bool:
     """**这一行**（`chosen` = 实际执行的动作键）是不是轴 `axis` 的那个动作。
 
     ⛔ 没有行级语义的轴（`deal` / `no_deal` / `win_points`）在这里**报错**，不返回 False ——
     返回 False 会让"这个轴在 decision 模式下付不出奖"变成**静默的 0**（正是本仓最忌讳的降级）。
+
+    ★ `dama`（`ROW_ACTION_DECLINE`）要**多一个入参** `legal`：它的判据是"合法的里**有**它、
+    这一行**偏不选**它"（`legal_has(legal, RIICHI_PREFIX) and not chosen.startswith(...)`）。
 
     ⚠ 这只是行级判据的**一半**：`win` 轴还要过 `ROW_SELF_SEAT`（我就被记录的那家）那一关，
     两者合起来才是 `row_is_axis_action`。别在别处直接用这个函数决定"要不要付奖"。
@@ -207,25 +279,62 @@ def row_is_action(axis: str, chosen: str) -> bool:
         return chosen.startswith(ROW_ACTION_PREFIX[axis])
     if axis in ROW_ACTION_EXACT:
         return chosen in ROW_ACTION_EXACT[axis]
+    if axis in ROW_ACTION_DECLINE:
+        pref = ROW_ACTION_DECLINE[axis]
+        return legal_has(legal, pref) and not chosen.startswith(pref)
     raise BonusSpecError(
         f"轴 {axis!r} 在 `decision` 模式下没有'哪一行做了它'的定义（它是**结局量**，不是行级动作）。"
         f"能当付奖轴的只有：{', '.join(ROW_ACTION_AXES)}；它当**伴随质量轴**（`PAIR`）仍然可用。"
         f"⛔ 不猜一行、也不静默退回 `hand` 模式")
 
 
-def row_is_axis_action(axis: str, seat: int, chosen: str, st: HandState) -> bool:
+def row_is_axis_action(axis: str, seat: int, chosen: str, st: HandState, idx: int | None = None) -> bool:
     """★ `decision` 模式的**唯一**行级判据：这一行**执行了该轴动作** ∧ **我就是被记录的那家**。
 
     `ROW_SELF_SEAT` 里登记过的轴（现在只有 `win`）带上第二条合取：多家荣和时**两家都执行了
     `ron`**，但被记录的和了者只有一家（`winners[0]` = 离放铳者最近那家）⇒ 只有**那一家**的
     和了行拿钱。⛔ 判据侧（`AXES`/`style-vector.py`）仍用"手级被记录和了者"，一个字都不动 ——
     这里是**软信号少付**（学生和了行里约 1.3%），不是"换了尺子"。
+
+    ★ `dama`（"能而不为"）用 `st.row_legal_riichi[idx]`（喂行时按 `legal` 存下来的那个布尔）：
+    合法动作里有 `riichi:*` 且这一行没选它 ⇒ 付奖行。取不到（`None`）⇒ `legal_has` 当场报错。
     """
+    if axis in ROW_ACTION_DECLINE:
+        pref = ROW_ACTION_DECLINE[axis]
+        if pref != RIICHI_PREFIX:
+            raise BonusSpecError(
+                f"轴 {axis!r} 的'能而不为'前缀是 {pref!r}，但 `HandState` 只按行存了 "
+                f"`{RIICHI_PREFIX}` 那一份 legal 标志 —— 加新前缀就要同时加它的存法（⛔ 不猜）")
+        has = None
+        if idx is not None and 0 <= idx < len(st.row_legal_riichi):
+            has = st.row_legal_riichi[idx]
+        if has is None:
+            return row_is_action(axis, chosen, None)      # 唯一报错点（`legal_has` 里）
+        return bool(has) and not str(chosen or "").startswith(pref)
     if not row_is_action(axis, chosen):
         return False
     if ROW_SELF_SEAT.get(axis) == "winner":
         return st.winner == seat
     return True
+
+
+def check_mode_axes(spec: BonusSpec, mode: str) -> None:
+    """⛔ 付奖轴与付奖模式的**配对闸门**（`dama` 只在 `decision` 模式成立，见模块 docstring）。
+
+    为什么要有它：`hand` 模式付的是**小局级合并量**（四席取或），而 `dama` 的合并量是
+    "桌上有没有人没立直"——**根本不是**"能立而不立"。那样跑出来的实验与轴名无关（静默换轴），
+    正是本仓最忌讳的降级 ⇒ 报错，不猜、不近似、不偷偷退回 `decision`。
+    """
+    m = check_mode(mode)
+    if m == MODE_DECISION:
+        return
+    bad = [a.name for a in spec.axes if a.name in DECISION_ONLY_AXES]
+    if bad:
+        raise BonusSpecError(
+            f"这些轴只在 `decision` 模式成立：{', '.join(bad)} —— 它们的行级判据是'**能而不为**'"
+            f"（`legal` 里有它、这一行没选它），而 `hand` 模式付的是小局级合并量，**不是**那个行为。"
+            f"⛔ 不静默换轴：要么加 `--style-bonus-mode decision`，要么换一条轴")
+
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +390,14 @@ AXES: dict[str, dict] = {
         "meaning": "小局打点（和了就取 `hand_delta[seat]`，没和就是 0；**点**）",
         "src": "决策行的 hand_delta[seat]（和了者）否则 0",
         "style_vector": "avg_win_score 的分子口径（win_points）",
+    },
+    "dama": {
+        "kind": "bernoulli",
+        "meaning": ("默听（**能立而不立**）：行级付奖行 = 立直是合法选项却没选它的那一行；"
+                    "手级指示量 = 该席本小局**未立直**（只用于伴随/对账语义，见模块 docstring）"),
+        "src": ("行级：该行 `legal` 里有 `riichi:*` 且 `chosen` 不是 `riichi:*`（`ROW_ACTION_DECLINE`）；"
+                "手级：`_seat_riichi` 取或为假"),
+        "style_vector": "dama_rate = dama_wins / wins（dama_wins = 和了且该小局未立直）",
     },
 }
 
@@ -372,6 +489,14 @@ def parse_bonus(text: str | None) -> BonusSpec:
             raise BonusSpecError(
                 f"轴 {name!r} 的成对质量轴 {pair!r} 不认识；可选：{', '.join(sorted(PAIR_KEYS))}"
                 f"（或 {PAIR_NEVER} = 恒假，只给红证用）")
+        # ⛔ **退化成恒真**的组合：付奖行本身蕴含了伴随量 ⇒ 质量轴一行都拦不下（= `PAIR_NEVER`）。
+        if pair in IMPLIED_PAIRS.get(name, ()):
+            raise BonusSpecError(
+                f"轴 {name!r} 配伴随质量轴 {pair!r} 会**退化成恒真**（付奖行蕴含了它）"
+                f"⇒ 质量轴形同虚设、奖励变成「只按 {name} 付奖」= 对同一件事重复加权。"
+                f"实测（`win=5000:no_deal`）：`action_rows == paid_rows == 2230`、`blocked_rows == 0`，"
+                f"和了率 −1.02pp / 立直率 −1.60pp。⛔ 当场报错，不静默放行"
+                f"（`IMPLIED_PAIRS` 里登记过的都不许用；要负向对照请显式写 `:{PAIR_NEVER}`）")
         out.append(BonusAxis(name=name, weight=weight, pair=pair))
     return BonusSpec(axes=tuple(out), raw=text)
 
@@ -430,6 +555,15 @@ class HandState:
     #: ⚠ 只存这两样：手级指示量已经在上面那几列里，多存一份 obs 只是白占内存（一手 ~60 行）。
     row_seat: list[int] = field(default_factory=list)
     row_chosen: list[str] = field(default_factory=list)
+    #: ★ 逐行："这一行的 `legal` 里有 `riichi:*` 吗"（`dama` 轴的付奖行判据要的那一半）。
+    #: `None` = 这一行的轨迹里**没有** `legal` ⇒ 对 `dama` 是无定义（`legal_has` 当场报错，不猜）。
+    #: ⚠ 只存这个**布尔**、不存整份 `legal`：判据只有一条（"能立而不立"），存全量只是白占内存。
+    row_legal_riichi: list[bool | None] = field(default_factory=list)
+    #: ★ 逐行的**公开状态位**（`obs.riichi[seat]` / `obs.riichi_turn[seat]`）：`dama` 的结构检查 ①
+    #: 要问"这一行这一席**是不是已经立直了**"—— 手级的 `riichi[seat]`（取或）回答不了这个问题
+    #: （宣言之后的每一行它都是 true，而那正是"能立而不立"最需要区分的地方）。
+    row_riichi_seen: list[bool] = field(default_factory=list)
+    row_riichi_turn: list[int] = field(default_factory=list)
 
     def seat_is_student(self, seat: int, student_policies: set[str]) -> bool:
         """该席本小局是不是"学生"（= 白化统计要不要算它）。
@@ -453,6 +587,18 @@ class HandState:
         #   ⇒ 宣言之后的每一行 `obs.riichi[seat]` 都是 true，不能拿它当行级判据）。
         self.row_seat.append(seat)
         self.row_chosen.append(chosen)
+        # ★ 逐行的"这一行能立直吗"（`dama` 轴的付奖行判据）。行上的 `legal` 与 `obs.legal`
+        #   必须一致（`dataset.py` 会硬校验这一条）⇒ 优先取行上的，行上没有再看 obs，都没有 = None。
+        legal = row.get("legal")
+        if legal is None:
+            legal = obs.get("legal")
+        self.row_legal_riichi.append(None if legal is None else legal_has(legal, RIICHI_PREFIX))
+        # 逐行的公开状态位（`dama` 的结构检查 ①）：`obs.riichi[seat]` 是"**已经**宣言过"，
+        # 宣言那一手它还是 false（服务端先广播 riichi 再广播 discard）—— 这正是我们要的那一位。
+        _ri = obs.get("riichi") or []
+        _rt = obs.get("riichi_turn") or []
+        self.row_riichi_seen.append(bool(_ri[seat]) if 0 <= seat < len(_ri) else False)
+        self.row_riichi_turn.append(int(_rt[seat]) if 0 <= seat < len(_rt) else 0)
         if 0 <= seat < SEATS_PER_TABLE:
             self.policy[seat] = str(row.get("policy") or "")
             if _seat_riichi(obs, chosen):
@@ -494,6 +640,10 @@ def indicator_values(st: HandState) -> list[dict[str, float]]:
             "deal": 1.0 if deal else 0.0,
             "no_deal": 0.0 if deal else 1.0,
             "win_points": float(st.delta[s]) if win else 0.0,
+            # ★ `dama` 的**手级**指示量 = 该席本小局**未立直**（与 `style-vector.py` 的 `dama_wins`
+            #   分子谓词同源）。⚠ 它**不是**付奖行判据（那是"能立而不立"）—— 见模块 docstring
+            #   与 `ROW_ACTION_DECLINE`：判据侧量结果、奖励侧量决策，两边由对账钉住。
+            "dama": 0.0 if st.riichi[s] else 1.0,
         }
         out.append(vals)
     return out
@@ -607,17 +757,19 @@ def indicator_cells(st: HandState, student_policies: set[str] | None):
 # ---------------------------------------------------------------------------
 
 def rows_in_scope(st: HandState, student_policies: set[str] | None):
-    """这一小局里**在统计范围内**的决策行：`[(seat, chosen), ...]`。
+    """这一小局里**在统计范围内**的决策行：`[(行下标, seat, chosen), ...]`。
 
     ⚠ 与 `indicator_cells` 共用**同一套**范围判据（`seat_is_student`）—— 行级白化的 μ/σ 与
     "这一行该不该付奖"必须是同一份总体，两处各写一份筛选必然漂移。
+    ★ 行下标是**必须**的：`dama` 轴的行级判据要用这一行自己的 `legal`（`st.row_legal_riichi[idx]`），
+    只给 `(seat, chosen)` 就取不到"这一行能不能立直"（那就只能猜 —— 本仓最忌讳的降级）。
     """
     out = []
-    for s, c in zip(st.row_seat, st.row_chosen):
+    for i, (s, c) in enumerate(zip(st.row_seat, st.row_chosen)):
         if not (0 <= s < SEATS_PER_TABLE):
             continue
         if student_policies is None or st.seat_is_student(s, student_policies):
-            out.append((s, c))
+            out.append((i, s, c))
     return out
 
 
@@ -639,8 +791,40 @@ def axis_row_action_counts(spec: BonusSpec, st: HandState,
                            student_policies: set[str] | None) -> dict[str, int]:
     """逐轴：这一小局在范围内**真的执行了该轴动作**（且 `win` 轴还要"我就是被记录的那家"）的行数。"""
     rows = rows_in_scope(st, student_policies)
-    return {ax.name: sum(1 for s, c in rows if row_is_axis_action(ax.name, s, c, st))
+    return {ax.name: sum(1 for i, s, c in rows if row_is_axis_action(ax.name, s, c, st, i))
             for ax in spec.axes}
+
+
+def decline_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[str] | None) -> dict:
+    """★ **"能立而不立"的四个数**（需求 ② 的原始读数，`dama` 这类"能而不为"轴专用）。
+
+    口径（每一行只落在其中一格，四格**互不重叠**）：
+      * `legal_rows` = 范围内 `legal` 里有 `riichi:*` 的行数（"立直当时是合法选项"）；
+      * `legal_chosen_rows` = 其中**真的选了** `riichi:*` 的行数（= 宣言行）；
+      * `declined_rows` = 其中**没选**立直的行数（= `legal_rows − legal_chosen_rows` = 付奖行候选）；
+      * `missing_legal_rows` = `legal` 取不到的行数（⛔ 非 0 就对"能而不为"轴报错，见 `legal_has`）。
+
+    ⚠ 这是**审计用**的独立累加点（与 `row_is_axis_action` 同一把尺子，但四个数各自独立数出来
+    ⇒ "`declined_rows` == 审计账的 `action_rows`"这件事才是**对账**、而不是同义反复）。
+    """
+    out = {"legal_rows": 0, "legal_chosen_rows": 0, "declined_rows": 0, "missing_legal_rows": 0}
+    decl = [a for a in spec.axes if a.name in ROW_ACTION_DECLINE]
+    if not decl:
+        return out
+    pref = ROW_ACTION_DECLINE[decl[0].name]
+    for i, _s, c in rows_in_scope(st, student_policies):
+        has = st.row_legal_riichi[i] if 0 <= i < len(st.row_legal_riichi) else None
+        if has is None:
+            out["missing_legal_rows"] += 1
+            continue
+        if not has:
+            continue
+        out["legal_rows"] += 1
+        if str(c or "").startswith(pref):
+            out["legal_chosen_rows"] += 1
+        else:
+            out["declined_rows"] += 1
+    return out
 
 
 def spec_axis_pay(spec: BonusSpec, stats: dict[str, Whitening], ax: BonusAxis) -> float:
@@ -650,8 +834,8 @@ def spec_axis_pay(spec: BonusSpec, stats: dict[str, Whitening], ax: BonusAxis) -
 
 
 def decision_bonus(spec: BonusSpec, stats: dict[str, Whitening], st: HandState,
-                   seat: int, chosen: str, own_policies: set[str] | None = None
-                   ) -> tuple[float, dict[str, float]]:
+                   seat: int, chosen: str, own_policies: set[str] | None = None,
+                   row_idx: int | None = None) -> tuple[float, dict[str, float]]:
     """`decision` 模式：**一行**决策 → 奖励（点）+ 逐轴明细。
 
     口径：`Σ_i w_i · 1[PAIR_i(这一小局)] · 1[这一行做了轴 i 的动作] · (1 − μ_i)/σ_i`，其余行 = **0**。
@@ -670,7 +854,7 @@ def decision_bonus(spec: BonusSpec, stats: dict[str, Whitening], st: HandState,
     for ax in spec.axes:
         cells = [v for _s, v in indicator_cells(st, own_policies)]
         merged = _merge_cells(cells)
-        hit = pair_ok(ax.pair, merged) and row_is_axis_action(ax.name, seat, chosen, st)
+        hit = pair_ok(ax.pair, merged) and row_is_axis_action(ax.name, seat, chosen, st, row_idx)
         c = spec_axis_pay(spec, stats, ax) if hit else 0.0
         detail[ax.name] = c
         total += c
@@ -696,7 +880,12 @@ def decision_violations(spec: BonusSpec, st: HandState,
     merged = _merge_cells([v for _s, v in indicator_cells(st, student_policies)])
     out: list[tuple[str, str]] = []
     for ax in spec.axes:
-        hit = [c for s, c in rows if row_is_axis_action(ax.name, s, c, st)]
+        # ★ `dama` 这类"能而不为"轴**不套**下面两条蕴含（手级=结果量、行级=决策，谁都不蕴含谁）
+        #   ⇒ 换成两条**可证伪**的结构检查（见 `_decline_violations`）。
+        if ax.name in ROW_ACTION_DECLINE:
+            out.extend(_decline_violations(ax.name, st, rows))
+            continue
+        hit = [(i, c) for i, s, c in rows if row_is_axis_action(ax.name, s, c, st, i)]
         hx = merged[ax.name] > 0.5
         if hx and not hit:
             out.append((ax.name, "手级指示量=1（本小局发生过这个动作），但**范围内一行都没有**执行它"
@@ -705,6 +894,39 @@ def decision_violations(spec: BonusSpec, st: HandState,
             out.append((ax.name, f"范围内 {len(hit)} 行执行了这个动作，手级指示量却是 0"
                                   f"—— 两套口径漂移了"))
     return out
+
+
+def _decline_violations(axis: str, st: HandState, rows) -> list[tuple[str, str]]:
+    """`dama` 的两条**可证伪**的结构检查（见 `decision_violations` 的 ★★ 段）：
+
+      ① 付奖行那一刻公开状态位必须还是"没立直"（服务端**不会**给已经在立直的人再下发 `riichi`
+         ⇒ 若这条不成立，是轨迹/判据坏了，不是"口径差异"）；
+      ② 付奖行必须发生在该席**第一次宣言之前**（宣言之后不可能再有"能立而不立"）。
+
+    ⛔ 别为了"让它像别的轴"而给 `dama` 编一条"手级=1 ⇒ 有动作行"的蕴含：手级量的是
+    "未立直"这个**结果**、行级量的是"能立而不立"这个**决策**，两者本来就不互相蕴含 ——
+    硬焊在一起等于把"两套口径互相独立"这条对账基础拆掉。
+    """
+    pref = ROW_ACTION_DECLINE[axis]
+    first_decl = None
+    for i, _s, c in rows:
+        if str(c or "").startswith(pref):
+            first_decl = i
+            break
+    bad: list[tuple[str, str]] = []
+    for i, s, c in rows:
+        if not row_is_axis_action(axis, s, c, st, i):
+            continue
+        seen = st.row_riichi_seen[i] if 0 <= i < len(st.row_riichi_seen) else False
+        rt = st.row_riichi_turn[i] if 0 <= i < len(st.row_riichi_turn) else 0
+        if seen or rt > 0:
+            bad.append((axis, f"第 {i} 行（seat={s}）的 `legal` 里有 `{pref}`，但公开状态位说这一席"
+                              f"**已经在立直**（obs.riichi={seen} / obs.riichi_turn={rt}）"
+                              f" —— 服务端不会给已立直的人再下发立直，轨迹/判据对不上"))
+        if first_decl is not None and i >= first_decl:
+            bad.append((axis, f"第 {i} 行（seat={s}）被算成'能立而不立'，却在第 {first_decl} 行"
+                              f"（同一席**已经宣言**立直）之后 —— 两套口径对不上"))
+    return bad
 
 
 def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None = None,
@@ -720,6 +942,7 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
     @return `(stats: dict[str, Whiten], audit: Audit)`
     """
     mode = check_mode(mode)
+    check_mode_axes(spec, mode)             # ⛔ `dama` 这类"能而不为"轴只在 decision 模式成立
     if mode == MODE_DECISION:
         require_row_axes(spec)              # ⛔ 前置闸门：付奖轴必须能定位到行
     acc: dict[str, list[float]] = {a.name: [] for a in spec.axes}
@@ -731,6 +954,12 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
     #: `hands_hit` = 手级指示量为 1 的小局数（= "立直小局数"，需求里要拿它当分母报比率）。
     dav: dict[str, dict] = {a.name: {"action_rows": 0, "paid_rows": 0, "blocked_rows": 0,
                                     "hands_hit": 0} for a in spec.axes}
+    #: ★ **"能而不为"轴的四个数**（`dama`）：`legal_rows` / `legal_chosen_rows` / `declined_rows`
+    #: / `missing_legal_rows`（口径见 `decline_row_numbers`）。⛔ 只对这类轴累加 ⇒ riichi/meld
+    #: 的审计账**一个键都不多**（"其它轴逐位不变"这条判据才是真的）。
+    dnum: dict[str, dict] = {a.name: {"legal_rows": 0, "legal_chosen_rows": 0,
+                                     "declined_rows": 0, "missing_legal_rows": 0}
+                             for a in spec.axes}
     #: `decision` 模式下顺带记一份**手级** μ/σ（**只作参照**，⛔ 不参与付奖）——
     #: 它让"剂量有没有被换掉"这件事在日志里当场可比（两条 std 都打出来）。
     hand_acc: dict[str, list[float]] = {a.name: [] for a in spec.axes}
@@ -759,6 +988,13 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
             rows = rows_in_scope(st, student_policies)
             n_rows += len(rows)
             acts = axis_row_action_counts(spec, st, student_policies)
+            # ★ "能而不为"轴的四个数（`dama`）：与 `acts` 同一份总体、但**独立数**出来
+            #   ⇒ `declined_rows == action_rows` 才有对账价值（见 `decline_row_numbers`）。
+            dn = decline_row_numbers(spec, st, student_policies)
+            for ax in spec.axes:
+                if ax.name in ROW_ACTION_DECLINE:
+                    for k, v in dn.items():
+                        dnum[ax.name][k] += v
             bad = decision_violations(spec, st, student_policies)
             if bad:
                 # ★ 计数**无条件** +1；样例才受上限约束（`len(viol)` 不是总数 —— 见 `n_viol` 的注释）。
@@ -864,7 +1100,15 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                "action_rows": (dav[ax.name]["action_rows"] if mode == MODE_DECISION else None),
                "paid_rows": (dav[ax.name]["paid_rows"] if mode == MODE_DECISION else None),
                "blocked_rows": (dav[ax.name]["blocked_rows"] if mode == MODE_DECISION else None),
-               "hands_indicator": (dav[ax.name]["hands_hit"] if mode == MODE_DECISION else None)}
+               "hands_indicator": (dav[ax.name]["hands_hit"] if mode == MODE_DECISION else None),
+               # ★ **"能而不为"轴的四个数**（`dama`）：只在**这类轴**上进账 ⇒ riichi/meld 的
+               #   审计账逐字节不变（"其它轴逐位不变"这条判据不是靠嘴说的）。
+               **({"legal_rows": dnum[ax.name]["legal_rows"],
+                   "legal_chosen_rows": dnum[ax.name]["legal_chosen_rows"],
+                   "declined_rows": dnum[ax.name]["declined_rows"],
+                   "missing_legal_rows": dnum[ax.name]["missing_legal_rows"],
+                   "row_rule": f"legal 含 {ROW_ACTION_DECLINE[ax.name]}* 且 chosen 不是它"}
+                  if (mode == MODE_DECISION and ax.name in ROW_ACTION_DECLINE) else {})}
               for ax in spec.axes],
     )
     if not quiet:
@@ -895,6 +1139,18 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                 print(f"     ⚠ 手级白化（**仅作参照**，本模式不用）：μ={hmu:.6f} σ={hsd:.6f}"
                       f"；『立直小局数』（手级指示量=1）{d['hands_hit']}"
                       f" ⇒ 付奖行数 / 立直小局数 = {ratio:.3f}")
+                if ax.name in ROW_ACTION_DECLINE:
+                    # ★ **四个数**（需求 ② 的原始输出）：legal 里有它 / 其中未选 / 真付奖 / 被伴随量拦下。
+                    dn = dnum[ax.name]
+                    print(f"     ★ 能而不为（`{ax.name}`）：`legal` 里有 "
+                          f"`{ROW_ACTION_DECLINE[ax.name]}*` 的行 {dn['legal_rows']}  "
+                          f"（其中**真的选了**它 {dn['legal_chosen_rows']}）"
+                          f"｜**未选**它 {dn['declined_rows']}（= 付奖行候选）"
+                          f"｜**真付奖** {d['paid_rows']}｜被伴随量 `{ax.pair}` 拦下 {d['blocked_rows']}"
+                          f"｜`legal` 取不到的行 {dn['missing_legal_rows']}")
+                    print(f"     ★ 对账：未选它 {dn['declined_rows']} == 动作行 {d['action_rows']}"
+                          f"（{'✓' if dn['declined_rows'] == d['action_rows'] else '✗ **对不上**'}）"
+                          f"；白化总体 = 该轴的**决策行**（{w.n} 行）")
     return stats, audit
 
 
@@ -957,7 +1213,10 @@ def _merge_cells(cells: list[dict[str, float]]) -> dict[str, float]:
     放铳洗掉了。所以它按"**这一小局有没有人放铳**"归一：有人放铳 ⇒ 0。
     """
     any_deal = any(v["deal"] > 0.5 for v in cells)
-    out = {k: max(v[k] for v in cells) for k in ("riichi", "meld", "win", "win_points")}
+    # ⚠ `dama` 也走 `max`（四席取或）：合并量只是"这一小局桌上有没有人没立直"这类**描述性**读数，
+    #   ⛔ 它**不是**付奖行判据（"能立而不立"只逐行判）—— `dama` 在 `hand` 模式下被
+    #   `check_mode_axes` 直接拒掉，就是为了不让这个合并量被当成付奖口径（静默换轴）。
+    out = {k: max(v[k] for v in cells) for k in ("riichi", "meld", "win", "win_points", "dama")}
     out["deal"] = 1.0 if any_deal else 0.0
     out["no_deal"] = 0.0 if any_deal else 1.0
     return out
@@ -978,17 +1237,19 @@ def audit_whitening(spec: BonusSpec, stats: dict[str, Whitening], hands, *,
     μ/σ，会得到 ≠0 的均值 —— 那不是容差问题，是真的错。
     """
     mode = check_mode(mode)
+    check_mode_axes(spec, mode)
     acc: dict[str, list[float]] = {a.name: [] for a in spec.axes}
     for _g, _h, st in hands:
         cells = [vals for _s, vals in indicator_cells(st, student_policies)]
         if not cells:
             continue
         if mode == MODE_DECISION:
-            for _s, chosen in rows_in_scope(st, student_policies):
+            for _i, _s, chosen in rows_in_scope(st, student_policies):
                 for ax in spec.axes:
                     w = stats[ax.name]
-                    # ★ 与 `whitening_stats` **同一把尺子**（含 `win` 的"我就是被记录的那家"合取）
-                    x = 1.0 if row_is_axis_action(ax.name, _s, chosen, st) else 0.0
+                    # ★ 与 `whitening_stats` **同一把尺子**（含 `win` 的"我就是被记录的那家"合取、
+                    #   含 `dama` 的"能立而不立"）
+                    x = 1.0 if row_is_axis_action(ax.name, _s, chosen, st, _i) else 0.0
                     acc[ax.name].append((x - w.mu) / w.sd)
             continue
         vals = _merge_cells(cells)
@@ -1050,6 +1311,7 @@ class BonusTracker:
         #: "自己"是谁（见 `hand_bonus`）：`None` = 四席取或；否则只看这些策略串坐的席位。
         self.own_policies = own_policies
         self.mode = check_mode(mode)
+        check_mode_axes(self.spec, self.mode)     # ⛔ 与 `whitening_stats` 同一道"轴×模式"闸门
         if self.mode == MODE_DECISION and self.spec:
             require_row_axes(self.spec)          # ⛔ 与 `whitening_stats` 同一道前置闸门
         #: `(game, hand_no) -> bonus`（**一个小局一个值**，四行同值；`hand` 模式）
@@ -1126,7 +1388,7 @@ class BonusTracker:
         if not cells:
             return (frozenset(), {}, int(st.winner))
         merged = _merge_cells(cells)
-        seats = frozenset(s for s, _c in rows_in_scope(st, self.own_policies))
+        seats = frozenset(s for _i, s, _c in rows_in_scope(st, self.own_policies))
         per: dict[str, tuple[bool, float]] = {}
         for ax in self.spec.axes:
             ok = pair_ok(ax.pair, merged)
@@ -1164,7 +1426,9 @@ class BonusTracker:
         """`decision` 模式：**这一行**的奖励（只在该行真的做了动作、且该小局质量轴成立时非 0）。
 
         ★ 行级判据与预扫**同一把尺子**：`row_is_axis_action` 需要 `HandState`，而这里只有 `row`
-        ⇒ 用预扫存下来的 **`winner`**（该小局被记录的和了者），**不**重读 `row["hand_winner"]`。
+        ⇒ 用预扫存下来的 **`winner`**（该小局被记录的和了者），**不**重读 `row["hand_winner"]`；
+        `dama` 用的是**这一行自己的 `legal`**（`row["legal"]`，缺失时退到 `obs.legal`；两处都缺
+        ⇒ `legal_has` 当场报错，⛔ 不按 False 静默付 0）。
         """
         ent = self.dcache.get(k)
         if ent is None:
@@ -1181,6 +1445,14 @@ class BonusTracker:
         for ax in self.spec.axes:
             ok, pay = per[ax.name]
             if not ok:
+                continue
+            if ax.name in ROW_ACTION_DECLINE:
+                legal = row.get("legal")
+                if legal is None:
+                    legal = (row.get("obs") or {}).get("legal")
+                if not row_is_action(ax.name, chosen, legal):
+                    continue
+                total += pay
                 continue
             if not row_is_action(ax.name, chosen):
                 continue
@@ -1212,6 +1484,7 @@ def paid_accounting(spec: BonusSpec, stats: dict[str, Whitening], hands,
     并且额外汇总"动作行 / 付奖行 / 被质量轴拦下"（与 `BonusTracker.dec` 同一个口径）。
     """
     mode = check_mode(mode)
+    check_mode_axes(spec, mode)
     if mode == MODE_DECISION:
         require_row_axes(spec)
     paid_hands: dict[str, int] = {a.name: 0 for a in spec.axes}
@@ -1232,8 +1505,8 @@ def paid_accounting(spec: BonusSpec, stats: dict[str, Whitening], hands,
         if mode == MODE_DECISION:
             n_cells += 1
             total = 0.0
-            for s, chosen in rows_in_scope(st, own_policies):
-                t, _d = decision_bonus(spec, stats, st, s, chosen, own_policies)
+            for i, s, chosen in rows_in_scope(st, own_policies):
+                t, _d = decision_bonus(spec, stats, st, s, chosen, own_policies, row_idx=i)
                 total += t
             tot_sum += total
             if total != 0.0:

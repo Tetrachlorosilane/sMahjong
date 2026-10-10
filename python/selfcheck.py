@@ -3834,6 +3834,57 @@ _ha_var = v4_pt._hand_advantage({**_gae_probe,
 ok(_ha_var["stats"]["ref_std"] > _ha_off["stats"]["ref_std"] + 1e-9,
    "风格奖励：逐小局变化的塑形**把奖励的方差推上去**（= 它真的在推那一轴）",
    f"{_ha_off['stats']['ref_std']:.6f} → {_ha_var['stats']['ref_std']:.6f}")
+# 判据 f：**质量护栏的越界规则**（`tools/w-ladder.py` 的 `companion_verdict`）——
+#   旧规则"CI 下界 < −tol 即越界"在 **SE 大**时**必然假警**（实测 `dama_rate` Δ=+0.30pp、SE=1.32pp、
+#   tol=2pp ⇒ 下界 −2.29 < −2 就报"越界"，可点估计是**正的**）。新规则 = 「**CI 上界 < 0**」
+#   **或**「**点估计 < −tol**」（点估计为正 + CI 宽 ⇒ **不报**）；退出码约定不变（0 不越界 / 3 越界）。
+#   ⚠ 以**文件方式加载** `tools/w-ladder.py` 并调它**同一个函数** —— 在这里抄一份规则 = 抄一份
+#   会各自漂移的口径（本仓的既定纪律）。`w-ladder.py` 只有 `main()` 在 `__main__` 下，导入无副作用。
+import importlib.util as _ilu                                              # noqa: E402
+# ⛔ 加载脚本**别在仓库里留 `tools/__pycache__/*.pyc`**（`tools/` 没被 .gitignore 覆盖 ⇒ 会变成
+#    未跟踪文件、污染 `git status`）。`sys.dont_write_bytecode` 是 `SourceFileLoader` 写缓存的闸门。
+_dwb = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    _wl_spec = _ilu.spec_from_file_location(
+        "_wl_guard", Path(__file__).resolve().parent.parent / "tools" / "w-ladder.py")
+    _wl = _ilu.module_from_spec(_wl_spec)
+    _wl_spec.loader.exec_module(_wl)
+finally:
+    sys.dont_write_bytecode = _dwb
+
+
+def _old_guard_rule(d, se, tol):
+    """旧规则（只作**对照**用；⛔ 别在生产路径上再用它 —— 它会把"点估计为正 + CI 宽"判成越界）。"""
+    return (d - _wl.Z95 * se) >= -tol
+
+
+_g_false = _wl.companion_verdict(0.30, 1.32, 1000, metric="decline_rate", tol=2.0)
+ok(_g_false["ok"] and not _old_guard_rule(0.30, 1.32, 2.0),
+   "质量护栏：Δ=+0.30/SE=1.32/tol=2（**点估计为正 + CI 宽**）⇒ **不再假警**（旧规则会报）✓",
+   f"CI[{_g_false['lo']:+.3f},{_g_false['hi']:+.3f}] ok={_g_false['ok']}（旧规则=False）")
+ok(not _wl.companion_verdict(-3.0, 0.5, 1000, tol=2.0)["ok"],
+   "质量护栏：Δ=−3/SE=0.5 ⇒ **仍报**（CI 上界 < 0 **且** 点估计 < −tol）✓")
+_g_hi = _wl.companion_verdict(-1.0, 0.3, 1000, tol=2.0)
+ok((not _g_hi["ok"]) and _g_hi["hi"] < 0 and _old_guard_rule(-1.0, 0.3, 2.0),
+   "质量护栏：Δ=−1/SE=0.3 ⇒ **仍报**（点估计没到 −2，但 **CI 上界 < 0** 单独触发；旧规则漏报）✓",
+   f"hi={_g_hi['hi']:+.3f}")
+ok(not _wl.companion_verdict(-2.0, 0.1, 1000, tol=2.0)["ok"],
+   "质量护栏：点估计**恰** = −tol ⇒ 仍报（由 CI 上界 < 0 触发；`<` 不含等号）✓")
+eq("质量护栏：判据行的键与顺序一字不动（同一份输入仍逐字节可比）",
+   tuple(_wl.companion_verdict(0.0, 1.0, 1)),
+   ("metric", "unit", "tol", "side", "delta", "lo", "hi", "se", "n_games", "ok", "combine", "sources"))
+eq("质量护栏：`quality --metric` 注册表（`decline_rate` 加进来、旧的三个一个不少）",
+   tuple(_wl.COMPANION_METRICS),
+   ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate"))
+_ax_names = {ax[0] for ax in _wl.PAIR_AXES}
+ok({"decline_rate", "decline_rows_per_game"} <= _ax_names,
+   "质量护栏：行级 `decline_rate` 的分子/分母进了 `PAIR_AXES`（⛔ 不另立一套口径）",
+   str(sorted(_ax_names)))
+ok(not (set(_wl.DECLINE_KEYS) & set(_wl.COUNT_KEYS)),
+   "质量护栏：行级 `DECLINE_KEYS` 与手级 `COUNT_KEYS` **不重叠**"
+   "（前者与**奖励侧审计账**对账、后者与 `style-vector.py` 对账 —— 两份独立账）")
+
 
 # ================================================================ 逐决策付奖（`--style-bonus-mode`）
 # 2026-10-10 加。动机：`hand` 口径的奖励是**小局级常数**⇒ 对手级行为（要不要立直）几乎没有信度
@@ -3854,8 +3905,9 @@ for _bad_m in ("Decision", "row", "per-decision"):
         ok(False, f"逐决策：未登记的模式 {_bad_m!r} 必须报错")
     except v4_sr.BonusSpecError:
         ok(True, f"逐决策：未登记的模式 {_bad_m!r} 被硬拒 ✓")
-# 行级动作的轴表：能定位到行的只有 riichi / meld / win；**结局量**一律报错（不许猜一行）
-eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES, ("meld", "riichi", "win"))
+# 行级动作的轴表：能定位到行的有 riichi / meld / win（动作键）+ **dama（"能立而不立"）**；
+# **结局量**一律报错（不许猜一行）
+eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES, ("dama", "meld", "riichi", "win"))
 for _ax in ("deal", "no_deal", "win_points"):
     try:
         v4_sr.row_is_action(_ax, "discard:1m")
@@ -3993,9 +4045,20 @@ with (_sr_mr / "g0.jsonl").open("w", encoding="utf-8") as _fh:
 _sr_mr_hands = list(v4_sr.iter_hands(_sr_mr / "g0.jsonl"))
 eq("多家荣和：合成轨迹 1 个小局", len(_sr_mr_hands), 1)
 _sr_mr_st = _sr_mr_hands[0][2]
-_sr_mr_spec = v4_sr.parse_bonus("win=1000:no_deal")
+# ⚠ `win=…:no_deal` 现在被 `parse_bonus` **硬拒**（`IMPLIED_PAIRS`：和了者的 `no_deal` 恒真，
+#   实测 `action_rows == paid_rows == 2230`、`blocked_rows == 0`）。这一段的目的是**行级判据**
+#   （多家荣和），所以 spec 直接**手工拼**（绕开文法校验，但用的是同一套 `_merge_cells`/行级判据）。
+try:
+    v4_sr.parse_bonus("win=1000:no_deal")
+    ok(False, "退化组合：`win=…:no_deal` 必须被 `parse_bonus` 硬拒（付奖行蕴含伴随量）")
+except v4_sr.BonusSpecError as _e:
+    ok("恒真" in str(_e) and "blocked_rows" in str(_e),
+       "退化组合：`win=…:no_deal` 当场报错并给出实测（恒真 ⇒ 奖励退化成对结果的重复加权）✓",
+       str(_e)[:70])
+_sr_mr_spec = v4_sr.BonusSpec(axes=(v4_sr.BonusAxis(name="win", weight=1000.0, pair="no_deal"),),
+                              raw="win=1000:no_deal（手工拼：只为红证行级判据）")
 eq("多家荣和：这一小局**两席**都执行了 `ron`（陷阱本身：手级只记一家、行级看是两家）",
-   sorted(s for s, c in v4_sr.rows_in_scope(_sr_mr_st, {_STU})
+   sorted(s for _i, s, c in v4_sr.rows_in_scope(_sr_mr_st, {_STU})
           if v4_sr.row_is_action("win", c)), [0, 2])
 eq("多家荣和：加'我就是被记录的那家'之后只剩 1 行（`hand_winner=0`）",
    v4_sr.axis_row_action_counts(_sr_mr_spec, _sr_mr_st, {_STU})["win"], 1)

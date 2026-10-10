@@ -122,6 +122,20 @@ PAIR_AXES = (
     ("deal_rate", "deals", "seat_hands", "pct"),
     ("riichi_win_rate", "riichi_wins", "riichi_hands", "pct"),
     ("avg_win_score", "win_points", "wins", "abs"),
+    # ★ `dama` 轴（2026-10-10）：**主**读数 = 每场每席的 `dama_wins` **计数**（分母 `games` =
+    #   这一场的学生席数 = 1 ⇒ Δ 的单位就是"场/席"）；**辅**读数 = 聚合口径 `dama_rate`
+    #   （= `dama_wins / wins`，与 `tools/style-vector.py` 的 `dama_rate` 同名同分子分母）。
+    ("dama_wins_per_game", "dama_wins", "games", "abs"),
+    ("dama_rate", "dama_wins", "wins", "pct"),
+    # ★★ `dama` 轴的**对齐后**判据（2026-10-10 第二轮，本任务的核心）：奖励侧的付奖行 = "该行
+    #   `legal` 含 `riichi:*` **且** `chosen` 不是它" ⇒ 判据必须量**同一个集合**（**行级**），
+    #   而不是手级的 `dama_wins`（实测只有 **8%** 重叠、92% 来自**根本不能立直**的副露手）。
+    #   **主** = 每场每席的"能立而不立"**行数**（`games` 当分母 = 这一场的学生席数 = 1，单位 = 行/场/席）；
+    #   **辅** = 聚合 `decline_rate`（= `decline_rows / legal_rows`，行级分母）。
+    #   ⚠ 分母 `legal_rows` 是**每一场自己的**行数 ⇒ 该场没有"能立直"的行时这一场不进 `decline_rate`
+    #   的配对（`_paired_delta` 的既有约定）；**主判据（计数）不受此影响，1000 场全用**。
+    ("decline_rows_per_game", "decline_rows", "games", "abs"),
+    ("decline_rate", "decline_rows", "legal_rows", "pct"),
 )
 #: 95% CI 的正态近似系数（与 `tools/w-ladder-gate-table.py` / `eval._paired_from_diffs` 同族做法）。
 Z95 = 1.96
@@ -720,8 +734,27 @@ def measure(reuse: bool = True) -> dict:
 RIICHI_PREFIX = "riichi:"
 MELD_PREFIXES = ("chi:", "pon:", "kan:")
 #: 配对要对账的整数键（名字与 `style-vector.py` 的 `counts` **逐字相同**）。
+#: ★ `dama_wins` / `games`（2026-10-10 加）：`dama` 轴的主配对量是"每场每席 `dama_wins` 计数"
+#:   （`games` 当分母 = 这一场学生占了几席 = 1），而它们**必须**与 `style-vector.py` 的
+#:   `counts.dama_wins` / `counts.games` 逐项相等 —— 所以两个键都得在这里对账。
 COUNT_KEYS = ("seat_hands", "riichi_hands", "meld_hands", "wins", "deals", "win_points",
-              "riichi_wins")
+              "riichi_wins", "dama_wins", "games")
+#: ★★ **行级**「能立而不立」的独立记账键（2026-10-10 第二轮）—— ⛔ **刻意不进 `COUNT_KEYS`**：
+#: `COUNT_KEYS` 的合计必须与 `tools/style-vector.py` 的 `counts` **逐项相等**（`_verify_pair_totals`），
+#: 而那份工具是**手级**口径、根本没有行级的 `legal_rows`/`decline_rows`（它的独立性要保住，
+#: 本任务明确 **⛔ 不许把行级量塞进 `style-vector.py`**）。
+#: 这组数的对账对象是**奖励侧的审计账**（`w-ladder/audit/<tag>.json`），口径逐条对应：
+#:   * `decision_rows` = 学生席的决策行数（审计账的 `n_used`）；
+#:   * `legal_rows` = 其中 `legal` 含 `riichi:*` 的行数（审计账同名键）；
+#:   * `decline_rows` = 其中 `chosen` **不是** `riichi:*` 的行数（= 付奖行候选；审计账的
+#:     `declined_rows` / `action_rows` —— 这两个键在奖励侧是同一个数）；
+#:   * `decline_paid_rows` / `decline_blocked_rows` = 付奖行里"学生该小局未放铳"/"学生放铳"；
+#:   * `decline_missing_legal_rows` = `legal` 取不到的行（⛔ 非 0 就不能做这个判据）；
+#:   * `decline_viol_state` / `decline_viol_after_decl` = 两条**结构检查**（付奖行那一刻公开状态位
+#:     必须还没立直 / 必须在首次宣言之前），都必须 = 0。
+DECLINE_KEYS = ("decision_rows", "legal_rows", "decline_rows",
+                "decline_paid_rows", "decline_blocked_rows", "decline_missing_legal_rows",
+                "decline_viol_state", "decline_viol_after_decl")
 
 
 def student_counts(sv: dict) -> dict:
@@ -747,6 +780,7 @@ def _student_per_game(tdir: Path) -> dict:
         riichi_flag: dict = {}      # (seat, hand_no) -> 该席这一小局宣言过立直
         meld_flag: dict = {}        # (seat, hand_no) -> 该席这一小局有副露（公开状态，任一行都能读到）
         hands: list = []            # (hand_no, agari, winner, loser, delta)
+        dec_rows: list = []         # ★ 行级记账的原料（见 `DECLINE_KEYS`）：(行号, 席, 小局, chosen, 能立直?, 状态位, riichi_turn)
         game, labs = None, []
         with f.open(encoding="utf-8") as fh:
             for line in fh:
@@ -775,6 +809,24 @@ def _student_per_game(tdir: Path) -> dict:
                             meld_flag[(s, hn)] = True
                     if chosen.startswith(MELD_PREFIXES):
                         meld_flag[(seat, hn)] = True
+                    # ★★ **行级**「能立而不立」的**独立**实现（⛔ 不 import 奖励侧、⛔ 不进 style-vector.py）：
+                    #   口径与 `ROW_ACTION_DECLINE['dama']` / 审计账的 `row_rule` **逐字相同** ——
+                    #   该行 `legal` 含 `riichi:*` ∧ `chosen` 不是 `riichi:*`。
+                    #   `legal` 的取法也与生产侧一致：行上的 `legal`，缺了退到 `obs.legal`；
+                    #   两处都缺 = `None`（"这一行的合法动作集在轨迹里根本没有" ⇒ 对这条判据**无定义**，
+                    #   记进 `decline_missing_legal_rows`，⛔ 不按 False 静默算 0）。
+                    #   这里只**收集**：学生是哪一席要等文件末尾的 `game` 行（它在文件最后）。
+                    legal = row.get("legal")
+                    if legal is None:
+                        legal = obs.get("legal")
+                    ob_ri = obs.get("riichi") or []
+                    ob_rt = obs.get("riichi_turn") or []
+                    dec_rows.append((
+                        len(dec_rows), seat, hn, chosen,
+                        None if legal is None
+                        else any(str(k).startswith(RIICHI_PREFIX) for k in legal),
+                        bool(ob_ri[seat]) if 0 <= seat < len(ob_ri) else False,
+                        int(ob_rt[seat]) if 0 <= seat < len(ob_rt) else 0))
                 elif t == "hand":
                     hands.append((row["hand_no"], bool(row.get("agari")),
                                   int(row.get("winner", -1)), int(row.get("loser", -1)),
@@ -783,6 +835,8 @@ def _student_per_game(tdir: Path) -> dict:
         if stu is None:
             raise SystemExit(f"⛔ {f} 的 `game` 行里找不到带 `@` 的学生席：{labs}")
         c = {k: 0 for k in COUNT_KEYS}
+        # `games` 的口径与 `style-vector.py` 同尺子：**场 × 席**（学生每场占 1 席 ⇒ 这一场 +1）。
+        c["games"] = 1
         for hn, agari, winner, loser, delta in hands:
             c["seat_hands"] += 1
             if riichi_flag.get((stu, hn)):
@@ -794,8 +848,45 @@ def _student_per_game(tdir: Path) -> dict:
                 c["win_points"] += int(delta[stu])
                 if riichi_flag.get((stu, hn)):
                     c["riichi_wins"] += 1
+                else:
+                    # ★ `dama_wins`（与 `style-vector.py` 逐字同一谓词）：和了且该小局**未立直**。
+                    c["dama_wins"] += 1
             if loser == stu:
                 c["deals"] += 1
+        # ★★ **行级**「能立而不立」的记账（`DECLINE_KEYS`；口径见那一段注释）------------------------
+        #   两遍扫：先取"该席第一次真的宣言立直"的行号（结构检查 ② 的界），再逐行数四个数。
+        c.update({k: 0 for k in DECLINE_KEYS})
+        first_decl: dict = {}
+        for i, seat, hn, chosen, _has, _ori, _ort in dec_rows:
+            if seat == stu and chosen.startswith(RIICHI_PREFIX):
+                first_decl.setdefault((hn, seat), i)
+        loser_of_hand = {hn: lo for hn, _ag, _w, lo, _dl in hands}
+        for i, seat, hn, chosen, has, ori, ort in dec_rows:
+            if seat != stu:
+                continue
+            c["decision_rows"] += 1
+            if has is None:
+                # ⛔ 对"能而不为"这类**依赖 `legal`** 的判据，取不到 `legal` 就是**无定义**：
+                #   记账并（由 `_decline_selfcheck`）报错，绝不静默当成"不能立直"。
+                c["decline_missing_legal_rows"] += 1
+                continue
+            if not has:
+                continue
+            c["legal_rows"] += 1
+            if chosen.startswith(RIICHI_PREFIX):
+                continue                      # 真的选了它（宣言行）⇒ 不是"能而不为"
+            c["decline_rows"] += 1
+            if ori or ort > 0:
+                # 结构检查 ①：付奖行那一刻**公开状态位**必须还没立直（与奖励侧同一条检查）。
+                c["decline_viol_state"] += 1
+            fd = first_decl.get((hn, seat))
+            if fd is not None and i >= fd:
+                # 结构检查 ②：付奖行必须在该席**首次宣言之前**（之后的"没选它"不是自由选择）。
+                c["decline_viol_after_decl"] += 1
+            if loser_of_hand.get(hn, -1) == stu:
+                c["decline_blocked_rows"] += 1      # 伴随量 `no_deal` 拦下（该小局学生放铳）
+            else:
+                c["decline_paid_rows"] += 1
         out[game if game is not None else int(f.name[1:-6])] = c
     return out
 
@@ -810,6 +901,78 @@ def _verify_pair_totals(per_game: dict, sv: dict, tag: str) -> dict:
         raise SystemExit(f"⛔ {tag}：逐场账与 style-vector 的 counts 对不上 —— 配对读数**不予发布**：\n"
                          + "\n".join("   " + b for b in bad))
     return tot
+
+
+def _decline_totals(per_game: dict) -> dict:
+    """把逐场的 `DECLINE_KEYS` 加总（**行级**口径；对账对象是奖励侧审计账，见那段注释）。"""
+    return {k: sum(g[k] for g in per_game.values()) for k in DECLINE_KEYS}
+
+
+def _decline_aggregate(tot: dict, games: int) -> dict:
+    """**聚合**读数（与"逐场配对"并列的那一份，`PREREGISTRATION-DAMA.md` §5 ① 的"辅"）。"""
+    return {"games": int(games), "decline_rows": tot["decline_rows"], "legal_rows": tot["legal_rows"],
+            "decline_rate": ((tot["decline_rows"] / tot["legal_rows"]) if tot["legal_rows"]
+                             else float("nan")),
+            "decline_rows_per_game": ((tot["decline_rows"] / games) if games else float("nan"))}
+
+
+def _decline_selfcheck(tot: dict, tag: str) -> dict:
+    """**口径自洽**（不需要奖励侧也有账就能查）：付奖 + 拦下 == 能而不为、结构检查 = 0、`legal` 全取到。"""
+    g = tot["decline_paid_rows"] + tot["decline_blocked_rows"]
+    bad = []
+    if g != tot["decline_rows"]:
+        bad.append(f"付奖行 + 拦下行 = {g} != 能而不为 {tot['decline_rows']}（累计点漏了/重了）")
+    if tot["decline_missing_legal_rows"]:
+        bad.append(f"`legal` 取不到的行 {tot['decline_missing_legal_rows']} != 0"
+                   f"（对'能立而不立'这类判据 = **无定义** ⇒ 不猜 False）")
+    for k, why in (("decline_viol_state", "付奖行那一刻公开状态位已说立直"),
+                   ("decline_viol_after_decl", "付奖行在该席首次宣言之后")):
+        if tot[k]:
+            bad.append(f"结构检查 {k} = {tot[k]} != 0（{why}）")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：行级「能立而不立」账**自相矛盾** —— 读数不予发布：\n"
+                         + "\n".join("   " + b for b in bad))
+    return tot
+
+
+def _verify_decline_totals(per_game: dict, tag: str) -> dict:
+    """★★ **判据与奖励对齐**的验收（本任务的核心）：行级判据的每一格 == 奖励侧审计账的对应键。
+
+    为什么这一条是硬判据（而不是"顺便看一眼"）：`decline_rate` 之所以要新加，就是因为上一轮拿
+    **手级** `dama_wins` 去当**行级**付奖行的判据 —— 两者只有 **8%** 重叠（92% 的 `dama_wins`
+    来自**根本不能立直**的副露手）⇒ 推那个决策对那个读数**没有杠杆**。对齐的唯一可证伪说法 =
+    **两个独立实现数同一个集合**，五个数 + `mu` **逐项相等**。⛔ 对不上就**不出读数**（先修判据）。
+
+    独立性的边界：本函数**只看轨迹**（按 PROTOCOL §8.3/§8.4 的字段自己数），数值一律来自
+    `_student_per_game`（w-ladder 的测量路径）；奖励侧的数从 `audit/<tag>.json` **读**
+    （⛔ 不 import `style_reward`，也不问它怎么算的）。
+    """
+    au = read_audit(tag)
+    if not au:
+        raise SystemExit(f"⛔ 审计账不存在：{AUDIT / (tag + '.json')} —— 没有奖励侧的账就**没法**做"
+                         f"「判据与奖励对齐」的对账（⛔ 不出读数）")
+    ax = (au.get("axes") or [{}])[0]
+    tot = _decline_selfcheck(_decline_totals(per_game), tag)
+    pairs = (("decline_rows", "action_rows"),        # 奖励侧的"动作行"就是这个集合
+             ("decline_rows", "declined_rows"),      # 同一件事的另一个键（要求两边都在、且都相等）
+             ("legal_rows", "legal_rows"),
+             ("decline_paid_rows", "paid_rows"),
+             ("decline_blocked_rows", "blocked_rows"),
+             ("decline_missing_legal_rows", "missing_legal_rows"),
+             ("decision_rows", "n_used"))
+    bad = [f"{mine:<26} 判据侧 {tot[mine]:>7} vs 审计账 `{theirs}` {ax.get(theirs)}"
+           for mine, theirs in pairs if int(ax.get(theirs, -1)) != tot[mine]]
+    mu = (tot["decline_rows"] / tot["decision_rows"]) if tot["decision_rows"] else float("nan")
+    if not (isinstance(ax.get("mu"), (int, float))
+            and abs(float(ax["mu"]) - mu) <= 1e-12):
+        bad.append(f"{'mu':<26} 判据侧 {mu!r} vs 审计账 {ax.get('mu')!r}")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：**判据与奖励对不上** —— `decline_rate` 读数不予发布（先修判据）：\n"
+                         + "\n".join("   " + b for b in bad)
+                         + f"\n   （审计账 {AUDIT / (tag + '.json')}，spec={au.get('spec')!r}）")
+    return {"tag": tag, "audit": str(AUDIT / f"{tag}.json"), "spec": au.get("spec"),
+            "axis": ax.get("axis"), "row_rule": ax.get("row_rule"), "totals": tot, "mu": mu,
+            "reconciled": True}
 
 
 def _paired_delta(pre: dict, post: dict, axes=PAIR_AXES) -> dict:
@@ -938,6 +1101,15 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
     per_post = _student_per_game(out_dir)
     _verify_pair_totals(per_pre, sv_pre, f"{label}-g01")
     _verify_pair_totals(per_post, sv, tag_post)
+    # ★★ **判据与奖励对齐**（本任务的核心，见 `_verify_decline_totals`）：行级「能立而不立」的
+    #   五数 + `mu` 必须与奖励侧审计账**逐项相等**；对不上 ⇒ `SystemExit`（不出读数）。
+    #   ⚠ 只有**训练前**那一侧有奖励侧的账（链内的采集才挂 `MAHJONG_STYLE_BONUS`）；`post` 补采走的是
+    #   `style-vector.py --run-out` 的采集路径、**不挂风格奖励** ⇒ post 侧只能做**口径自洽**那一层。
+    dec_pre = _verify_decline_totals(per_pre, f"{label}-g01")
+    tot_post = _decline_selfcheck(_decline_totals(per_post), tag_post)
+    dec_post = {"tag": tag_post, "totals": tot_post, "audit": None, "reconciled": False,
+                "note": "`post` 补采不挂风格奖励 ⇒ 奖励侧没有账；这一侧只做口径自洽"
+                        "（付奖+拦下 == 能而不为、结构检查 0、`legal` 全取到）"}
     res = {"tool": "tools/w-ladder.py post", "label": label, "generations": n,
            "final_net": str(net), "student_spec": labs[si], "policy": labs,
            "games": games, "seed": seed, "log": str(log),
@@ -945,6 +1117,12 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
            "pre_dir": str(pre_dir), "post_dir": str(out_dir), "style_vector": str(js),
            "pairing_check": pair,
            "totals_check": {k: int(student_counts(sv).get(k, -1)) for k in COUNT_KEYS},
+           "decline": {"pre": dec_pre, "post": dec_post,
+                       "aggregate": {"pre": _decline_aggregate(dec_pre["totals"], len(per_pre)),
+                                     "post": _decline_aggregate(tot_post, len(per_post))},
+                       "note": "行级「能立而不立」：分子 = 该席该行 `legal` 含 `riichi:*` 且 `chosen` "
+                               "不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 "
+                               "`riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"},
            "paired_delta": _paired_delta(per_pre, per_post)}
     (PAIRED / f"{tag_post}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2),
                                              encoding="utf-8")
@@ -955,6 +1133,29 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
           f"＝ **Δ {pd.get('delta_pp', float('nan')):+.2f}pp**（SE {pd.get('se_pp', float('nan')):.2f}，"
           f"t={pd.get('t', float('nan')):.2f}，95% CI "
           f"[{pd.get('lo_pp', float('nan')):+.2f},{pd.get('hi_pp', float('nan')):+.2f}]）", flush=True)
+    # ★★ 行级「能立而不立」：**先贴对账**（判据 vs 奖励），再贴配对读数（`PREREGISTRATION-DAMA.md` §5 ①）。
+    dp, dt = dec_pre["totals"], tot_post
+    for tag, t, rec in ((dec_pre["tag"], dp, "✓ 与审计账逐项相等"), (tag_post, dt, "口径自洽（无审计账）")):
+        print(f"[post] ★ 行级能立而不立 · {tag}：`legal` 含 `riichi:*` {t['legal_rows']}"
+              f"（其中真的选了 {t['legal_rows'] - t['decline_rows']}）｜未选它 {t['decline_rows']}"
+              f"（= 付奖行候选）｜真付奖 {t['decline_paid_rows']}｜被 `no_deal` 拦下 "
+              f"{t['decline_blocked_rows']}｜结构检查 {t['decline_viol_state']}/"
+              f"{t['decline_viol_after_decl']}｜μ_行 {t['decline_rows'] / max(t['decision_rows'], 1):.8f}"
+              f" ⇒ {rec}", flush=True)
+    dd = res["paired_delta"].get("decline_rows_per_game") or {}
+    dr = res["paired_delta"].get("decline_rate") or {}
+    ap, aq = res["decline"]["aggregate"]["pre"], res["decline"]["aggregate"]["post"]
+    print(f"[post] ★★ **主判据** `decline_rows_per_game`（每场每席行数）："
+          f"{dd.get('pre', float('nan')):.4f} → {dd.get('post', float('nan')):.4f}"
+          f"＝ **Δ {dd.get('delta_pp', float('nan')):+.4f}**（SE {dd.get('se_pp', float('nan')):.4f}，"
+          f"t={dd.get('t', float('nan')):.2f}，95% CI "
+          f"[{dd.get('lo_pp', float('nan')):+.4f},{dd.get('hi_pp', float('nan')):+.4f}]，n={dd.get('n_games')}）", flush=True)
+    print(f"[post] ★ 辅判据 `decline_rate`（逐场配对）：Δ {dr.get('delta_pp', float('nan')):+.3f}pp"
+          f"（SE {dr.get('se_pp', float('nan')):.3f}，95% CI "
+          f"[{dr.get('lo_pp', float('nan')):+.3f},{dr.get('hi_pp', float('nan')):+.3f}]，n={dr.get('n_games')}）"
+          f"｜**聚合**口径 {ap['decline_rate']:.4%} → {aq['decline_rate']:.4%}"
+          f"（{ap['decline_rows']}/{ap['legal_rows']} → {aq['decline_rows']}/{aq['legal_rows']}）"
+          f"＝ Δ {(aq['decline_rate'] - ap['decline_rate']) * 100:+.3f}pp", flush=True)
     print(f"[post] 落盘 {PAIRED / (tag_post + '.json')}")
     if not keep_traces:
         mb = 0.0
@@ -982,8 +1183,15 @@ COMPANION_METRIC = "riichi_win_rate"
 #: `riichi_win_rate` = `riichi` 轴（`PROBE-dec6170.md`）；`win_rate` = **`meld` 轴** ——
 #: `PREREGISTRATION-MELD.md` §2 明写："副露 = 开手牌换速度，最可能的『买副露卖什么』是**和了**与**放铳**"
 #: ⇒ 该轴的伴随量是**和了率**（`wins`），轨迹侧对应 `win_rate`（同一对分子分母 `wins/seat_hands`）。
-COMPANION_METRICS: tuple[str, ...] = ("riichi_win_rate", "win_rate")
-#: 预注册容忍带（**百分点 pp**，单侧）：实测那条 −1.49pp[−2.89,−0.09] 的 CI 下界越界 ⇒ 判"越界"。
+#: `dama_rate` = **`dama` 轴**（`PREREGISTRATION-DAMA.md` §2）：付奖行是"能立而不立"，
+#: 最该盯的伴随量是**默听/立直取向本身**（`dama_wins / wins`；主配对量另给"每场每席 `dama_wins` 计数"）。
+#: ★ `decline_rate` = **同一根 `dama` 轴的"对齐后"判据**（`PREREGISTRATION-DAMA.md` §5 ①）：
+#: 它也是**行级**量、分子集合**就是奖励侧的付奖行**，所以既能当主判据、也能当"这笔钱有没有
+#: 真的推上去"的护栏读数（⛔ 表外的一律报错；加进来只是**多一个选项** ⇒ 缺省口径逐字节不变）。
+COMPANION_METRICS: tuple[str, ...] = ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate")
+#: 预注册容忍带（**百分点 pp**，单侧）。★ 越界判据 2026-10-10 修过一次（见 `companion_verdict`）：
+#: 旧规则"CI 下界 ≥ −tol"在 **SE 大**时**必然假警**（实测 `dama_rate` Δ=+0.30pp、SE=1.32pp、tol=2pp
+#: ⇒ 旧规则报"越界"）。新规则 = 「**CI 上界 < 0**」**或**「**点估计 < −tol**」。
 COMPANION_TOL = 2.0
 #: 判据行里要用的字段名（与 `gate.guard_row` 的 `guards[]` **同名同义** ⇒ 两边读数可以直接并排放）。
 COMPANION_KEYS = ("metric", "unit", "tol", "delta", "lo", "hi", "ok")
@@ -1001,15 +1209,23 @@ def _companion_axis(metric: str):
 def companion_verdict(delta: float, se: float, n: int, *, metric: str = COMPANION_METRIC,
                       tol: float = COMPANION_TOL, unit: str = "pp", sources: list | None = None,
                       combine: str = "") -> dict:
-    """**单侧**判据行：`ok ⇔ CI 下界 ≥ −tol`（与 `gate.guard_row` 同构）。
+    """**单侧**判据行：`ok ⇔ (CI 上界 ≥ 0) ∧ (点估计 ≥ −tol)`（与 `gate.guard_row` 同族）。
 
-    ⛔ 单侧的意思是：只否掉"**变差**"。稀释变好（立直后和了率反而升）不该被这条卡住 ——
-    护栏是用来拦退化的，不是用来要求必须同时变好的。
+    ⛔ **为什么不是"CI 下界 ≥ −tol"**（2026-10-10 修，实测假警）：那条规则在 **SE 大**时**必然假警**
+    —— 实测 `dama_rate` Δ=**+0.30pp**、SE=**1.32pp**、tol=2pp ⇒ 下界 −2.29 < −2 就判"越界"，
+    可**点估计是正的**（这个量一个字都没说在退化；区间宽只是"没测准"，不是"变差了"）。
+    ⇒ 改成两条**并列**的越界条件（满足任一即越界，退出码 3）：
+      ① **CI 上界 < 0** —— 整个区间都在负侧，这是**有证据**的退化（哪怕幅度很小）；
+      ② **点估计 < −tol** —— 幅度真的越过容忍带（⛔ 不许拿宽 CI 藏一个大负数）。
+    **点估计为正 + CI 宽 ⇒ 不报**（这正是旧规则唯一会假警的那一格）。
+    ⛔ 单侧的本意不变：只否掉"**变差**"（稀释变好不该被这条卡住）；退出码约定不变
+    （**0 = 不越界 / 3 = 越界**）；字段一个不加、顺序一字不动 ⇒ 同一份输入的两份账仍可**逐字节**对比。
     """
     lo, hi = float(delta) - Z95 * float(se), float(delta) + Z95 * float(se)
+    bad = bool(hi < 0.0) or bool(float(delta) < -float(tol))
     return {"metric": metric, "unit": unit, "tol": float(tol), "side": "one-sided",
             "delta": float(delta), "lo": lo, "hi": hi, "se": float(se), "n_games": int(n),
-            "ok": bool(lo >= -float(tol)), "combine": combine, "sources": list(sources or [])}
+            "ok": not bad, "combine": combine, "sources": list(sources or [])}
 
 
 def companion_combine(rows: list) -> tuple:
@@ -1112,7 +1328,8 @@ def quality(paired: list, pre: str, post: str, tol: float, metric: str, out: str
               f"n={r['n_games']:>5}  ← {r['source']}")
     print(f"  合并：Δ={row['delta']:+.3f}pp  CI[{row['lo']:+.3f},{row['hi']:+.3f}]  "
           f"n={row['n_games']}  ⇒ {'不越界' if row['ok'] else '**越界（稀释）**'}"
-          f"（预注册：单侧，CI 下界须 ≥ −{tol:g}pp）")
+          f"（预注册：单侧，**越界 ⇔ CI 上界 < 0 或 点估计 < −{tol:g}pp**；"
+          f"点估计为正 + CI 宽 ⇒ 不报）")
     v = {k: row[k] for k in COMPANION_KEYS}
     print(f"  判据行：{json.dumps(v, ensure_ascii=False)}")
     dst = Path(out) if out else (STAGE / "companion-quality.json")
