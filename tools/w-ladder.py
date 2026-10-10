@@ -142,6 +142,13 @@ PAIR_AXES = (
     #   **辅**读数 = 聚合 `avg_riichi_turn`（= 合计 `riichi_turn_sum / riichi_turn_known`，
     #   与 `tools/style-vector.py` 的同名维**逐位同源**，由 `_verify_pair_totals` 对账）。
     ("riichi_turn_mean", "riichi_turn_sum", "riichi_turn_known", "turn"),
+    # ★★ `fold` 轴（**被威胁时的降り率**，2026-10-11）：**主**读数 = 逐场配对的**行级** `fold_rate`
+    #   = 付奖行 / 被威胁行（= 奖励侧付奖行的**同一集合**，与 `decline_rate` 同一条纪律）；
+    #   **辅** = 每场每席付奖行数（`games` 当分母 = 1 ⇒ 单位 = 行/场/席）。
+    #   ⚠ 分母 `threat_rows` 是**每一场自己的**行数 ⇒ 该场没有被威胁行时这一场不进 `fold_rate` 的配对
+    #   （`_paired_delta` 的既有约定）；**辅判据（计数）不受此影响，1000 场全用**。
+    ("fold_rows_per_game", "fold_rows", "games", "abs"),
+    ("fold_rate", "fold_rows", "threat_rows", "pct"),
 )
 #: 95% CI 的正态近似系数（与 `tools/w-ladder-gate-table.py` / `eval._paired_from_diffs` 同族做法）。
 Z95 = 1.96
@@ -785,6 +792,22 @@ RIICHI_TURN_KEYS = ("decl_rows", "decl_turn_rows", "decl_late_rows", "decl_missi
 #: 各写一份、由 `_verify_riichi_turn_totals` 对账（审计账里带 `turn_limit`）—— 只抄不查 = 同义反复。
 #: 值 = 8，来由见 `S:\mahjong-training\w-ladder\PREREGISTRATION-RIICHI-TURN.md` §1。
 RIICHI_TURN_T = 8
+#: ★★ **被威胁时降り轴**（`fold`）的判据侧记账键（2026-10-11 加）—— 与 `DECLINE_KEYS` /
+#: `RIICHI_TURN_KEYS` 同级：⛔ **刻意不进 `COUNT_KEYS`**（那组必须与 `style-vector.py` 的手级
+#: `counts` 逐项相等，而这里是**行级**量、对账对象是**奖励侧的审计账** `audit/<tag>.json`）：
+#:   * `f_decision_rows` = 学生席决策行数（审计账 `n_used`；单独一份，免得与 `dama` 那条口径混用）；
+#:   * `f_threat_rows` = 其中**出牌行 ∧ 被威胁**（当行 `obs.riichi` 里有真，且**别家**立的直）
+#:     —— = **降り率的分母**（审计账 `threat_rows`）；
+#:   * `f_fold_rows` = 其中打出的牌对**每一个**威胁家都是現物的（= **付奖行候选** = 审计账
+#:     `action_rows` / `fold_rows`）；
+#:   * `f_push_rows` = 其中不安全的（= **押し**那一侧，⛔ 不付奖）；`f_missing_rows` = 現物重建不出来；
+#:   * `fold_paid_rows` / `fold_blocked_rows` = 付奖行里"学生该小局未放铳"/"学生放铳"。
+FOLD_KEYS = ("f_decision_rows", "f_threat_rows", "f_fold_rows", "f_push_rows", "f_missing_rows",
+             "fold_paid_rows", "fold_blocked_rows")
+#: ⛔ **判据侧刻意不 import** `style_reward.ROW_ACTION_FOLD` / `tile_kind`：两套实现各写一份、
+#: 由 `_verify_fold_totals` 对账（审计账里带 `row_rule` / `genbutsu_src`）—— 只抄不查 = 同义反复。
+#: 判据侧的出牌前缀与牌种归一（赤五 `0m` → `5m`）：
+FOLD_DISCARD_PREFIX = "discard:"
 
 
 def student_counts(sv: dict) -> dict:
@@ -862,6 +885,9 @@ def _student_per_game(tdir: Path) -> dict:
                         legal = obs.get("legal")
                     ob_ri = obs.get("riichi") or []
                     ob_rt = obs.get("riichi_turn") or []
+                    # ★★ `fold` 轴要的**逐行威胁集**（当行 `obs.riichi` 快照里为真的**全部**座椅；
+                    #   与奖励侧的 `threat_seats(obs)` 同口径、但**各自算**）—— 只在 `_fold_totals`
+                    #   那一段用，不进 `DECLINE_KEYS`。
                     dec_rows.append((
                         len(dec_rows), seat, hn, chosen,
                         None if legal is None
@@ -871,7 +897,10 @@ def _student_per_game(tdir: Path) -> dict:
                         # ★ **这一行自己的巡目**（`obs.player_draws`；取不到 = None，⛔ 不猜 0）——
                         #   `riichi_turn` 轴的付奖行判据用的就是这个数（奖励侧同源于 `declared_turn`）。
                         (None if not isinstance(obs.get("player_draws"), int)
-                         else int(obs["player_draws"]))))
+                         else int(obs["player_draws"])),
+                        # ★ `fold`：这一行的威胁集 + 現物重建原料（`events` 原样，判据侧自己解）
+                        tuple(s for s in range(4) if 0 <= s < len(ob_ri) and bool(ob_ri[s])),
+                        obs.get("events") or []))
                 elif t == "hand":
                     hands.append((row["hand_no"], bool(row.get("agari")),
                                   int(row.get("winner", -1)), int(row.get("loser", -1)),
@@ -912,11 +941,11 @@ def _student_per_game(tdir: Path) -> dict:
         c.update({k: 0 for k in DECLINE_KEYS})
         c.update({k: 0 for k in RIICHI_TURN_KEYS})
         first_decl: dict = {}
-        for i, seat, hn, chosen, _has, _ori, _ort, _dt in dec_rows:
+        for i, seat, hn, chosen, _has, _ori, _ort, _dt, _thr, _ev in dec_rows:
             if seat == stu and chosen.startswith(RIICHI_PREFIX):
                 first_decl.setdefault((hn, seat), i)
         loser_of_hand = {hn: lo for hn, _ag, _w, lo, _dl in hands}
-        for i, seat, hn, chosen, has, ori, ort, dt in dec_rows:
+        for i, seat, hn, chosen, has, ori, ort, dt, threats, events in dec_rows:
             if seat != stu:
                 continue
             c["decision_rows"] += 1
@@ -957,8 +986,97 @@ def _student_per_game(tdir: Path) -> dict:
                 c["decline_blocked_rows"] += 1      # 伴随量 `no_deal` 拦下（该小局学生放铳）
             else:
                 c["decline_paid_rows"] += 1
+        # ★★ **行级**「被威胁时降り」的记账（`FOLD_KEYS`；口径见那一段注释）------------------------
+        #   ⛔ 独立实现（本文件自己解 `obs.events`，**不 import** `style_reward`/`style-vector.py`）。
+        #   口径与奖励侧逐条一致：**威胁 = 别家立直**（当行 `obs.riichi` 快照，⛔ 不含学生自己）；
+        #   **現物** = 该家 `riichi` 事件**之后**的舍牌 **＋ 宣言牌本身**（`sideways`）；付奖行 =
+        #   出牌 ∧ 被威胁 ∧ 打出的牌对**每一个**威胁家都是現物（⛔ 押し那一侧不付）。
+        c.update({k: 0 for k in FOLD_KEYS})
+        for i, seat, hn, chosen, _has, _ori, _ort, _dt, threats, events in dec_rows:
+            # ★★ **与奖励侧同一份总体：全部四席**（⛔ 不是只数学生席）—— 奖励侧的 `HandState` /
+            #   `axis_row_action_counts` 是对**这一小局的所有决策行**累加 `action_rows`，而它的
+            #   席位过滤发生在 `rows_in_scope`（写列/白化那一侧）。判据侧若只数学生席，就会与
+            #   `action_rows` **必然差 3/4**（实测：学生席 1591 vs 四席 1795）⇒ 对账永远对不上。
+            #   ⚠ 这不是"判据放宽"，而是**同一集合**：审计账的 `threat_rows/fold_rows/push_rows`
+            #   本来就是四席口径（`paid_rows/blocked_rows` 才是学生席的付奖账）。
+            if seat < 0 or seat > 3:
+                continue
+            c["f_decision_rows"] += 1
+            # ★★ **逐行**重建現物（⛔ 不用"跨行累积"的 `ev_seen`）：`events` 是**本小局累积**的，
+            #   而奖励侧的 `genbutsu_from_events` 每次都在**这一行自己的** `events` 上重算 ——
+            #   累积写法与它**不是同一件事**（实测会把 66% 的行误判成降り，而真实是 5.9%）。
+            #   口径（与奖励侧逐字相同，⛔ 只 import 公开事件、不用别家手牌/牌山/里宝）：
+            #     * 锚点 = 该 actor 的 **`riichi` 事件下标**（`riichi_idx`）；
+            #     * 現物 = 锚点**之后**（`i >= riichi_idx`）的 `discard` 牌种 **＋ 该 actor 的
+            #       `sideways` 舍牌**（宣言牌 / 顺延牌 —— 两者都进过河，都是現物）。
+            ri_idx: dict = {}
+            for _i2, _e in enumerate(events):
+                _a = _e.get("actor")
+                if _e.get("type") == "riichi" and isinstance(_a, int) and _a not in ri_idx:
+                    ri_idx[_a] = _i2
+            ev_seen: dict = {a: set() for a in ri_idx}
+            decl_seen: dict = {}
+            for _i2, _e in enumerate(events):
+                _a = _e.get("actor")
+                if not isinstance(_a, int) or _e.get("type") != "discard":
+                    continue
+                if _a in ri_idx and _i2 >= ri_idx[_a]:
+                    _tk2 = _norm_tile(_e.get("tile"))
+                    if _tk2:
+                        ev_seen[_a].add(_tk2)
+                if _e.get("sideways") and _a not in decl_seen:
+                    decl_seen[_a] = _norm_tile(_e.get("tile"))
+            if not chosen.startswith(FOLD_DISCARD_PREFIX):
+                continue
+            # ⛔ **不排自己已立直**：这一格的口径必须与奖励侧 `threat_seats(obs, seat)` **逐字相同**
+            #   —— 它数的是"这一行有没有威胁状态"（= `fold_row_ok` 的**前置集**），不是"有没有别家立直"。
+            #   自己已立直那几行进 `threat_rows`、但不进 `fold_rows`（由奖励侧 `threat_seats` 里的
+            #   `s != seat` 排掉）。⚠ 曾经在这里加过一条 `if _ori: continue`，后果是判据侧少数
+            #   **3763 行** ⇒ `_verify_fold_totals` 报"判据与奖励对不上"（它是对的：两边必须同一集合）。
+            others = [s for s in threats if s != seat]
+            if not others:
+                continue
+            c["f_threat_rows"] += 1
+            if any(s not in ev_seen for s in others):
+                c["f_missing_rows"] += 1        # ⛔ 現物重建不出来 ⇒ 奖励侧**硬拒**（这条必须 = 0）
+                continue
+            _tk = _norm_tile(chosen.split(":", 1)[1])
+            if not _tk:
+                c["f_missing_rows"] += 1
+                continue
+            # ⚠ 判据是"**对每一个威胁家都是現物**"：牌种 `_tk` 要么在它宣言点之后的舍牌里，
+            #   要么**就是它的宣言牌**（`sideways` 那张 —— 麻将标准口径：进过河不与荣）。
+            #   ⛔ 别写成 `_tk in ev_seen[s] or _tk == decl_seen.get(s)`：`_tk` 恒非空，而
+            #   `decl_seen.get(s)` 在"没有 `sideways` 事件"时是 `None` ⇒ 那一项恒假（看起来无害），
+            #   但**空串**时会恒真 —— 这类"拿 `.get()` 的缺省值当牌码比"的写法正是错一位的来源。
+            _safe = all((_tk in ev_seen[s])
+                        or (_tk == decl_seen[s] if s in decl_seen else False)
+                        for s in others)
+            if _safe:
+                c["f_fold_rows"] += 1
+                # ⚠ 这一格**只数学生席**（与奖励侧 `paid_rows/blocked_rows` 同一口径：
+                #   质量轴 `no_deal` 只看**学生自己**放铳了没有）。
+                if seat == stu and loser_of_hand.get(hn, -1) == stu:
+                    c["fold_blocked_rows"] += 1     # 伴随量 `no_deal` 拦下（切了現物照样可能放铳）
+                elif seat == stu:
+                    c["fold_paid_rows"] += 1
+            else:
+                c["f_push_rows"] += 1
         out[game if game is not None else int(f.name[1:-6])] = c
     return out
+
+
+def _norm_tile(code) -> str:
+    """牌码 → **牌种**键（赤五 `0m` 与普通 `5m` 归一；空/None → `""`）。
+
+    ⚠ **判据侧自己写一份**（⛔ 不 import `style_reward.tile_kind`）：两个来源各写一份、由
+    `_verify_fold_totals` 对账才有意义（只抄不查 = 同义反复）。赤五归一的理由与那边一致：
+    "打出的赤五恰好是現物"不该被判成不安全。
+    """
+    t = str(code or "")
+    if not t:
+        return ""
+    return ("5" + t[-1]) if t[:-1] == "0" else t
 
 
 def _verify_pair_totals(per_game: dict, sv: dict, tag: str) -> dict:
@@ -1122,6 +1240,82 @@ def _verify_riichi_turn_totals(per_game: dict, tag: str) -> dict:
             "totals": tot, "reconciled": True}
 
 
+def _fold_totals(per_game: dict) -> dict:
+    """把逐场的 `FOLD_KEYS` 加总（**行级**口径；对账对象是奖励侧审计账，见那段注释）。"""
+    return {k: sum(g[k] for g in per_game.values()) for k in FOLD_KEYS}
+
+
+def _fold_selfcheck(tot: dict, tag: str) -> dict:
+    """**口径自洽**（不需要奖励侧也有账就能查）：四数互不重叠、現物全取到。"""
+    bad = []
+    g = tot["f_fold_rows"] + tot["f_push_rows"] + tot["f_missing_rows"]
+    if g != tot["f_threat_rows"]:
+        bad.append(f"降り + 押し + 取不到 = {g} != 被威胁行 {tot['f_threat_rows']}"
+                   f"（三格互不重叠、合起来必须等于分母）")
+    if tot["f_missing_rows"]:
+        bad.append(f"現物重建不出来的行 {tot['f_missing_rows']} != 0"
+                   f"（奖励侧对这类行**硬拒**；判据侧非 0 = 两套口径对不上）")
+    if tot["f_fold_rows"] and (tot["fold_paid_rows"] + tot["fold_blocked_rows"]
+                               != tot["f_fold_rows"]):
+        bad.append(f"付奖 {tot['fold_paid_rows']} + 拦下 {tot['fold_blocked_rows']} != 降り行 "
+                   f"{tot['f_fold_rows']}（累计点漏了/重了）")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：行级「被威胁时降り」账**自相矛盾** —— 读数不予发布：\n"
+                         + "\n".join("   " + b for b in bad))
+    return tot
+
+
+def _fold_aggregate(tot: dict, games: int) -> dict:
+    """**聚合**读数（与"逐场配对"并列的那一份）：四数 + 降り率 + 每场每席付奖行数。"""
+    n = games or 0
+    return {"games": int(n), "threat_rows": tot["f_threat_rows"], "fold_rows": tot["f_fold_rows"],
+            "push_rows": tot["f_push_rows"], "missing_rows": tot["f_missing_rows"],
+            "fold_rate": ((tot["f_fold_rows"] / tot["f_threat_rows"]) if tot["f_threat_rows"]
+                          else float("nan")),
+            "fold_rows_per_game": ((tot["f_fold_rows"] / n) if n else float("nan")),
+            "paid_rows": tot["fold_paid_rows"], "blocked_rows": tot["fold_blocked_rows"]}
+
+
+def _verify_fold_totals(per_game: dict, tag: str) -> dict:
+    """★★ **判据与奖励对账**（`fold` 轴）：行级判据的每一格 == 奖励侧审计账的对应键。
+
+    为什么这条是硬判据：奖励侧的付奖行 = "**出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物**"，
+    而判据侧必须量**同一个集合**（否则"推的是不是这个行为"没法证伪）。独立性的边界：
+    本函数**只看轨迹**（`_student_per_game` 自己解 `obs.events`，⛔ 不 import `style_reward`），
+    奖励侧的数从 `audit/<tag>.json` **读**；口径句（`row_rule` / `genbutsu_src` / `threat_src`）
+    也在账里，必须存在。
+    """
+    au = read_audit(tag)
+    if not au:
+        raise SystemExit(f"⛔ 审计账不存在：{AUDIT / (tag + '.json')} —— 没有奖励侧的账就**没法**做"
+                         f"「判据与奖励对齐」的对账（⛔ 不出读数）")
+    ax = next((a for a in (au.get("axes") or []) if a.get("axis") == "fold"), None)
+    if ax is None:
+        raise SystemExit(f"⛔ 审计账 {AUDIT / (tag + '.json')} 里没有 `fold` 那一轴"
+                         f"（spec={au.get('spec')!r}）—— 这条链不是用这根轴跑的？")
+    tot = _fold_selfcheck(_fold_totals(per_game), tag)
+    pairs = (("f_threat_rows", "threat_rows"),
+             ("f_fold_rows", "fold_rows"),
+             ("f_fold_rows", "action_rows"),          # 奖励侧的"动作行"就是这个集合
+             ("f_push_rows", "push_rows"),
+             ("f_missing_rows", "missing_genbutsu_rows"),
+             ("fold_paid_rows", "paid_rows"),
+             ("fold_blocked_rows", "blocked_rows"),
+             ("f_decision_rows", "n_used"))
+    bad = [f"{mine:<24} 判据侧 {tot[mine]:>7} vs 审计账 `{theirs}` {ax.get(theirs)}"
+           for mine, theirs in pairs if int(ax.get(theirs, -1)) != tot[mine]]
+    for _k in ("row_rule", "genbutsu_src", "threat_src"):
+        if not ax.get(_k):
+            bad.append(f"审计账缺口径句 `{_k}`（不写下来就没法复判这一列）")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：**判据与奖励对不上**（`fold`）—— 读数不予发布（先修判据）：\n"
+                         + "\n".join("   " + b for b in bad)
+                         + f"\n   （审计账 {AUDIT / (tag + '.json')}，spec={au.get('spec')!r}）")
+    return {"tag": tag, "audit": str(AUDIT / f"{tag}.json"), "spec": au.get("spec"),
+            "axis": ax.get("axis"), "row_rule": ax.get("row_rule"),
+            "genbutsu_src": ax.get("genbutsu_src"), "totals": tot, "reconciled": True}
+
+
 def _paired_delta(pre: dict, post: dict, axes=PAIR_AXES) -> dict:
     """逐场配对：`Δ_g = post_rate_g − pre_rate_g`（**按场配**，不是把分子分母各自累加）。
 
@@ -1253,6 +1447,7 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
     # ⛔ **按轴名判"这条链有没有用这根轴"**（不假定 `axes[0]`）：多轴共存时按序号取会取错轴。
     _has_dama = "dama" in _axis_names
     _has_rt = "riichi_turn" in _axis_names
+    _has_fold = "fold" in _axis_names
     dec_pre = (_verify_decline_totals(per_pre, f"{label}-g01") if _has_dama else
                {"tag": f"{label}-g01", "totals": _decline_totals(per_pre), "audit": None,
                 "reconciled": False,
@@ -1275,6 +1470,21 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                             "post": _riichi_turn_aggregate(_riichi_turn_totals(per_post), len(per_post))},
               "note": "行级「早立直」：付奖行 = **宣言立直的那一行** ∧ 该行 `obs.player_draws` ≤ T"
                       "（= 奖励侧 `ROW_ACTION_TURN` 的**同一集合**）；⛔ 晚立直（> T）那一侧一行都不付。"}
+    # ★★ **被威胁时降り轴**（`fold`，2026-10-11）的对账：判据侧的行级账 vs 奖励侧审计账。
+    #   ⚠ 与 `dama` / `riichi_turn` 同理：只有**训练前**那一侧有奖励侧的账（链内采集挂
+    #   `MAHJONG_STYLE_BONUS`）；`post` 补采不挂奖励 ⇒ 那一侧只做口径自洽。
+    #   ⛔ 只有这条链**真的用了**这根轴时才做（否则 `_verify_fold_totals` 会正确地报错，
+    #   而那会把 dama/rt/meld 等老链的 `post` 一起打断）——判据 = 审计账里有没有 `fold` 那一轴。
+    fd_ = None
+    if _has_fold:
+        fd_ = {"pre": _verify_fold_totals(per_pre, f"{label}-g01"),
+               "post": {"tag": tag_post, "totals": _fold_selfcheck(_fold_totals(per_post), tag_post),
+                        "audit": None, "reconciled": False},
+               "aggregate": {"pre": _fold_aggregate(_fold_totals(per_pre), len(per_pre)),
+                             "post": _fold_aggregate(_fold_totals(per_post), len(per_post))},
+               "note": "行级「被威胁时降り」：付奖行 = **出牌 ∧ 被威胁（别家立直）∧ 打出的牌对"
+                       "**每一个**威胁家都是現物**（= 奖励侧 `fold_row_ok` 的**同一集合**）；"
+                       "⛔ 押し（不安全）那一侧一行都不付。"}
     res = {"tool": "tools/w-ladder.py post", "label": label, "generations": n,
            "final_net": str(net), "student_spec": labs[si], "policy": labs,
            "games": games, "seed": seed, "log": str(log),
@@ -1289,6 +1499,7 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                                "不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 "
                                "`riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"},
            "riichi_turn": rt,
+           "fold": fd_,
            "paired_delta": _paired_delta(per_pre, per_post)}
     (PAIRED / f"{tag_post}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2),
                                              encoding="utf-8")
@@ -1356,6 +1567,32 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
               f"{_cq.get('riichi_turn_sum')}/{_cq.get('riichi_turn_known')}）"
               f"＝ Δ {_avg_turn(_cq) - _avg_turn(_cp):+.4f} 巡目；付奖行/场 {_agg[0]:.4f} → {_agg[1]:.4f}",
               flush=True)
+    # ★★ **被威胁时降り轴**（`fold`）的原始输出：先贴**对账**（判据 vs 奖励），再贴**主判据**。
+    if fd_ is not None:
+        tp3, tq3 = fd_["pre"]["totals"], fd_["post"]["totals"]
+        for _tag, _t, _rec in ((fd_["pre"]["tag"], tp3, "✓ 与审计账逐项相等"), (tag_post, tq3,
+                                                                          "口径自洽（无审计账）")):
+            _r = (_t["f_fold_rows"] / _t["f_threat_rows"]) if _t["f_threat_rows"] else float("nan")
+            print(f"[post] ★ 被威胁时降り · {_tag}：**被威胁的出牌行** {_t['f_threat_rows']}"
+                  f"｜其中**切了对所有威胁家都安全的現物** {_t['f_fold_rows']}（= 付奖行候选）"
+                  f"｜**押し** {_t['f_push_rows']}｜現物取不到 {_t['f_missing_rows']}"
+                  f"｜降り率 {100 * _r:.3f}%｜付奖 {_t['fold_paid_rows']} / 拦下 "
+                  f"{_t['fold_blocked_rows']} ⇒ {_rec}", flush=True)
+        dd2 = res["paired_delta"].get("fold_rows_per_game") or {}
+        dr2 = res["paired_delta"].get("fold_rate") or {}
+        ap3, aq3 = fd_["aggregate"]["pre"], fd_["aggregate"]["post"]
+        print(f"[post] ★★ **主判据** `fold_rate`（逐场配对的**行级**降り率；**方向为升**）："
+              f"{ap3['fold_rate']:.4%} → {aq3['fold_rate']:.4%}"
+              f"（{ap3['fold_rows']}/{ap3['threat_rows']} → {aq3['fold_rows']}/{aq3['threat_rows']}）"
+              f"＝ **Δ {dr2.get('delta_pp', float('nan')):+.3f}pp**（SE {dr2.get('se_pp', float('nan')):.3f}，"
+              f"t={dr2.get('t', float('nan')):.2f}，95% CI "
+              f"[{dr2.get('lo_pp', float('nan')):+.3f},{dr2.get('hi_pp', float('nan')):+.3f}]，"
+              f"n={dr2.get('n_games')}）", flush=True)
+        print(f"[post] ★ 辅判据 `fold_rows_per_game`（每场每席付奖行数）："
+              f"{dd2.get('pre', float('nan')):.4f} → {dd2.get('post', float('nan')):.4f}"
+              f"＝ Δ {dd2.get('delta_pp', float('nan')):+.4f}（SE {dd2.get('se_pp', float('nan')):.4f}，"
+              f"95% CI [{dd2.get('lo_pp', float('nan')):+.4f},{dd2.get('hi_pp', float('nan')):+.4f}]，"
+              f"n={dd2.get('n_games')}）", flush=True)
     print(f"[post] 落盘 {PAIRED / (tag_post + '.json')}")
     if not keep_traces:
         mb = 0.0
