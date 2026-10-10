@@ -3835,9 +3835,13 @@ ok(_ha_var["stats"]["ref_std"] > _ha_off["stats"]["ref_std"] + 1e-9,
    "风格奖励：逐小局变化的塑形**把奖励的方差推上去**（= 它真的在推那一轴）",
    f"{_ha_off['stats']['ref_std']:.6f} → {_ha_var['stats']['ref_std']:.6f}")
 # 判据 f：**质量护栏的越界规则**（`tools/w-ladder.py` 的 `companion_verdict`）——
-#   旧规则"CI 下界 < −tol 即越界"在 **SE 大**时**必然假警**（实测 `dama_rate` Δ=+0.30pp、SE=1.32pp、
-#   tol=2pp ⇒ 下界 −2.29 < −2 就报"越界"，可点估计是**正的**）。新规则 = 「**CI 上界 < 0**」
-#   **或**「**点估计 < −tol**」（点估计为正 + CI 宽 ⇒ **不报**）；退出码约定不变（0 不越界 / 3 越界）。
+#   ① 旧规则"CI 下界 < −tol 即越界"在 **SE 大**时**必然假警**（实测 `dama_rate` Δ=+0.30pp、SE=1.32pp、
+#      tol=2pp ⇒ 下界 −2.29 < −2 就报"越界"，可点估计是**正的**）。修法 = 「**CI 上界 < 0**」
+#      **或**「**点估计 < −tol**」（点估计为正 + CI 宽 ⇒ **不报**）；退出码约定不变（0 不越界 / 3 越界）。
+#   ② ★ 越界是**有符号的**：坏方向按**轴的意图**取（`COMPANION_BAD_WHEN`）—— `down` 类（和了率/立直率/
+#      副露率/打点…）用上面那支；`up` 类（**放铳率**、巡目）反过来（`lo > 0` 或 `Δ > +tol`）。
+#      ⛔ 方向无关的旧版（只看 `hi < 0`）会把"放铳变少"也判成越界（实测 `pon` c1 放铳率 −0.992、
+#      上界 −0.136）⇒ 任何**同时改善防守**的轴都会被误杀，判据自己把正确方向的动作淘汰掉。
 #   ⚠ 以**文件方式加载** `tools/w-ladder.py` 并调它**同一个函数** —— 在这里抄一份规则 = 抄一份
 #   会各自漂移的口径（本仓的既定纪律）。`w-ladder.py` 只有 `main()` 在 `__main__` 下，导入无副作用。
 import importlib.util as _ilu                                              # noqa: E402
@@ -3871,12 +3875,36 @@ ok((not _g_hi["ok"]) and _g_hi["hi"] < 0 and _old_guard_rule(-1.0, 0.3, 2.0),
    f"hi={_g_hi['hi']:+.3f}")
 ok(not _wl.companion_verdict(-2.0, 0.1, 1000, tol=2.0)["ok"],
    "质量护栏：点估计**恰** = −tol ⇒ 仍报（由 CI 上界 < 0 触发；`<` 不含等号）✓")
-eq("质量护栏：判据行的键与顺序一字不动（同一份输入仍逐字节可比）",
+# ⚠ 判据行**多出两个方向键**（`bad_when` / `bad_rule`，2026-10-11 加"方向感知"那次）：它们是**量的
+#   属性**、只进屏幕上的那行判据，⛔ **不进产物** —— 落盘走白名单（`quality()` 里
+#   `payload = {k: row[k] for k in COMPANION_WRITTEN}`）⇒ 同一份输入在旧/新代码上写出的 JSON 仍
+#   **逐字节相同**。所以"可逐字节对拍"这条不变量要**钉在白名单上**，而不是钉 `companion_verdict`
+#   的返回字典上（后者是给人看的读数行、会随读数需要增长；钉它就等于把"加一个读数"判成回归）。
+eq("质量护栏：判据行的键与顺序（含方向两键 `bad_when`/`bad_rule`，插在 `side` 之后、位置固定）",
    tuple(_wl.companion_verdict(0.0, 1.0, 1)),
-   ("metric", "unit", "tol", "side", "delta", "lo", "hi", "se", "n_games", "ok", "combine", "sources"))
-eq("质量护栏：`quality --metric` 注册表（`decline_rate` 加进来、旧的三个一个不少）",
+   ("metric", "unit", "tol", "side", "bad_when", "bad_rule", "delta", "lo", "hi", "se",
+    "n_games", "ok", "combine", "sources"))
+eq("质量护栏：★ 落盘白名单 `COMPANION_WRITTEN` 一个字不加、顺序不动（旧/新产物逐字节可比）",
+   tuple(_wl.COMPANION_WRITTEN),
+   ("metric", "unit", "tol", "side", "delta", "lo", "hi", "se", "n_games", "ok",
+    "combine", "sources"))
+eq("质量护栏：`quality --metric` 注册表 = **恰好这 8 个量**、名字与顺序固定"
+   "（2026-10-11 六个伴随量全注册；`decline_rate` 与它之前那三个一个不少）",
    tuple(_wl.COMPANION_METRICS),
-   ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate"))
+   ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate",
+    "riichi_rate", "meld_rate", "deal_rate", "avg_win_score"))
+# 判据 f2：**`up` 类（放铳率：越少越好）**必须与 `down` 类分开判（⛔ 上面那几条用的都是 `down` 量，
+#   只测 `down` 等于把"方向"这件事测成"恰好缺省方向是 down"）。实测 `pon` c1：放铳率 Δ=−0.992、
+#   SE≈0.4367 ⇒ CI 上界 **−0.136 < 0**（= 在旧规则眼里"显著"），可它是**好事** ⇒ 必须 `ok`。
+_g_up_good = _wl.companion_verdict(-0.992, 0.4367, 1000, metric="deal_rate")
+_g_up_bad = _wl.companion_verdict(+2.0, 0.4, 1000, metric="deal_rate")
+ok(_g_up_good["bad_when"] == "up" and _g_up_good["hi"] < 0.0 and _g_up_good["ok"]
+   and (not _g_up_bad["ok"]) and _g_up_bad["lo"] > 0.0,
+   "质量护栏：`up` 类（放铳率）—— 上升显著 ⇒ **越界**；下降（变好，上界仍 < 0）⇒ **不**越界"
+   "（方向无关的旧规则会把「同时改善防守」的轴误杀）",
+   f"Δ=−0.992/SE=0.437 ⇒ CI[{_g_up_good['lo']:+.3f},{_g_up_good['hi']:+.3f}] "
+   f"ok={_g_up_good['ok']}（旧规则=False）；Δ=+2.0/SE=0.4 ⇒ lo={_g_up_bad['lo']:+.3f} "
+   f"ok={_g_up_bad['ok']}")
 _ax_names = {ax[0] for ax in _wl.PAIR_AXES}
 ok({"decline_rate", "decline_rows_per_game"} <= _ax_names,
    "质量护栏：行级 `decline_rate` 的分子/分母进了 `PAIR_AXES`（⛔ 不另立一套口径）",

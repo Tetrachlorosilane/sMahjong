@@ -199,7 +199,7 @@ cd C:\Users\HP\source\games\mahjong\python
 .venv\Scripts\python.exe -m mahjong_ml.features    # 权威特征规格（v3: state 615 / cand 96）
 
 # 服务端 / 客户端
-pwsh -File server\build.ps1 ; java -jar server\build\mahjong-server.jar --selftest   # L1（当前 1429 项）
+pwsh -File server\build.ps1 ; java -jar server\build\mahjong-server.jar --selftest   # L1（当前 1507 项）
 pwsh -File client\build.ps1 -Deploy                                                  # 发布前必做
 node tools\doc-refs-check.mjs                                                        # 文档自检（含索引完整性）
 
