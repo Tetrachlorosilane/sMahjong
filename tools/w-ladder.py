@@ -147,8 +147,12 @@ PAIR_AXES = (
     #   **辅** = 每场每席付奖行数（`games` 当分母 = 1 ⇒ 单位 = 行/场/席）。
     #   ⚠ 分母 `threat_rows` 是**每一场自己的**行数 ⇒ 该场没有被威胁行时这一场不进 `fold_rate` 的配对
     #   （`_paired_delta` 的既有约定）；**辅判据（计数）不受此影响，1000 场全用**。
-    ("fold_rows_per_game", "fold_rows", "games", "abs"),
-    ("fold_rate", "fold_rows", "threat_rows", "pct"),
+    #   ⚠ 分子/分母键必须与 `_student_per_game` 的逐场字典同名 —— `fold` 那一组是 `FOLD_KEYS`
+    #   （**带 `f_` 前缀**：`f_fold_rows` / `f_threat_rows`，与四席口径 `FOLD4_KEYS` 的 `f4_*` 分开）。
+    #   ⛔ 写裸名 `fold_rows` 会让 `_paired_delta` **对每一条链**都 `KeyError`（`FOLD_KEYS` 是无条件
+    #   初始化的 ⇒ 裸名永远不存在）—— 实测 HEAD 上 `post` 到这一步必死在 `_paired_delta`。
+    ("fold_rows_per_game", "f_fold_rows", "games", "abs"),
+    ("fold_rate", "f_fold_rows", "f_threat_rows", "pct"),
 )
 #: 95% CI 的正态近似系数（与 `tools/w-ladder-gate-table.py` / `eval._paired_from_diffs` 同族做法）。
 Z95 = 1.96
@@ -1518,6 +1522,12 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
     if si is None:
         raise SystemExit(f"⛔ {pre_dir} 的第 0 场里找不到带 `@` 的学生席：{labs}")
     suffix = labs[si][labs[si].index("@"):]            # 例 `@0#0.5`（采样口径必须与链内一致）
+    # ★ 训练前那一侧的学生串**必须先留一份**：`g01` 的轨迹里写的还是 `--init`/现任那个 `net:…`
+    #   （例 `v4-expert-defrep-g10/net.bin@0#0.5`），而下面这一行会把 `labs[si]` 换成末代权重。
+    #   ⛔ 拿**补采侧**的串去 `_reward_fold_account(pre_dir, …)` 重算训练前的账，`whitening_stats`
+    #   一行都匹配不到（实测 HEAD 在这里以"轴 'fold' … n=0"中止，`paired/*.json` 写不出来）——
+    #   `--reuse` 也一样中止。学生**串**不是学生**席**：两者都要按各自那一侧的轨迹取。
+    pre_student = labs[si]
     labs[si] = f"net:{net}{suffix}"
     tag_post = f"{label}-g{n:02d}-POST"
     out_dir = TRACES_POST / f"{label}-g{n:02d}"
@@ -1612,7 +1622,7 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
         #   冻结账是训练当时那一版代码的产物，实测与 HEAD 的 `fold_row_ok` 差 4892/96/4796 行
         #   （旧版把"行动者自己已立直"也算被威胁）。⛔ 两边的差**照实报出来**，不静默。
         _sp = (_au_pre.get("spec") or "")
-        _acc = _reward_fold_account(pre_dir, _sp, labs[si]) if _sp else None
+        _acc = _reward_fold_account(pre_dir, _sp, pre_student) if _sp else None
         if _acc is None:
             raise SystemExit(f"⛔ 冻结账 {AUDIT / (f'{label}-g01.json')} 里没有 `spec` —— 不猜"
                              f"奖励口径（对账基准必须是同一版代码重算的账）")
