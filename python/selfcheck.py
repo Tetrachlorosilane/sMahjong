@@ -3905,9 +3905,10 @@ for _bad_m in ("Decision", "row", "per-decision"):
         ok(False, f"逐决策：未登记的模式 {_bad_m!r} 必须报错")
     except v4_sr.BonusSpecError:
         ok(True, f"逐决策：未登记的模式 {_bad_m!r} 被硬拒 ✓")
-# 行级动作的轴表：能定位到行的有 riichi / meld / win（动作键）+ **dama（"能立而不立"）**；
-# **结局量**一律报错（不许猜一行）
-eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES, ("dama", "meld", "riichi", "win"))
+# 行级动作的轴表：能定位到行的有 riichi / meld / win（动作键）+ **dama（"能立而不立"）**
+# + **riichi_turn（"宣言行 ∧ 巡目 ≤ T"）**；**结局量**一律报错（不许猜一行）
+eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES,
+   ("dama", "meld", "riichi", "riichi_turn", "win"))
 for _ax in ("deal", "no_deal", "win_points"):
     try:
         v4_sr.row_is_action(_ax, "discard:1m")
@@ -4119,6 +4120,72 @@ eq("逐决策：`decision` 时紧凑集命令只多出 `--style-bonus-mode decis
 eq("逐决策：`hand`（缺省）时那一个开关**不进命令行**（老轮次台账逐字可比）",
    [x for x in _sr_cmd_on if x not in _sr_cmd_off],
    ["--style-bonus", "riichi=1.0:no_deal", "--style-bonus-whiten", "student"])
+
+# ================================================================ `riichi_turn` 轴（**早立直**，2026-10-11）
+# 判据（路线 1 第一根轴，与整份改动逐条对应）：
+#   ① 行级付奖行 = **宣言立直的那一行** ∧ 该行巡目 ≤ T（T=8）—— **方向单向**：> T 的一侧一行都不付；
+#   ② 手级指示量（`early_decl`）与行级判据**同一把尺子**（`ROW_TURN_LIMIT` + `declared_turn`）⇒ 蕴含不漂移；
+#   ③ 与既有 `riichi` 轴**共存**（同一份轨迹上两轴各自付奖、互不干扰）；
+#   ④ 宣言行**取不到巡目** ⇒ **当场报错**（⛔ 不猜 0 = 不把"取不到"读成"最早立直"）；
+#   ⑤ `hand` 模式用它 ⇒ 报错（合并量不是"宣言那一行" = 静默换轴）；⑥ 伴随量恒真 ⇒ 报错。
+print("== `riichi_turn` 轴（**早立直** · 阈值 T=8）==")
+eq("早立直：阈值表（唯一一条巡目轴 ⇒ 手级镜像只实现这一条）", dict(v4_sr.ROW_TURN_LIMIT),
+   {"riichi_turn": 8})
+eq("早立直：动作前缀 = 立直宣言（与 `riichi` 轴**同一行规则**）", dict(v4_sr.ROW_ACTION_TURN),
+   {"riichi_turn": "riichi:"})
+eq("早立直：**实测**恒真闸门（付奖行必须真被伴随量拦下）", dict(v4_sr.ROW_PAIR_MUST_BLOCK),
+   {"riichi_turn": ("no_deal",)})
+ok("riichi_turn" in v4_sr.DECISION_ONLY_AXES and "riichi_turn" in v4_sr.ROW_ACTION_AXES,
+   "早立直：登记为 `decision` 专用 + 行级付奖轴", f"{v4_sr.DECISION_ONLY_AXES}")
+eq("早立直：行级判据 = 宣言行 ∧ 巡目 ≤ T（> T 与'非宣言行'都 False）",
+   (v4_sr.row_is_action("riichi_turn", "riichi:1m", None, 8),
+    v4_sr.row_is_action("riichi_turn", "riichi:1m", None, 9),
+    v4_sr.row_is_action("riichi_turn", "discard:1m", None, None)), (True, False, False))
+eq("早立直：`declared_turn` 取不到返回 `None`（⛔ 不返回 0）",
+   v4_sr.declared_turn({"player_draws": None}), None)
+try:
+    v4_sr.row_is_action("riichi_turn", "riichi:1m", None, None)
+    ok(False, "早立直：宣言行取不到巡目必须报错")
+except v4_sr.BonusSpecError as _e:
+    ok("巡目" in str(_e), "早立直：宣言行**取不到巡目** ⇒ 当场报错（⛔ 不猜 0）✓", str(_e)[:70])
+# 合成 4 小局（只写学生席 = 0 号席）：早立直+未放铳 / **晚立直**+未放铳 / 早立直+放铳 / 没立直
+_sr_rt = scratch("v4-style-riichi-turn")
+with (_sr_rt / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    for _h, _c, _d, _l in ((0, "riichi:1m", 5, -1), (1, "riichi:1m", 12, -1),
+                           (2, "riichi:1m", 7, 0), (3, "discard:9m", 2, -1)):
+        _fh.write(json.dumps({
+            "type": "decision", "game": 0, "hand_no": _h, "step": 0, "seat": 0,
+            "policy": _STU, "kind": "turn", "legal": ["discard:9m", "riichi:1m"], "chosen": _c,
+            "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": _l,
+            "hand_agari": False,
+            "obs": dict(_v4obs, v=3, seat=0, legal=["discard:9m", "riichi:1m"], player_draws=_d,
+                        riichi=[False] * 4, riichi_turn=[0] * 4, melds=[[], [], [], []])},
+            ensure_ascii=False) + "\n")
+_sr_rt_spec = v4_sr.parse_bonus("riichi=1000:no_deal,riichi_turn=1000:no_deal")
+_sr_rt_stats, _sr_rt_audit = v4_sr.whitening_stats(
+    _sr_rt_spec, v4_sr.iter_hands(_sr_rt / "g0.jsonl"), student_policies={_STU}, quiet=True,
+    mode="decision")
+_rt_ri, _rt_turn = _sr_rt_audit.axes[0], _sr_rt_audit.axes[1]
+eq("早立直：四数（宣言 / ≤T / >T / 取不到）= (3, 2, 1, 0)",
+   (_rt_turn["decl_rows"], _rt_turn["decl_turn_rows"], _rt_turn["decl_late_rows"],
+    _rt_turn["missing_turn_rows"]), (3, 2, 1, 0))
+eq("早立直：付奖 + 拦下 == 动作行 == 巡目 ≤ T 的宣言行（1 + 1 == 2）",
+   (_rt_turn["action_rows"], _rt_turn["paid_rows"], _rt_turn["blocked_rows"]), (2, 1, 1))
+eq("早立直：账里带阈值与判据句（不写下来就没法复判那一列的口径）",
+   (_rt_turn["turn_limit"], "player_draws" in _rt_turn["turn_src"]), (8, True))
+eq("早立直 ★ **与 `riichi` 轴共存**：同一份轨迹上 `riichi` 三数（晚立直那一行**也付奖**）",
+   (_rt_ri["action_rows"], _rt_ri["paid_rows"], _rt_ri["blocked_rows"]), (3, 2, 1))
+_sr_rt_chk = v4_sr.audit_whitening(_sr_rt_spec, _sr_rt_stats,
+                                   v4_sr.iter_hands(_sr_rt / "g0.jsonl"),
+                                   student_policies={_STU}, mode="decision")
+ok(_sr_rt_chk["_all_ok"]["ok"], "早立直：白化自检通过（两轴都 mean≈0 / var == 1）",
+   f"riichi var={_sr_rt_chk['riichi']['var']!r} / riichi_turn var={_sr_rt_chk['riichi_turn']['var']!r}")
+try:
+    v4_sr.whitening_stats(_sr_rt_spec, v4_sr.iter_hands(_sr_rt / "g0.jsonl"),
+                          student_policies={_STU}, quiet=True, mode="hand")
+    ok(False, "早立直：`hand` 模式用它必须报错")
+except v4_sr.BonusSpecError as _e:
+    ok("decision" in str(_e), "早立直：`hand` 模式用它 ⇒ 当场报错（不静默换轴）✓", str(_e)[:70])
 
 # ---------------------------------------------------------------- 汇总
 

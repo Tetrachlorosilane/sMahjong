@@ -136,9 +136,18 @@ PAIR_AXES = (
     #   的配对（`_paired_delta` 的既有约定）；**主判据（计数）不受此影响，1000 场全用**。
     ("decline_rows_per_game", "decline_rows", "games", "abs"),
     ("decline_rate", "decline_rows", "legal_rows", "pct"),
+    # ★★ `riichi_turn` 轴（**早立直**，2026-10-11）：**主**读数 = 每场每席"**立直巡目之和 / 立直次数**"
+    #   （= 该场的平均立直巡目；分母 `riichi_turn_known` ⇒ 该场没有可读巡目的立直时这一场不进配对，
+    #   与 `decline_rate` 的既有约定一致）。**方向为"降"**：Δ 为负 = 立直时点被推早。
+    #   **辅**读数 = 聚合 `avg_riichi_turn`（= 合计 `riichi_turn_sum / riichi_turn_known`，
+    #   与 `tools/style-vector.py` 的同名维**逐位同源**，由 `_verify_pair_totals` 对账）。
+    ("riichi_turn_mean", "riichi_turn_sum", "riichi_turn_known", "turn"),
 )
 #: 95% CI 的正态近似系数（与 `tools/w-ladder-gate-table.py` / `eval._paired_from_diffs` 同族做法）。
 Z95 = 1.96
+#: 单位 → 人读标签（★ `turn` = 巡目：`riichi_turn_mean` 用它，**不是**"点/和了"）。
+#: ⚠ 只有 `pct` 会乘 100（`_paired_delta` 的 `scale`）—— 加这个标签**不改任何数**。
+UNIT_CN = {"pct": "百分点 pp", "abs": "点/和了", "turn": "巡目"}
 #: 补采的落点（与 `PROBE-dec6170.md` 的 `traces-post\…` 同一约定）。
 TRACES_POST = STAGE / "traces-post"
 PAIRED = STAGE / "paired"
@@ -738,7 +747,12 @@ MELD_PREFIXES = ("chi:", "pon:", "kan:")
 #:   （`games` 当分母 = 这一场学生占了几席 = 1），而它们**必须**与 `style-vector.py` 的
 #:   `counts.dama_wins` / `counts.games` 逐项相等 —— 所以两个键都得在这里对账。
 COUNT_KEYS = ("seat_hands", "riichi_hands", "meld_hands", "wins", "deals", "win_points",
-              "riichi_wins", "dama_wins", "games")
+              "riichi_wins", "dama_wins", "games",
+              # ★★ `riichi_turn` 轴（早立直，2026-10-11）：判据侧的**聚合**读数 `avg_riichi_turn`
+              #   = `riichi_turn_sum / riichi_turn_known`。三个键与 `tools/style-vector.py` 的
+              #   `COUNT_KEYS` **逐字同名** ⇒ `_verify_pair_totals` 会把它们逐项对账
+              #   （⛔ 不 import 那份工具、也不改它：它已经是**手级**口径的独立实现）。
+              "riichi_turn_sum", "riichi_turn_known", "riichi_turn_missing")
 #: ★★ **行级**「能立而不立」的独立记账键（2026-10-10 第二轮）—— ⛔ **刻意不进 `COUNT_KEYS`**：
 #: `COUNT_KEYS` 的合计必须与 `tools/style-vector.py` 的 `counts` **逐项相等**（`_verify_pair_totals`），
 #: 而那份工具是**手级**口径、根本没有行级的 `legal_rows`/`decline_rows`（它的独立性要保住，
@@ -755,6 +769,22 @@ COUNT_KEYS = ("seat_hands", "riichi_hands", "meld_hands", "wins", "deals", "win_
 DECLINE_KEYS = ("decision_rows", "legal_rows", "decline_rows",
                 "decline_paid_rows", "decline_blocked_rows", "decline_missing_legal_rows",
                 "decline_viol_state", "decline_viol_after_decl")
+
+#: ★★ **巡目阈值轴**（`riichi_turn` = 早立直）的判据侧记账键（2026-10-11 加）—— 与 `DECLINE_KEYS`
+#: 同级：⛔ **刻意不进 `COUNT_KEYS`**（那组必须与 `style-vector.py` 的手级 `counts` 逐项相等，
+#: 而这里是**行级**量、对账对象是**奖励侧的审计账** `audit/<tag>.json`）：
+#:   * `decl_rows` = 学生席**宣言立直**的行数（`chosen` 以 `riichi:` 开头）；
+#:   * `decl_turn_rows` = 其中巡目 ≤ T 的（= **付奖行候选** ⇒ 必须 == 审计账的 `action_rows`
+#:     与 `decl_turn_rows`）；`decl_late_rows` = 其中巡目 > T 的（⛔ **不付奖**的那一侧，
+#:     它必须真的存在 —— 否则 T 没起作用，方向就不是"越早越好"）；
+#:   * `decl_missing_turn_rows` = 宣言行里巡目取不到的（⛔ 非 0 就不能做这个判据）；
+#:   * `riichi_turn_paid_rows` / `riichi_turn_blocked_rows` = 付奖行里"学生该小局未放铳"/"学生放铳"。
+RIICHI_TURN_KEYS = ("decl_rows", "decl_turn_rows", "decl_late_rows", "decl_missing_turn_rows",
+                    "riichi_turn_paid_rows", "riichi_turn_blocked_rows")
+#: **阈值 T 的判据侧副本**（⛔ 刻意**不 import** `style_reward.ROW_TURN_LIMIT` 来读它：两个来源
+#: 各写一份、由 `_verify_riichi_turn_totals` 对账（审计账里带 `turn_limit`）—— 只抄不查 = 同义反复。
+#: 值 = 8，来由见 `S:\mahjong-training\w-ladder\PREREGISTRATION-RIICHI-TURN.md` §1。
+RIICHI_TURN_T = 8
 
 
 def student_counts(sv: dict) -> dict:
@@ -779,8 +809,11 @@ def _student_per_game(tdir: Path) -> dict:
     for f in sorted(_traces_of(tdir), key=lambda x: int(x.name[1:-6])):
         riichi_flag: dict = {}      # (seat, hand_no) -> 该席这一小局宣言过立直
         meld_flag: dict = {}        # (seat, hand_no) -> 该席这一小局有副露（公开状态，任一行都能读到）
+        rturn_max: dict = {}        # (seat, hand_no) -> `obs.riichi_turn[seat]` 的最大值（>0 才有意义）
+        decl_draw: dict = {}        # (seat, hand_no) -> 宣言那一行的 `obs.player_draws`（回退用）
         hands: list = []            # (hand_no, agari, winner, loser, delta)
-        dec_rows: list = []         # ★ 行级记账的原料（见 `DECLINE_KEYS`）：(行号, 席, 小局, chosen, 能立直?, 状态位, riichi_turn)
+        dec_rows: list = []         # ★ 行级记账的原料（见 `DECLINE_KEYS` / `RIICHI_TURN_KEYS`）：
+        #                             (行号, 席, 小局, chosen, 能立直?, 状态位, riichi_turn, 本行巡目)
         game, labs = None, []
         with f.open(encoding="utf-8") as fh:
             for line in fh:
@@ -803,6 +836,14 @@ def _student_per_game(tdir: Path) -> dict:
                     if obs["riichi"][seat] or (obs.get("riichi_turn") or [0] * 4)[seat] > 0 \
                             or chosen.startswith(RIICHI_PREFIX):
                         riichi_flag[(seat, hn)] = True
+                    # ★ `riichi_turn` 轴（早立直）要的两个手级原料（与 `style-vector.py` 同一把尺子）：
+                    #   `obs.riichi_turn[seat]` 的最大值（只在 **> 0** 时更新，与那边逐字相同），
+                    #   以及宣言那一行的 `obs.player_draws`（它是 `riichi_turn` 为 0 时的**回退**）。
+                    _rt = (obs.get("riichi_turn") or [0] * 4)[seat]
+                    if _rt > 0:
+                        rturn_max[(seat, hn)] = max(rturn_max.get((seat, hn), 0), int(_rt))
+                    if chosen.startswith(RIICHI_PREFIX):
+                        decl_draw[(seat, hn)] = int(obs.get("player_draws") or 0)
                     # 副露是**公开状态**：随便哪一席的行都能读出别家的副露（与 style-vector 同一条）
                     for s in range(4):
                         if obs["melds"][s]:
@@ -826,7 +867,11 @@ def _student_per_game(tdir: Path) -> dict:
                         None if legal is None
                         else any(str(k).startswith(RIICHI_PREFIX) for k in legal),
                         bool(ob_ri[seat]) if 0 <= seat < len(ob_ri) else False,
-                        int(ob_rt[seat]) if 0 <= seat < len(ob_rt) else 0))
+                        int(ob_rt[seat]) if 0 <= seat < len(ob_rt) else 0,
+                        # ★ **这一行自己的巡目**（`obs.player_draws`；取不到 = None，⛔ 不猜 0）——
+                        #   `riichi_turn` 轴的付奖行判据用的就是这个数（奖励侧同源于 `declared_turn`）。
+                        (None if not isinstance(obs.get("player_draws"), int)
+                         else int(obs["player_draws"]))))
                 elif t == "hand":
                     hands.append((row["hand_no"], bool(row.get("agari")),
                                   int(row.get("winner", -1)), int(row.get("loser", -1)),
@@ -841,6 +886,15 @@ def _student_per_game(tdir: Path) -> dict:
             c["seat_hands"] += 1
             if riichi_flag.get((stu, hn)):
                 c["riichi_hands"] += 1
+                # ★ 立直巡目（与 `style-vector.py` 的 `avg_riichi_turn` **逐字同一口径**）：
+                #   `obs.riichi_turn[seat]`（宣言之后的公开位）取不到时**回退**到宣言那一行的
+                #   `player_draws`；两者都取不到 ⇒ `riichi_turn_missing`（⛔ 不写 0）。
+                _rt = rturn_max.get((stu, hn), 0) or decl_draw.get((stu, hn), 0)
+                if _rt > 0:
+                    c["riichi_turn_sum"] += _rt
+                    c["riichi_turn_known"] += 1
+                else:
+                    c["riichi_turn_missing"] += 1
             if meld_flag.get((stu, hn)):
                 c["meld_hands"] += 1
             if agari and winner == stu:
@@ -856,15 +910,31 @@ def _student_per_game(tdir: Path) -> dict:
         # ★★ **行级**「能立而不立」的记账（`DECLINE_KEYS`；口径见那一段注释）------------------------
         #   两遍扫：先取"该席第一次真的宣言立直"的行号（结构检查 ② 的界），再逐行数四个数。
         c.update({k: 0 for k in DECLINE_KEYS})
+        c.update({k: 0 for k in RIICHI_TURN_KEYS})
         first_decl: dict = {}
-        for i, seat, hn, chosen, _has, _ori, _ort in dec_rows:
+        for i, seat, hn, chosen, _has, _ori, _ort, _dt in dec_rows:
             if seat == stu and chosen.startswith(RIICHI_PREFIX):
                 first_decl.setdefault((hn, seat), i)
         loser_of_hand = {hn: lo for hn, _ag, _w, lo, _dl in hands}
-        for i, seat, hn, chosen, has, ori, ort in dec_rows:
+        for i, seat, hn, chosen, has, ori, ort, dt in dec_rows:
             if seat != stu:
                 continue
             c["decision_rows"] += 1
+            # ★★ **巡目阈值轴**（`riichi_turn` = 早立直）的独立记账：宣言行 ∧ **本行巡目 ≤ T**
+            #   与奖励侧的 `ROW_ACTION_TURN` / `declared_turn` 同一把尺子，但**各自数**
+            #   （⇒ "== 审计账 action_rows" 才是对账而不是同义反复）。⛔ 取不到巡目**不猜 0**。
+            if chosen.startswith(RIICHI_PREFIX):
+                c["decl_rows"] += 1
+                if dt is None:
+                    c["decl_missing_turn_rows"] += 1
+                elif int(dt) > RIICHI_TURN_T:
+                    c["decl_late_rows"] += 1          # ⛔ 晚立直那一侧：三格都不进（一分钱不付）
+                else:
+                    c["decl_turn_rows"] += 1
+                    if loser_of_hand.get(hn, -1) == stu:
+                        c["riichi_turn_blocked_rows"] += 1
+                    else:
+                        c["riichi_turn_paid_rows"] += 1
             if has is None:
                 # ⛔ 对"能而不为"这类**依赖 `legal`** 的判据，取不到 `legal` 就是**无定义**：
                 #   记账并（由 `_decline_selfcheck`）报错，绝不静默当成"不能立直"。
@@ -951,7 +1021,12 @@ def _verify_decline_totals(per_game: dict, tag: str) -> dict:
     if not au:
         raise SystemExit(f"⛔ 审计账不存在：{AUDIT / (tag + '.json')} —— 没有奖励侧的账就**没法**做"
                          f"「判据与奖励对齐」的对账（⛔ 不出读数）")
-    ax = (au.get("axes") or [{}])[0]
+    # ⛔ **按轴名找**，不假定 `axes[0]`：多轴共存（例 `riichi_turn` 与 `dama` 同开）时按序号取会取错轴，
+    #   而症状是"判据与奖励对不上"这种看起来像判据坏了的假警（本仓最忌讳的静默错位）。
+    ax = next((a for a in (au.get("axes") or []) if a.get("axis") == "dama"), None)
+    if ax is None:
+        raise SystemExit(f"⛔ 审计账 {AUDIT / (tag + '.json')} 里没有 `dama` 那一轴"
+                         f"（spec={au.get('spec')!r}）—— 这条链不是用这根轴跑的？")
     tot = _decline_selfcheck(_decline_totals(per_game), tag)
     pairs = (("decline_rows", "action_rows"),        # 奖励侧的"动作行"就是这个集合
              ("decline_rows", "declined_rows"),      # 同一件事的另一个键（要求两边都在、且都相等）
@@ -973,6 +1048,78 @@ def _verify_decline_totals(per_game: dict, tag: str) -> dict:
     return {"tag": tag, "audit": str(AUDIT / f"{tag}.json"), "spec": au.get("spec"),
             "axis": ax.get("axis"), "row_rule": ax.get("row_rule"), "totals": tot, "mu": mu,
             "reconciled": True}
+
+
+def _riichi_turn_totals(per_game: dict) -> dict:
+    """把逐场的 `RIICHI_TURN_KEYS` 加总（**行级**口径；对账对象是奖励侧审计账，见那段注释）。"""
+    return {k: sum(g[k] for g in per_game.values()) for k in RIICHI_TURN_KEYS}
+
+
+def _riichi_turn_selfcheck(tot: dict, tag: str) -> dict:
+    """**口径自洽**（不需要奖励侧也有账就能查）：付奖 + 拦下 == 巡目 ≤ T 的宣言行、巡目全取到、T 真在起作用。"""
+    g = tot["riichi_turn_paid_rows"] + tot["riichi_turn_blocked_rows"]
+    bad = []
+    if g != tot["decl_turn_rows"]:
+        bad.append(f"付奖行 + 拦下行 = {g} != 巡目 ≤ {RIICHI_TURN_T} 的宣言行 {tot['decl_turn_rows']}"
+                   f"（累计点漏了/重了）")
+    if tot["decl_missing_turn_rows"]:
+        bad.append(f"宣言行里巡目取不到的 {tot['decl_missing_turn_rows']} != 0"
+                   f"（对'早立直'这类判据 = **无定义** ⇒ 不猜 0）")
+    if tot["decl_rows"] and not tot["decl_late_rows"]:
+        bad.append(f"宣言行 {tot['decl_rows']} 行里**一行晚立直（巡目 > T）都没有**"
+                   f"⇒ 阈值 T={RIICHI_TURN_T} 没在起作用（方向就不是'越早越好'那件事了）")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：行级「早立直」账**自相矛盾** —— 读数不予发布：\n"
+                         + "\n".join("   " + b for b in bad))
+    return tot
+
+
+def _riichi_turn_aggregate(tot: dict, games: int) -> dict:
+    """**聚合**读数（与"逐场配对"并列的那一份）：宣言行 / ≤T / >T / 付奖 / 拦下 + 付奖行率。"""
+    n = games or 0
+    return {"games": int(n), "decl_rows": tot["decl_rows"], "decl_turn_rows": tot["decl_turn_rows"],
+            "decl_late_rows": tot["decl_late_rows"],
+            "paid_rows": tot["riichi_turn_paid_rows"], "blocked_rows": tot["riichi_turn_blocked_rows"],
+            "turn_limit": RIICHI_TURN_T,
+            "paid_rows_per_game": ((tot["decl_turn_rows"] / n) if n else float("nan"))}
+
+
+def _verify_riichi_turn_totals(per_game: dict, tag: str) -> dict:
+    """★★ **判据与奖励对账**（`riichi_turn` 轴）：行级判据的每一格 == 奖励侧审计账的对应键。
+
+    为什么这条是硬判据：奖励侧的付奖行 = "**宣言立直的那一行** ∧ 该行 `obs.player_draws` ≤ T"，
+    而判据侧必须量**同一个集合**（否则"推的是不是这个行为"就没法证伪）。独立性的边界：
+    本函数**只看轨迹**（`_student_per_game` 自己按 PROTOCOL §8.3/§8.4 数），奖励侧的数从
+    `audit/<tag>.json` **读**（⛔ 不 import `style_reward`，也不问它怎么算的）；阈值 T 也是两个来源
+    （本文件的 `RIICHI_TURN_T` vs 账里的 `turn_limit`）⇒ 只抄不查不算对账。
+    """
+    au = read_audit(tag)
+    if not au:
+        raise SystemExit(f"⛔ 审计账不存在：{AUDIT / (tag + '.json')} —— 没有奖励侧的账就**没法**做"
+                         f"「判据与奖励对齐」的对账（⛔ 不出读数）")
+    ax = next((a for a in (au.get("axes") or []) if a.get("axis") == "riichi_turn"), None)
+    if ax is None:
+        raise SystemExit(f"⛔ 审计账 {AUDIT / (tag + '.json')} 里没有 `riichi_turn` 那一轴"
+                         f"（spec={au.get('spec')!r}）—— 这条链不是用这根轴跑的？")
+    tot = _riichi_turn_selfcheck(_riichi_turn_totals(per_game), tag)
+    pairs = (("decl_rows", "decl_rows"),
+             ("decl_turn_rows", "decl_turn_rows"),      # 同名键：两边都在、且都相等
+             ("decl_turn_rows", "action_rows"),         # 奖励侧的"动作行"就是这个集合
+             ("decl_late_rows", "decl_late_rows"),
+             ("decl_missing_turn_rows", "missing_turn_rows"),
+             ("riichi_turn_paid_rows", "paid_rows"),
+             ("riichi_turn_blocked_rows", "blocked_rows"))
+    bad = [f"{mine:<26} 判据侧 {tot[mine]:>7} vs 审计账 `{theirs}` {ax.get(theirs)}"
+           for mine, theirs in pairs if int(ax.get(theirs, -1)) != tot[mine]]
+    if int(ax.get("turn_limit", -1)) != RIICHI_TURN_T:
+        bad.append(f"{'turn_limit':<26} 判据侧 {RIICHI_TURN_T} vs 审计账 {ax.get('turn_limit')}")
+    if bad:
+        raise SystemExit(f"⛔ {tag}：**判据与奖励对不上**（`riichi_turn`）—— 读数不予发布（先修判据）：\n"
+                         + "\n".join("   " + b for b in bad)
+                         + f"\n   （审计账 {AUDIT / (tag + '.json')}，spec={au.get('spec')!r}）")
+    return {"tag": tag, "audit": str(AUDIT / f"{tag}.json"), "spec": au.get("spec"),
+            "axis": ax.get("axis"), "row_rule": ax.get("row_rule"), "turn_limit": ax.get("turn_limit"),
+            "totals": tot, "reconciled": True}
 
 
 def _paired_delta(pre: dict, post: dict, axes=PAIR_AXES) -> dict:
@@ -998,7 +1145,7 @@ def _paired_delta(pre: dict, post: dict, axes=PAIR_AXES) -> dict:
         m = statistics.fmean(diffs)
         se = statistics.stdev(diffs) / n ** 0.5
         scale = 100.0 if unit == "pct" else 1.0
-        out[name] = {"unit": unit, "unit_cn": "百分点 pp" if unit == "pct" else "点/和了",
+        out[name] = {"unit": unit, "unit_cn": UNIT_CN.get(unit, unit),
                      "pre": statistics.fmean(pres), "post": statistics.fmean(posts),
                      "delta_pp": m * scale, "se_pp": se * scale,
                      "t": (m / se if se > 0 else float("nan")),
@@ -1101,15 +1248,33 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
     per_post = _student_per_game(out_dir)
     _verify_pair_totals(per_pre, sv_pre, f"{label}-g01")
     _verify_pair_totals(per_post, sv, tag_post)
-    # ★★ **判据与奖励对齐**（本任务的核心，见 `_verify_decline_totals`）：行级「能立而不立」的
-    #   五数 + `mu` 必须与奖励侧审计账**逐项相等**；对不上 ⇒ `SystemExit`（不出读数）。
-    #   ⚠ 只有**训练前**那一侧有奖励侧的账（链内的采集才挂 `MAHJONG_STYLE_BONUS`）；`post` 补采走的是
-    #   `style-vector.py --run-out` 的采集路径、**不挂风格奖励** ⇒ post 侧只能做**口径自洽**那一层。
-    dec_pre = _verify_decline_totals(per_pre, f"{label}-g01")
+    _au_pre = read_audit(f"{label}-g01")
+    _axis_names = {a.get("axis") for a in (_au_pre.get("axes") or [])}
+    # ⛔ **按轴名判"这条链有没有用这根轴"**（不假定 `axes[0]`）：多轴共存时按序号取会取错轴。
+    _has_dama = "dama" in _axis_names
+    _has_rt = "riichi_turn" in _axis_names
+    dec_pre = (_verify_decline_totals(per_pre, f"{label}-g01") if _has_dama else
+               {"tag": f"{label}-g01", "totals": _decline_totals(per_pre), "audit": None,
+                "reconciled": False,
+                "note": "这条链没有 `dama` 轴 ⇒ 奖励侧审计账里没有那组键；这里只留判据侧的原始计数"})
     tot_post = _decline_selfcheck(_decline_totals(per_post), tag_post)
     dec_post = {"tag": tag_post, "totals": tot_post, "audit": None, "reconciled": False,
                 "note": "`post` 补采不挂风格奖励 ⇒ 奖励侧没有账；这一侧只做口径自洽"
                         "（付奖+拦下 == 能而不为、结构检查 0、`legal` 全取到）"}
+    # ★★ **巡目阈值轴**（`riichi_turn` = 早立直，2026-10-11）的对账：判据侧的行级账 vs 奖励侧审计账。
+    #   ⚠ 与 `dama` 同理，只有**训练前**那一侧有奖励侧的账（链内采集挂 `MAHJONG_STYLE_BONUS`）；
+    #   `post` 补采走 `style-vector.py --run-out`、不挂奖励 ⇒ 那一侧只做口径自洽。
+    #   ⛔ 只有这条链**真的用了**这根轴时才做（否则 `_verify_riichi_turn_totals` 会正确地报错，
+    #   而那会把 dama/meld 等老链的 `post` 一起打断）——判据 = 审计账里有没有 `riichi_turn` 那一轴。
+    rt = None
+    if _has_rt:
+        rt = {"pre": _verify_riichi_turn_totals(per_pre, f"{label}-g01"),
+              "post": {"tag": tag_post, "totals": _riichi_turn_selfcheck(
+                  _riichi_turn_totals(per_post), tag_post), "audit": None, "reconciled": False},
+              "aggregate": {"pre": _riichi_turn_aggregate(_riichi_turn_totals(per_pre), len(per_pre)),
+                            "post": _riichi_turn_aggregate(_riichi_turn_totals(per_post), len(per_post))},
+              "note": "行级「早立直」：付奖行 = **宣言立直的那一行** ∧ 该行 `obs.player_draws` ≤ T"
+                      "（= 奖励侧 `ROW_ACTION_TURN` 的**同一集合**）；⛔ 晚立直（> T）那一侧一行都不付。"}
     res = {"tool": "tools/w-ladder.py post", "label": label, "generations": n,
            "final_net": str(net), "student_spec": labs[si], "policy": labs,
            "games": games, "seed": seed, "log": str(log),
@@ -1123,6 +1288,7 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                        "note": "行级「能立而不立」：分子 = 该席该行 `legal` 含 `riichi:*` 且 `chosen` "
                                "不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 "
                                "`riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"},
+           "riichi_turn": rt,
            "paired_delta": _paired_delta(per_pre, per_post)}
     (PAIRED / f"{tag_post}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2),
                                              encoding="utf-8")
@@ -1134,28 +1300,62 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
           f"t={pd.get('t', float('nan')):.2f}，95% CI "
           f"[{pd.get('lo_pp', float('nan')):+.2f},{pd.get('hi_pp', float('nan')):+.2f}]）", flush=True)
     # ★★ 行级「能立而不立」：**先贴对账**（判据 vs 奖励），再贴配对读数（`PREREGISTRATION-DAMA.md` §5 ①）。
+    #   ⛔ 只有这条链真的用了 `dama` 轴才贴（否则这一段会按`dama`的口径去读一份别的轴的账）。
     dp, dt = dec_pre["totals"], tot_post
-    for tag, t, rec in ((dec_pre["tag"], dp, "✓ 与审计账逐项相等"), (tag_post, dt, "口径自洽（无审计账）")):
-        print(f"[post] ★ 行级能立而不立 · {tag}：`legal` 含 `riichi:*` {t['legal_rows']}"
-              f"（其中真的选了 {t['legal_rows'] - t['decline_rows']}）｜未选它 {t['decline_rows']}"
-              f"（= 付奖行候选）｜真付奖 {t['decline_paid_rows']}｜被 `no_deal` 拦下 "
-              f"{t['decline_blocked_rows']}｜结构检查 {t['decline_viol_state']}/"
-              f"{t['decline_viol_after_decl']}｜μ_行 {t['decline_rows'] / max(t['decision_rows'], 1):.8f}"
-              f" ⇒ {rec}", flush=True)
-    dd = res["paired_delta"].get("decline_rows_per_game") or {}
-    dr = res["paired_delta"].get("decline_rate") or {}
-    ap, aq = res["decline"]["aggregate"]["pre"], res["decline"]["aggregate"]["post"]
-    print(f"[post] ★★ **主判据** `decline_rows_per_game`（每场每席行数）："
-          f"{dd.get('pre', float('nan')):.4f} → {dd.get('post', float('nan')):.4f}"
-          f"＝ **Δ {dd.get('delta_pp', float('nan')):+.4f}**（SE {dd.get('se_pp', float('nan')):.4f}，"
-          f"t={dd.get('t', float('nan')):.2f}，95% CI "
-          f"[{dd.get('lo_pp', float('nan')):+.4f},{dd.get('hi_pp', float('nan')):+.4f}]，n={dd.get('n_games')}）", flush=True)
-    print(f"[post] ★ 辅判据 `decline_rate`（逐场配对）：Δ {dr.get('delta_pp', float('nan')):+.3f}pp"
-          f"（SE {dr.get('se_pp', float('nan')):.3f}，95% CI "
-          f"[{dr.get('lo_pp', float('nan')):+.3f},{dr.get('hi_pp', float('nan')):+.3f}]，n={dr.get('n_games')}）"
-          f"｜**聚合**口径 {ap['decline_rate']:.4%} → {aq['decline_rate']:.4%}"
-          f"（{ap['decline_rows']}/{ap['legal_rows']} → {aq['decline_rows']}/{aq['legal_rows']}）"
-          f"＝ Δ {(aq['decline_rate'] - ap['decline_rate']) * 100:+.3f}pp", flush=True)
+    if _has_dama:
+        for tag, t, rec in ((dec_pre["tag"], dp, "✓ 与审计账逐项相等"),
+                            (tag_post, dt, "口径自洽（无审计账）")):
+            print(f"[post] ★ 行级能立而不立 · {tag}：`legal` 含 `riichi:*` {t['legal_rows']}"
+                  f"（其中真的选了 {t['legal_rows'] - t['decline_rows']}）｜未选它 {t['decline_rows']}"
+                  f"（= 付奖行候选）｜真付奖 {t['decline_paid_rows']}｜被 `no_deal` 拦下 "
+                  f"{t['decline_blocked_rows']}｜结构检查 {t['decline_viol_state']}/"
+                  f"{t['decline_viol_after_decl']}｜μ_行 {t['decline_rows'] / max(t['decision_rows'], 1):.8f}"
+                  f" ⇒ {rec}", flush=True)
+        dd = res["paired_delta"].get("decline_rows_per_game") or {}
+        dr = res["paired_delta"].get("decline_rate") or {}
+        ap, aq = res["decline"]["aggregate"]["pre"], res["decline"]["aggregate"]["post"]
+        print(f"[post] ★★ **主判据** `decline_rows_per_game`（每场每席行数）："
+              f"{dd.get('pre', float('nan')):.4f} → {dd.get('post', float('nan')):.4f}"
+              f"＝ **Δ {dd.get('delta_pp', float('nan')):+.4f}**（SE {dd.get('se_pp', float('nan')):.4f}，"
+              f"t={dd.get('t', float('nan')):.2f}，95% CI "
+              f"[{dd.get('lo_pp', float('nan')):+.4f},{dd.get('hi_pp', float('nan')):+.4f}]，n={dd.get('n_games')}）", flush=True)
+        print(f"[post] ★ 辅判据 `decline_rate`（逐场配对）：Δ {dr.get('delta_pp', float('nan')):+.3f}pp"
+              f"（SE {dr.get('se_pp', float('nan')):.3f}，95% CI "
+              f"[{dr.get('lo_pp', float('nan')):+.3f},{dr.get('hi_pp', float('nan')):+.3f}]，n={dr.get('n_games')}）"
+              f"｜**聚合**口径 {ap['decline_rate']:.4%} → {aq['decline_rate']:.4%}"
+              f"（{ap['decline_rows']}/{ap['legal_rows']} → {aq['decline_rows']}/{aq['legal_rows']}）"
+              f"＝ Δ {(aq['decline_rate'] - ap['decline_rate']) * 100:+.3f}pp", flush=True)
+    # ★★ **巡目阈值轴**（`riichi_turn` = 早立直）的原始输出：先贴**对账**（判据 vs 奖励），再贴**主判据**。
+    if rt is not None:
+        tp, tq = rt["pre"]["totals"], rt["post"]["totals"]
+        ap2, aq2 = rt["aggregate"]["pre"], rt["aggregate"]["post"]
+        for _tag, _t, _rec in ((rt["pre"]["tag"], tp, "✓ 与审计账逐项相等（付奖行 == 巡目 ≤ T 的宣言行）"),
+                               (tag_post, tq, "口径自洽（无审计账）")):
+            print(f"[post] ★ 早立直 · {_tag}：宣言立直的行 {_t['decl_rows']}"
+                  f"（巡目 ≤ T={rt['pre']['turn_limit']} 的 {_t['decl_turn_rows']}｜> T 的 "
+                  f"{_t['decl_late_rows']} ⇒ ⛔ 不付奖）｜真付奖 {_t['riichi_turn_paid_rows']}"
+                  f"｜被 `no_deal` 拦下 {_t['riichi_turn_blocked_rows']}"
+                  f"｜巡目取不到的 {_t['decl_missing_turn_rows']} ⇒ {_rec}", flush=True)
+        tm = res["paired_delta"].get("riichi_turn_mean") or {}
+        print(f"[post] ★★ **主判据** `riichi_turn_mean`（每场每席 立直巡目之和/立直次数；**方向为降**）："
+              f"{tm.get('pre', float('nan')):.4f} → {tm.get('post', float('nan')):.4f}"
+              f"＝ **Δ {tm.get('delta_pp', float('nan')):+.4f}**（SE {tm.get('se_pp', float('nan')):.4f}，"
+              f"t={tm.get('t', float('nan')):.2f}，95% CI "
+              f"[{tm.get('lo_pp', float('nan')):+.4f},{tm.get('hi_pp', float('nan')):+.4f}]，"
+              f"n={tm.get('n_games')}）", flush=True)
+        _agg = (ap2["paid_rows_per_game"], aq2["paid_rows_per_game"])
+        _cp, _cq = student_counts(sv_pre), student_counts(sv)
+
+        def _avg_turn(c):
+            n = int(c.get("riichi_turn_known") or 0)
+            return (int(c.get("riichi_turn_sum") or 0) / n) if n else float("nan")
+
+        print(f"[post] ★ 辅判据 **聚合** `avg_riichi_turn`（与 `style-vector.py` 同名维**同一分子/分母**）："
+              f"{_avg_turn(_cp):.4f} → {_avg_turn(_cq):.4f}"
+              f"（{_cp.get('riichi_turn_sum')}/{_cp.get('riichi_turn_known')} → "
+              f"{_cq.get('riichi_turn_sum')}/{_cq.get('riichi_turn_known')}）"
+              f"＝ Δ {_avg_turn(_cq) - _avg_turn(_cp):+.4f} 巡目；付奖行/场 {_agg[0]:.4f} → {_agg[1]:.4f}",
+              flush=True)
     print(f"[post] 落盘 {PAIRED / (tag_post + '.json')}")
     if not keep_traces:
         mb = 0.0

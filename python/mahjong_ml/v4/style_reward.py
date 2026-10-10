@@ -128,6 +128,25 @@
 ⛔ **`dama` 只允许在 `decision` 模式下当付奖轴**（`DECISION_ONLY_AXES`）：`hand` 模式的合并量是
 "四席取或的未立直"，**不是**"能立而不立" —— 付出去的奖励与轴名无关（那是静默换轴），所以**当场报错**。
 
+## `riichi_turn` 轴（**早立直**：宣言巡目 ≤ T 才付奖，2026-10-11 加）
+
+**动机（`AXIS-CENSUS.md` 的路线 1 第一根轴）**：`riichi` 轴只问"立直了没有"，完全不问**什么时候**立直 ——
+而这个**时机**维度在同一份轨迹上是可识别、可测量、可配对的（普查：机会行 2.23% / 付奖行 1.91%、
+学生席立直巡目 均值 9.28 / 中位数 9；伴随量 `no_deal` 89.2% 真门）。
+
+| | `riichi_turn` 轴 |
+| --- | --- |
+| 行级付奖行（**唯一**口径） | **宣言立直的那一行**（与 `riichi` 轴同一行规则：`chosen` 以 `riichi:` 开头）**且**该行 `obs.player_draws` ≤ T（`ROW_ACTION_TURN` / `ROW_TURN_LIMIT`，T=8） |
+| 手级指示量（`AXES['riichi_turn']`） | 该席本小局**有过一次"巡目 ≤ T 的立直宣言"**（`HandState.early_decl`；与行级判据**同一把尺子**，`decision_violations` 的蕴含才成立） |
+| 伴随质量轴 | `no_deal`（该小局未放铳）—— ⛔ **不是恒真**：立直之后**仍然可能放铳**（普查实测 `no_deal` 89.2% 真门）。判据由 `ROW_PAIR_MUST_BLOCK` 的**实测**闸门钉住：`blocked_rows` 必须 > 0 |
+| 方向 | ⛔ **单向：越早越好** —— 巡目 > T 的宣言行那一侧**一分钱都不付**（不做负奖、也不做"越晚越少"：那两件事都会把"晚立直"也变成一个被优化的方向） |
+| 判据侧 | `tools/style-vector.py` 的 `avg_riichi_turn`（聚合，辅）+ `tools/w-ladder.py` 的逐场 `riichi_turn_mean`（主，**方向为降**） |
+
+⚠ **与 `riichi` 轴共存**：这是**同一决策点**的两个维度（做不做 / 早不早），两轴可以在**同一条轨迹**
+上分别开（`--style-bonus 'riichi=14000:no_deal,riichi_turn=5400:no_deal'` 是合法的；`riichi_turn` 自己开也合法）。
+⛔ 但 **`hand` 模式下不许用它**（`DECISION_ONLY_AXES`）：`hand` 的合并量是"这一小局有没有人早立直"，
+**不是**"宣言那一行" ⇒ 与 `dama` 同理，那等于静默换轴。
+
 ## ⛔ 退化成恒真的组合：当场报错（`IMPLIED_PAIRS`）
 
 **判据**：若伴随质量轴的指示量**被付奖行本身蕴含**，则它在付奖行上恒真 ⇒ 等于 `PAIR = none`
@@ -219,9 +238,22 @@ ROW_ACTION_EXACT: dict[str, tuple[str, ...]] = {
 #: 结果量换个名字重复加权（`win` 轴的实测教训，见模块 docstring）——"能立而不立"正是那个选择本身。
 ROW_ACTION_DECLINE: dict[str, str] = {"dama": RIICHI_PREFIX}
 
-#: 能在 `decision` 模式下当**付奖轴**的那些轴（含"能而不为"那条）。
+#: ★★ **巡目阈值轴**（`riichi_turn` = **早立直**，2026-10-11 加）：轴 → 宣言巡目的**上限 T**。
+#: 付奖行 = **宣言立直的那一行**（与 `riichi` 轴同一行规则）**且**该行的巡目 ≤ T。
+#: ⛔ **方向单向**：巡目 > T 的宣言行**一分钱都不付** —— 既不做负奖，也不做"越晚越少"
+#: （那两种写法都会把"晚立直"也变成一个被优化的方向，与"越早越好"这条约定自相矛盾）。
+#: T=8 的来由（普查：立直巡目 均值 9.28 / 中位数 9 ⇒ 均值量级）与剂量换算写在
+#: `S:\mahjong-training\w-ladder\PREREGISTRATION-RIICHI-TURN.md`。
+#: ⚠ 手级镜像（`HandState.early_decl`）**只实现了这一条**巡目轴；再加一条（不同的 T）就必须同时加
+#: 它的镜像，否则两条口径漂移（`row_is_axis_action` 与手级指示量会各说各话）。
+ROW_TURN_LIMIT: dict[str, int] = {"riichi_turn": 8}
+#: 轴 → "这一行是不是那个**带巡目门槛**的动作"的**前缀**判据（`row_is_action` 的第三个分支）。
+ROW_ACTION_TURN: dict[str, str] = {"riichi_turn": RIICHI_PREFIX}
+
+#: 能在 `decision` 模式下当**付奖轴**的那些轴（含"能而不为"与"带巡目门槛"那两条）。
 ROW_ACTION_AXES: tuple[str, ...] = tuple(sorted(set(ROW_ACTION_PREFIX) | set(ROW_ACTION_EXACT)
-                                                 | set(ROW_ACTION_DECLINE)))
+                                                 | set(ROW_ACTION_DECLINE)
+                                                 | set(ROW_ACTION_TURN)))
 
 #: ⛔ **退化成恒真的组合**（付奖行**蕴含**了伴随量 ⇒ 质量轴形同虚设 = `PAIR_NEVER`）。
 #: 键 = 轴，值 = 该轴上**恒真**的伴随量（`parse_bonus` 见到就报错，⛔ 不静默放行）。
@@ -233,7 +265,14 @@ IMPLIED_PAIRS: dict[str, tuple[str, ...]] = {
 
 #: ⛔ **只在 `decision` 模式成立**的付奖轴：它们的手级合并量**不是**那个行为（见模块 docstring）
 #: ⇒ `hand` 模式下用它们等于**静默换轴**，所以 `check_mode_axes` 当场报错。
-DECISION_ONLY_AXES: tuple[str, ...] = ("dama",)
+#: ★ `riichi_turn`：`hand` 的合并量 = "这一小局有没有人早立直"（四席取或），**不是**"宣言立直的那一行"。
+DECISION_ONLY_AXES: tuple[str, ...] = ("dama", "riichi_turn")
+
+#: ⛔★ **实测层面的"恒真"闸门**（比 `IMPLIED_PAIRS` 的静态表更硬）：轴 → 必须在真数据上**真的拦下过行**
+#: 的那些伴随量。`IMPLIED_PAIRS` 只能登记"结构上必然蕴含"的组合（`win` 那两条），而 `riichi_turn`+`no_deal`
+#: **不蕴含**（立直之后照样可能放铳）—— 所以只能靠**实测**：`blocked_rows == 0` ⇒ 伴随量在付奖行上恒真
+#: ⇒ 质量轴形同虚设 = 对同一件事重复加权（`win=w:no_deal` 的病）⇒ 当场报错（⛔ 不静默放行）。
+ROW_PAIR_MUST_BLOCK: dict[str, tuple[str, ...]] = {"riichi_turn": ("no_deal",)}
 
 #: ★ **多家荣和的语义陷阱**（2026-10-10 加，见模块 docstring 同名小节）：行级判据除了"这一行
 #: 执行了该轴的动作"，有些轴还要"**我就是被记录的那家**"。只有 `win` 需要它 —— 双响时两家都
@@ -262,7 +301,22 @@ def legal_has(legal, prefix: str) -> bool:
     return any(str(k).startswith(prefix) for k in legal)
 
 
-def row_is_action(axis: str, chosen: str, legal=None) -> bool:
+def declared_turn(obs: dict) -> int | None:
+    """这一行的**宣言巡目**（`obs.player_draws`）；取不到返回 `None`（⛔ 不猜 0）。
+
+    ⚠ 为什么是 `obs.player_draws` 而不是 `obs.riichi_turn[seat]`：后者是"**已经**宣言过"之后的公开位
+    （服务端先广播 `riichi` 再广播 `discard`）⇒ **宣言那一手它还是 0**。`tools/style-vector.py` 的
+    `avg_riichi_turn` 也是这么回退的（`riichi_turn` 为 0 时用宣言那一行的 `player_draws`）——
+    两边**同一把尺子**，否则判据侧与奖励侧量的是两个数。
+    ⛔ 取不到时**返回 None**（不返回 0）：0 必然 ≤ T ⇒ 那等于把"取不到"静默读成"最早立直"。
+    """
+    v = (obs or {}).get("player_draws")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return int(v)
+
+
+def row_is_action(axis: str, chosen: str, legal=None, turn: int | None = None) -> bool:
     """**这一行**（`chosen` = 实际执行的动作键）是不是轴 `axis` 的那个动作。
 
     ⛔ 没有行级语义的轴（`deal` / `no_deal` / `win_points`）在这里**报错**，不返回 False ——
@@ -270,6 +324,10 @@ def row_is_action(axis: str, chosen: str, legal=None) -> bool:
 
     ★ `dama`（`ROW_ACTION_DECLINE`）要**多一个入参** `legal`：它的判据是"合法的里**有**它、
     这一行**偏不选**它"（`legal_has(legal, RIICHI_PREFIX) and not chosen.startswith(...)`）。
+
+    ★ `riichi_turn`（`ROW_ACTION_TURN`）要**多一个入参** `turn`（= 这一行的 `obs.player_draws`）：
+    判据是"这一行**是**宣言行 ∧ 该行巡目 ≤ T"。非宣言行**不需要**巡目（直接 False，⛔ 不报错）；
+    是宣言行却取不到巡目 ⇒ **当场报错**（猜 0 = 它必然 ≤ T = 把"取不到"读成"最早立直"）。
 
     ⚠ 这只是行级判据的**一半**：`win` 轴还要过 `ROW_SELF_SEAT`（我就被记录的那家）那一关，
     两者合起来才是 `row_is_axis_action`。别在别处直接用这个函数决定"要不要付奖"。
@@ -282,6 +340,19 @@ def row_is_action(axis: str, chosen: str, legal=None) -> bool:
     if axis in ROW_ACTION_DECLINE:
         pref = ROW_ACTION_DECLINE[axis]
         return legal_has(legal, pref) and not chosen.startswith(pref)
+    if axis in ROW_ACTION_TURN:
+        # ★ **早立直**（见 `ROW_TURN_LIMIT`）：先看这一行是不是宣言行 —— 不是 ⇒ 直接 False
+        #   （非宣言行没有"宣言巡目"这件事，**不该**因为取不到巡目而报错）；
+        #   是宣言行却取不到巡目 ⇒ ⛔ 当场报错（不猜 0：猜 0 = 必然 ≤ T = 把"取不到"读成"最早立直"）。
+        if not chosen.startswith(ROW_ACTION_TURN[axis]):
+            return False
+        if turn is None:
+            raise BonusSpecError(
+                f"轴 {axis!r} 的付奖行是「**宣言立直的那一行**」，判据要**这一行自己的巡目**"
+                f"（`obs.player_draws`），但这一行取不到 ⇒ ⛔ 不猜 0（猜 0 = 它必然 ≤ T，"
+                f"等于把'取不到'静默读成'最早立直'）。要么这份轨迹带 `obs.player_draws`，"
+                f"要么别用这条轴")
+        return int(turn) <= int(ROW_TURN_LIMIT[axis])
     raise BonusSpecError(
         f"轴 {axis!r} 在 `decision` 模式下没有'哪一行做了它'的定义（它是**结局量**，不是行级动作）。"
         f"能当付奖轴的只有：{', '.join(ROW_ACTION_AXES)}；它当**伴随质量轴**（`PAIR`）仍然可用。"
@@ -311,6 +382,13 @@ def row_is_axis_action(axis: str, seat: int, chosen: str, st: HandState, idx: in
         if has is None:
             return row_is_action(axis, chosen, None)      # 唯一报错点（`legal_has` 里）
         return bool(has) and not str(chosen or "").startswith(pref)
+    if axis in ROW_ACTION_TURN:
+        # ★ **早立直**：巡目从 `HandState` 的**逐行**记录里取（`feed` 时按同一行的 `obs.player_draws`
+        #   存下来的那一份）—— ⛔ 不在这里重读 `row`（两条来源必然漂移）。取不到 ⇒ `row_is_action` 报错。
+        t = None
+        if idx is not None and 0 <= idx < len(st.row_declared_turn):
+            t = st.row_declared_turn[idx]
+        return row_is_action(axis, chosen, None, t)
     if not row_is_action(axis, chosen):
         return False
     if ROW_SELF_SEAT.get(axis) == "winner":
@@ -398,6 +476,16 @@ AXES: dict[str, dict] = {
         "src": ("行级：该行 `legal` 里有 `riichi:*` 且 `chosen` 不是 `riichi:*`（`ROW_ACTION_DECLINE`）；"
                 "手级：`_seat_riichi` 取或为假"),
         "style_vector": "dama_rate = dama_wins / wins（dama_wins = 和了且该小局未立直）",
+    },
+    "riichi_turn": {
+        "kind": "bernoulli",
+        "meaning": ("早立直（**宣言巡目 ≤ T 的立直**）：行级付奖行 = 宣言立直的那一行且该行巡目 ≤ T；"
+                    "手级指示量 = 该席本小局有过一次这样的宣言"),
+        "src": ("行级：`chosen` 以 `riichi:` 开头 ∧ `obs.player_draws` ≤ T"
+                "（`ROW_ACTION_TURN` / `ROW_TURN_LIMIT`，T = 8）；"
+                "手级：`HandState.early_decl`（同一个 `declared_turn(obs)` + 同一个 T）"),
+        "style_vector": "avg_riichi_turn = riichi_turn_sum / riichi_turn_known（判据侧的**聚合**读数；"
+                        "逐场主读数在 `tools/w-ladder.py` 的 `riichi_turn_mean`）",
     },
 }
 
@@ -564,6 +652,14 @@ class HandState:
     #: （宣言之后的每一行它都是 true，而那正是"能立而不立"最需要区分的地方）。
     row_riichi_seen: list[bool] = field(default_factory=list)
     row_riichi_turn: list[int] = field(default_factory=list)
+    #: ★★ 逐行的**宣言巡目**（`obs.player_draws`，`None` = 这一行取不到）：`riichi_turn` 轴的付奖行判据
+    #: 要"这一行自己的巡目"。与 `row_riichi_turn`（`obs.riichi_turn[seat]`，宣言那一手还是 0）**不是**
+    #: 同一个量 —— 后者是"已经宣言过"之后的公开位，拿它当宣言那一行的巡目必然读成 0。
+    row_declared_turn: list[int | None] = field(default_factory=list)
+    #: ★★ 逐席：本小局**有没有一次"巡目 ≤ T 的立直宣言"**（`AXES['riichi_turn']` 的**手级**指示量）。
+    #: ⚠ 它与行级判据必须是**同一把尺子**（同一个 `ROW_TURN_LIMIT`、同一个 `player_draws`），否则
+    #: `decision_violations` 的蕴含（手级=1 ⇔ 有动作行）会漂移。
+    early_decl: list[bool] = field(default_factory=lambda: [False] * SEATS_PER_TABLE)
 
     def seat_is_student(self, seat: int, student_policies: set[str]) -> bool:
         """该席本小局是不是"学生"（= 白化统计要不要算它）。
@@ -599,6 +695,14 @@ class HandState:
         _rt = obs.get("riichi_turn") or []
         self.row_riichi_seen.append(bool(_ri[seat]) if 0 <= seat < len(_ri) else False)
         self.row_riichi_turn.append(int(_rt[seat]) if 0 <= seat < len(_rt) else 0)
+        # ★★ 逐行的**宣言巡目**（`riichi_turn` 轴的付奖行判据）与手级镜像（`early_decl`）：
+        #   ⚠ 两者必须由**同一个** `ROW_TURN_LIMIT['riichi_turn']` 与**同一个** `declared_turn(obs)` 决定
+        #   （任何一处另写一份判据，手级与行级就会漂移，而症状是 `decision_violations` 报"两套口径漂移"）。
+        _dt = declared_turn(obs)
+        self.row_declared_turn.append(_dt)
+        if 0 <= seat < SEATS_PER_TABLE and chosen.startswith(RIICHI_PREFIX) \
+                and _dt is not None and int(_dt) <= int(ROW_TURN_LIMIT["riichi_turn"]):
+            self.early_decl[seat] = True
         if 0 <= seat < SEATS_PER_TABLE:
             self.policy[seat] = str(row.get("policy") or "")
             if _seat_riichi(obs, chosen):
@@ -644,6 +748,10 @@ def indicator_values(st: HandState) -> list[dict[str, float]]:
             #   分子谓词同源）。⚠ 它**不是**付奖行判据（那是"能立而不立"）—— 见模块 docstring
             #   与 `ROW_ACTION_DECLINE`：判据侧量结果、奖励侧量决策，两边由对账钉住。
             "dama": 0.0 if st.riichi[s] else 1.0,
+            # ★ `riichi_turn` 的**手级**指示量 = 本小局有过一次"巡目 ≤ T 的立直宣言"（见 `early_decl`）。
+            #   ⚠ 它与行级判据**同源同尺**（`ROW_TURN_LIMIT` + `declared_turn`）⇒ `decision_violations`
+            #   的"手级=1 ⇔ 有动作行"这条蕴含成立（行级那边没有 `riichi` 轴那套"手级=1 却找不到行"的坑）。
+            "riichi_turn": 1.0 if st.early_decl[s] else 0.0,
         }
         out.append(vals)
     return out
@@ -827,6 +935,44 @@ def decline_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[st
     return out
 
 
+def riichi_turn_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[str] | None) -> dict:
+    """★ **早立直轴的四个数**（`riichi_turn` 这类"带巡目门槛的动作"轴专用；与 `decline_row_numbers` 对称）。
+
+    口径（每一行只落在其中一格，四格**互不重叠**）：
+      * `decl_rows` = 范围内 **宣言立直** 的行数（`chosen` 以 `riichi:` 开头）；
+      * `decl_turn_rows` = 其中巡目 ≤ T 的（= **付奖行候选** = 奖励侧的"动作行"）；
+      * `decl_late_rows` = 其中巡目 > T 的（⛔ **不付奖**的那一侧 —— 它必须真的存在，否则 T 没起作用）；
+      * `decl_missing_turn_rows` = 宣言行里巡目取不到的（⛔ 非 0 就是"取不到宣言行巡目"，
+        由 `row_is_action` 当场报错；这里独立数一遍是为了让账能自证，而不是替它兜底）。
+
+    ⚠ `row_is_axis_action` 与这里的 `decl_turn_rows` 是**两处独立计数**（同一个尺子、各自数）
+    ⇒ "`decl_turn_rows == 审计账 action_rows`"才是一条**对账**，而不是同义反复。
+    """
+    out = {"decl_rows": 0, "decl_turn_rows": 0, "decl_late_rows": 0, "decl_missing_turn_rows": 0}
+    na = [a for a in spec.axes if a.name in ROW_ACTION_TURN]
+    if not na:
+        return out
+    if len(na) > 1:
+        raise BonusSpecError(
+            f"一次开了 {len(na)} 条巡目轴（{', '.join(a.name for a in na)}），但逐行巡目的**存法**只有一份"
+            f"（`HandState.row_declared_turn`）⇒ 加第二条巡目轴必须同时加它的存法（⛔ 不猜）")
+    ax = na[0]
+    pref = ROW_ACTION_TURN[ax.name]
+    lim = int(ROW_TURN_LIMIT[ax.name])
+    for i, _s, c in rows_in_scope(st, student_policies):
+        if not str(c or "").startswith(pref):
+            continue
+        out["decl_rows"] += 1
+        t = st.row_declared_turn[i] if 0 <= i < len(st.row_declared_turn) else None
+        if t is None:
+            out["decl_missing_turn_rows"] += 1
+        elif int(t) <= lim:
+            out["decl_turn_rows"] += 1
+        else:
+            out["decl_late_rows"] += 1
+    return out
+
+
 def spec_axis_pay(spec: BonusSpec, stats: dict[str, Whitening], ax: BonusAxis) -> float:
     """`decision` 模式里**动作行**拿到的那笔钱（点）：`w·(1−μ)/σ`（**唯一落点**，别处再算一遍必漂移）。"""
     w = stats[ax.name]
@@ -960,6 +1106,11 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
     dnum: dict[str, dict] = {a.name: {"legal_rows": 0, "legal_chosen_rows": 0,
                                      "declined_rows": 0, "missing_legal_rows": 0}
                              for a in spec.axes}
+    #: ★★ **巡目阈值轴**（`riichi_turn`）的四个数（口径见 `riichi_turn_row_numbers`）。
+    #: ⛔ 只对这类轴累加 ⇒ riichi/meld/dama 的审计账**一个键都不多**。
+    tnum: dict[str, dict] = {a.name: {"decl_rows": 0, "decl_turn_rows": 0,
+                                      "decl_late_rows": 0, "decl_missing_turn_rows": 0}
+                             for a in spec.axes}
     #: `decision` 模式下顺带记一份**手级** μ/σ（**只作参照**，⛔ 不参与付奖）——
     #: 它让"剂量有没有被换掉"这件事在日志里当场可比（两条 std 都打出来）。
     hand_acc: dict[str, list[float]] = {a.name: [] for a in spec.axes}
@@ -995,6 +1146,12 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                 if ax.name in ROW_ACTION_DECLINE:
                     for k, v in dn.items():
                         dnum[ax.name][k] += v
+            # ★ **巡目阈值轴**的四个数（与 `acts` 同一份总体、但**独立数**出来 ⇒ 对账才有意义）。
+            tn = riichi_turn_row_numbers(spec, st, student_policies)
+            for ax in spec.axes:
+                if ax.name in ROW_ACTION_TURN:
+                    for k, v in tn.items():
+                        tnum[ax.name][k] += v
             bad = decision_violations(spec, st, student_policies)
             if bad:
                 # ★ 计数**无条件** +1；样例才受上限约束（`len(viol)` 不是总数 —— 见 `n_viol` 的注释）。
@@ -1072,6 +1229,16 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                     f"轴 {ax.name!r}：动作行有 {d['action_rows']} 行，付奖行 **0** —— 质量轴 "
                     f"`{ax.pair}` 把所有动作行都拦下了。这多半不是想要的口径（先把质量轴的问题"
                     f"看清再跑，别拿一个'付奖恒 0'的模式去跑实验）")
+            # ★ **实测层面的"恒真"闸门**（`ROW_PAIR_MUST_BLOCK`）：被登记的轴在**真数据**上必须真的
+            #   有行被伴随量拦下。`blocked_rows == 0` ⇒ 伴随量在付奖行上恒真 ⇒ 质量轴形同虚设
+            #   （= 对同一件事重复加权，`win=w:no_deal` 的病）⇒ 当场报错，⛔ 不静默放行。
+            if (ax.pair in ROW_PAIR_MUST_BLOCK.get(ax.name, ()) and d["action_rows"]
+                    and not d["blocked_rows"]):
+                raise BonusSpecError(
+                    f"轴 {ax.name!r} 配伴随质量轴 `{ax.pair}` 在**真数据**上退化成恒真：动作行 "
+                    f"{d['action_rows']} 行、**被拦下 0 行** ⇒ 质量轴形同虚设 = 对同一件事重复加权"
+                    f"（`win=w:no_deal` 的病）。实测判据见 `ROW_PAIR_MUST_BLOCK`；⛔ 当场报错、"
+                    f"不静默放行（要负向对照请改质量轴或显式写 `:none` 并说明理由）")
     # 付奖总额 = Σ 1[PAIR]·w·(x − μ)/σ —— 只需 `Σ 1[PAIR]·x`（= raw_sum）与付奖格数
     paid_sums: dict[str, float] = {}
     for ax in spec.axes:
@@ -1108,7 +1275,19 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                    "declined_rows": dnum[ax.name]["declined_rows"],
                    "missing_legal_rows": dnum[ax.name]["missing_legal_rows"],
                    "row_rule": f"legal 含 {ROW_ACTION_DECLINE[ax.name]}* 且 chosen 不是它"}
-                  if (mode == MODE_DECISION and ax.name in ROW_ACTION_DECLINE) else {})}
+                  if (mode == MODE_DECISION and ax.name in ROW_ACTION_DECLINE) else {}),
+                # ★ **巡目阈值轴**（`riichi_turn`）的四个数 + 阈值：同样**只在这类轴上进账**
+                #   ⇒ 既有轴的审计账逐字节不变。判据侧（`tools/w-ladder.py`）拿这几个键对账
+                #   "付奖行数 == `declared_turn ≤ T` 的宣言行数"。
+                **({"decl_rows": tnum[ax.name]["decl_rows"],
+                    "decl_turn_rows": tnum[ax.name]["decl_turn_rows"],
+                    "decl_late_rows": tnum[ax.name]["decl_late_rows"],
+                    "missing_turn_rows": tnum[ax.name]["decl_missing_turn_rows"],
+                    "turn_limit": int(ROW_TURN_LIMIT[ax.name]),
+                    "turn_src": "obs.player_draws（宣言那一行的巡目；与 style-vector 的回退同一把尺子）",
+                    "row_rule": (f"chosen 以 {ROW_ACTION_TURN[ax.name]}* 开头 且 obs.player_draws ≤ "
+                                 f"{int(ROW_TURN_LIMIT[ax.name])}（⛔ 越晚越不付：> T 的一侧付 0）")}
+                   if (mode == MODE_DECISION and ax.name in ROW_ACTION_TURN) else {})}
               for ax in spec.axes],
     )
     if not quiet:
@@ -1151,6 +1330,18 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                     print(f"     ★ 对账：未选它 {dn['declined_rows']} == 动作行 {d['action_rows']}"
                           f"（{'✓' if dn['declined_rows'] == d['action_rows'] else '✗ **对不上**'}）"
                           f"；白化总体 = 该轴的**决策行**（{w.n} 行）")
+                if ax.name in ROW_ACTION_TURN:
+                    # ★ **早立直**的四个数（需求 ② 的原始输出）：宣言行 / 其中 ≤T / 其中 >T / 取不到巡目。
+                    tn = tnum[ax.name]
+                    print(f"     ★ 早立直（`{ax.name}`，T={ROW_TURN_LIMIT[ax.name]}）：宣言立直的行 "
+                          f"{tn['decl_rows']}｜其中巡目 ≤ T 的 {tn['decl_turn_rows']}（= 动作行）"
+                          f"｜巡目 > T 的 {tn['decl_late_rows']}（⛔ 不付奖的一侧）"
+                          f"｜真付奖 {d['paid_rows']}｜被伴随量 `{ax.pair}` 拦下 {d['blocked_rows']}"
+                          f"｜巡目取不到的行 {tn['decl_missing_turn_rows']}")
+                    print(f"     ★ 对账：巡目 ≤ T 的宣言行 {tn['decl_turn_rows']} == 动作行 "
+                          f"{d['action_rows']}（{'✓' if tn['decl_turn_rows'] == d['action_rows'] else '✗ **对不上**'}）"
+                          f"；付奖行 + 拦下 == 动作行 "
+                          f"({'✓' if d['paid_rows'] + d['blocked_rows'] == d['action_rows'] else '✗'}）")
     return stats, audit
 
 
@@ -1216,7 +1407,8 @@ def _merge_cells(cells: list[dict[str, float]]) -> dict[str, float]:
     # ⚠ `dama` 也走 `max`（四席取或）：合并量只是"这一小局桌上有没有人没立直"这类**描述性**读数，
     #   ⛔ 它**不是**付奖行判据（"能立而不立"只逐行判）—— `dama` 在 `hand` 模式下被
     #   `check_mode_axes` 直接拒掉，就是为了不让这个合并量被当成付奖口径（静默换轴）。
-    out = {k: max(v[k] for v in cells) for k in ("riichi", "meld", "win", "win_points", "dama")}
+    out = {k: max(v[k] for v in cells) for k in ("riichi", "meld", "win", "win_points", "dama",
+                                                 "riichi_turn")}
     out["deal"] = 1.0 if any_deal else 0.0
     out["no_deal"] = 0.0 if any_deal else 1.0
     return out
@@ -1451,6 +1643,16 @@ class BonusTracker:
                 if legal is None:
                     legal = (row.get("obs") or {}).get("legal")
                 if not row_is_action(ax.name, chosen, legal):
+                    continue
+                total += pay
+                continue
+            if ax.name in ROW_ACTION_TURN:
+                # ★ **早立直**：巡目取自**这一行自己的** `obs.player_draws`（与预扫那一遍
+                #   `HandState.feed` 用的是**同一个**字段、同一个 helper）⇒ 两条路不会各算一套。
+                #   ⚠ 非宣言行 ⇒ `row_is_action` 直接 False（**不会**因为取不到巡目报错）；
+                #   是宣言行却取不到巡目 ⇒ 当场报错（⛔ 不猜 0）。
+                if not row_is_action(ax.name, chosen, None,
+                                     declared_turn(row.get("obs") or {})):
                     continue
                 total += pay
                 continue
