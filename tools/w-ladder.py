@@ -2033,13 +2033,56 @@ COMPANION_METRIC = "riichi_win_rate"
 #: ★ `decline_rate` = **同一根 `dama` 轴的"对齐后"判据**（`PREREGISTRATION-DAMA.md` §5 ①）：
 #: 它也是**行级**量、分子集合**就是奖励侧的付奖行**，所以既能当主判据、也能当"这笔钱有没有
 #: 真的推上去"的护栏读数（⛔ 表外的一律报错；加进来只是**多一个选项** ⇒ 缺省口径逐字节不变）。
-COMPANION_METRICS: tuple[str, ...] = ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate")
+#: ★★ 2026-10-11（`pon` 轴 n=2 那一批）把六个伴随量**全部**注册进来：`riichi_rate`（立直率）/
+#: `meld_rate`（副露率）/ `win_rate`（和了率）/ `deal_rate`（**放铳率**）/ `avg_win_score`（打点）/
+#: `riichi_win_rate`（立直后和了率）。它们本来就在 `PAIR_AXES` 里（逐场配对算得出来），
+#: ⛔ 只是原先没进"允许 `quality` 判"的名单 ⇒ 立直率/副露率/放铳率/打点只能靠一次性脚本**手搓**
+#: 越界判定（`_fold-any-readout.py` 就是这么干的）。加进来 = **多几个选项**，缺省口径逐字节不变。
+COMPANION_METRICS: tuple[str, ...] = ("riichi_win_rate", "win_rate", "dama_rate", "decline_rate",
+                                       "riichi_rate", "meld_rate", "deal_rate", "avg_win_score")
 #: 预注册容忍带（**百分点 pp**，单侧）。★ 越界判据 2026-10-10 修过一次（见 `companion_verdict`）：
 #: 旧规则"CI 下界 ≥ −tol"在 **SE 大**时**必然假警**（实测 `dama_rate` Δ=+0.30pp、SE=1.32pp、tol=2pp
 #: ⇒ 旧规则报"越界"）。新规则 = 「**CI 上界 < 0**」**或**「**点估计 < −tol**」。
 COMPANION_TOL = 2.0
+#: ★★ **量的单位 → 容忍带的单位**（`PAIR_AXES` 的第 4 列 → 人读单位）。
+#: ⛔ 这条不是装饰：`avg_win_score` 的单位是**点**（≈7000 点），套 `±2.0pp` 会把
+#: Δ=−26.19 点（CI 含 0）**误判成越界**（`W-REPORT-DAMA-N2.md` §3 已经踩过这条）。
+COMPANION_UNIT_LABEL: dict[str, str] = {"pct": "pp", "abs": "点", "turn": "巡目"}
+#: ★★ **与单位绑定的默认容忍带**（⛔ 只给"单位不是 pp"的量；pp 类的默认就是 `COMPANION_TOL`）。
+#: 打点取 **150 点** —— 依据是**闸门侧**同量纲的口径 `win_points:150`（`gate.py` 的护栏），
+#: ⛔ 不是拍脑袋：换一个数就等于换判据，必须先进预注册。
+COMPANION_TOL_BY_METRIC: dict[str, float] = {"avg_win_score": 150.0}
+#: ★★ **每个伴随质量量的「坏方向」`bad_when`** —— **由轴的意图定，⛔ 不由统计量定**。
+#:   · `down` = **下降为坏**（这个量"越多越好"）：和了率 / 副露率 / 立直率 / 打点 / 立直后和了率，
+#:     以及**各轴自己的目标量**（`dama_rate`·`decline_rate` = 默听/能立而不立，`fold_rate` = 降り率，
+#:     `pon_type_rate` = 碰取向 —— 那一轴付钱就是要把它们**推上去**）。
+#:   · `up` = **上升为坏**（这个量"越少越好"）：**放铳率**（`deal_rate`）这类。
+#: ⛔ **为什么方向必须按轴意图定**：这条判据问的是"这笔钱是不是买到了效果却付出了代价"，而代价是
+#: **有符号的** —— 同一个 Δ=−0.99pp，落在"要和了率"上是要买的（坏），落在"放铳率"上是白赚的（好）。
+#: 方向无关的规则（旧版：只看 `hi < 0`）等于**把"变好"也判成越界** ⇒ 任何**同时改善防守**的轴都会被
+#: 误杀，判据会把正确方向的动作淘汰掉。`pon` 轴 c1 实测就是这样被误报的（放铳率 −0.992，上界 −0.136）。
+#: ⚠ 表里**必须**覆盖 `PAIR_AXES` 的每一个量：`companion_verdict` 查不到方向就**当场报错**
+#: （⛔ 不给"缺省向下"这种静默兜底 —— 兜错了方向，判据就是反的，而且看不出来）。
+COMPANION_BAD_WHEN: dict[str, str] = {
+    # 六个伴随质量量（`pon` / `fold` / `riichi_turn` 那一族共用）
+    "riichi_rate": "down", "meld_rate": "down", "win_rate": "down",
+    "deal_rate": "up",                      # ★ 放铳率：**上升为坏**
+    "avg_win_score": "down", "riichi_win_rate": "down",
+    # 各轴自己的目标量（"能而不为 / 降り / 碰取向"都是把它推上去才是效果）
+    "dama_wins_per_game": "down", "dama_rate": "down",
+    "decline_rows_per_game": "down", "decline_rate": "down",
+    "riichi_turn_mean": "up",               # ★ 巡目：**上升为坏**（Δ<0 = 立直被推早 = 效果）
+    "fold_rows_per_game": "down", "fold_rate": "down",
+    "pon_rows_per_game": "down", "pon_type_rate": "down",
+}
 #: 判据行里要用的字段名（与 `gate.guard_row` 的 `guards[]` **同名同义** ⇒ 两边读数可以直接并排放）。
 COMPANION_KEYS = ("metric", "unit", "tol", "delta", "lo", "hi", "ok")
+#: ★ **写进产物 `companion-quality*.json` 的键与顺序** —— 与加方向判据**之前**的那一份**逐字相同**
+#: （`companion_verdict` 的返回顺序 + `rows` + `warning`）。它的用处是**钉住缺省口径的逐字节回归**：
+#: 方向（`bad_when`）是**量的属性**、不进产物 ⇒ 同一份 `paired/*.json` 在旧/新代码上写出的文件
+#: 必须**逐字节相同**（对拍见 `PREREGISTRATION-MELD-TYPE.md` §6.0 / §7）。
+COMPANION_WRITTEN = ("metric", "unit", "tol", "side", "delta", "lo", "hi", "se", "n_games",
+                     "ok", "combine", "sources")
 
 
 def _companion_axis(metric: str):
@@ -2051,24 +2094,79 @@ def _companion_axis(metric: str):
                      f"⛔ 别在这里另立一套分子/分母，口径只在 `PAIR_AXES`／`style-vector.py` 里有一份）")
 
 
-def companion_verdict(delta: float, se: float, n: int, *, metric: str = COMPANION_METRIC,
-                      tol: float = COMPANION_TOL, unit: str = "pp", sources: list | None = None,
-                      combine: str = "") -> dict:
-    """**单侧**判据行：`ok ⇔ (CI 上界 ≥ 0) ∧ (点估计 ≥ −tol)`（与 `gate.guard_row` 同族）。
+def _companion_unit(metric: str) -> str:
+    """`PAIR_AXES` 的第 4 列 → 人读单位（`pct`→`pp` / `abs`→`点` / `turn`→`巡目`）。
 
-    ⛔ **为什么不是"CI 下界 ≥ −tol"**（2026-10-10 修，实测假警）：那条规则在 **SE 大**时**必然假警**
-    —— 实测 `dama_rate` Δ=**+0.30pp**、SE=**1.32pp**、tol=2pp ⇒ 下界 −2.29 < −2 就判"越界"，
-    可**点估计是正的**（这个量一个字都没说在退化；区间宽只是"没测准"，不是"变差了"）。
-    ⇒ 改成两条**并列**的越界条件（满足任一即越界，退出码 3）：
-      ① **CI 上界 < 0** —— 整个区间都在负侧，这是**有证据**的退化（哪怕幅度很小）；
-      ② **点估计 < −tol** —— 幅度真的越过容忍带（⛔ 不许拿宽 CI 藏一个大负数）。
-    **点估计为正 + CI 宽 ⇒ 不报**（这正是旧规则唯一会假警的那一格）。
-    ⛔ 单侧的本意不变：只否掉"**变差**"（稀释变好不该被这条卡住）；退出码约定不变
-    （**0 = 不越界 / 3 = 越界**）；字段一个不加、顺序一字不动 ⇒ 同一份输入的两份账仍可**逐字节**对比。
+    ⛔ 单位**必须从这里取**，不许在调用处写死 `"pp"`：`avg_win_score` 的单位是点（旧版 `quality`
+    把它硬写成 `pp` 只是因为那张表里从来没有它 —— 现在注册进来了，写死就会把容忍带的量纲也说错）。
     """
+    unit = _companion_axis(metric)[0][3]
+    return COMPANION_UNIT_LABEL.get(unit, unit)
+
+
+def _companion_tol(metric: str, tol: float | None = None) -> float:
+    """该量的**默认**容忍带（单侧）：pp 类 = `COMPANION_TOL`，其它单位按 `COMPANION_TOL_BY_METRIC`。
+
+    ⛔ 显式传 `tol` 时**以传入为准**（`quality --tol` 就是这个口子）—— 那时调用者已经点名了量，
+    单位歧义不存在。
+    """
+    if tol is not None:
+        return float(tol)
+    return float(COMPANION_TOL_BY_METRIC.get(metric, COMPANION_TOL))
+
+
+def _companion_direction(metric: str) -> str:
+    """查该量的**坏方向**；⛔ 查不到**当场报错**（不静默兜底 —— 兜错方向判据就是反的）。"""
+    bd = COMPANION_BAD_WHEN.get(metric)
+    if bd not in ("down", "up"):
+        raise SystemExit(
+            f"⛔ 伴随质量量 {metric!r} 没有登记**坏方向**（`COMPANION_BAD_WHEN`）—— "
+            f"这条判据是**有符号**的，没写方向就不能判（⛔ 不给你一个'缺省向下'的静默兜底）。"
+            f"已登记：{sorted(COMPANION_BAD_WHEN)}")
+    return bd
+
+
+def companion_verdict(delta: float, se: float, n: int, *, metric: str = COMPANION_METRIC,
+                      tol: float | None = None, unit: str | None = None,
+                      sources: list | None = None, combine: str = "") -> dict:
+    """**方向感知**的**单侧**判据行：`ok ⇔ 坏方向上没证据 ∧ 点估计没越过该方向的容忍带`。
+
+    ⛔ **为什么不是"CI 下界 ≥ −tol"**（2026-10-10 第一次修，实测假警）：那条规则在 **SE 大**时
+    **必然假警** —— 实测 `dama_rate` Δ=**+0.30pp**、SE=**1.32pp**、tol=2pp ⇒ 下界 −2.29 < −2 就判
+    "越界"，可**点估计是正的**（这个量一个字都没说在退化；区间宽只是"没测准"，不是"变差了"）。
+
+    ⛔★ **为什么还要按轴的意图定方向**（2026-10-11 第二次修，同样是实测假警）：上一版把"越界"写成
+    「`hi < 0` **或** `Δ < −tol`」—— 这是**方向无关**的机械式，它默认"所有量都是越大越好"，于是
+    **放铳率 Δ=−0.992（上界 −0.136，放铳变少 = 有利）被误报成越界**（`pon` 轴 c1）。
+    本判据的全部语义是「**这笔钱是不是买到了效果却付出了代价**」，而**代价是有符号的**：同一个
+    −0.99pp，落在"要和了率"上是要买的（坏），落在"放铳率"上是白赚的（好）。方向无关的规则等于把
+    "变好"也判成越界 ⇒ 任何**同时改善防守**的轴都会被误杀。
+
+    所以规则改成：先查这个量的**坏方向** `bad_when ∈ {down, up}`（`COMPANION_BAD_WHEN`，由轴的意图定），
+    再**按符号取单侧 CI**：
+      · `down`（越多越好）：`bad ⇔ hi < 0` **或** `Δ < −tol`；
+      · `up`  （越少越好）：`bad ⇔ lo > 0` **或** `Δ > +tol`。
+    两条并列、满足任一即越界（退出码 3）：① **在坏方向上显著**（整个区间都在坏侧，这是**有证据**的
+    退化，哪怕幅度很小）；② **点估计越过该方向的容忍带**（⛔ 不许拿宽 CI 藏一个大负数/大正数）。
+    `down` 那一支与新规则之前**逐字相同** ⇒ 既有的 `down` 类产物**逐字节不变**。
+
+    `unit` / `tol` 缺省从 `PAIR_AXES` 与 `COMPANION_TOL_BY_METRIC` 解析（⛔ 调用处不许写死 `pp`）。
+    退出码约定不变（**0 = 不越界 / 3 = 越界**）；`COMPANION_KEYS`（写进产物的字段）**一个不加、顺序
+    一字不动** ⇒ 同一份输入的两份账仍可**逐字节**对比（方向是**量的属性**，不进产物）。
+    """
+    bad_when = _companion_direction(metric)
+    if unit is None:
+        unit = _companion_unit(metric)
+    tol = _companion_tol(metric, tol)
     lo, hi = float(delta) - Z95 * float(se), float(delta) + Z95 * float(se)
-    bad = bool(hi < 0.0) or bool(float(delta) < -float(tol))
+    if bad_when == "down":                     # 越多越好 ⇒ 坏方向是**下降**
+        bad = bool(hi < 0.0) or bool(float(delta) < -tol)
+        why = f"坏方向=下降：越界 ⇔ CI 上界 < 0 或 点估计 < −{tol:g}"
+    else:                                      # 越少越好 ⇒ 坏方向是**上升**
+        bad = bool(lo > 0.0) or bool(float(delta) > tol)
+        why = f"坏方向=上升：越界 ⇔ CI 下界 > 0 或 点估计 > +{tol:g}"
     return {"metric": metric, "unit": unit, "tol": float(tol), "side": "one-sided",
+            "bad_when": bad_when, "bad_rule": why,
             "delta": float(delta), "lo": lo, "hi": hi, "se": float(se), "n_games": int(n),
             "ok": not bad, "combine": combine, "sources": list(sources or [])}
 
@@ -2142,13 +2240,16 @@ def _companion_from_dirs(pre_dir: Path, post_dir: Path,
              "n_games": int(blk["n_games"]), "pairing_check": pair}]
 
 
-def quality(paired: list, pre: str, post: str, tol: float, metric: str, out: str) -> int:
-    """★ 轨迹侧伴随质量量的**单侧判据**（见本节开头的"为什么在轨迹侧判"）。
+def quality(paired: list, pre: str, post: str, tol: float | None, metric: str, out: str) -> int:
+    """★ 轨迹侧伴随质量量的**方向感知 · 单侧**判据（见本节开头的"为什么在轨迹侧判"）。
 
     ⚠ `--metric` 只许从 **`COMPANION_METRICS`**（= 已预注册的那几个）里选：`meld` 轴的伴随量是
-    `win_rate`（`PREREGISTRATION-MELD.md` §2），`riichi` 轴的是 `riichi_win_rate`。
+    `win_rate`（`PREREGISTRATION-MELD.md` §2），`riichi` 轴的是 `riichi_win_rate`；2026-10-11 起
+    **六个伴随量全部注册**（立直率 / 副露率 / 和了率 / **放铳率** / 打点 / 立直后和了率）。
+    ⚠ 越界判据 = `companion_verdict` 的**方向感知**版（坏方向按 `COMPANION_BAD_WHEN` 取）；
+    `tol` 缺省按**量**解析（pp 类 2.0 / 打点 150 点），⛔ 不写死 `pp`。
 
-    退出码：**0 = 稀释没越界**；**3 = 越界**（脚本据此止损）；其它 = 出错。
+    退出码：**0 = 没在坏方向上变差**；**3 = 越界**（脚本据此止损）；其它 = 出错。
     """
     if bool(pre) != bool(post):
         raise SystemExit("⛔ --pre 与 --post 必须**成对**给（同 seed 的训练前 / 训练后）")
@@ -2171,20 +2272,28 @@ def quality(paired: list, pre: str, post: str, tol: float, metric: str, out: str
     row["warning"] = ("⛔ 这不是闸门：主判据仍只看 `mahjong_ml/v4/gate.py`（多套牌山 + 逐场配对 CI）。"
                       "本行是**测量路径**上的伴随质量量检查 —— 它回答「稀释越界了吗」，"
                       "不回答「这一代要不要采纳」。")
+    u = row["unit"]
     print(f"== 轨迹侧伴随质量量：**{metric}**（{combine}）==")
+    print(f"   ★ **坏方向 `bad_when` = {row['bad_when']}**：{row['bad_rule']}（单位 {u}，单侧）"
+          f"—— 方向由**轴的意图**定（`COMPANION_BAD_WHEN`），⛔ 不由统计量定")
     for r in rows:
-        print(f"  · {r['label']:<28} Δ={r['delta']:+7.2f}pp  SE={r['se']:5.2f}  "
+        print(f"  · {r['label']:<28} Δ={r['delta']:+9.3f}{u}  SE={r['se']:6.3f}  "
               f"n={r['n_games']:>5}  ← {r['source']}")
-    print(f"  合并：Δ={row['delta']:+.3f}pp  CI[{row['lo']:+.3f},{row['hi']:+.3f}]  "
-          f"n={row['n_games']}  ⇒ {'不越界' if row['ok'] else '**越界（稀释）**'}"
-          f"（预注册：单侧，**越界 ⇔ CI 上界 < 0 或 点估计 < −{tol:g}pp**；"
-          f"点估计为正 + CI 宽 ⇒ 不报）")
+    print(f"  合并：Δ={row['delta']:+.3f}{u}  CI[{row['lo']:+.3f},{row['hi']:+.3f}]  "
+          f"n={row['n_games']}  ⇒ {'不越界' if row['ok'] else '**越界（坏方向上变差）**'}"
+          f"（{row['bad_rule']}；⛔ 反方向的显著变化**不算**越界）")
     v = {k: row[k] for k in COMPANION_KEYS}
     print(f"  判据行：{json.dumps(v, ensure_ascii=False)}")
     dst = Path(out) if out else (STAGE / "companion-quality.json")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"  落盘 {dst}")
+    # ⚠ **落盘用白名单**（`COMPANION_WRITTEN` + `rows`/`warning`，顺序与加方向判据之前**逐字相同**）：
+    #   方向是**量的属性**、不进产物 ⇒ 同一份输入在旧/新代码上写的 JSON **逐字节相同**（可对拍）。
+    #   ⛔ 别把 `row` 整个 dump 出去 —— `bad_when`/`bad_rule` 会多两个键、逐字节对拍立刻失败。
+    payload = {k: row[k] for k in COMPANION_WRITTEN}
+    payload["rows"] = row["rows"]
+    payload["warning"] = row["warning"]
+    dst.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  落盘 {dst}（字段 = `COMPANION_WRITTEN` + rows/warning ⇒ 与旧版**逐字节可比**）")
     return 0 if row["ok"] else 3
 
 
@@ -2480,8 +2589,10 @@ def main(argv=None) -> int:
                    help="**已有**的配对账 `paired/*.json`（可重复 ⇒ 逆方差加权合并）")
     q.add_argument("--pre", default="", help="训练前 / 现任的采集目录（必须与 --post 成对）")
     q.add_argument("--post", default="", help="训练后 / 候选的采集目录（必须与 --pre 成对；同 seed）")
-    q.add_argument("--tol", type=float, default=COMPANION_TOL,
-                   help=f"预注册容忍带（pp，**单侧**；缺省 {COMPANION_TOL}）")
+    q.add_argument("--tol", type=float, default=None,
+                   help=f"预注册容忍带（**单侧**；缺省按量取：pp 类 {COMPANION_TOL}、"
+                        f"打点 {COMPANION_TOL_BY_METRIC['avg_win_score']:g} 点 —— "
+                        f"⛔ 别拿 pp 的带子去套打点，那是假警的来源）")
     q.add_argument("--metric", default=COMPANION_METRIC,
                    help=f"伴随质量量（缺省 {COMPANION_METRIC}）；预注册过的只有 "
                         f"{'/'.join(COMPANION_METRICS)}")
