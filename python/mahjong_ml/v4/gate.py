@@ -61,6 +61,23 @@ LINE_METRIC = {
 #: 护栏的预注册容忍带：通用强度（顺位点）的 CI **下界**不得低于 −1.0（即"为了风格最多让 1 点"）。
 GUARD_RANK = 1.0
 
+#: ★ **第二条护栏**（2026-10-10）：**风格轴自己的伴随质量量**（`--with-quality` 的预设表）。
+#:
+#: 为什么必须成对：实测（`S:\mahjong-training\w-ladder\PROBE-dec6170-4g-repro.md`）风格奖励把立直率推了
+#: **+2.95pp CI[+2.33,+3.56]**、强度也保住了（闸门 `deals` +0.061、护栏 `rank_points` +3.26〔+2.29,+4.26〕），
+#: **但**合并口径下**立直后和了率 −1.49pp CI[−2.89,−0.09]**（刚好排除 0）⇒ 多出来的立直里有一部分质量略低。
+#: 只盯着主口径那一轴，"买一个轴把另一个轴卖掉"就无人管 —— 这正是 `win2` 那次翻车的形状。
+#: ⚠ 每条线追加的是**别的**轴（不是它自己那一轴）：主口径已经管了它自己。
+QUALITY_GUARD = {
+    "atk": ("wins",),      # 打点线（主口径 win_points）⇒ 防"买打点卖和了"
+    "win": ("deals",),     # 和了线（主口径 wins）⇒ 防"多和了但多放铳"
+    "def": ("wins",),      # 防守线（主口径 deals）⇒ 防"少放铳但也不和了"
+}
+
+#: 上述伴随量的**预注册容忍带**：单位 = 该口径的**每场每席**的量（单侧 —— 只否掉"变差"，
+#: 不因"变好"卡人）。`wins`/`deals` 用 0.10（≈0.9pp 的和了率/放铳率）；`win_points` 用 150 点。
+QUALITY_TOL = {"wins": 0.10, "deals": 0.10, "win_points": 150.0}
+
 #: 跨牌山集合合并时的键偏移（每套给一段互不重叠的场次号）
 _KEY_STRIDE = 1_000_000
 
@@ -82,8 +99,22 @@ def pooled_diffs(series: list[tuple[dict[int, float], dict[int, float]]],
     return sa, sb
 
 
+def guard_row(metric: str, tol: float | None, sa: dict[int, float], sb: dict[int, float],
+              a: str, b: str) -> dict:
+    """**单条护栏**的判决行：`{metric, tol, delta, lo, hi, n, ok}`（与主口径同一个符号约定）。
+
+    ⚠ **单侧**：`ok ⇔ CI 下界 ≥ −tol`。也就是说只否掉"**变差**"—— 护栏存在的意义是拦住退化，
+    不是要求"必须也变好"（那样会把"主口径大涨、伴随量同时小涨"的健康结果也否掉）。
+    `tol is None` = 不设容忍带（该护栏**永不**否掉，只记录读数）—— 与老 `--guard` 的 `None` 语义一致。
+    """
+    r = arena.judge_pair(sb, sa, b, a, metric)          # 候选 − 现任（正 = 候选更好）
+    ok = (tol is None) or (float(r.lo) >= -float(tol))
+    return {"metric": metric, "tol": (None if tol is None else float(tol)),
+            "delta": r.delta, "lo": r.lo, "hi": r.hi, "n": r.games, "ok": bool(ok)}
+
+
 def decide(sa: dict[int, float], sb: dict[int, float], a: str, b: str,
-           metric: str = "rank_points") -> dict:
+           metric: str = "rank_points", guards: list[dict] | None = None) -> dict:
     """纯判据：**候选（`b`）− 现任（`a`）** 的 CI 排除 0 且为正 ⇒ 采纳。
 
     ⚠ **符号陷阱（实测踩过，代价是整轮判决方向反了）**：`eval.paired_test` 的约定是
@@ -92,31 +123,91 @@ def decide(sa: dict[int, float], sb: dict[int, float], a: str, b: str,
     `lo > 0` 就变成"**现任显著更好**"却去采纳候选（方向整反）。
     空对照（`a == b` ⇒ Δ=0 ⇒ CI[0,0]）**两种写法都判不采纳**，所以它抓不出这个反向 ——
     必须有**方向性对照**（见 `self_check`：弱现任 vs 强候选 ⇒ 必须采纳）。
+
+    @param guards ★ **第二条护栏起**（2026-10-10，`--guard-metric` / `--with-quality`）：每项是一行
+        `guard_row(...)` 的产物（含 `ok`）。给了就 **AND 进采纳**（主口径过 **且** 所有护栏不破 ⇒ 采纳），
+        并把逐条读数放进新键 `guards`。
+        ⛔ **缺省 `None` ⇒ 返回的字典与加这个参数之前逐字相同**（不加键、不改 `adopt`）——
+        这是"默认口径不变、与历次判决可比"的硬判据。
     """
     r = arena.judge_pair(sb, sa, b, a, metric)          # 候选 − 现任（正 = 候选更好）
-    return {"delta": r.delta, "lo": r.lo, "hi": r.hi, "p": r.p, "n": r.games,
-            "sd": r.sd, "win": r.win, "lose": r.lose, "tie": r.tie,
-            "need_for_2": r.need_for_2, "verdict": r.verdict,
-            "adopt": bool(r.lo > 0.0)}
+    out = {"delta": r.delta, "lo": r.lo, "hi": r.hi, "p": r.p, "n": r.games,
+           "sd": r.sd, "win": r.win, "lose": r.lose, "tie": r.tie,
+           "need_for_2": r.need_for_2, "verdict": r.verdict,
+           "adopt": bool(r.lo > 0.0)}
+    if guards is not None:
+        rows = [dict(g) for g in guards]
+        out["adopt_primary"] = bool(out["adopt"])
+        out["guards"] = rows
+        out["adopt"] = bool(out["adopt"] and all(g["ok"] for g in rows))
+    return out
+
+
+def parse_guard_metric(spec: str) -> tuple[str, float]:
+    """`--guard-metric NAME[:TOL]` → `(NAME, TOL)`；不写 `TOL` 就用 `QUALITY_TOL` 里的**预注册**值。
+
+    ⛔ 认不出 / 形状不对就**当场报错**（不许静默丢掉一条护栏 —— 那等于"以为有护栏、其实没有"）。
+    """
+    name, _, tol = str(spec).partition(":")
+    name = name.strip()
+    if name not in ml_eval.METRICS:
+        raise SystemExit(f"⛔ --guard-metric 的指标认不出：{name!r}"
+                         f"（已登记：{', '.join(ml_eval.METRICS)}）")
+    if not tol.strip():
+        if name not in QUALITY_TOL:
+            raise SystemExit(f"⛔ --guard-metric {name} 没写 TOL，而 {name} 也没有预注册容忍带"
+                             f"（预注册的只有 {', '.join(QUALITY_TOL)}）⇒ 必须写成 {name}:<TOL>")
+        return name, float(QUALITY_TOL[name])
+    try:
+        t = float(tol)
+    except ValueError:
+        raise SystemExit(f"⛔ --guard-metric 的 TOL 不是数：{spec!r}")
+    if t < 0:
+        raise SystemExit(f"⛔ --guard-metric 的 TOL 必须是**正数**（「最多让这么多」）：{spec!r}")
+    return name, t
+
+
+def quality_guards(line: str) -> list[tuple[str, float]]:
+    """`--with-quality` 预设：该风格线的**伴随质量量** + 预注册容忍带（见 `QUALITY_GUARD`）。"""
+    if line not in QUALITY_GUARD:
+        raise SystemExit(f"⛔ --with-quality 只支持 --line {'/'.join(sorted(QUALITY_GUARD))}"
+                         f"（收到 {line!r}）")
+    return [(m, float(QUALITY_TOL[m])) for m in QUALITY_GUARD[line]]
 
 
 def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: int,
          out_root: Path, *, workers: int = 16, metric: str = "rank_points",
          metric_guard: str = "rank_points", guard: float | None = 1.0,
-         tag: str = "gate", prod: str | None = None, rotate_perm: bool = True) -> dict:
+         tag: str = "gate", prod: str | None = None, rotate_perm: bool = True,
+         guard_metrics: list[tuple[str, float | None]] | None = None) -> dict:
     """跑闸门：多套牌山集合 × 分块，最后按**合并后的**配对差分判决。
 
     ⚠ `rotate_perm`（2026-10-08 起缺省 True）：闸门与**训练**桌用**同一套座次口径**（24 全排列）。
+
+    @param guard_metrics ★ **第二条护栏起**（可重复）：`[(指标, 容忍带), …]`。⛔ 缺省 `None` ⇒
+        **一条都不加**（不取额外轨迹、`verdict.json` 不多任何键）⇒ 与加这个参数之前**逐位相同**。
+        与主口径 / 老护栏同名的项会被丢掉（同一个量不需要两条护栏）。
     """
     root = out_root / tag
     series: list[tuple[dict[int, float], dict[int, float]]] = []
     guard_series: list[tuple[dict[int, float], dict[int, float]]] = []
     wall_deltas: list[float] = []
+    # ★ 追加护栏：先把请求表**去重**（主口径与老护栏已经管了那两个量）。
+    extra_guards: list[tuple[str, float | None]] = []
+    for gm, gt in (guard_metrics or []):
+        gm = str(gm)
+        if gm in (metric, metric_guard) or any(gm == m for m, _ in extra_guards):
+            continue
+        extra_guards.append((gm, None if gt is None else float(gt)))
+    extra_series: dict[str, list] = {m: [] for m, _ in extra_guards}
     print(f"闸门：现任={Path(incumbent).parent.name} vs 候选={Path(candidate).parent.name}"
           f"；{len(seeds)} 套牌山 × 每套至多 {games} 场（block={block}）")
     print(f"  主口径 = **{metric}**" + (f"（风格轴）；护栏 = **{metric_guard}**"
           + (f"，预注册：下界 ≥ −{guard}" if guard is not None else "，不设护栏")
           if metric != metric_guard else "（通用强度口径，无独立护栏）"))
+    if extra_guards:
+        print("  追加护栏（**单侧**：CI 下界须 ≥ −TOL）："
+              + " · ".join(f"{m}:{('—' if t is None else f'{t:g}')}" for m, t in extra_guards))
     for s in seeds:
         d = root / f"s{s}"
         arena.run_pair(d, incumbent, candidate, block, s, workers=workers, prod=prod,
@@ -134,6 +225,12 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
             gpart = arena.judge_pair(gy, gx, candidate, incumbent, metric_guard)
             guard_series.append((gx, gy))
             extra = f" · 护栏 {metric_guard} Δ={gpart.delta:+5.2f}"
+        # ★ 追加护栏的逐牌山读数（⚠ 只在真的追加了护栏时才拼进这行 ⇒ 缺省输出逐字不变）
+        for gm, _gt in extra_guards:
+            ex, ey = arena.judge_series(d, incumbent, candidate, gm)
+            extra_series[gm].append((ex, ey))
+            epart = arena.judge_pair(ey, ex, candidate, incumbent, gm)
+            extra += f" · 护栏 {gm} Δ={epart.delta:+5.2f}"
         print(f"  牌山 {s}：Δ={part.delta:+6.2f} CI[{part.lo:+6.2f},{part.hi:+6.2f}] n={part.games}"
               f"（候选 − 现任）{extra}")
         wall_deltas.append(float(part.delta))
@@ -159,10 +256,36 @@ def gate(incumbent: str, candidate: str, seeds: list[int], games: int, block: in
         print(f"  护栏（{metric_guard}）：Δ={g['delta']:+.2f} CI[{g['lo']:+.2f},{g['hi']:+.2f}]"
               + ("" if guard is None else f" ⇒ {'不破' if out['guard_ok'] else '破了'}"
                  f"（预注册：下界须 ≥ −{guard}）"))
+        # ⚠ 追加护栏在时，这一行**让位**给下面那条"逐条列出"的合并判决（否则会先喊一次"采纳"
+        #   再喊"不采纳"，读日志的人要被误导）。缺省（没追加护栏）时**逐字不变**。
+        if not extra_guards:
+            print(f"  合并判决：主口径（{metric}）Δ={out['delta']:+.2f} "
+                  f"CI[{out['lo']:+.2f},{out['hi']:+.2f}]"
+                  f" {'✓' if out['adopt_primary'] else '✗'} + 护栏 {'✓' if out['guard_ok'] else '✗'}"
+                  f" ⇒ **{'采纳' if out['adopt'] else '不采纳'}**")
+    # ---- ★ 追加护栏（`--guard-metric` / `--with-quality`；⛔ 缺省一条都不加）----------------------
+    # 判决口径：**主口径过（CI 排除 0 且为正）且所有护栏都不破 ⇒ 采纳**。护栏一律**单侧**。
+    if extra_guards:
+        rows: list[dict] = []
+        if "guard_ok" in out:          # 老护栏（顺位点）在的时候也**逐条列出来**，不是只在 guard_* 键里
+            rows.append({"metric": metric_guard,
+                         "tol": (None if guard is None else float(guard)),
+                         "delta": out["guard_delta"], "lo": out["guard_lo"],
+                         "hi": out["guard_hi"], "ok": bool(out["guard_ok"])})
+        for gm, gtol in extra_guards:
+            gsa2, gsb2 = pooled_diffs(extra_series[gm])
+            row = guard_row(gm, gtol, gsa2, gsb2, incumbent, candidate)
+            rows.append(row)
+            print(f"  护栏（{gm}）：Δ={row['delta']:+.3f} CI[{row['lo']:+.3f},{row['hi']:+.3f}]"
+                  + ("" if gtol is None else f" ⇒ {'不破' if row['ok'] else '破了'}"
+                     f"（预注册：下界须 ≥ −{gtol:g}，单位 = 该口径每场每席的量）"))
+        out["guards"] = rows
+        out["adopt_primary"] = bool(out.get("adopt_primary", out["adopt"]))
+        out["adopt"] = bool(out["adopt_primary"] and all(r["ok"] for r in rows))
         print(f"  合并判决：主口径（{metric}）Δ={out['delta']:+.2f} "
-              f"CI[{out['lo']:+.2f},{out['hi']:+.2f}]"
-              f" {'✓' if out['adopt_primary'] else '✗'} + 护栏 {'✓' if out['guard_ok'] else '✗'}"
-              f" ⇒ **{'采纳' if out['adopt'] else '不采纳'}**")
+              f"CI[{out['lo']:+.2f},{out['hi']:+.2f}] {'✓' if out['adopt_primary'] else '✗'}"
+              + "".join(f" · {r['metric']} {'✓' if r['ok'] else '✗'}" for r in rows)
+              + f" ⇒ **{'采纳' if out['adopt'] else '不采纳'}**")
     # ⚠ **套间散布要打出来**（第八季审计）：合并 CI 只含"套内"的配对噪声，而"换一套牌山"本身
     #   能把 Δ 摆动好几个点（实测同一候选：闸门 −2.26 vs 换牌山的自评 +1.32）。所以
     #   ① 判决只能读成"**条件于这几套牌山**"；② 套间极差 ≫ CI 半宽时，这个判决不该被当成
@@ -259,6 +382,17 @@ def main(argv: list[str] | None = None) -> int:
                          "），通用强度退为护栏")
     ap.add_argument("--guard", type=float, default=GUARD_RANK,
                     help=f"护栏容忍带：{ml_eval.METRICS[0]} 的 CI 下界须 ≥ −guard（缺省 {GUARD_RANK}）")
+    # ★ 第二条护栏起（2026-10-10）：**可重复**的 `--guard-metric NAME[:TOL]`，外加 `--line` 下的
+    #   预设 `--with-quality`。⛔ 都不给 ⇒ 与加这两个开关之前**逐位相同**（默认口径不变 ⇒ 与历次
+    #   判决可比；这是本仓"opt-in 新判据"的硬判据）。
+    ap.add_argument("--guard-metric", action="append", default=[], metavar="NAME[:TOL]",
+                    help="**可重复**追加一条**单侧**护栏（CI 下界须 ≥ −TOL；不写 TOL 用预注册值 "
+                         f"{'/'.join(f'{k}={v:g}' for k, v in QUALITY_TOL.items())}）。"
+                         "⛔ 只否掉「变差」，不因「变好」卡人")
+    ap.add_argument("--with-quality", action="store_true",
+                    help="`--line` 下追加该线的**伴随质量量**护栏（" +
+                         " / ".join(f"{k}→{'+'.join(v)}" for k, v in QUALITY_GUARD.items()) +
+                         "；容忍带见 --guard-metric 的说明）")
     ap.add_argument("--rotate-perm", dest="rotate_perm", action="store_true", default=True,
                     help="**24 全排列座次**（缺省开；与训练桌同一口径，2026-10-08 用户裁决）")
     ap.add_argument("--no-rotate-perm", dest="rotate_perm", action="store_false",
@@ -274,10 +408,17 @@ def main(argv: list[str] | None = None) -> int:
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     # 风格线 ⇒ 主口径换成目标轴、通用强度退护栏（`--metric` 显式给定时以它为准）
     metric = LINE_METRIC[args.line] if args.line else args.metric
+    # ★ 追加护栏（缺省空表 ⇒ 输出逐位不变）：显式 `--guard-metric` + `--with-quality` 预设。
+    guard_metrics: list[tuple[str, float]] = [parse_guard_metric(s) for s in args.guard_metric]
+    if args.with_quality:
+        if not args.line:
+            ap.error("--with-quality 是**风格线**的伴随质量量预设，必须同时给 --line")
+        guard_metrics += quality_guards(args.line)
     r = gate(_policy(args.incumbent), _policy(args.candidate), seeds, args.games, args.block,
              out_root, workers=args.workers, metric=metric,
              metric_guard="rank_points", guard=args.guard, tag=args.tag,
-             prod=args.producer, rotate_perm=args.rotate_perm)
+             prod=args.producer, rotate_perm=args.rotate_perm,
+             guard_metrics=(guard_metrics or None))
     return 0 if r["adopt"] else 3
 
 

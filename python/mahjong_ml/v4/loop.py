@@ -42,6 +42,10 @@ from typing import Any
 from .. import budget as ml_budget
 from .. import eval as ml_eval
 from .. import paths, producer
+#: ★ 付奖模式（`--style-bonus-mode`）的**模式名单一来源**在 `style_reward`（这里不抄一份 ——
+#: 抄一份就会出现"回路认识、数据集不认识"这种漂移）。⚠ 这个模块**没有**重依赖（只用标准库），
+#: 所以回路 import 它的代价可以忽略；口径本身（白化/付奖）仍然只在数据集侧那一份实现里。
+from . import style_reward as v4sr
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -145,6 +149,11 @@ class LoopConfig:
     style_bonus: str = ""
     #: 白化参数的统计总体：`student`（缺省，= 训练里真正进梯度的那些行）/ `all`。
     style_whiten: str = "student"
+    #: ★ **付奖模式**（`--style-bonus-mode`，2026-10-10 加）：`hand`（缺省）= 奖励是**小局级常数**
+    #: （老口径，逐位不变）；`decision` = **逐决策**付奖 —— 奖励只落在"真的做了那个动作"的那一行，
+    #: 白化总体随之换成**学生席的决策行**（理由见 `style_reward` 的模块 docstring）。
+    #: ⚠ 只有 `style_bonus` 非空时才有意义；`hand` 时**不进命令行**（老轮次的台账逐字可比）。
+    style_mode: str = "hand"
     #: 验证集早停**读哪个头的 CE**：`policy`（缺省，= 行为标签）/ `il`（引擎标签）。
     #: ⚠ 开了 `il_weight` 就**必须**配 `--val-metric il`：IL 臂的行为 CE 必然抬高（实测 0.512 → 0.62），
     #: 按行为 CE 判"没改善"会在引擎 CE 还在降的时候把这一轮掐掉（见 `docs/TRAINING-V4.md` §14.12）。
@@ -332,6 +341,10 @@ def plan_commands(cfg: LoopConfig, generation: int, net_in: Path, games: int) ->
     if cfg.style_bonus:
         r.commands["compact"] += ["--style-bonus", cfg.style_bonus,
                                   "--style-bonus-whiten", cfg.style_whiten]
+        # ★ 付奖模式：**只在非缺省时才进命令行** ⇒ `hand`（缺省）那一支打出来的命令与加这个
+        #   参数之前**逐字相同**（"默认关闭/默认口径 = 逐位不变"那条判据的第一层）。
+        if v4sr.check_mode(cfg.style_mode) != v4sr.MODE_HAND:
+            r.commands["compact"] += ["--style-bonus-mode", cfg.style_mode]
     train = [
         _py(), "-m", "mahjong_ml.v4.pretrain", "--data", str(r.compact),
         "--label", r.ckpt_label, "--objective", cfg.objective,
@@ -666,6 +679,9 @@ def run_round(cfg: LoopConfig, generation: int, net_in: Path, games: int,
         #   空串 = 关闭（老台账里没有这个键，读的时候按"没有塑形"看待）。
         "style_bonus": (cfg.style_bonus or ""),
         "style_bonus_whiten": (cfg.style_whiten if cfg.style_bonus else ""),
+        # ★ 付奖模式（`hand` = 缺省老口径）。没开塑形时记空串（与 `style_bonus_whiten` 同一个做法：
+        #   老台账里没有这个键，读的时候按"没有塑形"看待）。
+        "style_bonus_mode": (v4sr.check_mode(cfg.style_mode) if cfg.style_bonus else ""),
         "ckpt": str(paths.DATA_ROOT / "ckpt" / r.ckpt_label), "raw": str(r.raw),
         "compact": str(r.compact), "eval_dir": str(r.eval_dir),
         "seconds": {k: round(v, 1) for k, v in seconds.items()},
@@ -763,6 +779,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="白化参数 μ/σ 的统计总体：`student`（缺省）= 只用学生座位的小局"
                          "（= 训练里真正进梯度的行）；`all` = 全部座位。"
                          "⚠ 缺省值也可由 `MAHJONG_STYLE_WHITEN` 给（与 `--style-bonus` 同理）")
+    ap.add_argument("--style-bonus-mode", choices=list(v4sr.MODES),
+                    default=(os.environ.get(v4sr.MODE_ENV) or v4sr.MODE_HAND).strip(),
+                    help="**付奖模式**：`hand`（缺省）= 奖励是**小局级常数**、该小局四行同值"
+                         "（老口径，⛔ 数值语义逐位不变）；`decision` = **逐决策**付奖 —— 奖励只落在"
+                         "真的执行了该轴动作的那一行（`chosen` 以该轴的动作键开头），白化总体换成"
+                         "**学生席的决策行**。解答的问题是「把信度分配到'立直那一手'之后，"
+                         "立直率能不能被推上去」。见 `v4/style_reward.py` 的模块 docstring。"
+                         f"⚠ 缺省值也可由环境变量 `{v4sr.MODE_ENV}` 给 —— 那是给**不改 "
+                         "`tools/run-league.ps1`**（本仓不许动它）准备的入口")
     ap.add_argument("--strict-gate", action="store_true",
                     help="值头闸门（`value-audit --strict --ev-ref legit`：EV ≥ 0.7×合法天花板 + "
                          "覆盖率 ≤3pp）不过就**停整条回路**；缺省只记账不停（先看几轮再决定）")
@@ -802,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         ref_beta=args.ref_beta, val_every=args.val_every, val_patience=args.val_patience,
         val_metric=args.val_metric, il_weight=args.il_weight,
         style_bonus=args.style_bonus, style_whiten=args.style_bonus_whiten,
+        style_mode=args.style_bonus_mode,
         strict_gate=args.strict_gate, critic_steps=args.critic_steps, critic_lr=args.critic_lr,
     )
     net_in = Path(args.init)

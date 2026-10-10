@@ -3835,6 +3835,228 @@ ok(_ha_var["stats"]["ref_std"] > _ha_off["stats"]["ref_std"] + 1e-9,
    "风格奖励：逐小局变化的塑形**把奖励的方差推上去**（= 它真的在推那一轴）",
    f"{_ha_off['stats']['ref_std']:.6f} → {_ha_var['stats']['ref_std']:.6f}")
 
+# ================================================================ 逐决策付奖（`--style-bonus-mode`）
+# 2026-10-10 加。动机：`hand` 口径的奖励是**小局级常数**⇒ 对手级行为（要不要立直）几乎没有信度
+# 分配（实测把塑形 std 抬到结果奖励 2.52× 仍只动 +0.39pp，落在同配方 0.85pp 噪声内）。
+# 判据五条（与需求书逐条对应）：
+#   ① **缺省/`hand` 逐位不变**：模式参数不进命令行（上面判据 a 钉住"只多出两个开关"），
+#      且 `hand` 分支一行未动（那两条权重哈希判据仍绿）；
+#   ② `decision`：**付奖行数 == 通过质量轴的动作行数**、非动作行恒 0；
+#   ③ 白化仍 mean≈0 / var≈1（⚠ 范围 = 学生席的**行**），常数轴 σ=0 仍硬拒；
+#   ④ 取不到"哪一行做了它" ⇒ **当场报错**（⛔ 不退化成 `hand`）；
+#   ⑤ 模式名的校验**只有一处**（`check_mode`），未登记的模式当场报错。
+print("== 逐决策付奖（`--style-bonus-mode`）==")
+eq("逐决策：模式名单一来源", v4_sr.MODES, ("hand", "decision"))
+eq("逐决策：缺省 = `hand`（老口径）", v4_sr.check_mode(""), "hand")
+for _bad_m in ("Decision", "row", "per-decision"):
+    try:
+        v4_sr.check_mode(_bad_m)
+        ok(False, f"逐决策：未登记的模式 {_bad_m!r} 必须报错")
+    except v4_sr.BonusSpecError:
+        ok(True, f"逐决策：未登记的模式 {_bad_m!r} 被硬拒 ✓")
+# 行级动作的轴表：能定位到行的只有 riichi / meld / win；**结局量**一律报错（不许猜一行）
+eq("逐决策：能当付奖轴的轴表", v4_sr.ROW_ACTION_AXES, ("meld", "riichi", "win"))
+for _ax in ("deal", "no_deal", "win_points"):
+    try:
+        v4_sr.row_is_action(_ax, "discard:1m")
+        ok(False, f"逐决策：结局量 {_ax!r} 不该有行级动作定义")
+    except v4_sr.BonusSpecError:
+        ok(True, f"逐决策：结局量 {_ax!r} 当付奖轴 ⇒ 当场报错 ✓（不猜一行、不退回 hand）")
+try:
+    v4_sr.require_row_axes(v4_sr.parse_bonus("no_deal=1.0:none"))
+    ok(False, "逐决策：`no_deal` 当付奖轴必须被前置闸门拒掉")
+except v4_sr.BonusSpecError as _e:
+    ok("结局量" in str(_e), "逐决策：前置闸门拒掉结局量付奖轴 ✓", str(_e)[:60])
+
+# ---- ②③ 合成数据上的逐行账：**付奖行 == 通过质量轴的动作行**、非动作行恒 0、白化仍 0/1 ----
+# 合成布局（`_sr_*` 那一段）：8 个小局、每小局每席 3 行 = 12 行；学生 = **偶数席**（0/2）
+# ⇒ 范围内 6 行/小局；`_sr_R` 里 4 个小局立直（偶数席在 `_i==0` 那一行 `riichi:1m`）
+# ⇒ 动作行 = 4 小局 × 2 席 = 8 行，范围内行 = 48 ⇒ μ = 8/48 = 1/6、σ = √(μ(1−μ))。
+_sr_dec_spec = v4_sr.parse_bonus("riichi=1.0:no_deal")
+_sr_dec_stats, _sr_dec_audit = v4_sr.whitening_stats(
+    _sr_dec_spec, iter(_sr_all_hands), student_policies={"net:T:\\x\\stu.bin"},
+    quiet=True, mode="decision")
+_sr_dec_w = _sr_dec_stats["riichi"]
+eq("逐决策：白化单位换成**行**（范围内行数 = 8 小局 × 2 席 × 3 行）", _sr_dec_w.n, 48)
+eq("逐决策：行级 μ = 动作行 / 范围内行 = 8/48", round(_sr_dec_w.mu, 12), round(1 / 6, 12))
+eq("逐决策：行级 σ = √(μ(1−μ))（Bernoulli 同一把尺子）",
+   round(_sr_dec_w.sd, 12), round((1 / 6 * 5 / 6) ** 0.5, 12))
+ok(_sr_dec_w.sd > 0.0, "逐决策：行级 σ > 0（不撞 σ=0 闸门）", f"σ={_sr_dec_w.sd:.6f}")
+_sr_dec_chk = v4_sr.audit_whitening(
+    _sr_dec_spec, _sr_dec_stats, iter(_sr_all_hands),
+    student_policies={"net:T:\\x\\stu.bin"}, mode="decision")
+ok(_sr_dec_chk["_all_ok"]["ok"] and abs(_sr_dec_chk["riichi"]["var"] - 1.0) < 1e-9,
+   "逐决策：白化自检通过（范围内的**行**上均值 ≈ 0、方差 == 1）",
+   f"mean={_sr_dec_chk['riichi']['mean']:+.2e} var={_sr_dec_chk['riichi']['var']!r} n={_sr_dec_chk['riichi']['n']}")
+_sr_dec_row = _sr_dec_audit.axes[0]
+eq("逐决策：审计账记下模式 = decision", _sr_dec_audit.mode, "decision")
+eq("逐决策：动作行数（8 行 = 4 个小局 × 2 席）", _sr_dec_row["action_rows"], 8)
+eq("逐决策：付奖行数 + 质量轴拦下 == 动作行（4 + 4 == 8；小局 2/6 的立直者就是放铳者）",
+   (_sr_dec_row["paid_rows"], _sr_dec_row["blocked_rows"]), (4, 4))
+eq("逐决策：`hand` 模式的同一份审计账里这些键是 None（不污染老账）",
+   [a["action_rows"] for a in v4_sr.whitening_stats(
+       _sr_dec_spec, iter(_sr_all_hands), student_policies={"net:T:\\x\\stu.bin"},
+       quiet=True)[1].axes], [None])
+
+# ④ 红证：**手级指示量说立直了，行级却找不到那一行** ⇒ 必须报错（⛔ 不许退化成 hand）
+_sr_norow = scratch("v4-style-norow")
+with (_sr_norow / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    # 两个小局：小局 0 的公开状态位说"2 号席立直了"（但没有任何一行记下 `riichi:` 动作键）；
+    # 小局 1 什么都没发生 ⇒ `hand` 模式下 μ=0.5、σ=0.5（不撞 σ=0 那道闸门，能当对照）。
+    for _h in (0, 1):
+        for _s in range(4):
+            _fh.write(json.dumps({
+                "type": "decision", "game": 0, "hand_no": _h, "step": _s, "seat": _s,
+                "policy": "teacher", "kind": "turn", "legal": ["discard:1m"],
+                "chosen": "discard:1m", "chosen_index": 0,
+                "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": -1,
+                "hand_agari": False,
+                # ★ 公开状态位说"2 号席已经立直了"，但**没有任何一行**记下 `riichi:` 这个动作键
+                "obs": dict(_v4obs, v=3, seat=_s, legal=["discard:1m"],
+                            riichi=([False, False, True, False] if _h == 0 else [False] * 4),
+                            riichi_turn=([0, 0, 3, 0] if _h == 0 else [0, 0, 0, 0]),
+                            melds=[[], [], [], []])}
+            ) + "\n")
+try:
+    v4_sr.whitening_stats(_sr_dec_spec, v4_sr.iter_hands(_sr_norow / "g0.jsonl"), quiet=True,
+                          mode="decision")
+    ok(False, "逐决策：取不到'哪一行做了它'必须报错（⛔ 不许退化成 hand）")
+except v4_sr.BonusSpecError as _e:
+    ok("取不到" in str(_e) and "不退化" in str(_e),
+       "逐决策红证：手级=1 但行级找不到动作行 ⇒ 当场报错、明说**不退化** ✓", str(_e)[:80])
+# 同一个文件在 `hand` 模式下**照常能算**（证明上一条不是因为文件本身坏了）
+_sr_norow_hand = v4_sr.whitening_stats(_sr_dec_spec, v4_sr.iter_hands(_sr_norow / "g0.jsonl"),
+                                       quiet=True)
+eq("逐决策红证对照：同一份轨迹在 `hand` 模式下照常算得出（μ=0.5、两小局）",
+   (round(_sr_norow_hand[0]["riichi"].mu, 12), _sr_norow_hand[0]["riichi"].n), (0.5, 2))
+
+# ---- 数据集层（`build(style_mode="decision")`）：列结构 + meta + 常数轴硬拒 ------------------
+_sr_dout = _sr_src / "ds-dec"
+# ⚠ `val_frac=0.25`（不是 0.5）：合成集只有 4 场 × 2 小局，而**付奖只落在 4 个小局**上
+#   （小局 0/4 通过质量轴）—— 按 0.5 切分时训练那份**可能一个小局都不含**（实测撞到
+#   `build` 的"列全 0"硬拒，那是对的判据，不该为了过测试去削弱它）。
+_sr_dmeta = v4_ds.build(_sr_src, _sr_dout, val_frac=0.25, split_seed=0, aux=False, quiet=True,
+                        student="net:T:\\x\\stu.bin", style_bonus="riichi=1.0:no_deal",
+                        style_mode="decision")
+eq("逐决策：meta 记下模式", _sr_dmeta["style_reward"]["mode"], "decision")
+_sr_dax = json.loads(Path(_sr_dmeta["style_reward"]["audit_path"]).read_text(
+    encoding="utf-8"))["axes"][0]
+_sr_dcol = np.concatenate([np.asarray(v4_ds.load_split(_sr_dout, _sp)[v4_sr.COLUMN],
+                                      dtype=np.float64) for _sp in ("train", "val")])
+_sr_dhit = _sr_dcol[_sr_dcol != 0.0]
+eq("逐决策：列里非 0 行 == **付奖行数**（4 行：2 个小局各 2 席通过质量轴）",
+   int(_sr_dhit.size), _sr_dax["paid_rows"])
+ok(_sr_dhit.size < int(np.asarray(_sr_dcol).size),
+   "逐决策：非动作行是 **0**（不是 `−μ/σ` 的负偏移）—— 否则'付奖行数 == 动作行数'当场失效",
+   f"非 0 {int(_sr_dhit.size)} / 共 {int(_sr_dcol.size)} 行")
+ok(float(np.abs(_sr_dhit - _sr_dax["weight"] * (1 - _sr_dax["mu"]) / _sr_dax["sd"]).max())
+   < 1e-3 * abs(_sr_dax["weight"] * (1 - _sr_dax["mu"]) / _sr_dax["sd"]),
+   "逐决策：动作行拿到的钱就是 `w·(1−μ_行)/σ_行`",
+   f"{float(_sr_dhit[0]):.6f} vs {_sr_dax['weight'] * (1 - _sr_dax['mu']) / _sr_dax['sd']:.6f}")
+# 与 `hand` 模式对同一份数据的产物**必须不同**（否则这个模式就是个摆设 —— 静默 no-op）
+_sr_hand_col = np.concatenate([np.asarray(v4_ds.load_split(_sr_out, _sp)[v4_sr.COLUMN],
+                                          dtype=np.float64) for _sp in ("train", "val")])
+ok(int((_sr_hand_col != 0.0).sum()) != int(_sr_dhit.size),
+   "逐决策：同一份数据上 `decision` 与非 0 行结构与 `hand` **不同**（不是 no-op）",
+   f"hand 非 0 {int((_sr_hand_col != 0.0).sum())} 行 vs decision {int(_sr_dhit.size)} 行")
+# 常数轴（没有任何一行立直）⇒ 行级 σ=0 ⇒ **硬拒**（与手级同一道闸门）
+try:
+    v4_sr.whitening_stats(_sr_dec_spec, v4_sr.iter_hands(_sr_flat / "g0.jsonl"), quiet=True,
+                          mode="decision")
+    ok(False, "逐决策：行级常数轴（σ=0）必须报错")
+except v4_sr.BonusSpecError as _e:
+    ok("σ" in str(_e), "逐决策：行级常数轴 σ=0 被硬拒 ✓", str(_e)[:70])
+
+# ---- ②b ★ **多家荣和（双响）的语义陷阱**：`win` 轴的行级判据必须多"我就是被记录的那家" --------
+# 事故（上一轮的实测）：行级只判"这一行执行了 `tsumo`/`ron`"，而**双响时两家都执行了 `ron`**，
+# 生产端却只记 `winners[0]`（= 离放铳者最近那家）⇒ 手级指示量 = 0 却有动作行 ⇒ 白化那一遍
+# 抛 `BonusSpecError`（实测 30/11258 小局）。修法：行级判据加一条合取（`ROW_SELF_SEAT`），
+# ⛔ **判据侧（`AXES`/`style-vector.py`）仍用"手级被记录和了者"，一个字都不许动**。
+_STU = "net:T:\\x\\stu.bin"
+_sr_mr = scratch("v4-style-multi-ron")
+with (_sr_mr / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    # 1 个小局 × 四席 × 2 行；席位 0 与 2 **都**执行了 `ron`（双响），被记录的和了者 = 0 号席。
+    # ⚠ **学生只有 0/2 两席**（1/3 是 teacher）：`no_deal` 是**在统计范围内取或**的
+    #   （`_merge_cells` 的 `any_deal`）⇒ 若把放铳者那一席也算进来，这一小局的 `no_deal` 恒 0、
+    #   整个轴付奖恒 0（`whitening_stats` 会正确地把它判红）。这与线上一致（风格桌上学生只占 1 席）。
+    for _s in range(4):
+        for _i in range(2):
+            _fh.write(json.dumps({
+                "type": "decision", "game": 0, "hand_no": 0, "step": _i, "seat": _s,
+                "policy": (_STU if _s in (0, 2) else "teacher"), "kind": "claim",
+                "legal": ["ron", "pass"],
+                "chosen": ("ron" if (_s in (0, 2) and _i == 1) else "pass"), "chosen_index": 1,
+                "hand_delta": [3900, 0, 3900, -7800], "hand_winner": 0, "hand_loser": 3,
+                "hand_agari": True, "placement": [1, 2, 3, 4],
+                "obs": dict(_v4obs, v=3, seat=_s, legal=["ron", "pass"], melds=[[], [], [], []])},
+                ensure_ascii=False) + "\n")
+_sr_mr_hands = list(v4_sr.iter_hands(_sr_mr / "g0.jsonl"))
+eq("多家荣和：合成轨迹 1 个小局", len(_sr_mr_hands), 1)
+_sr_mr_st = _sr_mr_hands[0][2]
+_sr_mr_spec = v4_sr.parse_bonus("win=1000:no_deal")
+eq("多家荣和：这一小局**两席**都执行了 `ron`（陷阱本身：手级只记一家、行级看是两家）",
+   sorted(s for s, c in v4_sr.rows_in_scope(_sr_mr_st, {_STU})
+          if v4_sr.row_is_action("win", c)), [0, 2])
+eq("多家荣和：加'我就是被记录的那家'之后只剩 1 行（`hand_winner=0`）",
+   v4_sr.axis_row_action_counts(_sr_mr_spec, _sr_mr_st, {_STU})["win"], 1)
+eq("多家荣和：这一小局**不再**被判成'两套口径漂移'（上一轮 30/11258 就是这条误判）",
+   v4_sr.decision_violations(_sr_mr_spec, _sr_mr_st, {_STU}), [])
+_sr_mr_stats, _sr_mr_audit = v4_sr.whitening_stats(
+    _sr_mr_spec, iter(_sr_mr_hands), student_policies={_STU}, quiet=True, mode="decision")
+_sr_mr_ax = _sr_mr_audit.axes[0]
+eq("多家荣和：付奖行 == 动作行 == 1（另三席的 `pass` 行付 0）",
+   (_sr_mr_ax["action_rows"], _sr_mr_ax["paid_rows"], _sr_mr_ax["blocked_rows"]), (1, 1, 0))
+eq("多家荣和：`row_self_seat` 进审计账（不写下来就没法复判那一列的口径）",
+   _sr_mr_ax["row_self_seat"], "winner")
+_sr_mr_pay = {_s: v4_sr.decision_bonus(_sr_mr_spec, _sr_mr_stats, _sr_mr_st, _s, "ron", {_STU})[0]
+              for _s in (0, 2)}
+ok(_sr_mr_pay[0] > 0.0 and _sr_mr_pay[2] == 0.0,
+   "多家荣和：双响里**非最近那家**（席位 2）拿不到这笔奖励 = **软信号少付**（⛔ 判据侧不换尺子）",
+   f"seat0 {_sr_mr_pay[0]:+.1f} 点 / seat2 {_sr_mr_pay[2]:+.1f} 点")
+# ---- ③ ★ **报数假象**：日志报的必须是**真实违规小局数**，不是样例上限 -------------------------
+# 事故：`if bad and len(viol) < 8: viol.append(...)` 之后拿 `len(viol)` 当"共 N 个小局"打印
+# ⇒ 日志**恒说 8**（上一轮真实 30）。判据：12 个违规小局 ⇒ 报文里必须出现 **12**（且样例封顶 8）。
+_sr_v12 = scratch("v4-style-viol12")
+with (_sr_v12 / "g0.jsonl").open("w", encoding="utf-8") as _fh:
+    for _h in range(12):
+        for _s in range(4):
+            _fh.write(json.dumps({
+                "type": "decision", "game": 0, "hand_no": _h, "step": _s, "seat": _s,
+                "policy": _STU, "kind": "turn", "legal": ["discard:1m"], "chosen": "discard:1m",
+                "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1,
+                "hand_loser": -1, "hand_agari": False,
+                # 手级公开位说"2 号席立直了"，但**没有任何一行**记下 `riichi:` 动作键
+                "obs": dict(_v4obs, v=3, seat=_s, legal=["discard:1m"],
+                            riichi=[False, False, True, False],
+                            riichi_turn=[0, 0, 3, 0], melds=[[], [], [], []])},
+                ensure_ascii=False) + "\n")
+try:
+    v4_sr.whitening_stats(v4_sr.parse_bonus("riichi=1000:no_deal"),
+                          v4_sr.iter_hands(_sr_v12 / "g0.jsonl"), quiet=True, mode="decision")
+    ok(False, "报数：取不到'哪一行做了它'必须报错")
+except v4_sr.BonusSpecError as _e:
+    _vmsg = str(_e)
+    ok("**12**" in _vmsg and "前 8 条样例" in _vmsg,
+       "报数修正：日志报**真实违规小局数** 12（不是样例上限 8）—— 上一轮恒说 8",
+       _vmsg[:120])
+    ok(str(v4_sr.VIOL_SAMPLES) in _vmsg,
+       "报数修正：样例上限 `VIOL_SAMPLES` 与计数**分开**（计数不受它约束）", f"VIOL_SAMPLES={v4_sr.VIOL_SAMPLES}")
+
+# ---- ① 缺省/`hand` 模式的命令行**逐字不变**；`decision` 只多一个开关 -------------------------
+_sr_dec_cfg = v4_loop_sr.LoopConfig(label="v4-sr-cfg", init="X:/net.bin", no_java=True,
+                                    producer="cpp", style="def",
+                                    style_pools={"def": ("X:/d1.bin",), "atk": ("X:/a1.bin",),
+                                                 "win": ("X:/w1.bin",)},
+                                    style_bonus="riichi=1.0:no_deal",
+                                    style_mode="decision")
+_sr_cmd_dec = v4_loop_sr.plan_commands(_sr_dec_cfg, 1, Path("X:/net.bin"), 100).commands["compact"]
+eq("逐决策：`decision` 时紧凑集命令只多出 `--style-bonus-mode decision`",
+   [x for x in _sr_cmd_dec if x not in _sr_cmd_on],
+   ["--style-bonus-mode", "decision"])
+eq("逐决策：`hand`（缺省）时那一个开关**不进命令行**（老轮次台账逐字可比）",
+   [x for x in _sr_cmd_on if x not in _sr_cmd_off],
+   ["--style-bonus", "riichi=1.0:no_deal", "--style-bonus-whiten", "student"])
+
 # ---------------------------------------------------------------- 汇总
 
 # 收尾清掉 scratch（它是**手写**的目录，删得掉；`tempfile` 建的那种在本沙箱下删不掉 —— 见文件头）
@@ -3867,6 +4089,61 @@ try:
 except ValueError:
     ok("风格轴：缺字段必须报错（不许静默当 0）", True)
 eq("风格轴：护栏容忍带 = 1.0 顺位点（预注册）", _v4_gate.GUARD_RANK, 1.0)
+
+# ---- 第二条护栏（opt-in，"成对"纪律；见 NOTES §6.5）------------------------------------------
+# 判据：① `--with-quality` 的线→伴随量映射与容忍带固定；② 护栏**单侧**（只否掉"变差"）；
+# ③ `decide()` **缺省不加键、不改语义**（opt-in 的硬判据：默认口径与历次判决可比）；
+# ④ 护栏破了 ⇒ `adopt` 必须从真变假；⑤ `--guard-metric` 形状不对必须**当场报错**（⛔ 不静默丢护栏）。
+eq("风格轴：`--with-quality` 预设（atk→wins / win→deals / def→wins）", _v4_gate.QUALITY_GUARD,
+   {"atk": ("wins",), "win": ("deals",), "def": ("wins",)})
+eq("风格轴：伴随量容忍带（wins/deals 0.10 ≈0.9pp、win_points 150 点）", _v4_gate.QUALITY_TOL,
+   {"wins": 0.10, "deals": 0.10, "win_points": 150.0})
+eq("风格轴：`--with-quality` 展开（预注册容忍带随行）",
+   {k: _v4_gate.quality_guards(k) for k in sorted(_v4_gate.LINE_METRIC)},
+   {"atk": [("wins", 0.10)], "def": [("wins", 0.10)], "win": [("deals", 0.10)]})
+ok(all(m != _v4_gate.LINE_METRIC[k] and m != "rank_points"
+       for k, ms in _v4_gate.QUALITY_GUARD.items() for m in ms),
+   "风格轴：伴随量既不是该线主口径、也不是老护栏（同一个量不需要两条护栏）",
+   str(_v4_gate.QUALITY_GUARD))
+eq("风格轴：`--guard-metric` 显式 TOL", _v4_gate.parse_guard_metric("win_points:150"),
+   ("win_points", 150.0))
+eq("风格轴：`--guard-metric` 不写 TOL ⇒ 用预注册值", _v4_gate.parse_guard_metric("wins"),
+   ("wins", 0.10))
+_gm_bad = 0
+for _spec in ("nope:1", "wins:-1", "rank_points"):      # 未登记 / 负数 / 无预注册值
+    try:
+        _v4_gate.parse_guard_metric(_spec)
+    except SystemExit:
+        _gm_bad += 1
+eq("风格轴：`--guard-metric` 形状不对 ⇒ 当场报错（不静默丢护栏）", _gm_bad, 3)
+# 合成序列：主口径 `deals` 显著变好（Δ≈+0.5），护栏 `wins` 分别掉 0.5 / 掉 0.05 / 涨 0.5。
+# ⚠ 护栏的 Δ 是**候选 − 现任** ⇒ 想让护栏掉多少就直接把它设在 `现任 ± 差价` 上（别拿主口径的 sb 去减，
+#   那减出来的差是"相对主口径"，第一条版就是这么把 −0.5 写成了 +0.0095，被这条断言当场抓住）。
+_sa = {i: 0.0 for i in range(20)}
+_sb = {i: 0.5 + 0.01 * (i % 3) for i in range(20)}
+_DECIDE_KEYS = ("delta", "lo", "hi", "p", "n", "sd", "win", "lose", "tie",
+                "need_for_2", "verdict", "adopt")
+_d0 = _v4_gate.decide(_sa, _sb, "inc", "cand", "deals")
+eq("风格轴：`decide()` 缺省**一个键都不多**（新护栏是 opt-in ⇒ 与旧版逐位可比）",
+   tuple(_d0), _DECIDE_KEYS)
+ok(_d0["adopt"] is (_d0["lo"] > 0.0) and _d0["adopt"] is True,
+   "风格轴：`decide()` 缺省 = 仅按主口径 CI 排除 0 判（adopt ⇔ lo > 0，语义未变）",
+   f"lo={_d0['lo']:+.4f}")
+_rr = {}
+for _k, _d in (("bad", -0.5), ("ok", -0.05), ("better", +0.5)):
+    _rr[_k] = _v4_gate.guard_row("wins", 0.10, _sa, {i: _d for i in _sa}, "inc", "cand")
+eq("风格轴：护栏**单侧** —— 掉 0.5（> 带 0.10）⇒ 破", _rr["bad"]["ok"], False)
+eq("风格轴：护栏**单侧** —— 掉 0.05（≤ 带 0.10）⇒ 不破", _rr["ok"]["ok"], True)
+eq("风格轴：护栏**单侧** —— 变好**不**卡人", _rr["better"]["ok"], True)
+ok(set(_rr["bad"]) == {"metric", "tol", "delta", "lo", "hi", "n", "ok"},
+   "风格轴：护栏行是同构的 `metric/tol/delta/lo/hi/ok`", str(_rr["bad"]))
+_dr = _v4_gate.decide(_sa, _sb, "inc", "cand", "deals", guards=[_rr["bad"]])
+_dk = _v4_gate.decide(_sa, _sb, "inc", "cand", "deals", guards=[_rr["ok"]])
+ok(_dr["adopt_primary"] is True and _dr["adopt"] is False and len(_dr["guards"]) == 1,
+   "风格轴：★ 主口径过 + 护栏破 ⇒ `adopt` 从真变假（红证）",
+   f"primary={_dr['adopt_primary']} adopt={_dr['adopt']} guards={_dr['guards']}")
+ok(_dk["adopt_primary"] is True and _dk["adopt"] is True,
+   "风格轴：带内（掉 0.05）⇒ 仍采纳（不是「有护栏就一律否掉」）", f"adopt={_dk['adopt']}")
 
 print(f"\n自检：检查项 {count}，失败 {len(fails)}")
 for f in fails:

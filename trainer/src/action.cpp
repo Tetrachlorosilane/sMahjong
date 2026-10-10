@@ -57,6 +57,28 @@ std::string joinPlus(const std::vector<std::string> &v) {
     return out;
 }
 
+/**
+ * 两个 `chi:a+b` 键是不是**同一手吃**（两张牌视为集合，⛔ 不看书写顺序）。
+ *
+ * 为什么要它：`Action::key()` 把吃的手牌按 `actionTileIndex` 升序写，而**赤牌槽位是 34..36、
+ * 排在全部普通牌之后** ⇒ 吃「赤5 + 6p」写成 `chi:6p+0p`；引擎枚举 `legal` 时按**种类**升序
+ * 打印（赤5 的种类就是 5）⇒ legal 里是 `chi:0p+6p`。两者是**同一个动作**，只差书写顺序。
+ * 只解析得出两张合法牌码才比，否则一律判不同（坏键不会被"约等于"成好键）。
+ */
+bool chiKeySameSet(const std::string &a, const std::string &b) {
+    if (a.size() < 5 || b.size() < 5 || a.compare(0, 4, "chi:") != 0
+            || b.compare(0, 4, "chi:") != 0) {
+        return false;
+    }
+    std::vector<std::string> x;
+    std::vector<std::string> y;
+    if (!canonical(splitChar(a.substr(4), '+'), 2, x)
+            || !canonical(splitChar(b.substr(4), '+'), 2, y)) {
+        return false;
+    }
+    return x[0] == y[0] && x[1] == y[1];
+}
+
 }  // namespace
 
 int actionTileIndex(const std::string &code) {
@@ -369,8 +391,19 @@ std::string actionResolveKey(const std::string &cmdTokens, const std::vector<std
     const Action exact = actionFromCmdTokens(cmdTokens, cmdOk);
     if (cmdOk) {
         const std::string exactKey = exact.key();
+        // ⚠ **吃：按"两张牌是同一个集合"比**（2026-10-10 修的一处**丢标签**的根因）。
+        //   为什么必须这么比：`Action::key()` / `actionFromCmdTokens()` 把牌按 `actionTileIndex`
+        //   升序规整，而**赤牌槽位是 34..36（排在全部普通牌之后）** ⇒ 吃「赤5 + 6」被写成
+        //   `chi:6p+0p`；而引擎枚举 `legal` 时按**种类**升序打印（赤5 的种类就是 5）⇒ legal 里
+        //   是 `chi:0p+6p`。精确匹配于是**必然失败**，`trace.cpp` 按"认不出的回包不编造标签"
+        //   把那一条决策行**整条丢掉** —— 实测 `meld` 轴校准跑（1000 场）丢 41 条 = 4% 的吃
+        //   （`legal` 里出现过 4149 个 `chi:0X+Y` 选项，`chosen` 里一个都没有），
+        //   直接导致 `--style-bonus-mode decision` 的付奖账判红（"取不到哪一行做了它"）。
+        //   吃的两张手牌**没有顺序语义**（先手牌还是先鸣牌不改变动作身份）⇒ 按集合比**仍然是
+        //   精确匹配**，⛔ 不是"挑一个像的"（那条纪律说的是不许放宽到"同类型第一条"）。
+        const bool isChi = (exact.type == kActChi);
         for (const std::string &k : legalKeys) {
-            if (k == exactKey) {
+            if (k == exactKey || (isChi && chiKeySameSet(k, exactKey))) {
                 ok = true;
                 return k;
             }

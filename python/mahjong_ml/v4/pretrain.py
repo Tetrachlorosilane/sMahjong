@@ -365,6 +365,14 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
         _rw = reward_rows if reward_rows.size else np.arange(style_row.size)
         _s_h = style_row[_rw] * 1000.0               # 千点 → 点
         _base_std_pts = float(np.std(base_reward[_rw])) * 1000.0
+        # ★ **逐行**读数（2026-10-10 加，`--style-bonus-mode decision` 必需）：
+        #   `_rw` 是**每小局取第一行**（`reward_rows`）—— 那对 `hand` 模式（列是小局级常数）是对的；
+        #   但 `decision` 模式只有**动作行**非 0，按"每小局第一行"采样会几乎全采到 0
+        #   ⇒ 那个尺度读数会失真（看起来"塑形没了"，其实只是采样点选错了）。
+        #   所以另给一份**真正进梯度的那些行**（学生行）上的读数 —— 两种模式同一个口径、可比。
+        _rr = keep if keep is not None else np.ones(n, dtype=bool)
+        _s_rows = style_row[_rr] * 1000.0
+        _base_rows_pts = (float(np.std(base_reward[_rr])) * 1000.0) if bool(_rr.any()) else 0.0
         stats.update({
             "style_reward": {
                 "rows": int(n),
@@ -379,6 +387,16 @@ def _hand_advantage(data: dict, v_old: np.ndarray, *, gamma: float, lam: float,
                 # 建议的 `w`（= 把这一轴抬到与结果奖励 1:1 所需的比例；见 `hand_std_vs_reward`）
                 "w_for_parity": (float(_base_std_pts / _s_h.std()) if _s_h.std() > 0
                                  else float("inf")),
+                # ★ 逐行（学生行）读数：`row_std` = 那**一列**在进梯度的行上的标准差（点），
+                #   `row_std_vs_reward` = 它与同一批行上"被减的奖励"std 的比 ⇒ `hand` 与
+                #   `decision` 两种模式的**剂量**可以当场对比（`w` 在这两种模式里是同一个量）。
+                "row_population": ("student" if keep is not None else "all"),
+                "row_n": int(_rr.sum()),
+                "row_mean": (float(_s_rows.mean()) if _rr.any() else float("nan")),
+                "row_std": (float(_s_rows.std()) if _rr.any() else float("nan")),
+                "row_base_std": _base_rows_pts,
+                "row_std_vs_reward": (float(_s_rows.std() / _base_rows_pts)
+                                      if _base_rows_pts > 0 else float("nan")),
             }})
     ref = raw if keep is None else raw[keep]
     # ⚠ **方差削减必须在归一化之前量**：归一化之后学生行的 std 恒 ≈1、非学生行是 0，
@@ -1430,12 +1448,20 @@ def train(args) -> dict:
             #   "关掉时逐位相同"连日志都不受影响）。
             sr = s["style_reward"]
             print(f"  风格奖励塑形：`{_style_reward.COLUMN}` 列覆盖 {sr['nonzero_rows']}/{sr['rows']} 行"
-                  f"（非 0 = 那一小局被付奖）；"
+                  f"（非 0 = **拿到钱的行**；`hand` 模式是小局级常数 ⇒ 整手都非 0，"
+                  f"`decision` 模式只有动作行非 0）；"
                   f"小局级 mean {sr['hand_mean']:+.1f} std {sr['hand_std']:.1f} **点** "
                   f"vs 结果奖励 std {sr['reward_base_std']:.1f} 点 ⇒ "
                   f"**{sr['hand_std_vs_reward']:.5f}× 结果奖励的尺度**"
                   f"（= 「这一轴会不会支配梯度」的**尺度**读数：远小于 1 就推不动；"
-                  f"要 1:1 大约要 `w={sr['w_for_parity']:.0f}`）")
+                  f"{_style_reward.parity_note(sr['w_for_parity'])}）")
+            # ★ 逐行（学生行）读数：`hand` 与 `decision` 两种模式的**剂量**在这一行上可比
+            #   （`hand` 的列是小局级常数、`decision` 的列只在动作行非 0 —— 用"每小局第一行"
+            #   采样会把后者几乎全采成 0，所以这一份才是两种模式共用的那把尺子）。
+            print(f"    逐行（{sr['row_population']} 行 {sr['row_n']} 行）mean {sr['row_mean']:+.1f} "
+                  f"std {sr['row_std']:.1f} 点 vs 同一批行上被减奖励 std {sr['row_base_std']:.1f} 点 "
+                  f"⇒ **{sr['row_std_vs_reward']:.3f}×**（= 塑形列相对结果奖励的方差尺度；"
+                  f"1:1 就是「这一轴与结果奖励同权」）")
             print(f"    被减的那个奖励（delta + 塑形 + 顺位点）的 std：{s['ref_std']:.3f} 千点；"
                   f"std(A_raw)/std({s['ref_name']}) = {s['std_ratio_raw']:.3f}×")
             print(f"  归一化后（学生行 z-score）std = {s['adv_std_norm_student']:.3f}"
