@@ -24,6 +24,7 @@
 | 发一版 release | `NOTES.md` §9.5 | `tools/package-release.ps1` · `docs/DEPLOY.md` |
 | 牌谱导出 / 喂复盘器 | `docs/input-json.md` | `NOTES.md` §9.6 · `tools/tenhou-log-check.mjs` |
 | 文档怎么维护 | `AGENTS.md` §8 | `tools/doc-refs-check.mjs`（预算 + 章节号 + §引用 + 本索引） |
+| **把手工反复做的验证收敛成一条命令** | **`tools/AUTOMATION.md`** | 一键全检查 `tools/all-checks.ps1` · JVM 崩溃重试 `tools/jvm-guard.mjs` · 推送核对 `tools/verify-push.mjs` · 配对评测 `tools/paired-eval.mjs` |
 | 玩家怎么玩 | `README.md` | — |
 
 ## 1. 六个板块

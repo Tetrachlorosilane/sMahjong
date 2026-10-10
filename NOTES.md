@@ -266,6 +266,10 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 
 ## 4 五层验证：每个工具的注解（命令清单见 `AGENTS.md` §4）
 
+> **要"一条命令跑完全部检查/核对推送/配对评测/JVM 崩溃重试"** ⇒ 总入口在
+> **`tools/AUTOMATION.md`**（`tools/all-checks.ps1` · `tools/jvm-guard.mjs` · `tools/verify-push.mjs` ·
+> `tools/paired-eval.mjs`）；下面这一节仍是**每一层为什么这么跑**的注解。
+
 **改完必须跑对应层，"编译通过"不算验证。** 这个项目里绝大多数 bug 是编译期发现不了的。
 
 > ⚠ **`python selfcheck.py` 在本机有三道坑（2026-10-07 实测，三条都要满足才跑得起来）**：
