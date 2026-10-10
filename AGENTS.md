@@ -266,7 +266,7 @@ node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/in
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解 + `docs/INDEX.md` 完整性（见 §8）
-node tools\handover-facts.mjs --check   # `docs/HANDOVER.md` §1 的 git 事实（基线 sha 是 HEAD 祖先 / 远端 sha+日期逐字相等 / 未推送>0 时不许写"已同步"）
+node tools\handover-facts.mjs --check   # `docs/HANDOVER.md` §1 的 git 事实（基线 sha 是 HEAD 祖先 / 远端 sha 是头或其祖先 / 未推送>0 时不许写"已同步"）
 node tools\round-index.mjs --check      # `NOTES.md` §6.5 的轮次索引表覆盖全部轮次小节（"加了轮次忘了登记"判红；⛔ 不重排正文）
 ```
 
