@@ -140,7 +140,7 @@ cd client
 | 命令 | 说明 |
 | --- | --- |
 | `mahjong-client.exe` | 正常启动：大厅 → 输入服务器地址/昵称 → 连接 → 建房或加入 |
-| `mahjong-client.exe --selftest [outdir]` | 自检（**401 项**）：牌码/协议单测 + `TableModel` 事件 + 风盘布局不变量 + 自动开关 + 结算面，并输出 PNG |
+| `mahjong-client.exe --selftest [outdir]` | 自检（**899 项**）：牌码/协议单测 + `TableModel` 事件 + 风盘布局不变量 + 自动开关 + 结算面，并输出 PNG |
 | `mahjong-client.exe --lobbytest <host> <port>` | UI 回归：连上后检查大厅「建房间」按钮是否可用，并真的点它建房（退出码 0 = 通过） |
 | `mahjong-client.exe --autoplay <host> <port> [--name 名] [--timeout 秒]` | 联调自走：真连服务端、自动建房补机器人、打完一场东风战，结果写 `autoplay.log` |
 | `mahjong-client.exe --demo <host> <port> [--bots N] [--no-answer] [--shot <png>] [--after 秒]` | 演示：起 GUI 自动进房（`--no-answer` = 建房但不自动应答，截图用），可定时把窗口渲染成 PNG 后退出 |
