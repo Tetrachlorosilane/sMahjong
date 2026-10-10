@@ -4189,9 +4189,12 @@ except v4_sr.BonusSpecError as _e:
 
 # ================================================================ `fold` 轴（**被威胁时的降り率**，2026-10-11）
 # 判据（路线 2 核心轴，与整份改动逐条对应）：
-#   ① 「被威胁」= **当行** `obs.riichi` 里有真（别家已宣言立直），現物 = `obs.events` 里该家
-#      `riichi` 事件**之后**的舍牌 **＋ 宣言牌本身**（`sideways`，麻将标准口径：进过河不与荣）；
-#   ② 付奖行 = 出牌 ∧ 被威胁 ∧ 打出的牌对**每一个**威胁家都是現物 ⇒ **方向单向**（押し那一侧付 0）；
+#   ① 「被威胁」= **当行** `obs.riichi` 里**别家**（`s != 这一行的行动者`）有真（已宣言立直；
+#      ⛔ **seat 口径写死**：行动者自己立直不算威胁 —— 立直后只能摸切、没有选择权）；
+#      現物 = `obs.events` 里该家 `riichi` 事件**之后**的舍牌 **＋ 宣言牌本身**（`sideways`）；
+#   ② 付奖行 = 出牌 ∧ 被威胁 ∧ 打出的牌对**至少一家**威胁家是現物（★ 2026-10-11 第三轮由
+#      "对**每一个**"（`all`）放宽为"对**至少一家**"（`any`）；旧口径付奖行率只有 1.0394%/行、
+#      一代配对 SE 0.170pp ⇒ CI 含 0）⇒ **方向单向**（对谁都不安全那一侧付 0）；
 #   ③ 四数自洽 `threat == fold + push + missing`，且 `fold_rows == action_rows`（独立累加）；
 #   ④ 白化 mean≈0 / var≈1；⑤ 取不到威胁状态 / 現物 ⇒ **当场硬拒**（⛔ 不按 False 静默压低付奖行率）；
 #   ⑥ `hand` 模式用它 ⇒ 报错（合并量不是"这一行" = 静默换轴）；⑦ 伴随量恒真 ⇒ 报错。
@@ -4219,54 +4222,89 @@ _fold_gb, _fold_decl = v4_sr.genbutsu_from_events(_fold_ev)
 eq("降り：現物 = 宣言牌(9m) + 宣言后的舍牌(5m/2s/赤五⇒5p)，⛔ 不含宣言前的 3z",
    sorted(_fold_gb[2]), ["2s", "5m", "5p", "9m"])
 eq("降り：宣言牌本身由 `sideways` 认定（⛔ 不猜）", _fold_decl, {2: "9m"})
-_fold_obs = {"riichi": [False, False, True, False], "events": _fold_ev}
-eq("降り：「被威胁」= **当行** `obs.riichi` 里有真（⛔ 不是'本小局曾经有人立直'）",
-   v4_sr.threat_seats(_fold_obs), (True, (2,)))
+# ★★ seat 口径写死：`seat` 是 `fold_row_ok` / `threat_missing` 的**必填参数**（⛔ 不从 obs 里猜）。
+_fold_obs = {"riichi": [False, False, True, False], "events": _fold_ev, "seat": 0}
+eq("降り：「被威胁」= **当行** `obs.riichi` 里**别家**有真（⛔ 不是'本小局曾经有人立直'）",
+   v4_sr.threat_seats(_fold_obs, 0), (True, (2,)))
+eq("降り：★ seat 口径写死 —— 行动者自己立直**不算**威胁（立直后只能摸切、没有选择权）",
+   (v4_sr.threat_seats({"riichi": [True, False, True, False], "events": _fold_ev}, 0),
+    v4_sr.threat_seats({"riichi": [True, False, False, False], "events": _fold_ev}, 0)),
+   ((True, (2,)), (True, ())))
 eq("降り：打出的牌对威胁家是現物 ⇒ 付奖行；不是 ⇒ 押し（False）",
-   (v4_sr.fold_row_ok(_fold_obs, "discard:9m"), v4_sr.fold_row_ok(_fold_obs, "discard:2s"),
-    v4_sr.fold_row_ok(_fold_obs, "discard:7p")), (True, True, False))
+   (v4_sr.fold_row_ok(_fold_obs, "discard:9m", 0), v4_sr.fold_row_ok(_fold_obs, "discard:2s", 0),
+    v4_sr.fold_row_ok(_fold_obs, "discard:7p", 0)), (True, True, False))
 eq("降り：非出牌行（pass / riichi: / ron）永远不是降り行",
-   tuple(v4_sr.fold_row_ok(_fold_obs, _c) for _c in ("pass", "riichi:1m", "ron")),
+   tuple(v4_sr.fold_row_ok(_fold_obs, _c, 0) for _c in ("pass", "riichi:1m", "ron")),
    (False, False, False))
 eq("降り：威胁判定按**牌种**（打出的赤五 `0p` 与現物 `5p` 同一种）",
-   (v4_sr.fold_row_ok(_fold_obs, "discard:5p"), v4_sr.fold_row_ok(_fold_obs, "discard:0p")),
+   (v4_sr.fold_row_ok(_fold_obs, "discard:5p", 0), v4_sr.fold_row_ok(_fold_obs, "discard:0p", 0)),
    (True, True))
+# ★★ 本次改动的**判别性红证**：两家威胁、打出的牌只对**其中一家**安全 ⇒ 新口径 `any` = 付奖行，
+#   旧口径 `all` = 押し（这一条就是"安全口径放宽度"的全部差别，⛔ 不许删）。
+_fold_ev2 = _fold_ev + [
+    {"type": "riichi", "actor": 3, "turn": 3},                                     # 第二家立直
+    {"type": "discard", "tile": "1z", "actor": 3, "turn": 3, "sideways": True},    # 它的宣言牌
+    {"type": "discard", "tile": "9p", "actor": 3, "turn": 4, "sideways": False},
+]
+_fold_obs2 = {"riichi": [False, False, True, True], "events": _fold_ev2, "seat": 0}
+eq("降り：两家威胁（2 現物 9m/5m/2s/5p、3 現物 1z/9p）",
+   v4_sr.threat_seats(_fold_obs2, 0), (True, (2, 3)))
+eq("降り：★★ 新口径 = **对至少一家**威胁家是現物 ⇒ `9m`（只对 2 安全）**是**付奖行（`all` 会判 False）",
+   (v4_sr.fold_row_ok(_fold_obs2, "discard:9m", 0),
+    v4_sr.fold_row_ok(_fold_obs2, "discard:1z", 0),      # 只对 3 安全
+    v4_sr.fold_row_ok(_fold_obs2, "discard:7p", 0)),     # 对两家都不安全 ⇒ 押し
+   (True, True, False))
 eq("降り：无威胁（没别家立直）⇒ 不是被威胁行（threat_rows 不计）",
-   (v4_sr.threat_seats({"riichi": [False] * 4, "events": _fold_ev}),
-    v4_sr.fold_row_ok({"riichi": [False] * 4, "events": _fold_ev}, "discard:9m")),
+   (v4_sr.threat_seats({"riichi": [False] * 4, "events": _fold_ev}, 0),
+    v4_sr.fold_row_ok({"riichi": [False] * 4, "events": _fold_ev}, "discard:9m", 0)),
    ((True, ()), False))
 eq("降り：`obs.riichi` 缺字段 ⇒ `available=False` + 出牌行**硬拒**标记（⛔ 不当'没威胁'）",
-   (v4_sr.threat_seats({}), v4_sr.threat_missing({"events": _fold_ev}, "discard:1m")),
+   (v4_sr.threat_seats({}, 0), v4_sr.threat_missing({"events": _fold_ev}, "discard:1m", 0)),
    ((False, ()), True))
 eq("降り：`riichi` 状态位为真但 `events` 里**没有**该家的 `riichi` 事件 ⇒ 現物重建不出来 ⇒ 硬拒标记",
-   v4_sr.threat_missing({"riichi": [False, False, True, False], "events": []}, "discard:1m"), True)
+   v4_sr.threat_missing({"riichi": [False, False, True, False], "events": []}, "discard:1m", 0), True)
 try:
     v4_sr.row_is_action("fold", "discard:1m")
     ok(False, "降り：`row_is_action('fold', …)` 必须当场报错（那会把口径偷换成'随便打一张'）")
 except v4_sr.BonusSpecError as _e:
     ok("fold_row_ok" in str(_e), "降り：`row_is_action('fold', …)` 当场报错 ⇒ 唯一落点是 `fold_row_ok` ✓",
        str(_e)[:70])
+# ★ 缺 `seat` ⇒ TypeError（**必填参数**，⛔ 没有"缺字段就四席取真"的字面口径岔路 —— 上一轮那条链
+#   实际付的就是它，冻结账比 HEAD 多 threat +4892 / fold +96 / push +4796）。
+try:
+    v4_sr.fold_row_ok(_fold_obs, "discard:9m")
+    ok(False, "降り：`fold_row_ok` 缺 `seat` 必须当场报错（seat 口径写死，⛔ 不许有默认值）")
+except TypeError:
+    ok(True, "降り：`fold_row_ok(obs, chosen, seat)` 的 `seat` **必填**（缺了当场 TypeError）✓")
 # ---- 合成 4 小局（学生席 = 0）：现物降り未放铳 / 现物降り放铳 / 押し未放铳 / 取不到 ⇒ 硬拒 ---------
 _sr_fold = scratch("v4-style-fold")
 _sr_fold_rows = [
-    # (小局, chosen, 威胁席, 事件, 放铳者) —— 小局 0/1 切 5m（席 2 立直后的現物）⇒ 降り；小局 2 切 1m ⇒ 押し
+    # (小局, chosen, 威胁席, 事件, 放铳者, `step`) —— 小局 0/1/2 切 5m（席 2 立直后的現物）⇒ 降り
+    # （小局 2 的学生**放铳** ⇒ 伴随量拦下）；小局 3 切 1m ⇒ 押し。
+    # ⚠⚠ `step` **跨小局连续**（= 生产端的真实口径：`step` 是**每一场**的决策行计数器，
+    #   实测 `g0.jsonl` 的 hand 1 首行是 `step=76`、hand 2 是 `139`）—— 这正是下面那条
+    #   "付钱路的坐标系"判据要抓的东西：行内下标是 0/0/0/0，而 `step` 是 0/1/2/3。
     (0, "discard:5m", [False, False, True, False],
      [{"type": "discard", "tile": "9m", "actor": 2, "turn": 2, "sideways": True},
       {"type": "riichi", "actor": 2, "turn": 2},
-      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], -1),
+      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], -1, 0),
     (1, "discard:5m", [False, False, True, False],
      [{"type": "discard", "tile": "9m", "actor": 2, "turn": 2, "sideways": True},
       {"type": "riichi", "actor": 2, "turn": 2},
-      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], 0),
-    (2, "discard:1m", [False, False, True, False],
+      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], -1, 1),
+    (2, "discard:5m", [False, False, True, False],
      [{"type": "discard", "tile": "9m", "actor": 2, "turn": 2, "sideways": True},
       {"type": "riichi", "actor": 2, "turn": 2},
-      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], -1),
+      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], 0, 2),
+    (3, "discard:1m", [False, False, True, False],
+     [{"type": "discard", "tile": "9m", "actor": 2, "turn": 2, "sideways": True},
+      {"type": "riichi", "actor": 2, "turn": 2},
+      {"type": "discard", "tile": "5m", "actor": 2, "turn": 3, "sideways": False}], -1, 3),
 ]
 with (_sr_fold / "g0.jsonl").open("w", encoding="utf-8") as _fh:
-    for _h, _c, _ri, _ev, _l in _sr_fold_rows:
+    for _h, _c, _ri, _ev, _l, _stp in _sr_fold_rows:
         _fh.write(json.dumps({
-            "type": "decision", "game": 0, "hand_no": _h, "step": 0, "seat": 0,
+            "type": "decision", "game": 0, "hand_no": _h, "step": _stp, "seat": 0,
             "policy": _STU, "kind": "turn", "legal": ["discard:1m", "discard:5m", "discard:9m"],
             "chosen": _c, "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1,
             "hand_loser": _l, "hand_agari": False,
@@ -4278,14 +4316,14 @@ _sr_fold_stats, _sr_fold_audit = v4_sr.whitening_stats(
     _sr_fold_spec, v4_sr.iter_hands(_sr_fold / "g0.jsonl"), student_policies={_STU}, quiet=True,
     mode="decision")
 _fa = _sr_fold_audit.axes[0]
-eq("降り：四数（被威胁行 / 降り / 押し / 取不到）= (3, 2, 1, 0)",
+eq("降り：四数（被威胁行 / 降り / 押し / 取不到）= (4, 3, 1, 0)",
    (_fa["threat_rows"], _fa["fold_rows"], _fa["push_rows"], _fa["missing_genbutsu_rows"]),
-   (3, 2, 1, 0))
+   (4, 3, 1, 0))
 eq("降り：四数自洽 `threat == fold + push + missing`",
    _fa["threat_rows"], _fa["fold_rows"] + _fa["push_rows"] + _fa["missing_genbutsu_rows"])
 eq("降り：对账 `fold_rows == action_rows`（两处独立累加）", _fa["fold_rows"], _fa["action_rows"])
-eq("降り：付奖 + 拦下 == 动作行（2 = 1 + 1；切了現物照样可能放铳 ⇒ 非恒真）",
-   (_fa["paid_rows"], _fa["blocked_rows"]), (1, 1))
+eq("降り：付奖 + 拦下 == 动作行（3 = 2 + 1；切了現物照样可能放铳 ⇒ 非恒真）",
+   (_fa["paid_rows"], _fa["blocked_rows"]), (2, 1))
 ok("genbutsu_src" in _fa and "events" in _fa["genbutsu_src"] and "threat_src" in _fa,
    "降り：账里带口径句（threat_src / genbutsu_src / row_rule）—— 不写下来就没法复判",
    f"{_fa.get('row_rule', '')[:40]}")
@@ -4298,36 +4336,63 @@ ok(_sr_fold_chk["_all_ok"]["ok"] and abs(_sr_fold_chk["fold"]["var"] - 1.0) < 1e
 # 手级指示量（`fold_hit`）与行级判据同一把尺子 ⇒ "手级=1 ⇔ 有动作行"这条蕴含不漂移
 _sr_fold_cells = [(h, s, v) for _g, h, st in v4_sr.iter_hands(_sr_fold / "g0.jsonl")
                   for s, v in v4_sr.indicator_cells(st, {_STU})]
-eq("降り：手级指示量 = 该席本小局**至少有一行**被判成付奖行（小局 0/1 ⇒ 1，小局 2 ⇒ 0）",
-   sorted(h for h, _s, v in _sr_fold_cells if v["fold"] > 0.5), [0, 1])
-# ★ **自己已立直 ⇒ 不算被威胁**（立直后只能模切、没有选择权 ⇒ 不是降り决策）。
-# ⚠ 实测 1000 场：不排自己会多数出 **300** 行，而判据侧排了 ⇒ "两套口径对不上"（判据/奖励必须同集合）。
-# 布局：小局 0 = 只有别家（2 号席）立直 ⇒ **被威胁**（切 5m 是席 2 的現物 ⇒ 降り）；
-#       小局 1 = 自己（0 号席）也立直了 ⇒ **同一行不再算被威胁行**（连付奖候选都不进）。
+eq("降り：手级指示量 = 该席本小局**至少有一行**被判成付奖行（小局 0/1/2 ⇒ 1，小局 3 ⇒ 0）",
+   sorted(h for h, _s, v in _sr_fold_cells if v["fold"] > 0.5), [0, 1, 2])
+# ★★ **付钱路的坐标系**（2026-10-11 第三轮实测的第二个坑，⛔ 这一条是它的回归判据）：
+#   预扫存下来的付奖行集合必须与 `_decision_value` 手上的键**同一个坐标系** ——
+#   `step` 是**每一场**的决策行计数器（本组 = 0/1/2/3），而行内下标是 0/0/0/0。混用会让付奖
+#   只落在"下标恰好等于 step"的少数行上：1000 场实测本该付 1578 行、实际只有 **150** 行
+#   （≈9.5% ⇒ 上一轮 `fold` 链的剂量只有名义值的十分之一）。
+_sr_fold_tr = v4_sr.BonusTracker(_sr_fold_spec, _sr_fold_stats, own_policies={_STU},
+                                 mode="decision")
+_sr_fold_tr.prebuild(_sr_fold / "g0.jsonl")
+_sr_fold_money = []
+for _h, _c, _ri, _ev, _l, _stp in _sr_fold_rows:
+    _sr_fold_money.append(round(_sr_fold_tr.value({
+        "type": "decision", "game": 0, "hand_no": _h, "step": _stp, "seat": 0,
+        "chosen": _c, "legal": ["discard:1m", "discard:5m", "discard:9m"]}), 3) != 0.0)
+eq("降り：★ **付钱路按 `step` 查集合**（小局 0/1 付奖、小局 2 被伴随量拦下、小局 3 押し；"
+   "⛔ 拿行内下标当键时小局 1（step=1）与 2（step=2）会**漏付**）",
+   _sr_fold_money, [True, True, False, False])
+eq("降り：付钱路非零行数 == 记账路付奖行数（两条路同一集合）",
+   int(sum(_sr_fold_money)), _sr_fold_audit.axes[0]["paid_rows"])
+# ★ **自己已立直 ⇒ 不算被威胁**（立直后只能摸切、没有选择权 ⇒ 不是降り决策；seat 口径写死）。
+# ⚠ 实测（上一轮 1000 场）：按字面口径（含行动者自己）会多算 threat +4892 / fold +96 / push +4796
+#   ⇒ "两套口径对不上"（判据/奖励必须同集合）。布局（学生席 = 0）：
+#   h0 只有别家（2 号席）立直 ⇒ **被威胁**（切 5m 是席 2 的現物 ⇒ 降り）；
+#   h1 **只有自己**（0 号席）立直 ⇒ ⛔ **不是被威胁行**（威胁集只数别家 ⇒ 这一行连分母都不进）；
+#   h2 自己与别家都立直 ⇒ 被威胁（威胁集 = {2}）⇒ 切 5m 仍是降り；
+#   h3 没人立直 ⇒ 不是被威胁行；h4 被威胁但切 1m（不是現物）⇒ 押し（⛔ 不付奖）。
+#   ⚠ h2 的学生**放铳**（`hand_loser=0`）⇒ `blocked_rows ≥ 1`（伴随量 `no_deal` 真的拦下过行 ——
+#   `ROW_PAIR_MUST_BLOCK` 的**实测**闸门要求非 0，⛔ 全是未放铳的合成数据会被它当场判红）。
+#   ⚠ 必须留 h3/h4 这种"非降り行"：全为降り行时 μ=1 ⇒ σ=0 ⇒ `whitening_stats` 当场报错
+#   （这一点曾经让本组**在 HEAD 上就崩**：两小局都是降り行 ⇒ BonusSpecError 直接终止自检）。
 _sr_fold_self = scratch("v4-style-fold-selfriichi")
 with (_sr_fold_self / "g0.jsonl").open("w", encoding="utf-8") as _fh:
-    for _h, _ri in ((0, [False, False, True, False]), (1, [True, False, True, False])):
+    for _h, _ri, _c, _l in ((0, [False, False, True, False], "discard:5m", -1),
+                            (1, [True, False, False, False], "discard:5m", -1),
+                            (2, [True, False, True, False], "discard:5m", 0),
+                            (3, [False] * 4, "discard:5m", -1),
+                            (4, [False, False, True, False], "discard:1m", -1)):
         _fh.write(json.dumps({
             "type": "decision", "game": 0, "hand_no": _h, "step": 0, "seat": 0,
-            "policy": _STU, "kind": "turn", "legal": ["discard:5m"], "chosen": "discard:5m",
-            "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": -1,
+            "policy": _STU, "kind": "turn", "legal": ["discard:1m", "discard:5m"], "chosen": _c,
+            "chosen_index": 0, "hand_delta": [0, 0, 0, 0], "hand_winner": -1, "hand_loser": _l,
             "hand_agari": False,
             "obs": dict(_v4obs, v=3, seat=0, riichi=_ri, riichi_turn=[0, 0, 3, 0],
-                        legal=["discard:5m"], events=_fold_ev)},
+                        legal=["discard:1m", "discard:5m"], events=_fold_ev)},
             ensure_ascii=False) + "\n")
 _sr_fold_self_au = v4_sr.whitening_stats(
     _sr_fold_spec, v4_sr.iter_hands(_sr_fold_self / "g0.jsonl"), student_policies={_STU},
     quiet=True, mode="decision")[1].axes[0]
-# ⚠⚠ 实测纠正（1000 场对账）：这一格的口径与奖励侧 `threat_seats(obs, seat)` **逐字相同**
-#   —— 它数的是"这一行有没有威胁状态"（= `fold_row_ok` 的前置集），**不是**"有没有别家立直"。
-#   自己已立直那几行进 `threat_rows`、**不进 `fold_rows`**（由 `s != seat` 排掉）
-#   ⇒ 小局 0/1 都是"1 行威胁状态 + 0 降り + 1 押し"（两小局的行都是该席自己已立直）。
-_sr_fold_self_au = v4_sr.whitening_stats(
-    _sr_fold_spec, v4_sr.iter_hands(_sr_fold_self / "g0.jsonl"), student_policies={_STU},
-    quiet=True, mode="decision")[1].axes[0]
-eq("降り：自己已立直的行进 `threat_rows`、不进 `fold_rows`（与奖励侧同集合）",
-   (_sr_fold_self_au["threat_rows"], _sr_fold_self_au["fold_rows"], _sr_fold_self_au["push_rows"]),
-   (2, 0, 2))
+# 威胁集 = {2}（别家）：h0/h2/h4 是威胁行（h1 自己立直 ⇒ **不进**；h3 没人立直 ⇒ 不进）；
+# 其中 h0/h2 切 5m = 席 2 的現物 ⇒ 降り，h4 切 1m ⇒ 押し。⛔ h1 若被算进威胁集，这一格会变 (4, 2, 2)。
+eq("降り：★ 自己已立直的行**不进**威胁集（h1 被排除）；被威胁 3 行里降り 2 / 押し 1",
+   (_sr_fold_self_au["threat_rows"], _sr_fold_self_au["fold_rows"], _sr_fold_self_au["push_rows"],
+    _sr_fold_self_au["missing_genbutsu_rows"]), (3, 2, 1, 0))
+eq("降り：★ 付奖行 + 拦下 == 动作行 == 降り行（2 = 1 + 1；h2 学生放铳 ⇒ 伴随量非恒真）",
+   (_sr_fold_self_au["action_rows"], _sr_fold_self_au["paid_rows"],
+    _sr_fold_self_au["blocked_rows"]), (2, 1, 1))
 try:
     v4_sr.whitening_stats(_sr_fold_spec, v4_sr.iter_hands(_sr_fold / "g0.jsonl"),
                           student_policies={_STU}, quiet=True, mode="hand")

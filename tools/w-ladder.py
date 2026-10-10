@@ -800,11 +800,13 @@ RIICHI_TURN_T = 8
 #: `RIICHI_TURN_KEYS` 同级：⛔ **刻意不进 `COUNT_KEYS`**（那组必须与 `style-vector.py` 的手级
 #: `counts` 逐项相等，而这里是**行级**量、对账对象是**奖励侧的审计账** `audit/<tag>.json`）：
 #:   * `f_decision_rows` = 学生席决策行数（审计账 `n_used`；单独一份，免得与 `dama` 那条口径混用）；
-#:   * `f_threat_rows` = 其中**出牌行 ∧ 被威胁**（当行 `obs.riichi` 里有真，且**别家**立的直）
+#:   * `f_threat_rows` = 其中**出牌行 ∧ 被威胁**（当行 `obs.riichi` 里**别家**为真；⛔ **不含
+#:     行动者自己** —— seat 口径写死，与奖励侧 `fold_row_ok(obs, chosen, seat)` 逐字相同）
 #:     —— = **降り率的分母**（审计账 `threat_rows`）；
-#:   * `f_fold_rows` = 其中打出的牌对**每一个**威胁家都是現物的（= **付奖行候选** = 审计账
-#:     `action_rows` / `fold_rows`）；
-#:   * `f_push_rows` = 其中不安全的（= **押し**那一侧，⛔ 不付奖）；`f_missing_rows` = 現物重建不出来；
+#:   * `f_fold_rows` = 其中打出的牌对**至少一家**威胁家是現物的（= **付奖行候选** = 审计账
+#:     `action_rows` / `fold_rows`）；⚠ 2026-10-11 第三轮由"对每一个"（`all`）放宽为"对至少一家"（`any`），
+#:     奖励侧同步改；两侧由 ≤50 场**口径冒烟测试**（`_fold-any-smoke.py`）逐键 + 逐行集合对账。
+#:   * `f_push_rows` = 其中对**谁都不**安全的（= **押し**那一侧，⛔ 不付奖）；`f_missing_rows` = 現物重建不出来；
 #:   * `fold_paid_rows` / `fold_blocked_rows` = 付奖行里"学生该小局未放铳"/"学生放铳"。
 #: ⚠ **总体 = 学生席**（2026-10-11 第二轮口径判定，30 场小样本实测）：奖励侧审计账
 #:   `axes[].threat_rows/fold_rows/push_rows` 由 `fold_row_numbers(spec, st, student_policies)` 产出，
@@ -1004,9 +1006,9 @@ def _student_per_game(tdir: Path) -> dict:
                 c["decline_paid_rows"] += 1
         # ★★ **行级**「被威胁时降り」的记账（`FOLD_KEYS`；口径见那一段注释）------------------------
         #   ⛔ 独立实现（本文件自己解 `obs.events`，**不 import** `style_reward`/`style-vector.py`）。
-        #   口径与奖励侧逐条一致：**威胁 = 别家立直**（当行 `obs.riichi` 快照，⛔ 不含学生自己）；
+        #   口径与奖励侧逐条一致：**威胁 = 别家立直**（当行 `obs.riichi` 快照，⛔ 不含行动者自己）；
         #   **現物** = 该家 `riichi` 事件**之后**的舍牌 **＋ 宣言牌本身**（`sideways`）；付奖行 =
-        #   出牌 ∧ 被威胁 ∧ 打出的牌对**每一个**威胁家都是現物（⛔ 押し那一侧不付）。
+        #   出牌 ∧ 被威胁 ∧ 打出的牌对**至少一家**威胁家是現物（⛔ 对谁都不安全的"押し"不付）。
         c.update({k: 0 for k in FOLD_KEYS})
         c.update({k: 0 for k in FOLD4_KEYS})
         for i, seat, hn, chosen, _has, _ori, _ort, _dt, threats, events in dec_rows:
@@ -1070,12 +1072,17 @@ def _student_per_game(tdir: Path) -> dict:
                 if not _tk:
                     _cls = "missing"
                 else:
-                    # ⚠ 判据是"**对每一个威胁家都是現物**"：牌种 `_tk` 要么在它宣言点之后的舍牌里，
-                    #   要么**就是它的宣言牌**（`sideways` 那张 —— 麻将标准口径：进过河不与荣）。
+                    # ★★ **安全口径（2026-10-11 第三轮，本批）= 对至少一家威胁家是現物**（`any`）：
+                    #   牌种 `_tk` 只要在**某一个**威胁家宣言点之后的舍牌里、或是**它的宣言牌**
+                    #   （`sideways` 那张 —— 麻将标准口径：进过河不与荣），就算降り行。
+                    #   ⚠ 旧口径是 `all`（对**每一个**威胁家都安全）⇒ 付奖行率只有 1.0394%/行、
+                    #   一代配对 SE 0.170pp、CI 含 0；新口径普查实测 ≈8.6%/行。奖励侧同步
+                    #   （`style_reward.fold_row_ok` 的 `any`），由 ≤50 场**口径冒烟测试**逐行对账
+                    #   （`_fold-any-smoke.py`）。
                     #   ⛔ 别写成 `_tk in ev_seen[s] or _tk == decl_seen.get(s)`：`_tk` 恒非空，而
                     #   `decl_seen.get(s)` 在"没有 `sideways` 事件"时是 `None` ⇒ 那一项恒假（看起来无害），
                     #   但**空串**时会恒真 —— 这类"拿 `.get()` 的缺省值当牌码比"的写法正是错一位的来源。
-                    _safe = all((_tk in ev_seen[s])
+                    _safe = any((_tk in ev_seen[s])
                                 or (_tk == decl_seen[s] if s in decl_seen else False)
                                 for s in others)
                     _cls = "fold" if _safe else "push"
@@ -1327,7 +1334,8 @@ def _fold_aggregate(tot: dict, games: int) -> dict:
 def _verify_fold_totals(per_game: dict, tag: str, audit: dict | None = None) -> dict:
     """★★ **判据与奖励对账**（`fold` 轴）：行级判据的每一格 == 奖励侧审计账的对应键。
 
-    为什么这条是硬判据：奖励侧的付奖行 = "**出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物**"，
+    为什么这条是硬判据：奖励侧的付奖行 = "**出牌 ∧ 被威胁（别家立直）∧ 对至少一家威胁家是現物**"
+    （⚠ 2026-10-11 第三轮把安全口径由 `all` 放宽为 `any`；判据侧 `_student_per_game` 同步），
     而判据侧必须量**同一个集合**（否则"推的是不是这个行为"没法证伪）。独立性的边界：
     本函数**只看轨迹**（`_student_per_game` 自己解 `obs.events`，⛔ 不 import `style_reward`），
     奖励侧的数从 `audit/<tag>.json` **读**；口径句（`row_rule` / `genbutsu_src` / `threat_src`）
@@ -1647,8 +1655,9 @@ def post(label: str, dry: bool = False, games: int = GAMES, workers: int = 12,
                "aggregate": {"pre": _fold_aggregate(_fold_totals(per_pre), len(per_pre)),
                              "post": _fold_aggregate(_fold_totals(per_post), len(per_post))},
                "note": "行级「被威胁时降り」：付奖行 = **出牌 ∧ 被威胁（别家立直）∧ 打出的牌对"
-                       "**每一个**威胁家都是現物**（= 奖励侧 `fold_row_ok` 的**同一集合**）；"
-                       "⛔ 押し（不安全）那一侧一行都不付。"}
+                       "**至少一家**威胁家是現物**（= 奖励侧 `fold_row_ok(obs, chosen, seat)` 的"
+                       "**同一集合**；⚠ 2026-10-11 第三轮由 `all` 放宽为 `any`）；"
+                       "⛔ 对谁都不安全的「押し」那一侧一行都不付。"}
     res = {"tool": "tools/w-ladder.py post", "label": label, "generations": n,
            "final_net": str(net), "student_spec": labs[si], "policy": labs,
            "games": games, "seed": seed, "log": str(log),
@@ -1885,7 +1894,11 @@ def _companion_from_dirs(pre_dir: Path, post_dir: Path,
         raise SystemExit(f"⛔ 轨迹已被删（`g*.jsonl` 不在）⇒ 逐场配对算不出来；"
                          f"改用 `--paired <已算好的 paired/*.json>`（seed_base={seed}）")
     for tdir, per in ((pre_dir, per_pre), (post_dir, per_post)):
-        js = STYLE_VEC / f"{tdir.name}.json"
+        # ⚠⚠ **补采那一侧的读数是 `<tag>-POST.json`**（`post` 写的），而 `traces/` 与 `traces-post/`
+        #   下的目录**同名**（都叫 `<tag>`）⇒ 只按目录名找 JSON 会让补采侧去对**训练前**那份 counts
+        #   ⇒ 必然报"逐场账与 style-vector 对不上"（实测本批：`quality --pre traces/<tag>
+        #   --post traces-post/<tag>` 一百年也过不了）。判据 = 父目录是不是 `traces-post`。
+        js = STYLE_VEC / f"{tdir.name}{'-POST' if tdir.parent.name == TRACES_POST.name else ''}.json"
         if js.is_file():
             _verify_pair_totals(per, json.loads(js.read_text(encoding="utf-8")), tdir.name)
         else:

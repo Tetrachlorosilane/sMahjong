@@ -147,17 +147,24 @@
 ⛔ 但 **`hand` 模式下不许用它**（`DECISION_ONLY_AXES`）：`hand` 的合并量是"这一小局有没有人早立直"，
 **不是**"宣言那一行" ⇒ 与 `dama` 同理，那等于静默换轴。
 
-## `fold` 轴（**被威胁时的降り率**：切"对**所有**威胁家都安全"的牌，2026-10-11 加）
+## `fold` 轴（**被威胁时的降り率**：切"对**至少一家**威胁家安全"的牌，2026-10-11 加）
 
 **动机（`AXIS-CENSUS.md` 的路线 2 核心轴）**：A 轴是普查里**唯一"高频（机会行 15.30%）且真有杠杆"**的轴
 （付奖行 6.14%；`deal` 付奖行 28.7% vs 对照行 21.0% = 判别力 **+7.7pp**）。⚠ 但强口径的引擎危险度
 （`rules/Danger.java`）**不在 `obs` 里** ⇒ 本轴只能走**弱口径 = 現物（genbutsu）**。
 
+⚠ **安全口径改过一轮（2026-10-11 第三轮，本批）**：旧口径 = "对**每一个**威胁家都是現物"（`all`），
+付奖行率仅 **1.0394%/行**（刚过 1% 门槛）、一代配对 SE **0.170pp**、CI 含 0 ⇒ 判"测不动"；
+新口径 = "对**至少一家**威胁家是現物"（`any`），普查实测付奖行率 ≈ **8.6%/行**。
+改动点三处一起（⛔ 缺一处就是两套尺子）：`fold_row_ok`（`all`→`any`）、`threat_missing | fold_row_ok`
+的 `seat` **必填**（威胁集只数**别家**；付钱路 `_decision_rule` 也要传行的 `seat`）、
+判据侧 `tools/w-ladder.py` 的 `_student_per_game` / `FOLD_KEYS`。
+
 | | `fold` 轴 |
 | --- | --- |
-| 「被威胁」（**只用公开信息**） | 该行 `obs.riichi[s]` 为真（`s` 是**这一行的行动者**）的 `s` 至少一个 —— 立直宣言已发生 |
-| 付奖行（**唯一**口径） | **该行是出牌行**（`chosen` 以 `discard:` 开头）∧ **被威胁** ∧ 打出的牌对**每一个**威胁家都是**現物** |
-| 現物（弱口径安全牌） | 重建规则见 `_genbutsu_from_events`：**只用** `obs.events` —— 取该家 `type=="riichi"` 那条事件**之后**的 `discard` 事件牌（**宣言牌本身不算**，与 `PROTOCOL.md` §8.2 判据 2「宣言那张算立直**之前**」同一把尺子）。⚠ 只用公开事件；不读别家手牌 / 牌山 / 里宝 / 别家听牌 |
+| 「被威胁」（**只用公开信息**） | 该行 `obs.riichi[s]` 为真（`s` 是**这一行的行动者以外的**座位）的 `s` 至少一个 —— 立直宣言已发生；⚠ **⛔ 只数别家**（行动者自己立直不算威胁：立直后只能摸切、没有选择权，那几行不是降り决策） |
+| 付奖行（**唯一**口径） | **该行是出牌行**（`chosen` 以 `discard:` 开头）∧ **被威胁** ∧ 打出的牌对**至少一家**威胁家是**現物** |
+| 現物（弱口径安全牌） | 重建规则见 `_genbutsu_from_events`：**只用** `obs.events` —— 取该家 `type=="riichi"` 那条事件**之后**的 `discard` 事件牌 **＋ 宣言牌本身**（`sideways`，与 `PROTOCOL.md` §8.2 判据 2「宣言那张算立直**之前**」同一把尺子）。⚠ 只用公开事件；不读别家手牌 / 牌山 / 里宝 / 别家听牌 |
 | 方向 | ⛔ **单向：降り率 ↑** —— 只对"选了安全牌"的那些行付奖，**不安全那一侧一分钱都不付**（不做负奖、也不做"越安全越多"） |
 | 手级指示量 | 该席本小局**至少有一行**被判成付奖行（与行级**同一把尺子** ⇒ `decision_violations` 的蕴含成立；⛔ 它**不**是"降り率"这个比值） |
 | 伴随质量轴 | `no_deal`（该小局未放铳）—— ⛔ **不是恒真**：切了現物**照样可能放铳**（自摸/被别家荣和），判据由 `ROW_PAIR_MUST_BLOCK` 的**实测**闸门钉住：`blocked_rows` 必须 > 0 |
@@ -274,12 +281,17 @@ ROW_TURN_LIMIT: dict[str, int] = {"riichi_turn": 8}
 ROW_ACTION_TURN: dict[str, str] = {"riichi_turn": RIICHI_PREFIX}
 
 #: ★★ **"被威胁时切了安全牌"型**的行级判据（`fold` = 降り率，2026-10-11 加）：轴 → **出牌**的动作前缀。
-#: 付奖行 = **出牌行** ∧ **被威胁**（该行 `obs.riichi[这一行的行动者]` 里有真）∧ 打出的牌对**每一个**
-#: 威胁家都是**現物**（重建规则见 `_genbutsu_from_events`）。⛔ **方向单向**：不安全那一侧
-#: （"押し"）**一分钱都不付** —— 不做负奖、也不做"越安全越多"（那会把"危险度"也变成一个被优化的方向，
-#: 与"降り率 ↑"这条约定自相矛盾；理由与剂量见 `S:\mahjong-training\w-ladder\PREREGISTRATION-FOLD.md`）。
+#: 付奖行 = **出牌行** ∧ **被威胁**（该行 `obs.riichi` 里**别家**有真）∧ 打出的牌对**至少一家**威胁家
+#: 是**現物**（重建规则见 `_genbutsu_from_events`）。
+#: ★ 2026-10-11 第三轮（本批）：安全口径由"对**每一个**威胁家都是現物"（`all`）**放宽**为
+#: "对**至少一家**威胁家是現物"（`any`）—— 旧口径付奖行率仅 1.0394%/行（刚过门槛）、一代配对
+#: SE 0.170pp ⇒ CI 含 0；新口径普查实测 ≈8.6%/行。判据侧同步（`tools/w-ladder.py` 的 `FOLD_KEYS`）。
+#: ⛔ **方向单向**：不安全那一侧（"押し"）**一分钱都不付** —— 不做负奖、也不做"越安全越多"。
+#: ⛔ **seat 口径写死**：威胁集只数**别家**（`fold_row_ok(obs, chosen, seat)` 的 `seat` 必填），
+#: 因为立直之后只能摸切、没有选择权 ⇒ 那几行不是降り决策（上一轮"字面口径"的教训见 `fold_row_ok`）。
 #: ⚠ 弱口径的来由：引擎危险度（`rules/Danger.java`）**不在 `obs` 里** ⇒ 只能用**公开舍牌**算的**現物**
-#: 当"安全"的弱代理（`AXIS-CENSUS.md` 的"⛔ 取不到的量"）。
+#: 当"安全"的弱代理（`AXIS-CENSUS.md` 的"⛔ 取不到的量"）。剂量与判决见
+#: `S:\mahjong-training\w-ladder\PREREGISTRATION-FOLD-ANY.md`。
 ROW_ACTION_FOLD: dict[str, str] = {"fold": "discard:"}
 
 #: 能在 `decision` 模式下当**付奖轴**的那些轴（含"能而不为" / "带巡目门槛" / "被威胁时降り"那三条）。
@@ -450,19 +462,33 @@ def genbutsu_sets(obs: dict, threats) -> tuple[bool, dict[int, frozenset]]:
     return True, out
 
 
-def fold_row_ok(obs: dict, chosen) -> bool:
-    """★ `fold` 轴的**唯一**行级判据：**这一行**是"出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物"吗。
+def fold_row_ok(obs: dict, chosen, seat: int) -> bool:
+    """★ `fold` 轴的**唯一**行级判据：**这一行**是"出牌 ∧ 被威胁 ∧ 对**至少一家**威胁家是現物"吗。
 
     ⛔ **单向**（见 `ROW_ACTION_FOLD`）：不安全那一侧返回 False 一分钱都不付。
-    ⛔ 取不到威胁状态 / 現物 ⇒ 由 `_threat_missing` 的**硬拒**负责（本函数在这里按 False 返回，
+    ⛔ 取不到威胁状态 / 現物 ⇒ 由 `threat_missing` 的**硬拒**负责（本函数在这里按 False 返回，
     但调用方（`HandState.feed`）**同一行**就会把它记进 `row_threat_missing` 并当场报错）。
+
+    ★★ **`seat` = 这一行的行动者**（必填、且由调用方**显式**传入；⛔ 不从 `obs["seat"]` 里读）：
+    威胁集 = `obs.riichi` 里为真的**别家**座位（`s != seat`）。为什么必须写死：立直之后只能摸切、
+    **没有选择权** ⇒ 那几行不是降り决策。上一轮链实测的教训 —— 付钱那条路（`_row_obs` 不带 seat）
+    偷偷按"含行动者自己"的**字面口径**算（冻结账比 HEAD 多 threat +4892 / fold +96 / push +4796），
+    所以现在把座位做成**必填参数**：两条路（`HandState.feed` / `BonusTracker._decision_rule`）
+    都只能从**行的 `seat`** 取，⛔ 没有"缺字段就退回四席取真"的岔路。
+
+    ★★ **安全口径（2026-10-11 第三轮，本批改动）= 「对至少一家威胁家是現物」**（`any`）：
+    旧口径是"对**每一个**威胁家都是現物"（`all`）。放宽的依据与代价见
+    `S:/mahjong-training/w-ladder/PREREGISTRATION-FOLD-ANY.md`：旧口径付奖行率仅 1.0394%/行
+    （刚过 1% 门槛）⇒ 一代配对 SE 0.170pp、CI 含 0；新口径普查实测付奖行率 ≈ 8.6%/行。
+    ⚠ 判据侧（`tools/w-ladder.py` 的 `_student_per_game` / `FOLD_KEYS`）**同步改成 `any`**，
+    由 ≤50 场**口径冒烟测试**逐键 + 逐行集合对账（⛔ "命令行一样"不算）。
 
     ⚠ 威胁判定**按行取**（当行的 `obs.riichi` 快照），不是"本小局曾经有人立直" —— 见模块 docstring。
     """
     t = str(chosen or "")
     if not t.startswith(ROW_ACTION_FOLD["fold"]):
         return False                                   # 不是出牌行（鸣牌询问 / pass / riichi / win）
-    avail, threats = threat_seats(obs, (obs or {}).get("seat"))
+    avail, threats = threat_seats(obs, seat)
     if not avail or not threats:
         return False
     ok, sets = genbutsu_sets(obs, threats)
@@ -471,19 +497,20 @@ def fold_row_ok(obs: dict, chosen) -> bool:
     tk = tile_kind(t.split(":", 1)[1])
     if not tk:
         return False
-    return all(tk in sets[s] for s in threats)
+    return any(tk in sets[s] for s in threats)          # ★★ 「对至少一家威胁家是現物」（旧 = all）
 
 
-def threat_missing(obs: dict, chosen) -> bool:
+def threat_missing(obs: dict, chosen, seat: int) -> bool:
     """★ **硬拒判据**（见 `FOLD_GENBUTSU_ERR`）：这一行是**出牌行**却取不到"被威胁 / 現物"吗。
 
     ⚠ 只在**出牌行**上判：鸣牌询问行（`chosen` 是 `pass`/`chi:`/…）与和了行没有"降り"这件事，
     对它们要求 `obs.riichi`/`events` 只是白白硬拒（而它们本来就不可能是付奖行）。
+    ⚠ `seat` 与 `fold_row_ok` **同一个**（这一行的行动者；见那里的 ★★ 段）。
     """
     t = str(chosen or "")
     if not t.startswith(ROW_ACTION_FOLD["fold"]):
         return False
-    avail, threats = threat_seats(obs, (obs or {}).get("seat"))
+    avail, threats = threat_seats(obs, seat)
     if not avail:
         return True
     if not threats:
@@ -532,8 +559,9 @@ def row_is_action(axis: str, chosen: str, legal=None, turn: int | None = None) -
     if axis in ROW_ACTION_FOLD:
         raise BonusSpecError(
             f"轴 {axis!r} 的行级判据**不是**'`chosen` 长什么样'，而是"
-            f"`fold_row_ok(obs, chosen)`（出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物）—— "
-            f"它要**整份 `obs`**（`obs.riichi` + `obs.events` 重建的現物）。⛔ 不在这里按前缀返回 True"
+            f"`fold_row_ok(obs, chosen, seat)`（出牌 ∧ 被威胁（**别家**立直）∧ 对**至少一家**威胁家"
+            f"是現物）—— 它要**整份 `obs`**（`obs.riichi` + `obs.events` 重建的現物）与这一行的"
+            f"**行动者座位**。⛔ 不在这里按前缀返回 True"
             f"（那等于把'被威胁时切了安全牌'偷换成'随便打了一张牌'）")
     if axis in ROW_ACTION_PREFIX:
         return chosen.startswith(ROW_ACTION_PREFIX[axis])
@@ -702,10 +730,11 @@ AXES: dict[str, dict] = {
     },
     "fold": {
         "kind": "bernoulli",
-        "meaning": ("被威胁时的降り（**切了对所有威胁家都安全的現物**）：行级付奖行 = 出牌行 ∧ "
-                    "被威胁（该行 `obs.riichi` 里有真）∧ 打出的牌对**每一个**威胁家都是現物；"
-                    "手级指示量 = 该席本小局至少有一行这样的（只服务结构不变量，⛔ 不是降り率）"),
-        "src": ("行级：`fold_row_ok(obs, chosen)`（出牌前缀 + `obs.riichi` 当行快照 + "
+        "meaning": ("被威胁时的降り（**切了对至少一家威胁家安全的現物**）：行级付奖行 = 出牌行 ∧ "
+                    "被威胁（该行 `obs.riichi` 里**别家**有真）∧ 打出的牌对**至少一家**威胁家"
+                    "（⛔ 只数别家）是現物；手级指示量 = 该席本小局至少有一行这样的"
+                    "（只服务结构不变量，⛔ 不是降り率）"),
+        "src": ("行级：`fold_row_ok(obs, chosen, seat)`（出牌前缀 + `obs.riichi` 当行快照 + "
                 "`obs.events` 重建的現物，見 `genbutsu_from_events`；仅公开信息）；"
                 "手级：`HandState.fold_hit`（同一个 `fold_row_ok`）"),
         "style_vector": ("⛔ 不在 `tools/style-vector.py` 里（那是**手级**口径的独立实现）："
@@ -867,7 +896,15 @@ class HandState:
     #: ⚠ 只存这两样：手级指示量已经在上面那几列里，多存一份 obs 只是白占内存（一手 ~60 行）。
     row_seat: list[int] = field(default_factory=list)
     row_chosen: list[str] = field(default_factory=list)
-    #: ★ 逐行："这一行的 `legal` 里有 `riichi:*` 吗"（`dama` 轴的付奖行判据要的那一半）。
+    #: ★★ 逐行：**这一行**的 `step`（轨迹里的决策行计数器；`None`/缺失 ⇒ `-1`）。
+    #: ⚠⚠ **必须有它**：`step` 是**每一场（game）**从头数的计数器（实测 `g0.jsonl`：hand 0 的
+    #: 首行 `step=0`、hand 1 的首行 `step=76`、hand 2 是 `139`…），而 `rows_in_scope` 给的是
+    #: **每一小局的行内下标**（每个小局都从 0 开始）。付钱那条路（`_decision_value`）手上只有
+    #: `row["step"]` ⇒ 存行内下标当键会**两套坐标系混用**：实测（1000 场折叠账）本该付 1578 行，
+    #: 实际只有 **150** 行拿到钱（≈9.5%，纯属下标巧合）—— 即上一轮那条 `fold` 链的**剂量只有
+    #: 名义值的十分之一**。现在按 `step` 建集合（与 `_decision_value` 同一坐标系）。
+    row_step: list[int] = field(default_factory=list)
+    #: ★★ 逐行："这一行的 `legal` 里有 `riichi:*` 吗"（`dama` 轴的付奖行判据要的那一半）。
     #: `None` = 这一行的轨迹里**没有** `legal` ⇒ 对 `dama` 是无定义（`legal_has` 当场报错，不猜）。
     #: ⚠ 只存这个**布尔**、不存整份 `legal`：判据只有一条（"能立而不立"），存全量只是白占内存。
     row_legal_riichi: list[bool | None] = field(default_factory=list)
@@ -884,7 +921,8 @@ class HandState:
     #: ⚠ 它与行级判据必须是**同一把尺子**（同一个 `ROW_TURN_LIMIT`、同一个 `player_draws`），否则
     #: `decision_violations` 的蕴含（手级=1 ⇔ 有动作行）会漂移。
     early_decl: list[bool] = field(default_factory=lambda: [False] * SEATS_PER_TABLE)
-    #: ★★ 逐行：**这一行**是不是 `fold` 轴的付奖行（= 出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物）。
+    #: ★★ 逐行：**这一行**是不是 `fold` 轴的付奖行（= 出牌 ∧ 被威胁（**别家**立直）∧
+    #: 打出的牌对**至少一家**威胁家是現物；`fold_row_ok(obs, chosen, seat)`，seat 必填）。
     #: ⚠ 与 `row_legal_riichi` / `row_declared_turn` 同理：**存判据的结果**、不在别处重算一遍
     #: （预扫的 `HandState` 与写列时的 `row` 各算一套必然漂移）。
     row_fold: list[bool] = field(default_factory=list)
@@ -928,6 +966,9 @@ class HandState:
         #   ⇒ 宣言之后的每一行 `obs.riichi[seat]` 都是 true，不能拿它当行级判据）。
         self.row_seat.append(seat)
         self.row_chosen.append(chosen)
+        # ★ 逐行的 `step`（**付钱路的坐标系**：`_decision_value` 只有 `row["step"]`；见 `row_step`）。
+        _stp = row.get("step")
+        self.row_step.append(int(_stp) if isinstance(_stp, int) and not isinstance(_stp, bool) else -1)
         # ★ 逐行的"这一行能立直吗"（`dama` 轴的付奖行判据）。行上的 `legal` 与 `obs.legal`
         #   必须一致（`dataset.py` 会硬校验这一条）⇒ 优先取行上的，行上没有再看 obs，都没有 = None。
         legal = row.get("legal")
@@ -949,19 +990,21 @@ class HandState:
                 and _dt is not None and int(_dt) <= int(ROW_TURN_LIMIT["riichi_turn"]):
             self.early_decl[seat] = True
         # ★★ **被威胁时的降り**（`fold` 轴）的逐行判据 —— 与 `row_is_axis_action` 的 `ROW_ACTION_FOLD`
-        #   分支**同一个函数**（唯一落点）：出牌 ∧ 被威胁 ∧ 对所有威胁家都是現物。
+        #   分支**同一个函数**（唯一落点）：出牌 ∧ 被威胁（**别家**立直）∧ 对**至少一家**威胁家現物。
         #   ⚠ 这里只**记**（预扫那条路）：`row_threat_missing` 非 0 ⇒ 由 `whitening_stats` 当场硬拒
         #   （"取不到威胁状态 / 現物"⇒ 按 False 跳过会把付奖行率静默压低，见 `FOLD_GENBUTSU_ERR`）。
         #   ⚠ 四个数（被威胁 / 降り / 押し / 取不到）各自独立数出来 ⇒ "降り行数 == 审计账 action_rows"
         #   才是**对账**而不是同义反复。
+        #   ⚠⚠ `seat` **显式传入**（= 这一行的行动者；`fold_row_ok` / `threat_missing` 都是必填参数）
+        #   ⇒ 坐位口径写死成"只数别家"，⛔ 不再有"obs 里没 seat 就四席取真"的字面口径岔路。
         _is_discard = str(chosen or "").startswith(ROW_ACTION_FOLD["fold"])
         _avail, _threats = threat_seats(obs, seat)
-        # ⚠ `threat_rows` = **被威胁的出牌行**（至少一家 `obs.riichi` 为真 ∧ 出牌）。
+        # ⚠ `threat_rows` = **被威胁的出牌行**（至少一家**别家** `obs.riichi` 为真 ∧ 出牌）。
         #   ⛔ "取不到威胁状态 / 現物"的那几行不进这一格（它们本连"有没有被威胁"都无定义），
         #   而是进 `row_threat_missing` → 由 `whitening_stats` **当场硬拒**（见 `FOLD_GENBUTSU_ERR`）。
         _threat_row = bool(_is_discard and _avail and _threats)
-        _missing = bool(_is_discard and threat_missing(obs, chosen))
-        _fold = fold_row_ok(obs, chosen)
+        _missing = bool(_is_discard and threat_missing(obs, chosen, seat))
+        _fold = fold_row_ok(obs, chosen, seat)
         # ★ 逐行记"公开切片"（只 `riichi` / `events` 两样）—— `row_is_axis_action('fold')` 与
         #   `BonusTracker._decision_rule` 都靠它，⛔ 不在别处重读 `row`（两条来源必然漂移）。
         self.row_obs_public.append({"riichi": obs.get("riichi"),
@@ -1263,7 +1306,8 @@ def fold_row_numbers(spec: BonusSpec, st: HandState, student_policies: set[str] 
     口径（每一行只落在其中一格：`threat_rows == fold_rows + push_rows`；另有一格
     `threat_missing_rows` = **无定义的那些行** —— 它们不进分母，而是**当场硬拒**）：
       * `threat_rows` = 范围内 **出牌行 ∧ 至少一家 `obs.riichi` 为真** 的行数（= 降り率的**分母**）；
-      * `fold_rows` = 其中**打出的牌对所有威胁家都是現物**的（= **付奖行候选** = 奖励侧的"动作行"）；
+      * `fold_rows` = 其中**打出的牌对至少一家威胁家是現物**的（= **付奖行候选** = 奖励侧的
+        "动作行"；⚠ 2026-10-11 第三轮由 `all` 放宽为 `any`）；
       * `push_rows` = 其中**不安全**的（= **押し**那一侧；⛔ 一分钱都不付 —— 方向单向）；
       * `threat_missing_rows` = 其中 `obs.riichi` / `obs.events` 取不到、**現物重建不出来**的
         （⛔ 非 0 就对 `fold` 轴**当场硬拒**，见 `FOLD_GENBUTSU_ERR`；不静默当"没被威胁"或"不安全"）。
@@ -1641,13 +1685,14 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                     "fold_rows": fnum[ax.name]["fold_rows"],
                     "push_rows": fnum[ax.name]["push_rows"],
                     "missing_genbutsu_rows": fnum[ax.name]["threat_missing_rows"],
-                    "threat_src": ("该行 `obs.riichi[这一行的行动者]` 里有真（当行公开快照；"
-                                   "⛔ 不是'本小局曾经有人立直'）"),
+                    "threat_src": ("该行 `obs.riichi` 里**别家**（`s != 这一行的行动者`）为真"
+                                   "（当行公开快照；⛔ 不是'本小局曾经有人立直'，"
+                                   "⛔ 也不含行动者自己 —— seat 口径写死：立直后只能摸切）"),
                     "genbutsu_src": ("`obs.events` 里该家 `type==\"riichi\"` 那条事件**之后**的 "
                                      "`discard` 牌 **＋ 宣言牌本身**（`sideways`；麻将标准口径："
                                      "进过河不与荣）；仅公开信息"),
-                    "row_rule": ("`chosen` 以 `discard:` 开头 ∧ 被威胁 ∧ 打出的牌对**每一个**威胁家"
-                                 "都是現物（⛔ 不安全那一侧一分钱不付）")}
+                    "row_rule": ("`chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对"
+                                 "**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）")}
                    if (mode == MODE_DECISION and ax.name in ROW_ACTION_FOLD) else {})}
               for ax in spec.axes],
     )
@@ -1708,9 +1753,10 @@ def whitening_stats(spec: BonusSpec, hands, *, student_policies: set[str] | None
                     #   取不到（現物重建不出来）。
                     fn = fnum[ax.name]
                     _rate = (d["action_rows"] / fn["threat_rows"]) if fn["threat_rows"] else float("nan")
-                    print(f"     ★ 被威胁时降り（`{ax.name}`，弱口径 = 現物）：**被威胁的出牌行** "
-                          f"{fn['threat_rows']}｜其中**切了对所有威胁家都安全的現物** "
-                          f"{fn['fold_rows']}（= 付奖行候选）｜**押し**（不安全）{fn['push_rows']}"
+                    print(f"     ★ 被威胁时降り（`{ax.name}`，弱口径 = 現物，"
+                          f"安全口径 = **对至少一家**威胁家安全）：**被威胁的出牌行** "
+                          f"{fn['threat_rows']}｜其中**切了对至少一家威胁家安全的現物** "
+                          f"{fn['fold_rows']}（= 付奖行候选）｜**押し**（对谁都不安全）{fn['push_rows']}"
                           f"｜現物取不到 {fn['threat_missing_rows']}")
                     print(f"     ★ 对账：降り行 {fn['fold_rows']} == 动作行 {d['action_rows']}"
                           f"（{'✓' if fn['fold_rows'] == d['action_rows'] else '✗ **对不上**'}）"
@@ -1889,7 +1935,10 @@ class BonusTracker:
             require_row_axes(self.spec)          # ⛔ 与 `whitening_stats` 同一道前置闸门
         #: `(game, hand_no) -> bonus`（**一个小局一个值**，四行同值；`hand` 模式）
         self.cache: dict[tuple[int, int], float] = {}
-        #: `(game, hand_no) -> (范围内席位, {轴: (质量轴成立, 动作行拿多少点)}, 被记录的和了者)`（`decision` 模式）
+        #: `(game, hand_no) -> (范围内席位, {轴: (质量轴成立, 动作行拿多少点)}, 被记录的和了者,
+        #: `fold` 付奖行的 **`step`** 集合)`（`decision` 模式）
+        #: ⚠ 第四个分量装的是 **`step`**（每场计数器；与 `_decision_value` 的 `row["step"]` 同坐标系）
+        #: —— ⛔ 不是行内下标（混用会让付奖只落在少数巧合行上，见 `HandState.row_step`）。
         self.dcache: dict[tuple[int, int],
                           tuple[frozenset, dict[str, tuple[bool, float]], int,
                                 frozenset]] = {}
@@ -1963,10 +2012,22 @@ class BonusTracker:
             return (frozenset(), {}, int(st.winner), frozenset())
         merged = _merge_cells(cells)
         seats = frozenset(s for _i, s, _c in rows_in_scope(st, self.own_policies))
-        # ★★ `fold` 的付奖行**行号集合**（预扫那条路算出来的、判据口径唯一的一份）——
+        # ★★ `fold` 的付奖行**集合**（预扫那条路算出来的、判据口径唯一的一份）——
         #   写列时按行号查（⛔ 不重算：两条实现各算一套必然漂移，那是本仓最经典的静默错位）。
-        fold_rows = frozenset(i for i, _s, c in rows_in_scope(st, self.own_policies)
-                              if fold_row_ok(_row_obs(st, i), c))
+        #   ⚠⚠ `seat` = 这一行的**行动者**（`rows_in_scope` 给的那个 `_s`），**显式传入**
+        #   ⇒ 付钱路与记账路（`HandState.feed` 里那份 `row_fold`）是**同一把尺子**。
+        #   上一轮的坑：`_row_obs` 不带 `seat` ⇒ 这里按"含行动者自己"的**字面口径**算，
+        #   而记账路按"只数别家"算 ⇒ 真正付出去的钱与审计账不同源（冻结账 +4892/+96/+4796）。
+        #   ⚠⚠⚠ **键必须是 `step`（每场计数器），不是行内下标**（`rows_in_scope` 的 `i`）：
+        #   `_decision_value` 手上只有 `row["step"]` ⇒ 拿行内下标当键 = 两套坐标系混用，
+        #   付奖只会落在"下标恰好等于 step"的少数行上（实测 1000 场：本该 1578 行、实际 **150** 行
+        #   ⇒ 上一轮那条链的**剂量只有名义值的 ≈9.5%**）。契约由 `smoke` 与 `selfcheck` 的行集合判据钉住。
+        fold_steps: list[int] = []
+        for i, _s, c in rows_in_scope(st, self.own_policies):
+            if 0 <= i < len(st.row_step) and st.row_step[i] >= 0 \
+                    and fold_row_ok(_row_obs(st, i), c, _s):
+                fold_steps.append(st.row_step[i])
+        fold_rows = frozenset(fold_steps)
         per: dict[str, tuple[bool, float]] = {}
         for ax in self.spec.axes:
             ok = pair_ok(ax.pair, merged)
@@ -2028,9 +2089,10 @@ class BonusTracker:
             if ax.name in ROW_ACTION_FOLD:
                 # ★★ **被威胁时的降り**：判据要"这一行**当时**的公开状态"（`obs.riichi` 当行快照 +
                 #   `obs.events` 重建的現物），而写列这条路手上只有 `HandState` 的**行号**
-                #   ⇒ 只认预扫算出来的那份**行号集合**（`_decision_rule` 里由 `fold_row_ok` 算出）。
-                #   ⛔ 这里**不重算** `fold_row_ok(row["obs"], chosen)`：那会造出第二条实现，
+                #   ⇒ 只认预扫算出来的那份集合（`_decision_rule` 里由 `fold_row_ok` 算出）。
+                #   ⛔ 这里**不重算** `fold_row_ok(row["obs"], chosen, seat)`：那会造出第二条实现，
                 #   而"两条路各算一套"正是本仓最经典的静默错位。
+                #   ⚠⚠ 集合里装的是 **`step`**（每场计数器，= 这里的 `step`）—— ⛔ 不是行内下标。
                 if step not in fold_rows:
                     continue
                 total += pay
