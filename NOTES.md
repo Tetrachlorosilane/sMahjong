@@ -301,12 +301,12 @@ java -jar server\build\mahjong-server.jar --selftest
 
 > ⚠ **本机偶发 JVM 崩溃（2026-10 实测）—— 根因已定性为硬件（2026-10-11）**：`--selftest` 偶尔在 `mahjong.rules.Shanten.dfs` 的 **C2 编译帧**里以 `EXCEPTION_ACCESS_VIOLATION (0xc0000005)` 崩掉（`hs_err_pid*.log` 的 `Problematic frame: J ... c2 mahjong.rules.Shanten.dfs([IIIII[I)V`，**读地址 `0x2c`**，运行约 **9~10 秒**时崩）。
 > 本机 = **Intel(R) Core(TM) i9-14900HX** / 32 核 / 31G / Win11（14 代 **Raptor Lake-HX** —— 该族有公开记录的**高负载不稳定**问题）。
-> **重跑即过**：仓库根现存 4 份同签名日志，最早一份是**改动之前**（2026-10-05）就有的；与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
+> **重跑即过**：仓库根现存 **7** 份同签名日志（截至写稿时），最早一份是**改动之前**（2026-10-05）就有的；与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
 > **证据链**：`WHEA-Logger` **ID 19** 近 3 天数**十**条 —— 「出现已更正的硬件错误。由以下组件报告: 处理器核心 错误源: Corrected Machine Check 错误类型: Internal parity error 处理器 APIC ID: 33」（另有 **32**）；
 > 密集时段 2026-10-10 22:29 → 2026-10-11 03:39；`Microsoft-Windows-Kernel-Power` **ID 41**（2026-10-11 12:38:57）「系统已在未先正常关机的情况下重新启动…」+ `EventLog` **6008**「上一次系统的 3:36:27 在 2026/10/11 上的关闭是意外的」。
 > ⇒ **⛔ 不是 JDK/JIT 的锅，也不能靠 `-XX:CompileCommand` 规避**（无代码 bug 的间歇性访问违例：`--selftest` 也会崩、20 分钟曾撞 2 次）；**缓解 = 降负载 / 限频 / 更新 BIOS 微码**。
 > 已施加（可逆）：`powercfg` 最大处理器状态 **100% → 80%**（`PROCTHROTTLEMAX` 0x64→0x50）并 `setactive`；**还原命令** =
-> `powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setactive SCHEME_CURRENT`（⚠ 也把 `PERFBOOSTMODE` 还原成 2）。
+> `powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2; powercfg /setactive SCHEME_CURRENT`。
 > 判据：**输出里出现 `SELFTEST PASS` 才算过**；看到 `hs_err` 横幅 + 退出码 1 时**先重跑**，别改代码。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
 > 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：直接摆手牌 + 用现成的钩子问结论
