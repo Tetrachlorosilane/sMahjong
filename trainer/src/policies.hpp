@@ -24,6 +24,7 @@
 #include <string>
 
 #include "action.hpp"
+#include "batchforward.hpp"
 #include "java_rand.hpp"
 #include "net.hpp"
 #include "observation.hpp"
@@ -48,6 +49,22 @@ struct Decision {
     const std::vector<Option> *options = nullptr;
     /** 鸣牌询问的"被鸣那张牌 id"（= Java `extra.get("tile")` 解析回来的 kind 的来源）。 */
     int calledTileId = -1;
+
+    // ---- 确定批前向的**排序键**（`batchforward.hpp`；opt-in，缺省关时恒为 -1） ----
+    /**
+     * 本线程当前场号（= `g<N>.jsonl` 的 N；`-1` = 不在自对弈里）。
+     *
+     * <p>由 `batchfw::GameScope` 在 `oneGame` 里设好（**询问时**就有，不是决策之后）。
+     */
+    int game = -1;
+    /**
+     * 本场第几次询问（0 基、跨小局连续、含未被采样的询问）。
+     *
+     * <p>由 `Table::decideBot` 在**调用策略之前**发号（`decisionOrdinal` 的旧值）——
+     * 这正是"提交时键必须已存在"的落点：`trace.cpp` 的 `step_++` 发生在决策**之后**，
+     * 拿不到它。
+     */
+    int step = -1;
 };
 
 /** 策略回包（等价于 Java 的 `Map<String,Object> cmd`）。 */
@@ -237,7 +254,16 @@ inline Policy makeV4NetPolicy(std::shared_ptr<const V4Policy> net, float temp, J
         }
         std::vector<float> logits;
         std::string err;
-        if (!v4Logits(*net, obsJson, logits, err, scr.get())) {
+        if (batchfw::active()) {
+            // **确定批前向**（opt-in，缺省关）：把 (键, obs, legal) 提交给收集器，等这一批回来。
+            // 键（`d.game` / `d.step`）在**询问时**就已由 `Table::decideBot` 发好 —— 这正是
+            // "提交时要有键"的落点。⛔ 取回失败 ⇒ 返回 `valid = false`（上层硬失败报错退出），
+            // 绝不悄悄退回逐行 `v4Logits`：静默兜底会把"批路径没接线"伪装成"两臂一致"。
+            const batchfw::Key bkey{d.game, d.step, d.obs->seat};
+            if (!batchfw::forwardOne(*net, bkey, d.obs->toJson(), keys, logits, err)) {
+                return c;
+            }
+        } else if (!v4Logits(*net, obsJson, logits, err, scr.get())) {
             return c;
         }
         const int pick = temp > 0.f ? netSampleSoftmax(logits, temp, rng) : netArgmax(logits);

@@ -46,6 +46,12 @@ inline void jsonEscaped(std::string &out, const std::string &s) {
 }
 
 inline void jsonStr(std::string &out, const std::string &s) { jsonEscaped(out, s); }
+/** 返回**带引号**的 JSON 字符串（给 `o += jsonQuoted(x)` 这种用法；语义 = `jsonStr`）。 */
+inline std::string jsonQuoted(const std::string &s) {
+    std::string o;
+    jsonEscaped(o, s);
+    return o;
+}
 inline void jsonNull(std::string &out) { out += "null"; }
 inline void jsonStrOrNull(std::string &out, bool has, const std::string &s) {
     if (has) {

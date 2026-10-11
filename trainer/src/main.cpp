@@ -1237,6 +1237,10 @@ int selftest() {
         }
     }
 
+    // 确定批前向（opt-in）：键序 / 规范取批 / 守卫正负向 / 尾批三选一 / 指纹 / 真会合
+    // （判据与接线见 `batchforward.hpp` 顶部与 docs/TRAINER-CPP.md §6.26）
+    trainer::batchfw::selftest(check);
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
 }

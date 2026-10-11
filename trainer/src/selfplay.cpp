@@ -68,6 +68,17 @@ struct Config {
     bool teacherLabel = false;
     /** `--aux`：额外落标签侧 `g*.aux.npz`（对手手牌/听牌、放铳、和了、顺位）。 */
     bool aux = false;
+    // ---- 确定批前向（opt-in；缺省全关 ⇒ 旧路径逐位不变，见 `batchforward.hpp`） ----
+    /** `--batch-forward K`：K > 0 才开；批组成 = 屏障时刻未决键里最小的 K 个。 */
+    int batchForward = 0;
+    /** `--batch-games L`：同时在场（= 开几条 worker 线程）的场数，缺省 = K。 */
+    int batchGames = 0;
+    /** `--batch-tail keep|drop|error`（缺省 keep，与 `tools/v4-batch-serve.py` 同缺省）。 */
+    std::string batchTail = "keep";
+    /** `--batch-order canonical|arrival`：`arrival` 是**故意红的负向开关**。 */
+    std::string batchOrder = "canonical";
+    /** `--batch-plan <文件>`：批计划 + 指纹落盘（JSON）。 */
+    std::string batchPlan;
 };
 
 struct GameRow {
@@ -152,6 +163,9 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
     if (!c.preset.empty()) {
         rules.applyPreset(c.preset);
     }
+    // 确定批：本场在场登记交给 **lane 作用域**（`--batch-games` 那条线程把分给自己的场
+    // 全部跑完才销账，见 `batchforward.hpp` 的 `GameScope` —— 按"场"销账会让 180 场只跑出 32 场）。
+    // 开关关着时不构造任何东西 ⇒ 旧路径逐位不变。
     Table t(rules);
     t.debugMaxHands = c.maxHands;
     t.seedBase = seed;
@@ -222,9 +236,47 @@ Summary run(const Config &c, std::string &fatal) {
     // 并行度钳制与 Java `SelfPlay.run` **同一个式子**：`max(1, min(workers, max(1, games)))`。
     // ⚠ `--workers` 缺省 / 0 = **1**（C++ 侧的既定口径：不按核数偷偷并发 —— 同一台机器上
     //    `--workers` 省略时跑得跟以前一样；Java 的缺省是 `availableProcessors()`）。
-    const int workers = c.workers > 0
+    int workers = c.workers > 0
             ? (c.workers < (games > 0 ? games : 1) ? c.workers : (games > 0 ? games : 1))
             : 1;
+    // 确定批：并发度**由批模式决定**（同时在场几条线程 = 收集器屏障的宽度），
+    // 缺省 = K（K 越大越需要更多在场场数，否则每波都只能凑出短批）。
+    if (c.batchForward > 0) {
+        const int cap = games > 0 ? games : 1;
+        const int want = c.batchGames > 0 ? c.batchGames : c.batchForward;
+        workers = want < cap ? want : cap;
+        if (workers < 1) {
+            workers = 1;
+        }
+    }
+    // 确定批的收集器（**建线程之前**装好；之后只读，见 `batchforward.hpp` 的单例约定）。
+    std::unique_ptr<batchfw::Collector> collector;
+    if (c.batchForward > 0) {
+        if (c.batchOrder != "canonical" && c.batchOrder != "arrival") {
+            fatal = "--batch-order 只认 canonical / arrival，收到 " + c.batchOrder;
+            return Summary{};
+        }
+        if (c.batchTail != "keep" && c.batchTail != "drop" && c.batchTail != "error") {
+            fatal = "--batch-tail 只认 keep / drop / error，收到 " + c.batchTail;
+            return Summary{};
+        }
+        const batchfw::Tail tail = c.batchTail == "keep" ? batchfw::Tail::Keep
+                : (c.batchTail == "drop" ? batchfw::Tail::Drop : batchfw::Tail::Error);
+        const batchfw::Order order = c.batchOrder == "canonical" ? batchfw::Order::Canonical
+                                                                 : batchfw::Order::Arrival;
+        // 批路径只接 v4 权重：`net:` 的其它形态（teacher / pass / v3 权重）在批模式下没有键，
+        // 会静默地少提交行 ⇒ 显式拒绝，不做"部分座位走批"的混合口径。
+        for (const std::string &p : c.seatPolicy) {
+            if (p.find("net:") == std::string::npos) {
+                fatal = "批前向只接 `net:` 策略（v4 权重）；策略串里的 `" + p + "` 没有 net:";
+                return Summary{};
+            }
+        }
+        collector = std::make_unique<batchfw::Collector>(c.batchForward, order, tail);
+        collector->setEngine(&batchfw::engineRowLoop);
+        collector->setLive(workers);
+        batchfw::g_collector = collector.get();
+    }
     std::vector<PolicyFactory> factories(4);
     std::string err;
     if (c.seatPolicy.empty()) {
@@ -258,17 +310,105 @@ Summary run(const Config &c, std::string &fatal) {
     std::vector<std::thread> pool;
     pool.reserve(static_cast<size_t>(workers));
     std::atomic<int> next{0};
-    for (int w = 0; w < workers; w++) {
-        pool.emplace_back([&]() {
-            int g;
-            while ((g = next.fetch_add(1)) < games) {
-                rows[static_cast<size_t>(g)]
-                        = oneGame(c, factories, g, c.outDir, rowFatal[static_cast<size_t>(g)]);
-            }
-        });
+    if (batchfw::active()) {
+        // **确定批的调度**（唯一与旧路径不同的地方）：场号**静态轮转**分给 L 条线程
+        // （线程 i 跑 i, i+L, i+2L, …）。为什么不用 `next.fetch_add` 抢号：谁先抢到下一场
+        // 取决于**时序**，而"屏障时刻哪些场在场"直接决定批组成 ⇒ 抢号会让"同种子 ⇒ 同批计划"
+        // 当场失效（判据④）。静态分配下"线程 i 在第 w 波跑哪一场"只由 g 与 L 决定 ⇒ 完全确定。
+        // ⚠ 每条线程跑完一场**立刻**取下一场（不 reunite），所以存活场数在尾部会自然下降。
+        // ⚠ **不许在这里另立一个块内局部量当步长**（`const int lanes = workers;`）：lambda 按引用
+        //    捕获，而 `join()` 在本 `if` 块**之外** ⇒ 块一退出那个栈槽就失效，线程读到的是垃圾
+        //    （实测 `lanes` 读成 232 ⇒ 每条 lane 只跑 1 场、180 场只出 32 场，且不报错）。
+        //    所以步长直接用**函数作用域**的 `workers`。
+        for (int w = 0; w < workers; w++) {
+            pool.emplace_back([&, w]() {
+                // lane 作用域：**整条 lane 退出时才销账**（不是每场销一次，见 `GameScope` 的注释）
+                batchfw::GameScope lane;
+                for (int g = w; g < games; g += workers) {
+                    if (std::getenv("MAHJONG_BATCH_DEBUG") != nullptr) {
+                        std::fprintf(stderr, "[batch-debug] lane=%d g=%d games=%d lanes=%d\n", w, g,
+                                     games, workers);
+                    }
+                    lane.setGame(g);
+                    rows[static_cast<size_t>(g)]
+                            = oneGame(c, factories, g, c.outDir, rowFatal[static_cast<size_t>(g)]);
+                }
+            });
+        }
+    } else {
+        for (int w = 0; w < workers; w++) {
+            pool.emplace_back([&]() {
+                int g;
+                while ((g = next.fetch_add(1)) < games) {
+                    rows[static_cast<size_t>(g)]
+                            = oneGame(c, factories, g, c.outDir, rowFatal[static_cast<size_t>(g)]);
+                }
+            });
+        }
     }
     for (std::thread &t : pool) {
         t.join();
+    }
+    // ---- 确定批：批计划 + 指纹（**所有 worker 已收工**，收集器只读） ----
+    if (collector != nullptr) {
+        const batchfw::Plan bp = collector->plan();
+        std::printf("[batch] K=%d 场/波=%d tail=%s order=%s ⇒ %zu 批 / %d 行 / 尾批 %d 批"
+                    "（drop 记账 %d 行）\n",
+                    c.batchForward, workers, c.batchTail.c_str(), c.batchOrder.c_str(),
+                    bp.batches.size(), bp.rows,
+                    static_cast<int>(std::count_if(bp.batches.begin(), bp.batches.end(),
+                                                   [](const batchfw::BatchRecord &b) {
+                                                       return b.tail;
+                                                   })),
+                    bp.dropped);
+        std::printf("[batch] 批计划指纹 = %s\n", bp.fingerprint.c_str());
+        if (!bp.error.empty()) {
+            std::fprintf(stderr, "[batch] 守卫/前向错误：%s\n", bp.error.c_str());
+        }
+        if (!c.batchPlan.empty()) {
+            std::string o = "{\n \"K\": ";
+            o += std::to_string(c.batchForward);
+            o += ",\n \"lanes\": ";
+            o += std::to_string(workers);
+            o += ",\n \"tail\": ";
+            o += jsonQuoted(c.batchTail);
+            o += ",\n \"order\": ";
+            o += jsonQuoted(c.batchOrder);
+            o += ",\n \"games\": ";
+            o += std::to_string(games);
+            o += ",\n \"batches\": ";
+            o += std::to_string(bp.batches.size());
+            o += ",\n \"rows\": ";
+            o += std::to_string(bp.rows);
+            o += ",\n \"dropped\": ";
+            o += std::to_string(bp.dropped);
+            o += ",\n \"fingerprint\": ";
+            o += jsonQuoted(bp.fingerprint);
+            o += ",\n \"error\": ";
+            o += jsonQuoted(bp.error);
+            o += ",\n \"batch_keys\": [\n";
+            for (size_t i = 0; i < bp.batches.size(); i++) {
+                const batchfw::BatchRecord &b = bp.batches[i];
+                o += "  {\"b\": " + std::to_string(b.index) + ", \"count\": "
+                     + std::to_string(b.count) + ", \"tail\": " + (b.tail ? "true" : "false")
+                     + ", \"keys\": [";
+                for (size_t j = 0; j < b.keys.size(); j++) {
+                    o += (j ? ", " : "") + jsonQuoted(batchfw::keyText(b.keys[j]));
+                }
+                o += "]}";
+                o += (i + 1 == bp.batches.size() ? "\n" : ",\n");
+            }
+            o += " ]\n}\n";
+            std::FILE *f = std::fopen(c.batchPlan.c_str(), "wb");
+            if (f == nullptr) {
+                std::fprintf(stderr, "[batch] 计划文件写不出来：%s\n", c.batchPlan.c_str());
+            } else {
+                std::fwrite(o.data(), 1, o.size(), f);
+                std::fclose(f);
+                std::printf("[batch] 计划 → %s\n", c.batchPlan.c_str());
+            }
+        }
+        batchfw::g_collector = nullptr;
     }
     for (int g = 0; g < games; g++) {
         if (!rowFatal[static_cast<size_t>(g)].empty()) {
@@ -494,7 +634,16 @@ void selfplayUsage(std::FILE *out) {
                  "                轨迹不动）—— 与 Java 侧同一份格式与口径（逐元素对拍见\n"
                  "                `tools/trainer-aux-parity.mjs`）\n"
                  "  --preset X    规则预设（mleague|tenhou|majsoul|custom）；缺省 mleague\n"
-                 "  --out DIR     轨迹输出目录（g<场号>.jsonl + summary.json）\n");
+                 "  --out DIR     轨迹输出目录（g<场号>.jsonl + summary.json）\n"
+                 "  --batch-forward K   **确定批前向**（缺省关 = 0）：每 K 行成一批（opt-in）\n"
+                 "                批组成 = **屏障时刻未决键里字典序最小的 min(K,|未决|) 个**，键 =\n"
+                 "                `(场号, 该场第几次询问, 座位)`；⛔ 绝不按到达顺序凑批\n"
+                 "                （`--batch-order arrival` 是故意红的负向开关，守卫必拦）\n"
+                 "                只接 `net:`（v4）策略；引擎 = 进程内逐行（GPU 服务见 §6.26）\n"
+                 "  --batch-games L     同时在场（= 开 L 条 worker 线程、静态轮转分场）的场数；缺省 = K\n"
+                 "  --batch-tail T      尾批（|未决| < K）：keep（缺省，与批服务同）/drop/error\n"
+                 "  --batch-order O     canonical（缺省）/ arrival（负向）\n"
+                 "  --batch-plan F      批计划 + 指纹落成 JSON（F）\n");
 }
 
 }  // namespace
@@ -553,6 +702,16 @@ int selfplayCli(int argc, char **argv) {
             teacherLabel = true;
         } else if (a == "--aux") {
             c.aux = true;
+        } else if (a == "--batch-forward") {
+            c.batchForward = std::atoi(next("--batch-forward"));
+        } else if (a == "--batch-games") {
+            c.batchGames = std::atoi(next("--batch-games"));
+        } else if (a == "--batch-tail") {
+            c.batchTail = next("--batch-tail");
+        } else if (a == "--batch-order") {
+            c.batchOrder = next("--batch-order");
+        } else if (a == "--batch-plan") {
+            c.batchPlan = next("--batch-plan");
         } else if (a == "--help" || a == "-h") {
             selfplayUsage(stdout);
             return 0;

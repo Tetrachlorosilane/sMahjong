@@ -136,6 +136,12 @@ public:
         d.round = r;
         d.options = &opts;
         d.calledTileId = calledTileId;
+        // 确定批的键在**询问时**发号（`batchforward.hpp` 顶部 §2 / GPU-SELFPLAY-PLAN §5）：
+        // `game` = 本线程当前场号（`batchfw::GameScope` 设的），`step` = 本场第几次询问（0 基）。
+        // ⚠ 这里**不改** `trace.cpp` 的 `step_`（它按"记下来的行"发号）：那是落盘契约，
+        //   动它就等于改 `g*.jsonl`（判据①"旧路径逐位不变"）。两者口径不同，**不要合并**。
+        d.game = batchfw::tlsGame;
+        d.step = decisionOrdinal;
         Cmd cmd;
         const int ordinal = ++decisionOrdinal;
         if (policy[static_cast<size_t>(seatIdx)]) {
