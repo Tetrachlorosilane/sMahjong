@@ -1477,10 +1477,16 @@ pred := <字段> <运算> <字面量>          # 布尔字段可裸用（= 真�
 
 **可读字段 = 全部**（其余一律报错，⛔ 不当假）：`kind`（`claim`/`turn`）· `draw`（自家巡目 =
 `player_draws`）· `tiles_left` · `dead_wall_left` · `total_discards` · `kan_count` · `kyoku` ·
-`honba` · `riichi_sticks` · `seat`（整数字段，可比较）；`opp_riichi`（**有他家立直**，不含自家）·
-`self_riichi` · `menzen` · `furiten` · `any_call` · `haitei` · `houtei` · `rinshan` · `has_drawn`
-（布尔字段，可裸用或 `=true/false/1/0`）。⚠ 公开但**未登记**的量（如 `scores`）也报错 ——
-"支持多少写多少"，缺口必须看得见。⛔ `cond` 里**没有**逻辑非（`!` 是结构分隔符）；要非就用 `!=`。
+`honba` · `riichi_sticks` · `seat` · **`score`（自家持点）** · **`rank`（顺位 1..4：`1 + 持点严格高于
+自家的家数`，**同点并列、不按座次拆**）** · **`gap_above`（自家持点 − 紧邻上一名的持点；自家第一 = 0，
+其余 ≤ 0）** · **`lead`（自家持点 − 除自家外最高持点，可正可负）**（整数字段，可比较）；
+`opp_riichi`（**有他家立直**，不含自家）· `self_riichi` · `menzen` · `furiten` · `any_call` · `haitei` ·
+`houtei` · `rinshan` · `has_drawn` · **`is_oya`（自家是亲 = 庄）**（布尔字段，可裸用或
+`=true/false/1/0`）。⚠ 点棒/顺位四字段是**公开共见**信息（四家持点本来就摆在桌上），
+取值口径与 Python 侧求值器 `FIELDS` **逐字同义**（两语言同名是域自证的前提；
+⛔ 别名 `my_score`/`my_rank` **不登记**、一律报错）。⚠ 公开但**未登记**的量（如 `scores` **整表**）
+也报错 —— "支持多少写多少"，缺口必须看得见。⛔ `cond` 里**没有**逻辑非（`!` 是结构分隔符）；
+要非就用 `!=`。
 
 ```bash
 # 域 = 鸣牌询问段；域内换成另一张网（域外逐位等于 wl-riichi）
@@ -1492,8 +1498,10 @@ trainer selfplay 1000 --workers 6 --rotate-perm --seed 52870101 --out <dir> \
 
 - 语法错（`!` 后缺 `@<cond>`、`@` 后是数字、字段/值/运算认不出、括号不配对、`cond` 空）**全部在构造期**
   报错并**退出码 2、零轨迹产出**（⛔ 不静默降级）。
-- 回归：`trainer --selftest` 的「域掩码」十条 —— 24 条 `cond` 取值 + 16 条非法条件 + 域外逐位
-  （动作与 `valid`/`fromBot`）+ 域内改判 + "B 的动作不在 legal ⇒ 报错" + 切分/负向。
+- 回归：`trainer --selftest` 的「域掩码」一组 —— 48 条 `cond` 取值（含点棒/顺位新字段）+
+  27 条非法条件（含未登记别名 `my_score`/`my_rank`）+ 域外逐位
+  （动作与 `valid`/`fromBot`）+ 点棒/顺位新字段的域内改判/域外逐位 5 条 + 域内改判 +
+  "B 的动作不在 legal ⇒ 报错" + 切分/负向。
   ⚠ 这一支是**训练端 C++ 专用**：Java 侧 `mahjong.ai.Policies.byName` **没有**它，所以
   `MAHJONG_PRODUCER=java` 下用它会报"未知策略名"（能力缺口**显式**暴露，不悄悄降级）。
 

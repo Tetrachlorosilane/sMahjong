@@ -945,9 +945,11 @@ int selftest() {
     }
 
     // ---- ⑨○ 域掩码策略组合（P2-11：`net:<A>!net:<B>@<cond>`）----
-    // 五条要钉住的东西：① cond 的文法与取值（含"取不到的量报错、不当假"）；
+    // 六条要钉住的东西：① cond 的文法与取值（含"取不到的量报错、不当假"）；
     // ② 域外**逐位**等于 A（连 valid/fromBot 一起）；③ 域内确实改判；
-    // ④ B 的回包不在 legal ⇒ 报错（**不退回 A**）；⑤ 老串的解析入口不被新分支碰到。
+    // ④ B 的回包不在 legal ⇒ 报错（**不退回 A**）；⑤ 老串的解析入口不被新分支碰到；
+    // ⑥ **点棒/顺位新字段**（`score`/`rank`/`gap_above`/`lead`/`is_oya`）的取值 +
+    //    域内改判/域外逐位 + 未登记别名（`my_score`/`my_rank`）报错。
     {
         using trainer::Action;
         using trainer::Cmd;
@@ -965,6 +967,11 @@ int selftest() {
             o.riichi[2] = true;                 // 别家（seat 2）已立直
             o.menzen = true;
             o.totalDiscards = 11;
+            // 点棒/顺位域的定值局面（P2-11）：seat 1 持点 18,500；另三家 28,000 / 41,000 / 12,500
+            //   ⇒ rank = 3（严格高于自家的有 2 家；同点并列口径）· gap_above = 18500−28000 = −9500
+            //   ⇒ lead = 18500−41000 = −22500；dealer = 1 ⇒ is_oya = true
+            o.scores = {28000, 18500, 41000, 12500};
+            o.dealer = 1;
             auto ev = [&](const char *text, bool &parsed, std::string &e2) -> bool {
                 DomainCond c;
                 parsed = trainer::condParse(text, c, e2);
@@ -989,6 +996,20 @@ int selftest() {
                 {"(kind=turn|opp_riichi)&draw<3", false},
                 // `&` 比 `|` 结合得紧：若反过来，下一条会是 false
                 {"kind=claim|self_riichi&menzen", true},
+                // ---- 点棒 / 顺位（P2-11 扩展；取值口径与 Python 求值器逐字同义）----
+                {"score=18500", true},         {"score<20000", true},
+                {"score>18000", true},         {"score=28000", false},
+                {"rank=3", true},              {"rank<3", false},
+                {"rank>=3", true},             {"rank=4", false},
+                {"rank=1", false},             {"rank!=3", false},
+                {"gap_above=-9500", true},     {"gap_above<0", true},
+                {"gap_above>0", false},        {"gap_above=0", false},
+                {"lead=-22500", true},         {"lead>0", false},
+                {"is_oya", true},              {"is_oya=true", true},
+                {"is_oya=false", false},       {"is_oya!=true", false},
+                {"rank=3&score<20000", true},  {"rank=4|is_oya", true},
+                {"(rank=4|is_oya)&score<30000", true},
+                {"rank=3&is_oya&gap_above<0", true},
             };
             int bad = 0;
             std::string firstBad;
@@ -1013,6 +1034,10 @@ int selftest() {
                 "", "nosuch=1", "scores=1", "draw", "kind", "kind=foo", "kind<claim",
                 "draw<", "draw<x", "draw<7 8", "(kind=claim", "kind=claim&",
                 "kind=claim|", "opp_riichi=maybe", "!kind=claim", "draw<7)",
+                // ---- 点棒/顺位新字段：非法值 / 缺运算 / **未登记的别名**一律报错 ----
+                "rank", "lead", "rank=", "rank=x", "gap_above<x", "scores<20000",
+                "is_oya=maybe", "is_oya<1", "is_oya=2",
+                "my_score=1", "my_rank=1",   // ⛔ 别名不登记（两语言同名是硬要求）
             };
             int okErrs = 0;
             int nBad = static_cast<int>(sizeof(badConds) / sizeof(badConds[0]));
@@ -1107,6 +1132,69 @@ int selftest() {
             const Cmd in2 = trainer::makeDomainMaskPolicy(base, domIn, inClaim)(d);
             check("域掩码：域内 B 的动作在 legal 里 ⇒ 正常放行", in2.valid
                   && in2.action.key() == "pass" && !in2.fromBot);
+        }
+
+        // ③′ 点棒/顺位**新字段**的"域内改判 / 域外逐位"自证（P2-11）
+        //   `gap_above>0` / `lead>0` / `rank=4` 在这个定值局面里**为假** ⇒ H 必须与纯 A **逐位**相同
+        //   （连 valid / fromBot 一起）；`rank=3&is_oya` / `score<20000` **为真** ⇒ 必须走 B。
+        //   两侧一起才说明新字段"既不假阳也不假阴"（只测一侧会出现"字段恒假"的假绿）。
+        {
+            Observation o;
+            o.seat = 1;
+            o.scores = {28000, 18500, 41000, 12500};
+            o.dealer = 1;
+            bool k1 = false, k2 = false;
+            const Action aPass = trainer::actionOf(trainer::kActPass);
+            const Action aA = trainer::actionParse("discard:3m", k1);
+            const Action aB = trainer::actionParse("discard:7p", k2);
+            o.legal = {aPass, aA, aB};
+
+            Decision d;
+            d.obs = &o;
+            d.kind = "turn";
+
+            Policy base = [&](const Decision &) {
+                Cmd c;
+                c.valid = true;
+                c.fromBot = true;                    // 域外必须连这个标志一起原样传出
+                c.action = aA;
+                return c;
+            };
+            Policy dom = [&](const Decision &) {
+                Cmd c;
+                c.valid = true;
+                c.action = aB;
+                return c;
+            };
+            struct NewCase { const char *text; bool wantB; };
+            const NewCase nc[] = {
+                {"gap_above>0", false}, {"lead>0", false}, {"rank=4", false},
+                {"rank=3&is_oya", true}, {"score<20000", true},
+            };
+            int nbad = 0;
+            std::string firstBad;
+            for (const NewCase &c : nc) {
+                DomainCond cd;
+                std::string e2;
+                if (!trainer::condParse(c.text, cd, e2)) {
+                    nbad++;
+                    firstBad = std::string(c.text) + " 解析失败：" + e2;
+                    continue;
+                }
+                const Cmd got = trainer::makeDomainMaskPolicy(base, dom, cd)(d);
+                const bool isB = got.action.key() == aB.key();
+                const bool bytewiseA = !isB && got.valid && got.fromBot && got.action.key() == aA.key();
+                const bool ok = c.wantB ? (isB && got.valid && !got.fromBot) : bytewiseA;
+                if (!ok) {
+                    nbad++;
+                    if (firstBad.empty()) {
+                        firstBad = std::string(c.text) + "（得 " + got.action.key() + "）";
+                    }
+                }
+            }
+            check(("域掩码 点棒/顺位新字段：" + std::to_string(sizeof(nc) / sizeof(nc[0]))
+                   + " 条域内改判/域外逐位全对" + (nbad ? ("；首个不符 = " + firstBad) : "")).c_str(),
+                  nbad == 0);
         }
 
         // ⑤ 串解析：老串不进新分支；新串的语法错逐条报错且原因可读

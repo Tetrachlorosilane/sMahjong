@@ -337,6 +337,51 @@ inline bool intField(const std::string &n, const Observation &o, long long &v) {
     if (n == "honba") { v = o.honba; return true; }
     if (n == "riichi_sticks") { v = o.sticks; return true; }
     if (n == "seat") { v = o.seat; return true; }
+    // ---- 点棒 / 顺位（P2-11「点棒/顺位」域；**全部公开共见** —— 四家持点本来就摆在自己面前）----
+    //   ⚠ 取值口径必须与 Python 侧 `_p2-11c-cond.py` 的 `FIELDS` **逐字同义**：域判定由 C++ 给真值，
+    //     但读数据侧（覆盖率 / D 行选取 / 逐行自证）走 Python 的等价求值器；两边不一致 = 静默判宽/判窄。
+    //   ⚠ 命名定死：**不**登记 `my_score` / `my_rank` 别名（两语言同名是硬要求，别名一律报错）。
+    const int s0 = (o.seat >= 0 && o.seat < 4) ? o.seat : 0;   // `isIntFieldName` 会拿空观测来探名
+    const int self = o.scores[static_cast<size_t>(s0)];
+    if (n == "score") { v = self; return true; }
+    if (n == "rank") {
+        long long r = 1;
+        for (int s = 0; s < 4; s++) {
+            if (s != o.seat && o.scores[static_cast<size_t>(s)] > self) {
+                r++;
+            }
+        }
+        v = r;
+        return true;
+    }
+    if (n == "gap_above") {
+        // 与**紧邻上一名**的差（自家第一 = 0 ⇒ 其余 ≤ 0）：`above` 取严格高于自家的最小持点。
+        long long prev = 0;
+        bool has = false;
+        for (int s = 0; s < 4; s++) {
+            const int x = o.scores[static_cast<size_t>(s)];
+            if (s != o.seat && x > self && (!has || x < prev)) {
+                prev = x;
+                has = true;
+            }
+        }
+        v = has ? static_cast<long long>(self) - prev : 0;
+        return true;
+    }
+    if (n == "lead") {
+        // 与**除自家外最高持点**的差（可正可负）。
+        long long top = 0;
+        bool has = false;
+        for (int s = 0; s < 4; s++) {
+            const int x = o.scores[static_cast<size_t>(s)];
+            if (s != o.seat && (!has || x > top)) {
+                top = x;
+                has = true;
+            }
+        }
+        v = has ? static_cast<long long>(self) - top : 0;
+        return true;
+    }
     return false;
 }
 
@@ -359,6 +404,8 @@ inline bool boolField(const std::string &n, const Observation &o, bool &v) {
     if (n == "houtei") { v = o.houtei; return true; }
     if (n == "rinshan") { v = o.rinshan; return true; }
     if (n == "has_drawn") { v = o.hasDrawn; return true; }
+    /** 自家是不是亲（庄）。公开共见；`Observation` 里本来就有 `dealer`。 */
+    if (n == "is_oya") { v = (o.seat == o.dealer); return true; }
     return false;
 }
 
