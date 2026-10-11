@@ -361,10 +361,15 @@ def read_npz(path: Path) -> Rows:
         if missing:
             raise InputError(f"{path.name} 缺键：{missing}（有 {sorted(keys)}）")
         h0 = z["h0"] if "h0" in keys else None
+        # ⚠ `steps` 是**可选**列：`materialize(..., rows_out=…)` 会写它，别的 npz（R1 的
+        #   `rows2000.npz` 一类）没有。原来只认 `h0`、把 `steps` 一律当 None ⇒ `--index-file`
+        #   去下标取 step 时当场 `TypeError`（见 `steps_for`）。有就带上，没有才是 None。
+        steps = [int(x) for x in z["steps"]] if "steps" in keys else None
         return Rows(tile=_as_f32(z["tile"], "tile"), evt=_as_f32(z["evt"], "evt"),
                     ctx=_as_f32(z["ctx"], "ctx"), cand=_as_f32(z["cand"], "cand"),
                     nlegal=np.asarray(z["nlegal"], dtype=np.int32),
-                    h0=None if h0 is None else _as_f32(h0, "h0"), source=path.name)
+                    h0=None if h0 is None else _as_f32(h0, "h0"), source=path.name,
+                    steps=steps)
 
 
 def read_compact(directory: Path, split: str) -> Rows:
@@ -563,6 +568,22 @@ def forward(net: Net, rows: Rows, device, batch: int, *, index=None, quiet: bool
     return ForwardResult(n=out_n, argmax=out_arg, logits=out_log, seconds=sec, tiles_rows=len(sel))
 
 
+def steps_for(rows: Rows, index=None):
+    """取"每行对应哪个 `step`"，**没有就返回 None**（`write_out` 的口径：None ⇒ 全落 -1）。
+
+    ⚠ 这里就是 2026-10-11 R1 那个小 bug 的现场：`--rows <npz> --index-file <idx>` 时
+    `rows.steps is None`，原实现无条件 `[rows.steps[i] for i in index]` ⇒ **`TypeError`**，
+    而且是在 `forward` **之后**才炸 ⇒ `[fwd] … 用时 …` 照打、`--out` 的文件根本没生成
+    （看着像"跑完了但没输出"）。判据：**没有 step 就是没有**，绝不能去下标取；
+    `--index-file` 的语义是"选哪些行前向"，不是"选哪些 step"。
+    """
+    if rows.steps is None:
+        return None
+    if index is None:
+        return list(rows.steps)
+    return [rows.steps[i] for i in index]
+
+
 def write_out(path: Path | None, res: ForwardResult, fmt: str, *, steps=None) -> None:
     """落盘：`jsonl`（默认，本工具自己的口径）或 `cpp`（与 `trainer v4net` 逐字符同格式）。"""
     lines = []
@@ -749,6 +770,41 @@ def selftest(tmp: Path, batch: int, tol: float) -> int:
     if torch.cuda.is_available():
         line(resolve_device("cuda").type == "cuda", "--device cuda 正常（正向对照）")
 
+    # ---- ⑤ `--rows <npz> --index-file`（负向：没有 step 列时**不许**去下标取 ⇒ 更不许只打 [fwd] 就退出）
+    #   这条是 2026-10-11 R1 那个小 bug 的回归：`rows.steps is None` 时 `[rows.steps[i] …]` ⇒ TypeError，
+    #   且**在 `forward` 之后**才炸 ⇒ 日志里有 `[fwd]`、`--out` 的文件却不存在（像"跑完了"）。
+    print("⑤ `--rows` + `--index-file`（负向：npz 没有 step 列也必须出文件，且 step 落 -1）")
+    idx = tmp / "selftest-index.txt"
+    idx.write_text("3\n1\n5\n", encoding="utf-8")
+    sel = [3, 1, 5]
+    nostep = tmp / "selftest-rows-nostep.npz"
+    np.savez(str(nostep), tile=rows.tile, evt=rows.evt, ctx=rows.ctx, cand=rows.cand,
+             nlegal=rows.nlegal)                                   # ⛔ 故意不写 steps
+    withstep = tmp / "selftest-rows-step.npz"
+    np.savez(str(withstep), tile=rows.tile, evt=rows.evt, ctx=rows.ctx, cand=rows.cand,
+             nlegal=rows.nlegal, steps=np.asarray([100 + i for i in range(len(rows.nlegal))],
+                                                  dtype=np.int32))
+    for label, npz in (("npz 没有 steps 列（旧 bug 的现场）", nostep),
+                       ("npz 带 steps 列（正向对照）", withstep)):
+        out = tmp / f"selftest-out-{npz.stem}.jsonl"
+        if out.exists():
+            out.unlink()
+        try:
+            code = main(["--weights", str(good), "--rows", str(npz), "--index-file", str(idx),
+                         "--out", str(out), "--device", "cpu", "--quiet"])
+        except Exception as e:                                     # noqa: BLE001（TypeError 就要在这里现形）
+            line(False, f"{label} ⇒ 抛异常 {type(e).__name__}: {e}")
+            continue
+        if code != EXIT_OK or not out.is_file():
+            line(False, f"{label} ⇒ exit={code}、输出文件存在={out.is_file()}（该出的文件没出）")
+            continue
+        got = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x.strip()]
+        want = [-1] * len(sel) if npz is nostep else [100 + i for i in sel]
+        line([r["row"] for r in got] == list(range(len(sel))) and [r["step"] for r in got] == want,
+             f"{label} ⇒ exit=0、{len(got)} 行、step={[r['step'] for r in got]}（期望 {want}）")
+    line(steps_for(read_npz(nostep), sel) is None and steps_for(rows) is None,
+         "`steps_for`：没有 step 列 ⇒ 返回 None（⛔ 不去下标取）")
+
     print(("SELFTEST PASS" if not fails else f"SELFTEST FAIL（{len(fails)} 条）")
           + f"：{good.name} + {npz.name} @ {tmp}")
     return EXIT_OK if not fails else EXIT_MISMATCH
@@ -828,7 +884,7 @@ def main(argv=None) -> int:
                                      f"同一份输入给出两个答案")
                 print(f"[rep] device={a.device} run {k}（热）: {again.seconds:.3f}s "
                       f"（{len(again.n) / max(again.seconds, 1e-9):,.0f} 行/秒）", file=sys.stderr)
-        steps = rows.steps if index is None else [rows.steps[i] for i in index]
+        steps = steps_for(rows, index)
         write_out(Path(a.out) if a.out else None, res, a.format, steps=steps)
         if rows.ref_policy is not None:
             _, worst_abs, worst_rel, bad = compare_ref(rows, res, a.tol)

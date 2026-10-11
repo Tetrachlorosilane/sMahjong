@@ -3887,6 +3887,9 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
   四道闸门与推导见 §6.5 第十轮；`std(A)/std(delta)=2.671×`（基线不与奖励同尺度）见第十九/二十轮。
 - **`budget.py`**：一轮的场次由它从**台账实测回填**反推 + 闸门夹逼（**点名谁限制的**）；缺省 `--target-minutes 20`。
 - 详见 §6.5 正文的第十九/二十/二十一/二十二轮小节与 `docs/TRAINING-V4.md` §14.8–§14.10。
+- **R3（2026-10-11，argmax 型自对弈前向迁 GPU）**：新增 `tools/v4-batch-serve.py` = **确定批**跨局前向（规范序 `(game,step,seat)`、`batch(b)=规范序[b·K,(b+1)·K)`、提交前 `assert_canonical`、输出按行号回填；K 组内仍按 `nlegal` 分桶）。
+- **离线证明**（180 场 A0 on-policy / 121,120 行）：批 K=512 ↔ C++ `v4net` 逐行 **argmax 0 翻转**、相对 maxΔ **2.909e-05**（绝对 9.968e-05）；两次独立进程的批指纹与输出文件 sha256 **逐位相同**；负向 `--shuffle-plan` ⇒ 退出码 2 且不出文件；吞吐 K=32→8192 = 637→20,502 行/秒（C++ 逐行 546 ⇒ K=512 只有 8.8×、K=8192 37.5×，瓶颈是每微批的 H2D/启动）。
+- ⛔ 红线：**`trainer/src` 未改**（本批只做设计 + 离线证明，改动点见 `S:\mahjong-training\w-ladder\GPU-SELFPLAY-PLAN.md` §5）；"逐字节"在 GPU 前向上**已退役**（maxΔ ≠ 0）⇒ 判据只能是"argmax 全同 + 随量纲 maxΔ"，批组成不许含到达顺序；未跑 PPO/训练/闸门。
 
 ## 6.6 teacher（内置机器人）的五层取舍
 

@@ -80,7 +80,8 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | `tools\jvm-guard.mjs --selftest` | 5/5 | ② 一直崩 ⇒ FAIL（不许出现 PASS）；③ 退出码 0 但新落 `hs_err` ⇒ FAIL；⑤ 被包装命令里的 `--selftest` 不许触发 guard 自己的自检 |
 | `tools\verify-push.mjs --selftest` | 5/5 | ③ tree 不同 ⇒ `TREE_MISMATCH` 退出码 1；④ 拿不到远端 tree ⇒ `UNKNOWN` 退出码 2；⑤ 取不到远端头 ⇒ `NO_REMOTE` 退出码 2 |
 | `tools\paired-eval.mjs --selftest` | 桥内 23 项 | 采集目录不存在 ⇒ 非 0 退出；落点选 `docs/` ⇒ 拒绝写；桥内：未登记方向的量 ⇒ **当场报错**（⛔ 无缺省兜底） |
-| `tools\v4-forward-gpu.py --selftest` | 16/16 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
+| `tools\v4-forward-gpu.py --selftest` | 19/19 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU**；⑤ `--rows <npz>` + `--index-file` 在**没有 `steps` 列**时也必须出文件（旧实现在 `forward` **之后**才 `TypeError`，`[fwd]` 照打而 `--out` 的文件不存在） |
+| `tools\v4-batch-serve.py --selftest` | 26/26 | **乱序的批计划 ⇒ 报错不许提交**（批内乱序 / 批间乱序 / 中间批少一行）；行对齐（`row` 越界 / 重复 / 未覆盖 / `(game,step)` 重复）⇒ 报错；`K>行数` / `K=1` / `不整除`（`keep`/`drop`/`error`，含"`drop` 必须能过守卫"）/ `K=0` 行为逐条断言；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
 | `tools\v4dforward-gpu.py`（评估路径的等价替换，无自检，靠与 `trainer v4net` 逐行对拍） | — | `--select-from` 里重复键 / 键在 `--traces` 找不到 / 枚举行数与 `materialize` 不等 ⇒ **当场报错**（⛔ 不"看着差不多就往下算"）；⚠ 选行**必须按 `trace_files` 的规范序**（数值序），字典序会让两边整片错位而 flip 数仍然相同 |
 
 ## 6. v4 前向（GPU 批量 · `tools\v4-forward-gpu.py`）
@@ -91,12 +92,16 @@ python\.venv\Scripts\python.exe tools\v4-forward-gpu.py --weights <net.bin> --tr
 python\.venv\Scripts\python.exe tools\v4-forward-gpu.py --selftest
 # 评估路径（`_p2-11c-dforward.py` 一族）的**等价替换**：只换前向那一步，行序与读数口径都不变
 python\.venv\Scripts\python.exe tools\v4dforward-gpu.py --traces <该臂原始轨迹目录> --select-from <stuD/<arm>__<cond>> --weights <net-b> --device cuda --out logits.txt --out-json reading.json
+# **确定批跨局前向**（argmax 型自对弈上 GPU 的"前向那一格"）：规范序 (game,step,seat) → 固定 K 的批
+python\.venv\Scripts\python.exe tools\v4-batch-serve.py --weights <net.bin> --rows rows.npz --keys-from-traces <轨迹目录> --batch 512 --device cuda --margins --out logits.jsonl --manifest plan.json --compare cpp-v4net.txt
+python\.venv\Scripts\python.exe tools\v4-batch-serve.py --selftest
 ```
 
 | 项 | 内容 |
 | --- | --- |
 | 判据 | 同权重同输入时 **argmax 逐行相同** + 逐元素 `maxΔ ≤ tol × max(1, \|参考值\|)`（`TOL_REL = 1e-4`，见那里的量纲依据；⛔ argmax 这条不放）；`--traces` 与 `--rows` 两条输入路径必须**逐位相同**；`--repeat` 每次 argmax 必须逐行相同（⛔ 不同就是"同一份输入两个答案"）；`--device cuda` 在 `cuda.is_available()=False` 时**报错不回落**；按 `legal` 条数分桶（补 0 行会经 `u.mean`→`policy_gate` 改 argmax，与逐行语义**不等价**） |
 | ⛔ 特征侧不重实现 | 只消费**既有行级张量**；唯一的"轨迹→张量"通道（`--traces`）只调 `mahjong_ml.v4.blocks.assemble` + `v4.traces.sidecar_dict`（降级**一律报错**）。`tools\v4dforward-gpu.py` 同理：它**不重实现前向**，只做选行/对齐/记账 |
+| **确定批**（`tools\v4-batch-serve.py`） | 判据 = **批成员与顺序只由键表决定**：`batch(b) = 规范序[b·K, (b+1)·K)`，规范序 = `(game, step, seat)` 字典序（键必须唯一，⛔ 不用 `row` 兜底）；提交前 `assert_canonical` 逐行比对，`--shuffle-plan`（负向控制）必须被拦成退出码 2；输出**按行号回填**（`--out-order row`）⇒ 逐行消费者读第 k 行拿到的就是第 k 行的答案；`K` 组内仍按 `legal` 条数分桶；`--device cpu` 与 `--device cuda` **同一份代码**；⚠ 吞吐的分子是 **`served`（真正前向的行数）**，`--allow-subset` 时不许拿张量行数顶替 |
 | ⚠ 现状（2026-10-11 **R2**） | **五条判据全过 ⇒ 已切到 GPU**。R1 的两条不过都修掉了：① 真 bug = `features.py` 的 `action_parts` 对 `kan:daiminkan:a+b+c` **既没拆整个键、也没填主牌槽**（契约是 Java `Action.parse` 拆整个键得 3 段 + `Action.kan(kind, tile, hand)` **同时**带 `tile`/`tiles`，`Features.candidate` 两处都读）⇒ 51/13,408 行该候选 logit 差 4.4~10、1 行 argmax 翻转；② `1e-5` 是**绝对**阈值而 \|logits\| 中位 29.5 ⇒ fp32 1 ulp ≈ 1.3e-5（比阈值还大），改成**相对** `maxΔ ≤ tol × max(1,\|ref\|)`、`tol = 1e-4`（= 仓库对**同一条前向**既有的夹具 tol）。**R2 实测**：argmax **13,408/13,408**、相对 maxΔ 最大 **1.502e-05**（超限 0 行）、51 行大明杠候选格 \|Δ\| ≤ **1.53e-05**、GPU↔CPU argmax 13,408/13,408（相对 maxΔ 1.192e-05）、P5 夹具已补 `kan:` 覆盖 ⇒ **11 例**、两条路径 argmax 11/11。CUDA 冷启动 ≈16 s 是一次性预热（⛔ 不摊进吞吐）。详见 `NOTES.md` §6.5（R2 段） |
 | 退出码 | 0 = 通过 / 1 = 判据不过（夹具参考 logits 不符） / 2 = 用法、环境或输入坏了 |
 
