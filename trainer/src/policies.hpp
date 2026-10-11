@@ -15,6 +15,7 @@
 // ⚠ `net:` 的 `@α` 先验要调 `Bot.decide`（现在是有的），但先验那一支仍未接（见下）。
 #pragma once
 
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -283,12 +284,463 @@ inline bool parseFloatStrict(const std::string &s, float &out) {
     return true;
 }
 
+// ---------------------------------------------------------------------------------------------
+// 域掩码策略组合（P2-11「共享主干 + 域条件化分叉」的最小可执行件）
+//
+// 策略串：`net:<A>!net:<B>@<cond>`（A = 基座、B = 域内替换网、cond = **只读公开观测**的条件）
+//   · cond 为真（**域内**）⇒ 用 B 在**同一次询问、同一个 `legal`** 上的 argmax；
+//   · cond 为假（**域外**）⇒ **逐位**返回 A 的回包（连 `valid` / `fromBot` 一起原样返回）。
+//
+// 三条硬判据（写成代码就是下面几条分支；契约见 docs/PROTOCOL.md §8.4）：
+//   ① **域外逐位等于 A** —— 这是"同到可辨状态再分歧"的定义，不是巧合；
+//   ② 域内 B 的回包**必须在本次 legal 里**，不在就**整场报错退出**（⛔ 绝不静默退回 A：
+//      静默退回会把"B 没接线"伪装成"两臂无分歧"）；
+//   ③ 条件**只许读 `Observation`**（该席的合法观测）—— 别家手牌 / 牌山顺序 / 里宝指示牌
+//      一律取不到 ⇒ 未知字段**报错**，不当假（AGENTS §6.5 反作弊口径）。
+// ⚠ `!` 是结构分隔符，所以 cond 里**没有**逻辑非；要用非就用 `!=` 或德摩根。
+// ---------------------------------------------------------------------------------------------
+
+/** 域掩码条件：编译成 `Observation -> bool`（**构造期**就把未知字段 / 未知运算判死）。 */
+struct DomainCond {
+    std::function<bool(const Observation &)> pred;
+    /** 原串（报错 / 日志用）。 */
+    std::string text;
+};
+
+namespace conddetail {
+
+using CondPred = std::function<bool(const Observation &)>;
+
+/** 跳过 ASCII 空白（与 `trimAscii` 同一口径）。 */
+inline void skipWs(const std::string &s, size_t &i) {
+    while (i < s.size() && static_cast<unsigned char>(s[i]) <= 0x20) {
+        i++;
+    }
+}
+
+/** 是不是标识符首 / 后续字符。 */
+inline bool isIdentStart(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+inline bool isIdentChar(char c) {
+    return isIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+/** 整型字段表（值 = 该字段在 `Observation` 上的读数；名字必须**逐字**与文档一致）。 */
+inline bool intField(const std::string &n, const Observation &o, long long &v) {
+    if (n == "draw") { v = o.playerDraws; return true; }
+    if (n == "tiles_left") { v = o.tilesLeft; return true; }
+    if (n == "dead_wall_left") { v = o.deadWallLeft; return true; }
+    if (n == "total_discards") { v = o.totalDiscards; return true; }
+    if (n == "kan_count") { v = o.kanCount; return true; }
+    if (n == "kyoku") { v = o.kyoku; return true; }
+    if (n == "honba") { v = o.honba; return true; }
+    if (n == "riichi_sticks") { v = o.sticks; return true; }
+    if (n == "seat") { v = o.seat; return true; }
+    return false;
+}
+
+/** 布尔字段表。⚠ `opp_riichi` **不含自家**（自家立直另有 `self_riichi`）。 */
+inline bool boolField(const std::string &n, const Observation &o, bool &v) {
+    if (n == "opp_riichi") {
+        v = false;
+        for (int s = 0; s < 4; s++) {
+            if (s != o.seat && o.riichi[static_cast<size_t>(s)]) {
+                v = true;
+            }
+        }
+        return true;
+    }
+    if (n == "self_riichi") { v = o.selfRiichi; return true; }
+    if (n == "menzen") { v = o.menzen; return true; }
+    if (n == "furiten") { v = o.furiten; return true; }
+    if (n == "any_call") { v = o.anyCall; return true; }
+    if (n == "haitei") { v = o.haitei; return true; }
+    if (n == "houtei") { v = o.houtei; return true; }
+    if (n == "rinshan") { v = o.rinshan; return true; }
+    if (n == "has_drawn") { v = o.hasDrawn; return true; }
+    return false;
+}
+
+inline bool isIntFieldName(const std::string &n) {
+    Observation dummy;
+    long long v = 0;
+    return intField(n, dummy, v);
+}
+inline bool isBoolFieldName(const std::string &n) {
+    Observation dummy;
+    bool v = false;
+    return boolField(n, dummy, v);
+}
+
+inline bool fail(std::string &err, const std::string &msg, const std::string &src) {
+    err = "域掩码条件语法错误：" + msg + "（cond=\"" + src + "\"）";
+    return false;
+}
+
+inline bool parseOr(const std::string &s, size_t &i, CondPred &out, std::string &err);
+inline bool parseAnd(const std::string &s, size_t &i, CondPred &out, std::string &err);
+
+/** 谓词：`<字段><运算><字面量>`，或裸布尔字段。 */
+inline bool parsePred(const std::string &s, size_t &i, CondPred &out, std::string &err) {
+    const size_t b = i;
+    while (i < s.size() && isIdentChar(s[i])) {
+        i++;
+    }
+    const std::string name = s.substr(b, i - b);
+    if (name.empty()) {
+        return fail(err, "这里要一个字段名（kind / draw / opp_riichi / …）", s);
+    }
+    skipWs(s, i);
+    std::string op;
+    if (i < s.size()) {
+        const char c = s[i];
+        if (c == '<' || c == '>' || c == '=' || c == '!') {
+            op.push_back(c);
+            i++;
+            if (i < s.size() && s[i] == '=') {
+                op.push_back('=');
+                i++;
+            } else if (c == '!') {
+                // `!` 单独出现非法（`!` 是域掩码的结构分隔符）；`=` 单独出现合法（等同 `==`）
+                return fail(err, "`!` 只能写成 `!=`（`!` 本身是域掩码的结构分隔符）", s);
+            }
+        }
+    }
+    const bool isInt = isIntFieldName(name);
+    const bool isBool = isBoolFieldName(name);
+    const bool isStr = (name == "kind");
+    if (!isInt && !isBool && !isStr) {
+        return fail(err, "未知字段 `" + name + "`（可读到的只有该席合法观测里的字段；"
+                         "别家手牌 / 牌山 / 里宝一律取不到）", s);
+    }
+    if (op.empty()) {
+        if (!isBool) {
+            return fail(err, "字段 `" + name + "` 是" + (isInt ? "整数" : "字符串")
+                             + "字段，必须带比较运算（如 `" + name + "<7` / `" + name + "=claim`）", s);
+        }
+    }
+    skipWs(s, i);
+    // ---- 字面量 ----
+    if (isBool) {
+        bool want = true;
+        if (!op.empty()) {
+            const size_t vb = i;
+            while (i < s.size() && (isIdentChar(s[i]))) {
+                i++;
+            }
+            const std::string lit = s.substr(vb, i - vb);
+            if (lit == "true" || lit == "1") {
+                want = true;
+            } else if (lit == "false" || lit == "0") {
+                want = false;
+            } else {
+                return fail(err, "布尔字段 `" + name + "` 的值只认 true/false/1/0，收到 `" + lit + "`", s);
+            }
+            if (op != "=" && op != "==" && op != "!=") {
+                return fail(err, "布尔字段 `" + name + "` 只支持 = / == / !=，收到 `" + op + "`", s);
+            }
+        }
+        if (op == "!=") {
+            out = [name, want](const Observation &o) {
+                bool v = false;
+                boolField(name, o, v);
+                return v != want;
+            };
+        } else {
+            out = [name, want](const Observation &o) {
+                bool v = false;
+                boolField(name, o, v);
+                return v == want;
+            };
+        }
+        return true;
+    }
+    if (isStr) {
+        const size_t vb = i;
+        while (i < s.size() && isIdentChar(s[i])) {
+            i++;
+        }
+        const std::string lit = s.substr(vb, i - vb);
+        if (lit != "claim" && lit != "turn") {
+            return fail(err, "字段 `kind` 的值只认 claim / turn，收到 `" + lit + "`", s);
+        }
+        if (op == "=" || op == "==") {
+            out = [lit](const Observation &o) { return o.kind == lit; };
+        } else if (op == "!=") {
+            out = [lit](const Observation &o) { return o.kind != lit; };
+        } else {
+            return fail(err, "字符串字段 `kind` 不支持运算 `" + op + "`（只有 = / == / !=）", s);
+        }
+        return true;
+    }
+    // ---- 整数 ----
+    const size_t nb = i;
+    if (i < s.size() && s[i] == '-') {
+        i++;
+    }
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+        i++;
+    }
+    const std::string lit = s.substr(nb, i - nb);
+    if (lit.empty() || lit == "-") {
+        return fail(err, "字段 `" + name + "` 的比较值要一个整数", s);
+    }
+    const long long want = std::strtoll(lit.c_str(), nullptr, 10);
+    if (op == "=" || op == "==") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v == want;
+        };
+    } else if (op == "!=") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v != want;
+        };
+    } else if (op == "<") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v < want;
+        };
+    } else if (op == "<=") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v <= want;
+        };
+    } else if (op == ">") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v > want;
+        };
+    } else if (op == ">=") {
+        out = [name, want](const Observation &o) {
+            long long v = 0;
+            intField(name, o, v);
+            return v >= want;
+        };
+    } else {
+        return fail(err, "整数字段 `" + name + "` 不支持运算 `" + op + "`", s);
+    }
+    return true;
+}
+
+/** `(` expr `)` 或一个谓词。 */
+inline bool parseAtom(const std::string &s, size_t &i, CondPred &out, std::string &err) {
+    skipWs(s, i);
+    if (i < s.size() && s[i] == '(') {
+        i++;
+        if (!parseOr(s, i, out, err)) {
+            return false;
+        }
+        skipWs(s, i);
+        if (i >= s.size() || s[i] != ')') {
+            return fail(err, "少一个 `)`", s);
+        }
+        i++;
+        return true;
+    }
+    return parsePred(s, i, out, err);
+}
+
+/** `and`：`&` 比 `|` 结合得紧（左结合）。 */
+inline bool parseAnd(const std::string &s, size_t &i, CondPred &out, std::string &err) {
+    CondPred lhs;
+    if (!parseAtom(s, i, lhs, err)) {
+        return false;
+    }
+    while (true) {
+        skipWs(s, i);
+        if (i < s.size() && s[i] == '&') {
+            i++;
+            CondPred rhs;
+            if (!parseAtom(s, i, rhs, err)) {
+                return false;
+            }
+            CondPred acc = lhs;
+            lhs = [acc, rhs](const Observation &o) { return acc(o) && rhs(o); };
+            continue;
+        }
+        break;
+    }
+    out = lhs;
+    return true;
+}
+
+inline bool parseOr(const std::string &s, size_t &i, CondPred &out, std::string &err) {
+    CondPred lhs;
+    if (!parseAnd(s, i, lhs, err)) {
+        return false;
+    }
+    while (true) {
+        skipWs(s, i);
+        if (i < s.size() && s[i] == '|') {
+            i++;
+            CondPred rhs;
+            if (!parseAnd(s, i, rhs, err)) {
+                return false;
+            }
+            CondPred acc = lhs;
+            lhs = [acc, rhs](const Observation &o) { return acc(o) || rhs(o); };
+            continue;
+        }
+        break;
+    }
+    out = lhs;
+    return true;
+}
+
+}  // namespace conddetail
+
+/**
+ * 解析 `cond`（文法：`or := and ('|' and)*` · `and := atom ('&' atom)*` ·
+ * `atom := '(' or ')' | 谓词`）。**任何**认不出的东西都写 `err` 并返回 false ——
+ * ⛔ 绝不把"取不到的字段"当假（那会把实现缺口伪装成"域是空的"）。
+ */
+inline bool condParse(const std::string &src, DomainCond &out, std::string &err) {
+    const std::string s = trimAscii(src);
+    if (s.empty()) {
+        err = "域掩码条件为空（写法 net:<A>!net:<B>@<cond>）";
+        return false;
+    }
+    size_t i = 0;
+    conddetail::CondPred p;
+    if (!conddetail::parseOr(s, i, p, err)) {
+        return false;
+    }
+    conddetail::skipWs(s, i);
+    if (i != s.size()) {
+        return conddetail::fail(err, "多余的内容 `" + s.substr(i) + "`", s);
+    }
+    out.pred = p;
+    out.text = s;
+    return true;
+}
+
+/**
+ * 域掩码合成：`base`（域外）/ `dom`（域内），`cond` 为真走 `dom`。
+ *
+ * <p>用 `Policy` 级组合（不是 `ActionPolicy`）：它只要 `Decision`，**拿不到 `Round`** ——
+ * 与 `net:` 同一条反作弊口径（`teacher` 是唯一例外，见 `Decision` 的注释）。
+ */
+inline Policy makeDomainMaskPolicy(Policy base, Policy dom, DomainCond cond) {
+    auto c = std::make_shared<DomainCond>(std::move(cond));
+    return [base, dom, c](const Decision &d) -> Cmd {
+        if (d.obs == nullptr) {
+            return Cmd{};                      // 与 `net:` 同：拿不到观测 → 上层报错
+        }
+        if (!c->pred(*d.obs)) {
+            return base(d);                    // 域外：**逐位**等于 A（连 valid / fromBot 一起）
+        }
+        Cmd cmd = dom(d);                      // 域内：B 的 argmax
+        if (!cmd.valid || cmd.fromBot) {
+            return cmd;                        // B 自己失败 / 内置 Bot 回包 → 原样上交（上层报错）
+        }
+        if (d.obs->legal.empty()) {
+            // §6.15 的退化局面（自家回合每一种牌都被禁止）：`net:` 本身也回 PASS，引擎兜底。
+            // 这里放行是**与漏斗同口径**，不是"退回 A"。
+            return cmd;
+        }
+        if (d.obs->indexOfKey(cmd.action.key()) < 0) {
+            // ⛔ 绝不静默退回 A：那会把"两网在看不同的 legal"伪装成"域内无分歧"。
+            std::fprintf(stderr,
+                         "[trainer] 域掩码策略：域内 B 的回包不在本次 legal 里 —— 键 %s，"
+                         "legal=%zu 条，kind=%s，seat=%d，cond=\"%s\"（训练端不退回 A，直接报错）\n",
+                         cmd.action.key().c_str(), d.obs->legal.size(), d.obs->kind.c_str(),
+                         d.obs->seat, c->text.c_str());
+            return Cmd{};
+        }
+        return cmd;
+    };
+}
+
+/** `net:` 前缀（大小写不敏感）。 */
+inline bool hasNetPrefix(const std::string &s) {
+    return s.size() >= 4 && (s[0] == 'n' || s[0] == 'N') && (s[1] == 'e' || s[1] == 'E')
+           && (s[2] == 't' || s[2] == 'T') && s[3] == ':';
+}
+
+/**
+ * 把 `net:<A>!net:<B>[@α][#T]@<cond>` 切成三段。
+ *
+ * 触发条件**刻意收紧**：串必须 `net:` 开头、且含**紧接 `net:` 的 `!`**（`!net:`）——
+ * 于是所有老串（`net:<路径>[@α][#T]` / `pass` / `first` / `random` / `teacher`）**永不**进这一支，
+ * 逐位不变（自检钉着）。
+ *
+ * @return true = 是本支（`err` 非空 ⇒ 语法错，`err` 空 ⇒ 三段已填好）；false = 不是本支（`err` 不动）。
+ */
+inline bool domainMaskSplit(const std::string &name, std::string &specA, std::string &specB,
+                            std::string &condText, std::string &err) {
+    if (!hasNetPrefix(name)) {
+        return false;
+    }
+    size_t bang = std::string::npos;                     // 第一个 `!net:`（`!` 的绝对下标）
+    for (size_t k = 4; k + 5 <= name.size(); k++) {
+        if (name[k] == '!' && hasNetPrefix(name.substr(k + 1, 4))) {
+            bang = k;
+            break;
+        }
+    }
+    if (bang == std::string::npos) {
+        return false;
+    }
+    const size_t at = name.rfind('@');
+    if (at == std::string::npos || at <= bang + 4 || at + 1 >= name.size()) {
+        err = "域掩码策略缺 `@<cond>`：写法 net:<A>!net:<B>@<cond>（例：net:A!net:B@kind=claim）—— "
+              + name;
+        return true;
+    }
+    condText = trimAscii(name.substr(at + 1));
+    float probe = 0.f;
+    if (parseFloatStrict(condText, probe)) {
+        err = "域掩码策略的 `@` 后面那一段是个数（`" + condText + "`）—— 那看着像给 B 的 `@α`；"
+              "域掩码必须给 `@<cond>`（例：net:A!net:B@kind=claim）—— " + name;
+        return true;
+    }
+    specA = "net:" + name.substr(4, bang - 4);
+    specB = "net:" + name.substr(bang + 5, at - (bang + 5));
+    if (specA.size() <= 4 || specB.size() <= 4) {
+        err = "域掩码策略的 A / B 有一侧没写权重路径：写法 net:<A>!net:<B>@<cond> —— " + name;
+        return true;
+    }
+    return true;
+}
+
 /**
  * `Policies.byName(name)` 的等价物。
  *
  * @param err 未知 / 未实现的策略名写在这里（调用方据此报错退出，**不静默降级**）
  */
 inline PolicyFactory policyFactoryByName(const std::string &name, std::string &err) {
+    // ---- 域掩码（P2-11）：`net:<A>!net:<B>@<cond>` ----
+    // ⚠ 只在串里出现 `!net:` 时触发 ⇒ 老串走下面的原路，**逐位不变**（自检钉着）。
+    {
+        std::string specA, specB, condText;
+        if (domainMaskSplit(name, specA, specB, condText, err)) {
+            if (!err.empty()) {
+                return nullptr;
+            }
+            DomainCond cond;
+            if (!condParse(condText, cond, err)) {
+                return nullptr;
+            }
+            PolicyFactory fa = policyFactoryByName(specA, err);
+            if (!fa) {
+                return nullptr;
+            }
+            PolicyFactory fb = policyFactoryByName(specB, err);
+            if (!fb) {
+                return nullptr;
+            }
+            return [fa, fb, cond](int seat, int64_t gameSeed) {
+                return makeDomainMaskPolicy(fa(seat, gameSeed), fb(seat, gameSeed), cond);
+            };
+        }
+    }
     // `net:<权重文件>[@<α>][#<T>]` —— 与 Java `Policies.byName` 同一套解析：
     // 前缀大小写不敏感、**先剥 `#T` 再剥 `@α`**（顺序固定：Windows 路径里可能带 `#`），
     // 权重路径保持原样大小写；权重在**构造期**加载并校验魔数/版本/维度（坏了立刻报错）。

@@ -1222,7 +1222,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--selfplay <n>` | 跑 n 场半庄（**不监听端口**，4 个机器人座位） |
 | `--seed <n>` | 基准种子；第 g 场种子 = `SelfPlay.seedFor(seed, g)`（SplitMix，**与并行度无关**） |
 | `--workers <k>` | 并行线程数（默认 = CPU 核数；**不改变结果**） |
-| `--policy a,b,c,d` | 四家策略：`teacher`（内置机器人）/ `first` / `pass` / `random` / **`net:<权重文件>`**（进程内神经网络）/ **`net:<权重文件>@<α>`**（P5b 混合，老师先验权重 α，见下） |
+| `--policy a,b,c,d` | 四家策略：`teacher`（内置机器人）/ `first` / `pass` / `random` / **`net:<权重文件>`**（进程内神经网络）/ **`net:<权重文件>@<α>`**（P5b 混合，老师先验权重 α，见下）/ **`net:<A>!net:<B>@<cond>`**（P2-11 域掩码：`cond` 为真走 B、为假**逐位**走 A，见下） |
 | `--rotate` | 按局轮转座位：同一批牌山下让每个策略把四个座位都坐一遍（**配对评测务必开**） |
 | `--out <dir>` | 轨迹输出（每场 `g<序号>.jsonl` + `summary.json`） |
 | `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
@@ -1447,6 +1447,55 @@ java -jar mahjong-server.jar --selfplay 300 --workers 24 --rotate \
 - 回归：`SelfTest.samplingPolicyTests` —— 分布对拍（两候选 = `sigmoid(d/T)`、同分候选 χ²、
   T→0⁺ 逐条退化成 argmax）、非贪心比例随 T 单调不减、随机源可复现、`T=0`/缺省与贪心逐决策相同、
   `α=1e9` 时采样仍逐决策等同 `teacher`、整局零非法动作，外加两条非空转对照。
+
+**P2-11 域掩码（域条件化分叉；训练端 C++ 侧专用）**：策略串写成
+
+```
+net:<A>!net:<B>@<cond>
+```
+
+语义（`trainer/src/policies.hpp` 的 `makeDomainMaskPolicy`）：`<cond>` 为**真**（域内）时用
+`B` 在**同一次询问、同一个 `legal`** 上的 argmax；为**假**（域外）时**逐位**返回 `A` 的回包
+（连 `valid` / `fromBot` 一并原样返回）。`A` / `B` 各自仍是完整的 `net:<权重文件>[@α][#T]`。
+
+| 判据 | 口径 |
+| --- | --- |
+| 域外逐位等于 A | **定义级**：域外不经过任何再解码 —— 这是「同到可辨状态再分歧」（预注册 §1）的可执行形态 |
+| 域内的动作合法 | `B` 的回包**必须**在本次 `legal` 的键集里；不在就**整场报错退出**（⛔ 绝不静默退回 A —— 那会把"两网在看不同的 `legal`"伪装成"域内无分歧"）。唯一放行的是 §6.15 的退化局面（自家回合 `legal` 为空，`net:` 本身也回 `pass`，引擎兜底） |
+| 条件只读公开观测 | `cond` 只许读该席 `Observation` 的字段。**别家手牌 / 牌山顺序 / 里宝指示牌**取不到 ⇒ 未登记的字段**报错**，不当假（AGENTS §6.5 反作弊口径） |
+| 老串不受影响 | 只有串里出现**紧接 `net:` 的 `!`**（`!net:`）才进这一支 ⇒ 既有串（`net:…[@α][#T]` / `pass` / `first` / `random` / `teacher`）**逐位不变**（`trainer --selftest` 钉着） |
+
+`<cond>` 的文法（`&` 比 `|` 结合得紧、左结合；可用括号）：
+
+```
+or   := and ('|' and)*
+and  := atom ('&' atom)*
+atom := '(' or ')' | pred
+pred := <字段> <运算> <字面量>          # 布尔字段可裸用（= 真）
+运算 := = | == | != | < | <= | > | >=    # `kind` 只有 = / == / !=
+```
+
+**可读字段 = 全部**（其余一律报错，⛔ 不当假）：`kind`（`claim`/`turn`）· `draw`（自家巡目 =
+`player_draws`）· `tiles_left` · `dead_wall_left` · `total_discards` · `kan_count` · `kyoku` ·
+`honba` · `riichi_sticks` · `seat`（整数字段，可比较）；`opp_riichi`（**有他家立直**，不含自家）·
+`self_riichi` · `menzen` · `furiten` · `any_call` · `haitei` · `houtei` · `rinshan` · `has_drawn`
+（布尔字段，可裸用或 `=true/false/1/0`）。⚠ 公开但**未登记**的量（如 `scores`）也报错 ——
+"支持多少写多少"，缺口必须看得见。⛔ `cond` 里**没有**逻辑非（`!` 是结构分隔符）；要非就用 `!=`。
+
+```bash
+# 域 = 鸣牌询问段；域内换成另一张网（域外逐位等于 wl-riichi）
+trainer selfplay 1000 --workers 6 --rotate-perm --seed 52870101 --out <dir> \
+    --policy "net:<wl-riichi>!net:<wl-meld>@kind=claim,net:<风格1>,net:<风格2>,net:<风格3>"
+# 组合条件：别家已立直 且 自家巡目 ≥ 7 的行，用 temperature=0.5 采样
+--policy "net:<A>!net:<B>#0.5@opp_riichi&draw>=7"
+```
+
+- 语法错（`!` 后缺 `@<cond>`、`@` 后是数字、字段/值/运算认不出、括号不配对、`cond` 空）**全部在构造期**
+  报错并**退出码 2、零轨迹产出**（⛔ 不静默降级）。
+- 回归：`trainer --selftest` 的「域掩码」十条 —— 24 条 `cond` 取值 + 16 条非法条件 + 域外逐位
+  （动作与 `valid`/`fromBot`）+ 域内改判 + "B 的动作不在 legal ⇒ 报错" + 切分/负向。
+  ⚠ 这一支是**训练端 C++ 专用**：Java 侧 `mahjong.ai.Policies.byName` **没有**它，所以
+  `MAHJONG_PRODUCER=java` 下用它会报"未知策略名"（能力缺口**显式**暴露，不悄悄降级）。
 
 ### 8.5 数据集校验
 

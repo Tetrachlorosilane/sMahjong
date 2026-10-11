@@ -73,7 +73,7 @@ trainer\build\trainer.exe net NET.BIN TRACE.jsonl …       # 逐条 decision �
 | 开关 | 含义 | 缺省 |
 | --- | --- | --- |
 | `--workers K` | K 个线程抢场号 `g`；**并行只改调度**，`g*.jsonl` 与 `--workers 1` 逐字节相同 | **1**（不按核数自动并发），钳制到 `[1, games]` |
-| `--policy P` | 四家策略，逗号分隔：`teacher`（缺省）/ `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（`#T` = 从 `softmax(logits/T)` 采样，`T≤0` = argmax） | 缺省 = `teacher`（已实现）；`@α`（teacher 先验）**显式报错** |
+| `--policy P` | 四家策略，逗号分隔：`teacher`（缺省）/ `pass` / `first` / `random` / **`net:<权重文件>[@α][#T]`**（`#T` = 从 `softmax(logits/T)` 采样，`T≤0` = argmax）/ **`net:<A>!net:<B>@<cond>`**（P2-11 域掩码：`cond` 为真走 B、为假**逐位**走 A；文法与可读字段表见 `docs/PROTOCOL.md` §8.4） | 缺省 = `teacher`（已实现）；`@α`（teacher 先验）**显式报错** |
 | `--seed S` | 基准种子；每场种子只与 `(S, 场号)` 有关 | `20260101` |
 | `--hands H` | 每场最多 H 小局 | **0 = 完整半庄** |
 | `--out DIR` | 轨迹输出目录（`g<场号>.jsonl` + `summary.json`）；不给就只算不写 | — |

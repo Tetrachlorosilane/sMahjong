@@ -29,6 +29,7 @@
 #include "meld.hpp"
 #include "net.hpp"
 #include "payments.hpp"
+#include "policies.hpp"
 #include "roundclaims.hpp"
 #include "roundoptions.hpp"
 #include "roundscoring.hpp"
@@ -940,6 +941,211 @@ int selftest() {
                 check("鸣牌：不是下家打的牌不给 chi",
                       !has(trainer::claimOptionsText(b), "chi="));
             }
+        }
+    }
+
+    // ---- ⑨○ 域掩码策略组合（P2-11：`net:<A>!net:<B>@<cond>`）----
+    // 五条要钉住的东西：① cond 的文法与取值（含"取不到的量报错、不当假"）；
+    // ② 域外**逐位**等于 A（连 valid/fromBot 一起）；③ 域内确实改判；
+    // ④ B 的回包不在 legal ⇒ 报错（**不退回 A**）；⑤ 老串的解析入口不被新分支碰到。
+    {
+        using trainer::Action;
+        using trainer::Cmd;
+        using trainer::Decision;
+        using trainer::DomainCond;
+        using trainer::Observation;
+        using trainer::Policy;
+
+        // ① cond 求值（只读公开观测）
+        {
+            Observation o;
+            o.seat = 1;
+            o.kind = "claim";
+            o.playerDraws = 6;
+            o.riichi[2] = true;                 // 别家（seat 2）已立直
+            o.menzen = true;
+            o.totalDiscards = 11;
+            auto ev = [&](const char *text, bool &parsed, std::string &e2) -> bool {
+                DomainCond c;
+                parsed = trainer::condParse(text, c, e2);
+                return parsed && c.pred(o);
+            };
+            struct CondCase { const char *text; bool want; };
+            const CondCase cases[] = {
+                {"kind=claim", true},          {"kind==claim", true},
+                {"kind=turn", false},          {"kind!=turn", true},
+                {"kind!=claim", false},
+                {"draw<7", true},              {"draw<6", false},
+                {"draw<=6", true},             {"draw=6", true},
+                {"draw!=6", false},            {"draw>6", false},
+                {"draw>=6", true},
+                {"opp_riichi", true},          {"self_riichi", false},
+                {"menzen", true},              {"opp_riichi=false", false},
+                {"opp_riichi!=true", false},   {"total_discards<12", true},
+                {"kind=claim&opp_riichi", true},
+                {"kind=turn&opp_riichi", false},
+                {"kind=turn|opp_riichi", true},
+                {"(kind=turn|kind=claim)&draw<=6", true},
+                {"(kind=turn|opp_riichi)&draw<3", false},
+                // `&` 比 `|` 结合得紧：若反过来，下一条会是 false
+                {"kind=claim|self_riichi&menzen", true},
+            };
+            int bad = 0;
+            std::string firstBad;
+            for (const CondCase &cc : cases) {
+                bool parsed = false;
+                std::string e2;
+                const bool got = ev(cc.text, parsed, e2);
+                if (!parsed || got != cc.want) {
+                    bad++;
+                    if (firstBad.empty()) {
+                        firstBad = std::string(cc.text) + "（parsed=" + (parsed ? "1" : "0")
+                                   + "，得 " + (got ? "true" : "false") + "，要 "
+                                   + (cc.want ? "true" : "false") + "；" + e2 + "）";
+                    }
+                }
+            }
+            check(("域掩码 cond：" + std::to_string(sizeof(cases) / sizeof(cases[0]))
+                   + " 条取值全部相符" + (bad ? ("；首条不符 = " + firstBad) : "")).c_str(), bad == 0);
+
+            // ⛔ "取不到 / 没支持的量"必须**报错**，绝不静默当假
+            const char *badConds[] = {
+                "", "nosuch=1", "scores=1", "draw", "kind", "kind=foo", "kind<claim",
+                "draw<", "draw<x", "draw<7 8", "(kind=claim", "kind=claim&",
+                "kind=claim|", "opp_riichi=maybe", "!kind=claim", "draw<7)",
+            };
+            int okErrs = 0;
+            int nBad = static_cast<int>(sizeof(badConds) / sizeof(badConds[0]));
+            std::string firstMiss;
+            for (const char *t : badConds) {
+                DomainCond c;
+                std::string e2;
+                if (!trainer::condParse(t, c, e2) && !e2.empty()) {
+                    okErrs++;
+                } else if (firstMiss.empty()) {
+                    firstMiss = t;
+                }
+            }
+            check(("域掩码 cond 负向：" + std::to_string(okErrs) + "/" + std::to_string(nBad)
+                   + " 条非法条件都报错且带原因"
+                   + (okErrs == nBad ? "" : ("；首个漏网 = " + firstMiss))).c_str(), okErrs == nBad);
+        }
+
+        // ②③④ 组合语义：域外逐位 / 域内改判 / 非法回包报错
+        {
+            Observation o;
+            o.seat = 0;
+            o.kind = "claim";
+            bool ok1 = false, ok2 = false, ok3 = false;
+            const Action aPass = trainer::actionOf(trainer::kActPass);
+            const Action aD1 = trainer::actionParse("discard:1m", ok1);
+            const Action aD2 = trainer::actionParse("discard:2m", ok2);
+            const Action aOut = trainer::actionParse("discard:9m", ok3);
+            o.legal = {aPass, aD1, aD2};             // 9m 不在 legal 里
+
+            Decision d;
+            d.obs = &o;
+            d.kind = o.kind;
+
+            int baseCalls = 0;
+            int domCalls = 0;
+            Policy base = [&](const Decision &) {
+                baseCalls++;
+                Cmd c;
+                c.valid = true;
+                c.fromBot = true;                    // 域外必须连这个标志一起原样传出
+                c.action = aD1;
+                return c;
+            };
+            Policy dom = [&](const Decision &) {
+                domCalls++;
+                Cmd c;
+                c.valid = true;
+                c.action = aD2;
+                return c;
+            };
+            DomainCond inClaim;
+            std::string cerr;
+            const bool cok = trainer::condParse("kind=claim", inClaim, cerr);
+            check("域掩码：cond kind=claim 解析成功", cok);
+            const Policy comb = trainer::makeDomainMaskPolicy(base, dom, inClaim);
+
+            // 域内（kind=claim）⇒ 走 B
+            const Cmd in = comb(d);
+            check("域掩码：域内用 B 的回包（改判）",
+                  in.valid && in.action.key() == "discard:2m" && domCalls == 1 && baseCalls == 0);
+            // 域外（kind=turn）⇒ **逐位**等于 A
+            o.kind = "turn";
+            d.kind = "turn";
+            const Cmd out = comb(d);
+            check("域掩码：域外逐位等于 A（动作 + valid + fromBot）",
+                  out.valid == true && out.fromBot == true && out.action.key() == "discard:1m"
+                  && baseCalls == 1 && domCalls == 1);
+            // 域外的 A 若失败 ⇒ 原样失败（不掩盖）
+            Policy baseBad = [](const Decision &) { return Cmd{}; };
+            const Cmd outBad = trainer::makeDomainMaskPolicy(baseBad, dom, inClaim)(d);
+            check("域掩码：域外 A 失败 → 原样失败（valid=false）", !outBad.valid);
+
+            // ④ 域内 B 回了一个不在 legal 里的动作 ⇒ **报错**（valid=false），绝不退回 A
+            o.kind = "claim";
+            d.kind = "claim";
+            Policy domOut = [&](const Decision &) {
+                Cmd c;
+                c.valid = true;
+                c.action = aOut;                     // 9m ∉ legal
+                return c;
+            };
+            const Cmd err1 = trainer::makeDomainMaskPolicy(base, domOut, inClaim)(d);
+            check("域掩码：域内 B 的动作不在 legal ⇒ 报错（valid=false，不退回 A）", !err1.valid);
+            // ④′ 同一条件下 B 的动作**在** legal 里 ⇒ 正常放行（负向对照的非空转）
+            Policy domIn = [&](const Decision &) {
+                Cmd c;
+                c.valid = true;
+                c.action = aPass;
+                return c;
+            };
+            const Cmd in2 = trainer::makeDomainMaskPolicy(base, domIn, inClaim)(d);
+            check("域掩码：域内 B 的动作在 legal 里 ⇒ 正常放行", in2.valid
+                  && in2.action.key() == "pass" && !in2.fromBot);
+        }
+
+        // ⑤ 串解析：老串不进新分支；新串的语法错逐条报错且原因可读
+        {
+            std::string e1;
+            check("域掩码串：`teacher` 仍走老路（不是域掩码）",
+                  trainer::policyFactoryByName("teacher", e1) != nullptr && e1.empty());
+            std::string pA, pB, pC, pE;
+            const bool isMask = trainer::domainMaskSplit("pass", pA, pB, pC, pE);
+            check("域掩码串：`pass` 不被 domainMaskSplit 认领", !isMask);
+            std::string sa, sb, ct, e3;
+            const bool isMask2 = trainer::domainMaskSplit("net:A!net:B@kind=claim", sa, sb, ct, e3);
+            check("域掩码串：`net:A!net:B@kind=claim` 切出 A/B/cond",
+                  isMask2 && e3.empty() && sa == "net:A" && sb == "net:B" && ct == "kind=claim");
+            struct SplitCase { const char *text; const char *why; };
+            const SplitCase bad[] = {
+                {"net:A!net:B", "缺 cond"},                       // ③ 语法错（`!` 后缺 cond）
+                {"net:A!net:B@0.5", "把 @α 当 cond"},
+                {"net:A!net:B@", "cond 空"},
+            };
+            int hit = 0;
+            std::string miss;
+            for (const SplitCase &sc : bad) {
+                std::string xa, xb, xc, xe;
+                const bool claimed = trainer::domainMaskSplit(sc.text, xa, xb, xc, xe);
+                if (claimed && !xe.empty()) {
+                    hit++;
+                } else if (miss.empty()) {
+                    miss = std::string(sc.text) + "（" + sc.why + "）";
+                }
+            }
+            check(("域掩码串负向：" + std::to_string(hit) + "/3 条语法错都报错"
+                   + (hit == 3 ? "" : ("；首个漏网 = " + miss))).c_str(), hit == 3);
+            // 正串进 `policyFactoryByName` 时，报的必须是"权重加载失败"（⇒ cond 与切分都过了）
+            std::string e4;
+            const trainer::PolicyFactory f =
+                trainer::policyFactoryByName("net:no-such-A.bin!net:no-such-B.bin@kind=claim", e4);
+            check("域掩码串：切分/cond 通过后才去加载权重（错误信息指向权重）",
+                  f == nullptr && e4.find("加载神经网络权重失败") != std::string::npos);
         }
     }
 
