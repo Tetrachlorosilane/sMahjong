@@ -72,9 +72,10 @@ DEFAULT_PHASE_SHARE = {
 #: （单位 MB/场，除权已在 12,000 场上做）；余下 0.29 MB/场 是 `effect/ctx/aux_*` 与小张量。
 #: ⚠ 这个数直接决定**缓存档上限**与 `paths.allocate` 的配额预扣：**取小 5× = 把 181 GB 的一轮当 37 GB
 #: 排进计划**（P3-01 A 臂 `ENOSPC` + 内存/交换爆掉的直接原因）。改它必须同步 `selfcheck` 的那条断言。
-#: ⚠ 同批实测 `raw` = **3.25 MB/场**（36.38 GiB / 12,000，含 `*.feat.bin`）—— 与下面的 1.52e6 差 **2.1×**；
-#: 本批只授权改 compact 这一条常数，**raw 的同源偏差待决**（见 `S:\mahjong-training\w-ladder\MEMORY-CACHE-PLAN.md`）。
-DEFAULT_RAW_BYTES_PER_GAME = 1.52e6
+#: ⚠ 同批实测 `raw` = **3.25 MB/场**（36.38 GiB / 12,000 = 3.25e6，含 `g*.feat.bin` sidecar；
+#: 旧值 `1.52e6` 是 v3 谱系**不带 `--aux`/派生特征**的账，差 **2.14×**）⇒ 同样修正：取小 2× 会把
+#: raw 配额闸门（80 GB）算宽一倍，采到一半才 `ENOSPC`。两条常数必须**同步**改（同一份实测、同一条纪律）。
+DEFAULT_RAW_BYTES_PER_GAME = 3.25e6
 DEFAULT_COMPACT_BYTES_PER_GAME = 15.36e6
 
 #: **整盘余量**闸门的安全系数：物理上限只按余量的 90% 排计划（写满盘会让采集**静默失败**）。

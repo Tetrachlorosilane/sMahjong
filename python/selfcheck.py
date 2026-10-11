@@ -1465,9 +1465,14 @@ _d = ml_budget.fit_disk([{"games": 2000, "raw_bytes": 2.6e9, "compact_bytes": 5.
 eq("预算：磁盘模型也实测回填（1.3 MB/场 raw）", round(_d.raw_bytes_per_game, 1), 1.3e6)
 eq("预算：磁盘模型（2.8 MB/场 compact）", round(_d.compact_bytes_per_game, 1), 2.8e6)
 eq("预算：磁盘模型没有台账 → 默认值", ml_budget.fit_disk([]).rounds, 0)
-eq("预算：磁盘默认值与实测一致（raw 1.52 / compact 15.36 MB/场 —— 2026-10-12 P3-01 A 臂 12,000 场实测）",
+eq("预算：磁盘默认值与实测一致（raw 3.25 / compact 15.36 MB/场 —— 2026-10-12 P3-01 A 臂 12,000 场实测）",
    (round(ml_budget.DEFAULT_RAW_BYTES_PER_GAME / 1e6, 2),
-    round(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6, 2)), (1.52, 15.36))
+    round(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6, 2)), (3.25, 15.36))
+# ⚠ 下界断言：raw 默认值**不许**再跌回 v3 旧口径（1.52 MB/场 实测差 2.14×）——
+# 取小了会把 raw 配额（80 GB）算宽一倍，采到一半才 ENOSPC（与 compact 那条同一个成因）。
+ok(ml_budget.DEFAULT_RAW_BYTES_PER_GAME >= 3.0e6,
+   "预算：raw 默认值 ≥ 实测下界 3.0 MB/场（v3 旧值 1.52 已证伪）",
+   f"{ml_budget.DEFAULT_RAW_BYTES_PER_GAME / 1e6:.2f} MB/场")
 # ⚠ 下界断言：compact 默认值**不许**再跌回 v3 旧口径（3.06 MB/场 实测差 5.0×）——
 # 取小了会把 181 GB 的一轮当成 37 GB 排进计划（P3-01 A 臂 ENOSPC 的直接原因）。
 ok(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME >= 15.0e6,
