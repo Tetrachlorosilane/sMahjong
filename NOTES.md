@@ -304,9 +304,11 @@ java -jar server\build\mahjong-server.jar --selftest
 > **重跑即过**：仓库根现存 **7** 份同签名日志（截至写稿时），最早一份是**改动之前**（2026-10-05）就有的；与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
 > **证据链**：`WHEA-Logger` **ID 19** 近 3 天数**十**条 —— 「出现已更正的硬件错误。由以下组件报告: 处理器核心 错误源: Corrected Machine Check 错误类型: Internal parity error 处理器 APIC ID: 33」（另有 **32**）；
 > 密集时段 2026-10-10 22:29 → 2026-10-11 03:39；`Microsoft-Windows-Kernel-Power` **ID 41**（2026-10-11 12:38:57）「系统已在未先正常关机的情况下重新启动…」+ `EventLog` **6008**「上一次系统的 3:36:27 在 2026/10/11 上的关闭是意外的」。
-> ⇒ **⛔ 不是 JDK/JIT 的锅，也不能靠 `-XX:CompileCommand` 规避**（无代码 bug 的间歇性访问违例：`--selftest` 也会崩、20 分钟曾撞 2 次）；**缓解 = 降负载 / 限频 / 更新 BIOS 微码**。
-> 已施加（可逆）：`powercfg` 最大处理器状态 **100% → 80%**（`PROCTHROTTLEMAX` 0x64→0x50）并 `setactive`；**还原命令** =
-> `powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2; powercfg /setactive SCHEME_CURRENT`。
+> ⇒ **⛔ 不是 JDK/JIT 的锅，也不能靠 `-XX:CompileCommand` 规避**（无代码 bug 的间歇性访问违例：`--selftest` 也会崩、20 分钟曾撞 2 次）。
+> **正确缓解（两条腿）**：① **硬件侧** = **BIOS/微码更新 + Intel Default/Baseline 设定 + 把 PL1/PL2 设回规格**（i9-14900HX 约 **55/157 W**，以官方为准）+ 可选**限倍频**或**轻微降压**；
+> ② **软件侧我们只降并行度**（一次一个重负载任务 · `--workers ≤6` · `OMP_NUM_THREADS`/`MKL_NUM_THREADS` ≤6，见下方"低压力运行策略"）。
+> ⚠ **曾试 `powercfg` 最大处理器状态 `PROCTHROTTLEMAX` 100%→80%，但已判定不合理并已还原**（原因：该设置**先关睿频、再把频率压到基准 2.2 GHz 以下**，而本机健康工作点是**全核睿频 3.4–3.7 GHz**）⇒ 现状 = **100% + `PERFBOOSTMODE=2`**；⛔ **不要再按"限频 80%"重做**（若你手动改过、要还原到 100% + boost：`powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2; powercfg /setactive SCHEME_CURRENT`）。
+> **效果判据** = 近 24h `WHEA-Logger` **ID 19** 计数（改前 **18** → 重启前已 **22** ⇒ **限频并没有止住**）+ 是否再现 `Kernel-Power` **41** / `EventLog` **6008**。
 > 判据：**输出里出现 `SELFTEST PASS` 才算过**；看到 `hs_err` 横幅 + 退出码 1 时**先重跑**，别改代码。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
 > 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：直接摆手牌 + 用现成的钩子问结论
