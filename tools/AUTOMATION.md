@@ -80,3 +80,20 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | `tools\jvm-guard.mjs --selftest` | 5/5 | ② 一直崩 ⇒ FAIL（不许出现 PASS）；③ 退出码 0 但新落 `hs_err` ⇒ FAIL；⑤ 被包装命令里的 `--selftest` 不许触发 guard 自己的自检 |
 | `tools\verify-push.mjs --selftest` | 5/5 | ③ tree 不同 ⇒ `TREE_MISMATCH` 退出码 1；④ 拿不到远端 tree ⇒ `UNKNOWN` 退出码 2；⑤ 取不到远端头 ⇒ `NO_REMOTE` 退出码 2 |
 | `tools\paired-eval.mjs --selftest` | 桥内 23 项 | 采集目录不存在 ⇒ 非 0 退出；落点选 `docs/` ⇒ 拒绝写；桥内：未登记方向的量 ⇒ **当场报错**（⛔ 无缺省兜底） |
+| `tools\v4-forward-gpu.py --selftest` | 16/16 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
+
+## 6. v4 前向（GPU 批量 · `tools\v4-forward-gpu.py`）
+
+```powershell
+python\.venv\Scripts\python.exe tools\v4-forward-gpu.py --weights <net.bin> --rows <rows.npz|紧凑集目录|python\tests\golden\forward-v4.bin> --device cuda --batch 512 --repeat 3 --out logits.jsonl
+python\.venv\Scripts\python.exe tools\v4-forward-gpu.py --weights <net.bin> --traces <轨迹目录> --policy "<学生策略串>" --where-kind claim --rows-out rows.npz   # 物化行级张量（内部只调 blocks.assemble）
+python\.venv\Scripts\python.exe tools\v4-forward-gpu.py --selftest
+```
+
+| 项 | 内容 |
+| --- | --- |
+| 判据 | 同权重同输入时 **argmax 逐行相同** + 逐元素 `maxΔ ≤ tol`；`--traces` 与 `--rows` 两条输入路径必须**逐位相同**；`--repeat` 每次 argmax 必须逐行相同（⛔ 不同就是"同一份输入两个答案"）；`--device cuda` 在 `cuda.is_available()=False` 时**报错不回落**；按 `legal` 条数分桶（补 0 行会经 `u.mean`→`policy_gate` 改 argmax，与逐行语义**不等价**） |
+| ⛔ 特征侧不重实现 | 只消费**既有行级张量**；唯一的"轨迹→张量"通道（`--traces`）只调 `mahjong_ml.v4.blocks.assemble` + `v4.traces.sidecar_dict`（降级**一律报错**） |
+| ⚠ 现状（2026-10-11 R1） | **判据不过 ⇒ 未推广**：1/13,408 行 argmax 翻转（根因 = `python/mahjong_ml/features.py:287-294` 对 `kan:daiminkan:a+b+c` 只拆 2 段，与 `Action.java:403-413` 不一致）；`maxΔ` 超 1e-5 属量纲（\|logits\| 中位 29.5 ⇒ 1 ulp ≈ 1.3e-5）。**热态 20,628 行/秒（≈57.6× 于 C++ 逐行）**，CUDA 冷启动 15.999 s 是一次性预热。详见 `NOTES.md` §6.5 末 |
+| 退出码 | 0 = 通过 / 1 = 判据不过（夹具参考 logits 不符） / 2 = 用法、环境或输入坏了 |
+
