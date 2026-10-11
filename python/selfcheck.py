@@ -1465,9 +1465,14 @@ _d = ml_budget.fit_disk([{"games": 2000, "raw_bytes": 2.6e9, "compact_bytes": 5.
 eq("预算：磁盘模型也实测回填（1.3 MB/场 raw）", round(_d.raw_bytes_per_game, 1), 1.3e6)
 eq("预算：磁盘模型（2.8 MB/场 compact）", round(_d.compact_bytes_per_game, 1), 2.8e6)
 eq("预算：磁盘模型没有台账 → 默认值", ml_budget.fit_disk([]).rounds, 0)
-eq("预算：磁盘默认值与 v3 谱系最近四代实测一致（raw 1.52 / compact 3.06 MB/场）",
+eq("预算：磁盘默认值与实测一致（raw 1.52 / compact 15.36 MB/场 —— 2026-10-12 P3-01 A 臂 12,000 场实测）",
    (round(ml_budget.DEFAULT_RAW_BYTES_PER_GAME / 1e6, 2),
-    round(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6, 2)), (1.52, 3.06))
+    round(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6, 2)), (1.52, 15.36))
+# ⚠ 下界断言：compact 默认值**不许**再跌回 v3 旧口径（3.06 MB/场 实测差 5.0×）——
+# 取小了会把 181 GB 的一轮当成 37 GB 排进计划（P3-01 A 臂 ENOSPC 的直接原因）。
+ok(ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME >= 15.0e6,
+   "预算：compact 默认值 ≥ 实测下界 15.0 MB/场（v3 旧值 3.06 已证伪）",
+   f"{ml_budget.DEFAULT_COMPACT_BYTES_PER_GAME / 1e6:.2f} MB/场")
 # 计划：时间预算 30 分钟、无闸门 → 用弦反解（1800 s 落在 1000/3000 两点之间）
 _p = ml_budget.plan_round(1800.0, _c, ())
 eq("预算：30 分钟 → 场次由**分段线性**反解并取整到百", _p.by_time,
