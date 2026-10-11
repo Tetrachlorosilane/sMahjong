@@ -373,6 +373,33 @@ ok(abs(float(cd_d[-1]) - 1.0) < 1e-6 and abs(float(cd_d[-8]) - 1.0) < 1e-6,
    "派生候选量按 DERIVED_SCALE_CAND 归一化（向听 8→1.0、dora 4→1.0）",
    f"shanten={float(cd_d[-8])} dora={float(cd_d[-1])}")
 
+# ---- 大明杠（`kan:daiminkan:a+b+c`）的**两处都要填** ---------------------------------------
+# 契约 = Java `Action.kan(kind, tile, hand)`（`Action.java:118-120`）+ `Features.candidate`
+#   **两处都读**：`a.tile` → 主牌 one-hot、`a.tiles` → 「取法」计数（`Features.java:234-248`）；
+#   C++ 同（`trainer/src/action.cpp:244-247` 置 `hasTile = hasTiles = true`）。
+# ⚠ 为什么单列一组、而且每一条都单独断言：这条**整个漏过**——`action_parts` 拆
+#   `key[len("kan:"):]` 只有 2 段 ⇒ 3 段分支不可达 ⇒ 主牌 `tile_slot("a+b+c") == -1`、「取法」恒 0
+#   ⇒ 51/13,408 行该候选 logit 差 4.4~10、1 行 argmax 翻转（NOTES §6.5）。
+#   而 P5 夹具 10 例的 legal 里**一个 `kan:` 都没有** ⇒ 三端 parity 结构上抓不到它。
+#   ⇒ 把这段改回"只拆 2 段"或"只填取法不填主牌"，下面几条**必须**红。
+eq("大明杠 action_parts：拆**整个键**（kind 在 p[1]、取法在 p[2]）",
+   feat.action_parts("kan:daiminkan:3s+3s+3s"), ("kan", "3s", ["3s", "3s", "3s"], "daiminkan"))
+eq("暗杠/加杠仍走「单张主牌」那条（不填取法）",
+   (feat.action_parts("kan:ankan:5z"), feat.action_parts("kan:kakan:5z")),
+   (("kan", "5z", [], "ankan"), ("kan", "5z", [], "kakan")))
+eq("大明杠主牌是**牌种**码：赤五被抹掉（Java `Tiles.kindToStr`，⛔ 不是 aka 槽）",
+   feat.action_parts("kan:daiminkan:0m+5m+5m"), ("kan", "5m", ["0m", "5m", "5m"], "daiminkan"))
+_dk = feat.cand_vector("kan:daiminkan:3s+3s+3s")
+eq("大明杠「主牌」one-hot 落在 kind(3s)=20 槽", int(np.argmax(_dk[9:9 + feat.TILE_SLOTS])), 20)
+eq("大明杠「主牌」块只有一个 1（赤五没落到 aka 槽）",
+   float(np.abs(_dk[9:9 + feat.TILE_SLOTS]).sum()), 1.0)
+eq("大明杠「取法」块是**计数**（3 张同种 = 3.0，落在同一 kind 槽）",
+   float(_dk[9 + feat.TILE_SLOTS + 20]), 3.0)
+eq("大明杠 kan_kind 标志落在 KAN_KINDS[2]",
+   int(np.argmax(_dk[9 + 2 * feat.TILE_SLOTS + 1:9 + 2 * feat.TILE_SLOTS + 1 + len(feat.KAN_KINDS)])), 2)
+eq("暗杠不填「取法」块",
+   float(np.abs(feat.cand_vector("kan:ankan:5z")[9 + feat.TILE_SLOTS:9 + 2 * feat.TILE_SLOTS]).sum()), 0.0)
+
 print("== 数据集（按整场切分 + 紧凑落盘 + 派生特征 sidecar）==")
 
 

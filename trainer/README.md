@@ -147,7 +147,7 @@ node tools\selfplay-check.mjs <dir>                                         # �
 ```powershell
 # ① golden 夹具自检：四张量 + 四个推理头 + 红证（Python 侧 blocks.assemble 是基准）
 trainer\build\trainer.exe v4golden python\tests\golden\forward-v4.bin [--tol 1e-4]
-#   实测：golden cases=10 tol=0.000100000 特征 maxΔ=5.96e-08 前向 maxΔ=5.03e-08 argmax=10/10 红证 maxΔ=0 → PASS
+#   实测：golden cases=11 tol=0.000100000 特征 maxΔ=5.96e-08 前向 maxΔ=2.26e-06 argmax=11/11 红证 maxΔ=1.19e-07 → PASS
 
 # ② 与 Java 逐行对拍（真实权重 + 真实轨迹）
 javac -encoding UTF-8 -cp server\build\mahjong-server.jar -d tools\build tools\V4Probe.java

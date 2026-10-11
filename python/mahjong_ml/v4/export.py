@@ -392,7 +392,12 @@ def _iter_cases(trace_dir: Path, want: int, *, scan_files: int = 8):
                 picked.append((f, idx, row))
             long_seen = long_seen or long
             idx += 1
-            if len(picked) >= want and long_seen:
+            # ⚠ 停止条件必须**包含覆盖闸门**：`seen_tags` 只在"这条被选走"时才更新
+            #   （见上面的 `seen_tags |= tags`），所以它 == 这批用例**真正覆盖到**的标签集。
+            #   少了这个条件，新加的必须覆盖项就只是"扫的时候恰好捡到了没有"——
+            #   一个出现在后面文件里的 `legal_kan` 会被 `len(picked) >= want` 提前掐掉，
+            #   于是闸门报"覆盖不足"，而其实只是**没去找**。
+            if len(picked) >= want and long_seen and set(REQUIRED_TAGS) <= seen_tags:
                 return picked
     return picked
 
@@ -402,12 +407,23 @@ def _iter_cases(trace_dir: Path, want: int, *, scan_files: int = 8):
 #:   在**满窗**用例上被 GRU 的收缩性洗掉（实测 |Δh|=1.3e-7，判据看不见）；只有在
 #:   "绝大多数是 padding、真实事件只有几条"的用例上才会放大到 1e-2 量级 ⇒ 缺了它，
 #:   三端把 padding 也喂进 GRU 也照样全绿。
-REQUIRED_TAGS = ("turn", "claim", "own_meld", "riichi_any", "ippatsu", "evt_short")
+#: ⚠ `legal_kan`（R2 加的）：夹具里必须有 `kan:` 候选。缺了它，`cand` 的**候选键解析**这一路
+#:   （`kan:daiminkan:a+b+c` 的主牌 one-hot + 取法计数）在 Java/C++/Python 三端**没有任何用例**
+#:   —— 实测漏掉了一个真 bug（51/13,408 行 logit 差 4.4~10、1 行 argmax 翻转）。
+#:   ⚠ 这一条**必须**同时进 `_iter_cases` 的停止条件（见那里的注释），否则它只是在事后检查
+#:   "恰好捡到了没有"，而不是"必须捡到"。
+REQUIRED_TAGS = ("turn", "claim", "own_meld", "riichi_any", "ippatsu", "evt_short", "legal_kan")
 
 
 def _tags(obs: Mapping[str, Any]) -> set[str]:
     """一条决策"走了哪些特征分支"（选例与覆盖闸门都用它）。"""
     tags = {str(obs.get("kind"))}
+    # ⚠ **候选侧也要有覆盖维度**：夹具原来 10 例的 `legal` 里**一个 `kan:` 都没有** ⇒
+    #   大明杠候选的主牌/取法两处（`features.cand_vector` 与 Java `Features.candidate`）
+    #   在**三端 parity 上结构性地抓不到** —— 实测就漏了 51/13,408 行、1 行 argmax 翻转，
+    #   而夹具一直全绿（NOTES §6.5）。候选键是独立的语义面，不能只按 obs 的状态分支打标签。
+    if any(str(k).startswith("kan:") for k in (obs.get("legal") or [])):
+        tags.add("legal_kan")
     seat = int(obs.get("seat", 0))
     melds = obs.get("melds") or []
     if seat < len(melds) and melds[seat]:

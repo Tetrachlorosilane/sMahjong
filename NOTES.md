@@ -3772,6 +3772,31 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 - **不一致①（真 bug，在 Python 特征侧，⛔ 本轮未改）**：`python/mahjong_ml/features.py:287-294` 的 `action_parts` 对 `kan:daiminkan:a+b+c` 只拆出 **2 段**（Java `Action.parse` 拆**整个键**得 3 段，`server/src/main/java/mahjong/ai/Action.java:403-413`）⇒ `len(parts)==3` 那条**永远走不到**、大明杠候选的「取法」块恒 0 且 `tile_slot('a+b+c')=-1` ⇒ **51/13,408 行**该候选 logit 差 4.4~10、**1 行 argmax 翻转**（行 12518：C++/Java 选 `pon`、Python 选 `pass`）。⚠ P5 夹具 10 例的 legal 里 **0 个 `kan:` 候选** ⇒ 三端 parity **结构上**抓不到它。**不一致②（量纲而非语义）**：阈值 1e-5 是**绝对**的，而 |logits| 中位 29.5 / 最大 112 ⇒ fp32 该量级 **1 ulp ≈ 1.3e-5**；相对口径 C++↔torch 中位 2.0e-7、GPU↔CPU 中位 2.05e-7 / 最大 1.19e-5（≈1 ulp），去掉 51 行大明杠后 argmax **13,357/13,357 全同**、行内 maxΔ 仍 6.11e-5。
 - **红线与处置**：⛔ **特征侧不重实现** —— GPU 前向只消费**既有行级张量**（P5 夹具 / `.npz` / 紧凑集目录），唯一的"轨迹→张量"通道只调 `mahjong_ml.v4.blocks.assemble`；⛔ 未改 `python/mahjong_ml/**`、未改 `trainer/**`、未跑训练/采集/闸门。**按"发现不一致就停止推广"：先修 ①（大明杠键解析，并给夹具补 `kan:` 候选覆盖）+ 把 ③④ 的 tol 改成随量纲走（相对或 1e-4），再谈把评估路径切到 GPU。**
 
+**R2 —— 修掉 R1 抓出的真 bug + 补覆盖 + 修正判据口径，五条判据全过 ⇒ 评估路径已切到 GPU**（2026-10-11 同轮继续 · 零训练 · ⛔ 只跑小规模前向对拍与在既有产物上重算）：
+
+- **① 真 bug 其实是"两处"**（R1 只看到第一处，上一段那句"只拆 2 段"**不完整**）：
+  `action_parts` 对 `kan:daiminkan:a+b+c` ① 拆的是 `key[len("kan:"):]` ⇒ 只有 **2 段** ⇒ `len(parts)==3` 那条**不可达**；② 即使修好分段，**主牌槽位也没填** —— 契约是 Java `Action.parse`（`Action.java:403-413`）`key.split(":")` 得 **3 段**、`p[1]`=种类、`p[2]`=牌码或"手里取哪三张"，而 `Action.kan(kind, tile, handTiles)`（`Action.java:118-120`）生成的 `Action` **同时**带 `tile` 与 `tiles`（`tile = Tiles.kindToStr(Tiles.parseKind(hand.get(0)))` = **牌种**码，赤五被抹成 `5m`；`hand` 按 `tileIndex` 升序），`Features.candidate` 两处**都读**（`Features.java:234-248`；C++ `action.cpp:244-247` 同样 `hasTile = hasTiles = true`）。
+  ⚠ **只修 ① 会换一个方向翻**：实测只补分段时 argmax 仍是 13,407/13,408，只是翻转行从 12518 变成 6003（该候选 logit 差 0.52~2.26）——**这就是"修一半比不修更难发现"**。
+  ⚠ R1 那段证据脚本的两处口径也记错（结论不受影响）：`action_parts` 的块偏移不是 `[49:83]` 而是 **`[46:83]`**（`len(ACTION_TYPES)=9`、`TILE_SLOTS=37`），期望下标不是 3 而是 `tile_kind("3s") = 20`。
+  ⚠ R1 那句"行 12518：C++/Java 选 `pon`"也不对：`legal = ['pon:5z+5z','kan:daiminkan:5z+5z+5z','pass']`，C++ 选的是**下标 1 = 大明杠**（logits `-9.5442` vs pass `-13.6695`），错实现把该候选打到 `-15.916` 才选了 `pass`。
+- **② 红证（同一批 13,408 行 / 同一份权重 `v4-wl-meld3030-4g-c2-g04` / R1 的 `raw/v4-wl-fold-any-c1-c1-g01` 副本）**：
+  **修前** = `argmax 13,407/13,408`（不符 1 行 `[12518]`）、绝对 `maxΔ` 最大 **9.964**、51 行大明杠候选格 |Δ| 中位 3.912；
+  **修后** = `argmax **13,408/13,408**`、绝对 `maxΔ` 最大 **6.110e-05**、相对 maxΔ **1.502e-05**、51 行大明杠候选格 |Δ| **min 0 / 中位 3.9e-06 / max 1.53e-05（51/51 ≤ 1e-4）**、31 行其它 `kan:`（暗杠/加杠）行不受影响（中位 9.6e-06）。
+  ⚠ **复现性**：本轮"修前"的输出与 R1 的 `gpu-cuda.txt` **逐元素 maxΔ = 0.000e+00（100% 为 0）** —— 同一份输入在同一台机上给出同一串浮点数，所以后面的红/绿不是随机。
+- **③ 判据口径（量纲）**：`--tol` 从**绝对 1e-5** 改成**相对** `|Δ| ≤ tol × max(1, |参考值|)`，`tol = 1e-4`。依据两条：① `|logits|` 中位 29.5 / p90 46.4 / 最大 112 ⇒ fp32 在该量级 **1 ulp ≈ 1.3e-5**，绝对 1e-5 **比 1 ulp 还小**（实测 13,408 行里 **7,019 行**"超"它，而同一批行的相对 maxΔ 只有 1.5e-05 ⇒ 那是在测舍入顺序，不是语义）；② 仓库对**同一条前向**早就用 1e-4（P5 夹具 `forward-v4.json` 的 `"tol": 1e-4`，`trainer v4golden` 与 `V4Probe --golden` 都按它判）⇒ 三端本来就是这个口径，不该在第四个地方收紧。⛔ **换量纲不是放宽语义：argmax 逐行相同这条一个字没动**；`max(1, ·)` 的 1 让"参考值接近 0"的格子退回绝对口径。
+- **④ 覆盖（防复发）—— 两层**：
+  **(a) 夹具生成流程**：`v4/export.py` 的 `_tags` 加 `legal_kan`、`REQUIRED_TAGS` 加它，并**同时把它写进 `_iter_cases` 的停止条件**（`set(REQUIRED_TAGS) <= seen_tags`）—— 少了后半句，新覆盖项就只是"扫的时候恰好捡到了没有"，一个出现在后面文件里的 `legal_kan` 会被 `len(picked) >= want` 提前掐掉（那是"没去找"，不是"覆盖不足"）。重建：`_iter_cases` 的新旧选例**逐条比过**，新选例 = 旧 10 条**前缀** + 第 11 条（`g0.jsonl idx=169`，`legal` 里带 `kan:daiminkan:6s+6s+6s`）。
+  **(b) 冻结夹具**：`python/tests/golden/forward-v4.bin/.json` 从 **10 例 → 11 例**（596,377 B → 631,551 B）。⚠ **重建前后前 10 例的输入（obs/legal/h0/tile/evt/ctx/cand）逐字节相同**；只有每例末尾的 **python 参考输出**差 ≤ **8.345e-07**（≈7 ulp @ |logit|≈1.17，`torch`/BLAS 归约顺序的机器差异，远在夹具自身 1e-4 之内）⇒ 不是我的改动造成的（这 10 例 legal 里没有 `kan:`，改动根本碰不到它们）。
+  **三端判据**：`node tools/trainer-v4-parity.mjs --golden` → **Java 与 C++ 各自 `cases=11 … 特征 maxΔ=5.96e-08 前向 maxΔ=2.26e-06 argmax=11/11 → PASS`**（两端数字逐项相同）。
+  **负向（"改回错实现 ⇒ 覆盖必须红"）**：用 `git show HEAD:` 的原件（**不改工作区**，只在进程内替换 `features.action_parts` + 清 `blocks._BASE_CAND_CACHE`）① 重跑 selfcheck 新加的 8 条断言 ⇒ **正确实现 8/8 过 → 错实现下 5 条红**；② 用它重建夹具 ⇒ `trainer v4golden` **exit 1 FAIL**，且点名 `c10.cand[row1][col32] Δ=1 | c10.cand[row1][col69] Δ=3` —— 正是**主牌**（`9+23`）与**取法**（`46+23`，kind 23 = `6s`）那两块。
+  **(c) 单测**：`python/selfcheck.py` 加 8 条大明杠契约断言（`selfcheck` **859 → 867 项 / 失败 0**）。
+- **⑤ 五条判据（本轮实测）**：① 行数 13,408 == 既有 `trainer-v4-parity` 的 13,408 ✓；② argmax **13,408/13,408** ✓；③ 相对 maxΔ 最大 **1.502e-05 ≤ 1e-4**、超限 **0** 行 ✓；④ GPU↔CPU argmax **13,408/13,408**、相对 maxΔ 1.192e-05 ✓；⑤ P5 夹具（11 例）两条路径 argmax **11/11**、相对 maxΔ 1.158e-06（cuda）/ 7.089e-07（cpu）✓。
+- **⑥ 评估路径切换（新增，不动在飞的脚本）**：新增 `tools/v4dforward-gpu.py` —— 它是 `_p2-11c-dforward.py` 一族**前向那一步**的等价替换（只做"选行 / 对齐 / 记账"，张量与 logits 全走 `tools/v4-forward-gpu.py`；⛔ 不重实现特征或前向），输出**与 `trainer v4net` 逐字符同格式**的逐行文本 + 与那一族**同名字段**的读数 JSON。`_p2-11c-*` / `_p2-11d-*` **一个字都没改**。
+  **回归读数（选 `python\.tmp\r1\corpus-a` = R1 留下的 20 场副本，因为 `raw\p2-11c\base` 与 `_p2-11c-work\stu\*` 都已被在跑的任务删空 ⇒ 冻结读数 `_p2-11c-dforward-*.json` 的输入已不可复算）**：**(a) 全量** 新路径 vs R1 冻结的 `cpp-v4net.txt`（= 旧路径当年在同一批行上的输出）⇒ `step/n/argmax` 不符 **0/0/0**、绝对 maxΔ 6.110e-05、相对 1.502e-05；**(b) 域 `kind=claim`（3,037 行）** 旧路径（`trainer v4net` 每 10 文件一批，与那一族同一批大小）vs 新路径 ⇒ `step/n/argmax` 不符 **0/0/0**，两边读数**完全相同**：`n_D=3037 flip_rows_D=357 flip_rate_D=0.117550`。
+  ⚠ 切换时抓到的**自己的**坑（记下来防复发）：`--select-from` 用 `glob` 的**字典序**（g0,g1,g10,…,g19,g2,…）选行，而那一族按 **game 数值序**喂 v4net ⇒ 逐行 diff **整片错位**（3,037 行里 2,664 行 `step` 对不上），**而两边的 `flip_rows_D` 都还是 357** —— 即"每行的答案都对，只是排在不同的行上"，**只看汇总数根本发现不了**。现在选行强制按 `traces.trace_files` 的规范序。
+- **⑦ 受影响的既有读数与处置**：① P5 夹具（10 例 / 596,377 B / Java+C++ `argmax=10/10`、前向 maxΔ 5.03e-08）⇒ **已重建为 11 例**，各处"当前状态"读数同步（`docs/PROTOCOL.md` §8、`docs/TRAINER-CPP.md` §6.25 表、`trainer/README.md`、本文件 §6.5 上一段）；**历史轮次记录保持原样**（`513459 B / 8 用例`、`573,336 B` 那两处是"当时"的事实，⛔ 不改写成现在）。② `python/selfcheck.py` 项数 859 → 867（AGENTS §4 记录处同步）。③ R1 的 `cpp-v4net.txt` / `gpu-cuda.txt` / `gpu-cpu.txt`（`python\.tmp`，不进仓库）**仍然有效**：它们测的是**旧实现**的输出，正是本轮的对照面。
+- **⑧ 算力账**：本轮只做小规模前向 —— 物化 13,408 行 ≈3 s（单核）、CUDA 前向 15.8 s（**含 ≈16 s 冷启动**，热态 851~3,047 行/秒）、torch-CPU 4.4 s、C++ `v4net` 只跑了 `claim` 域 3,037 行（分批）、`v4golden` 11 例 ×3 次。⛔ 未跑 PPO / 训练 / 强度闸门 / 采集；⛔ 未改 `powercfg`。
+
 ---
 
 ## 6.6 teacher（内置机器人）的五层取舍
@@ -5951,10 +5976,10 @@ $ ... --gate-root python\.tmp\dup-root --tags dup-a,dup-b ...
   `SelfTest.v4ForwardTests` 用夹具逐元素钉住（L1 1403 → **1423/0**）。
 - **C++**：`trainer/src/v4features.*` / `v4policy.*` + `v4net` / `v4golden` 子命令 +
   `policies.hpp` 按 `format` 分派（v3 路径一位不变）。
-- **夹具与对拍**：`python/tests/golden/forward-v4.bin`（小网络 32/16/2/5，10 个用例，**带覆盖闸门**）；
+- **夹具与对拍**：`python/tests/golden/forward-v4.bin`（小网络 32/16/2/5，**11 个用例** —— R2 起含一个 `kan:` 候选例（覆盖闸门里的 `legal_kan`），**带覆盖闸门**）；
   `tools/V4Probe.java` + `tools/trainer-v4-parity.mjs`
   （`--golden` / `--selfcheck` / 逐行对拍，退出码 0/1/2/3）。
-- **判据（实测）**：Java golden `特征 maxΔ=5.96e-08 / 前向 maxΔ=5.03e-08 / argmax 10/10 / 红证 0`；
+- **判据（实测）**：Java golden `特征 maxΔ=5.96e-08 / 前向 maxΔ=2.26e-06 / argmax 11/11 / 红证 1.19e-07`（R2 起夹具是 **11 例**，含 `kan:` 候选；原 10 例读数 `前向 maxΔ=5.03e-08 / argmax 10/10` 已随重建失效，见本文件 §6.5 R2 段 ⑦）；
   C++ 同数字；**Java↔C++ 1,885 条决策逐字符相同、maxΔ=0**；Java 端到端 8 场自对弈 +
   `selfplay-check` DATASET PASS；`packbot` 能打 v4 包并在服务端挂载成功。
 - ⚠ **性能实测**：特征 ≈4.6 ms + 前向 ≈35–40 ms / 决策（单线程）——当时那句耗时"预算"

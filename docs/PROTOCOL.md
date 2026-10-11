@@ -1352,7 +1352,7 @@ java -jar mahjong-server.jar --selfplay 200 --workers 24 --rotate \
 - **输入**是四张量 `tile[34,48] / evt[60,96] / ctx[64] / cand[n,128]`（`mahjong/ai/V4Features.java`）；
   `tile.danger/safety` 与 `cand` 的派生段在推理时**由引擎实时算**（`ObsFeatures.perSeat/perCandidate`），
   离线训练读的是 sidecar —— 两条通路必须同值，判据是 golden 夹具
-  （`python/tests/golden/forward-v4.bin`，10 个用例、覆盖面带闸门）。
+  （`python/tests/golden/forward-v4.bin`，**11 个用例**（R2 起含一个 `kan:` 候选例）、覆盖面带闸门）。
 - **判据**：`SelfTest.v4ForwardTests`（特征 + 四个推理头逐元素 ≤1e-4、argmax 全同、红证 +
   消融/版本/指纹负向对照）；三端逐行对拍 `node tools/trainer-v4-parity.mjs <net.bin> <轨迹目录>`
   （Java↔C++，实测 1,885 条决策 maxΔ=0）。

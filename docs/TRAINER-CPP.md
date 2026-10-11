@@ -1019,7 +1019,7 @@ v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个�
 
 | 项 | 结果 |
 | --- | --- |
-| `trainer v4golden python/tests/golden/forward-v4.bin` | `特征 maxΔ=5.96e-08 前向 maxΔ=5.03e-08 argmax=10/10 红证 maxΔ=0 → PASS`（与 Java 数字**逐项相同**） |
+| `trainer v4golden python/tests/golden/forward-v4.bin` | `特征 maxΔ=5.96e-08 前向 maxΔ=2.26e-06 argmax=11/11 红证 maxΔ=1.19e-07 → PASS`（与 Java 数字**逐项相同**）。⚠ **11 例是 R2 起**（夹具补了一个 `kan:` 候选例，覆盖闸门 `legal_kan`）；原 10 例读数 `前向 maxΔ=5.03e-08 / argmax=10/10` 已随重建失效，见 `NOTES.md` §6.5 R2 段 |
 | Java↔C++ 逐行对拍（1.36M 参数真权重 / `.tmp-v4fix` g0+g1） | **1,885 条决策逐字符相同、argmax 1,885/1,885、16,509 格 maxΔ = 0**（`node tools/trainer-v4-parity.mjs <net.bin> <轨迹目录>`） |
 | v3 回归 | `trainer-net-parity.mjs --golden` PASS（maxΔ=0）；`trainer-selfplay-parity.mjs 2 0 teacher 20260101` 逐字节一致 |
 | 端到端 | `trainer selfplay 1 --policy "net:tools\build\v4-bc-004\net.bin,teacher,teacher,teacher"` 跑通（≈95 决策/秒/核） |

@@ -105,6 +105,27 @@ def is_red(code: str) -> bool:
     return bool(code) and code[0] == "0"
 
 
+#: `kind_code` 的两张表（牌种下标 → 码）—— 与 Java `Tiles.HONOR_NAMES` / `kindToStr` 同序
+_SUIT_CODES = ("m", "p", "s")
+_HONOR_CODES = ("1z", "2z", "3z", "4z", "5z", "6z", "7z")
+
+
+def kind_code(kind: int) -> str:
+    """kind（0..33）→ **牌种码**（`5m`，不是 `0m`）—— Java `Tiles.kindToStr(kind)` 的对应物。
+
+    只给"大明杠的主牌"用：Java `Action.parse` 对 `kan:daiminkan:a+b+c` 走
+    `kan(kind, Tiles.kindToStr(Tiles.parseKind(hand.get(0))), hand)`，主牌是**牌种**码 ——
+    赤五在这里被抹掉（`0m` → `5m`），所以不能直接把手里那张的**牌码**当主牌：
+    `tile_slot("0m") == 34`（赤五槽）而 `tile_slot("5m") == 4` —— 会落到另一格。
+    认不出的 kind 返回 `""`（`cand_vector` 会跳过主牌，与 Java 的 `tileSlot("??") < 0` 同效）。
+    """
+    if not isinstance(kind, int) or kind < 0 or kind >= KIND_COUNT:
+        return ""
+    if kind < 27:
+        return f"{kind % 9 + 1}{_SUIT_CODES[kind // 9]}"
+    return _HONOR_CODES[kind - 27]
+
+
 # ------------------------------------------------------------------ 状态特征
 
 def state_dim() -> int:
@@ -285,12 +306,27 @@ def action_parts(key: str) -> tuple[str, str | None, list[str], str | None]:
     if key.startswith("chi:"):
         return "chi", None, key[len("chi:"):].split("+"), None
     if key.startswith("kan:"):
-        parts = key[len("kan:"):].split(":")
-        kind = parts[0] if parts else None
-        if len(parts) == 2:
-            return "kan", parts[1], [], kind
-        if len(parts) == 3:                    # 大明杠：第三段是"手里取哪三张"
-            return "kan", None, parts[2].split("+"), kind
+        # ⚠ 必须拆**整个键**（`key.split(":")`）：契约是 Java `Action.parse`
+        #   （`server/src/main/java/mahjong/ai/Action.java:403-413`）—— 它 `key.split(":")` 得
+        #   **3 段**，`p[1]`=杠的种类、`p[2]`=单张牌码（暗杠/加杠）或"手里取哪三张"（大明杠）。
+        #   原来拆的是 `key[len("kan:"):]`，只有 **2 段** ⇒ 下面那条 3 段分支**永远不可达**，
+        #   `kan:daiminkan:a+b+c` 会被当成**单张牌码**（`tile_slot("a+b+c") == -1`、
+        #   「取法」块恒 0）⇒ 该候选 logit 与 Java/C++ 差一个量级、实测有行 argmax 翻转
+        #   （NOTES §6.5：51/13,408 行、行 12518 翻转）。
+        parts = key.split(":")
+        kind = parts[1] if len(parts) > 1 else None
+        if len(parts) == 3 and "+" in parts[2]:      # 大明杠：第三段是"手里取哪三张"
+            tiles = parts[2].split("+")
+            # ⚠ **主牌槽位也要填**：Java 走的是 `kan(kind, Tiles.kindToStr(Tiles.parseKind(
+            #   hand.get(0))), hand)` ⇒ `Action` 同时带 `tile`（**牌种**码）与 `tiles`，而
+            #   `Features.candidate` 两处**都**读（`a.tile` → 主牌 one-hot；`a.tiles` → 「取法」
+            #   计数）—— C++ `action.cpp:244-247` 同样 `hasTile = hasTiles = true`。
+            #   只填「取法」会差一整块（实测该候选 logit 仍差 0.5~2.3）。
+            #   `min(..., tile_slot)` = Java `canonical` 的"按槽位升序取 hand.get(0)"。
+            first = min(tiles, key=tile_slot) if tiles else ""
+            return "kan", kind_code(tile_kind(first)), tiles, kind
+        if len(parts) == 3:
+            return "kan", parts[2], [], kind
         return "kan", None, [], kind
     if key in ACTION_TYPES:
         return key, None, [], None

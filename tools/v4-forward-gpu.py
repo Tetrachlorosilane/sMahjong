@@ -15,8 +15,14 @@
 3. 输出是**文本**，要比较就得再解析一遍文本（`%g` 的是十进制字符，不是 float32 位模式）。
 
 这份工具的判据很简单：**同一份权重、同一批行级张量 ⇒ 与 C++ `v4net` 逐行 argmax 相同、
-逐元素 `maxΔ ≤ 1e-5`，而墙钟快一个量级**。实现上只做三件事：读权重、读**已经算好的**行级
-输入张量、按 `n` 分桶批量前向。
+逐元素 `maxΔ ≤ tol × max(1, |参考值|)`，而墙钟快一个量级**。实现上只做三件事：读权重、
+读**已经算好的**行级输入张量、按 `n` 分桶批量前向。
+
+⚠ **数值判据是"随量纲走"的，不是那个绝对 1e-5**（R2 改的，依据见 `TOL_REL` 的注释）：
+`|logits|` 中位 29.5 ⇒ fp32 的 1 ulp ≈ 1.3e-5，绝对 1e-5 **小于 1 ulp** —— 那不是语义判据，
+是浮点噪声的抛硬币（实测 7,019/13,408 行"超"它，而相对 maxΔ 只有 1.5e-5）。仓库对**同一条前向**
+早就用 1e-4（P5 夹具的 `tol`）⇒ 这里采用同一个数，只是把它挂在相对量纲上。
+⛔ **argmax 逐行相同这条不放**：数值口径管的是"同一个答案的浮点尾巴"，不是"可以换个答案"。
 
 ## ⛔ 特征侧的红线（这条比性能重要）
 
@@ -84,6 +90,22 @@ EXIT_OK = 0
 EXIT_MISMATCH = 1
 EXIT_USAGE = 2
 
+#: 数值判据的**相对**容差：`|Δ| ≤ TOL_REL × max(1, |参考值|)`。为什么不是绝对 1e-5（R1 的红）：
+#: ① `|logits|` 中位 29.5 / p90 46.4 / 最大 112 ⇒ fp32 在该量级 **1 ulp ≈ 1.3e-5** ——
+#:    绝对 1e-5 **比 1 ulp 还小**，测的是舍入顺序而不是语义（实测 13,408 行里 7,019 行"超"它，
+#:    而同一批行的相对 maxΔ 只有 1.502e-05）；
+#: ② 仓库对**同一条前向**早就用 1e-4：P5 夹具 `python/tests/golden/forward-v4.json` 的 `"tol": 1e-4`
+#:    （`trainer v4golden` 与 `V4Probe --golden` 都按它判）⇒ 三端本来就是这个口径，不该在
+#:    第四个地方收紧成 1e-5。
+#: ⚠ 换量纲**不是**放宽语义：argmax 必须逐行相同这条**没动**；`max(1, ·)` 的 1 让"参考值接近 0"
+#: 的那几格退回绝对口径（否则 0 附近除出一个假的相对大数）。
+TOL_REL = 1e-4
+
+
+def rel_delta(ref, got) -> float:
+    """量纲无关的逐元素相对差 `|ref-got| / max(1, |ref|)`（`ref` = 参考/基准一侧）。"""
+    return abs(float(ref) - float(got)) / max(1.0, abs(float(ref)))
+
 #: `forward-v4.bin`（P5 夹具）的魔数与格式号 —— 与 `mahjong_ml.v4.export` 同值，
 #: 这里**不 import 常量**是为了让"读夹具"这条路径也能在 torch 没装时报出可读的错。
 GOLDEN_MAGIC = 0x4D4A3447          # "MJ4G"
@@ -113,8 +135,8 @@ def resolve_device(name: str):
     CPU，而且**没有任何一行输出**能看出来。这里宁可当场退出。
 
     ⚠ 同时把 `allow_tf32` 钉成 False（判据要的是 **fp32**）：TF32 只有 10 位尾数，相对误差 ~1e-3，
-    与 CPU 的 fp32 比 `maxΔ` 会直接超 `1e-5`。这不是"调参调过的绿"—— 判据④问的就是
-    "同一份实现在两个后端上是不是同一个数"，那两边都必须是 fp32。
+    与 CPU 的 fp32 比 `maxΔ` 会直接超判据（`TOL_REL = 1e-4` 那条相对口径）。这不是"调参调过的绿"
+    —— 判据④问的就是"同一份实现在两个后端上是不是同一个数"，那两边都必须是 fp32。
     """
     import torch
 
@@ -466,7 +488,7 @@ def materialize(traces: Path, *, policy: str | None, where_kind: str | None,
         Path(rows_out).parent.mkdir(parents=True, exist_ok=True)
         # ⚠ 存 **float32**（不跟紧凑集的 float16 口径）：紧凑集是**训练**产物（省一半磁盘），
         #   而这里的用途是**对拍**——float16 只有 11 位尾数（相对误差 ~5e-4），
-        #   过了它一遍就等于把"逐元素 ≤1e-5"这条判据冲掉了，之后所有的红绿都不作数。
+        #   过了它一遍就等于把 `TOL_REL = 1e-4` 这条判据冲掉了，之后所有的红绿都不作数。
         np.savez(str(rows_out), tile=rows.tile, evt=rows.evt, ctx=rows.ctx, cand=rows.cand,
                  nlegal=rows.nlegal, steps=np.asarray(steps, dtype=np.int32))
     if dump_selected is not None:
@@ -565,25 +587,30 @@ def write_out(path: Path | None, res: ForwardResult, fmt: str, *, steps=None) ->
 
 # ---------------------------------------------------------------- 参考对拍（夹具自带 logits）
 
-def compare_ref(rows: Rows, res: ForwardResult, tol: float) -> tuple[int, float, list]:
-    """与夹具里的 **Python 参考** logits 逐行比：argmax 相同 + `maxΔ ≤ tol`。
+def compare_ref(rows: Rows, res: ForwardResult, tol: float) -> tuple[int, float, float, list]:
+    """与夹具里的 **Python 参考** logits 逐行比：argmax 相同 + **相对** `maxΔ ≤ tol`。
+
+    数值口径见 `TOL_REL`：`|Δ| ≤ tol × max(1, |参考值|)`。返回
+    `(状态, 绝对最大差, 相对最大差, 失败说明)` —— 两个差都报，免得"看着过了"说不清余量。
 
     这只是"我这份实现在这台机器上、这个后端上，是否复现了**冻结在仓库里的** python 读数"——
     与 C++ 的三端对拍是既有闸门（`tools/trainer-v4-parity.mjs`）的事，本工具不替代它。
     """
     bad: list[str] = []
-    worst = 0.0
+    worst_abs = 0.0
+    worst_rel = 0.0
     if rows.ref_policy is None:
-        return -1, 0.0, ["（这份输入没有参考 logits）"]
+        return -1, 0.0, 0.0, ["（这份输入没有参考 logits）"]
     for k, ref in enumerate(rows.ref_policy):
         if len(ref) != res.n[k]:
             bad.append(f"第 {k} 行：候选数 {res.n[k]} != 参考 {len(ref)}")
             continue
         for a, b in zip(ref, res.logits[k]):
-            worst = max(worst, abs(float(a) - float(b)))
+            worst_abs = max(worst_abs, abs(float(a) - float(b)))
+            worst_rel = max(worst_rel, rel_delta(a, b))
         if _argmax([float(x) for x in ref]) != res.argmax[k]:
             bad.append(f"第 {k} 行：argmax {res.argmax[k]} != 参考 {_argmax([float(x) for x in ref])}")
-    return 0, worst, bad
+    return 0, worst_abs, worst_rel, bad
 
 
 # ---------------------------------------------------------------- 自检
@@ -685,7 +712,7 @@ def selftest(tmp: Path, batch: int, tol: float) -> int:
         line(False, f"合规格的张量被拒了：{e}")
 
     # ---- ③ 小样本 GPU ↔ CPU 对拍（同一份实现，只换设备）
-    print("③ GPU ↔ CPU（同一份实现；argmax 必须全同，maxΔ ≤ 1e-5）")
+    print(f"③ GPU ↔ CPU（同一份实现；argmax 必须全同，maxΔ ≤ {tol:g} × max(1, |ref|) —— 见 TOL_REL）")
     if not torch.cuda.is_available():
         print("  SKIP  torch.cuda.is_available() == False ⇒ 这条在本机跑不了"
               "（**不是** PASS：没有 GPU 就无法证明 GPU 与 CPU 一致）")
@@ -693,11 +720,16 @@ def selftest(tmp: Path, batch: int, tol: float) -> int:
     else:
         cpu = forward(netok, rows, torch.device("cpu"), batch, quiet=True)
         gpu = forward(netok, rows, resolve_device("cuda"), batch, quiet=True)
-        dmax = max((abs(a - b) for ra, rb in zip(cpu.logits, gpu.logits)
+        dabs = max((abs(a - b) for ra, rb in zip(cpu.logits, gpu.logits)
+                    for a, b in zip(ra, rb)), default=0.0)
+        # ⚠ 与 `compare_ref` **同一把尺子**：基准取 CPU 侧（相对差只依赖基准的绝对值量级，
+        #   两边同量级 ⇒ 取哪边都不改变结论；统一取"先跑的那个"免得两处口径漂移）。
+        dmax = max((rel_delta(a, b) for ra, rb in zip(cpu.logits, gpu.logits)
                     for a, b in zip(ra, rb)), default=0.0)
         same = sum(1 for a, b in zip(cpu.argmax, gpu.argmax) if a == b)
         line(same == len(cpu.argmax), f"argmax 逐行相同：{same}/{len(cpu.argmax)}")
-        line(dmax <= tol, f"maxΔ = {dmax:.3e} ≤ {tol:g}")
+        line(dmax <= tol, f"maxΔ（相对）= {dmax:.3e} ≤ {tol:g} × max(1,|ref|)"
+                          f"（绝对 maxΔ = {dabs:.3e}）")
         line(cpu.logits[0][:1] != [] and len(gpu.n) == len(cpu.n),
              f"两边的行数一致：cpu {len(cpu.n)} / cuda {len(gpu.n)}")
 
@@ -749,7 +781,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None, help="输出文件（缺省 stdout）")
     ap.add_argument("--format", choices=["jsonl", "cpp"], default="jsonl",
                     help="jsonl（缺省）或 cpp（与 `trainer v4net` 逐字符同格式，便于直接 diff）")
-    ap.add_argument("--tol", type=float, default=1e-5, help="与夹具参考 logits 比的容差（缺省 1e-5）")
+    ap.add_argument("--tol", type=float, default=TOL_REL,
+                    help="**相对**容差（缺省 1e-4）：|Δ| ≤ tol × max(1, |参考值|)；"
+                         "见 TOL_REL 的注释（绝对 1e-5 小于 fp32 在该量级的 1 ulp）")
     ap.add_argument("--tmp", default=str(REPO / "python" / ".tmp" / "v4-forward-gpu"),
                     help="自检的临时目录（缺省在仓库内：工作区外建目录会被沙箱拒）")
     ap.add_argument("--selftest", action="store_true", help="跑四条自检（含三条负向）")
@@ -797,12 +831,13 @@ def main(argv=None) -> int:
         steps = rows.steps if index is None else [rows.steps[i] for i in index]
         write_out(Path(a.out) if a.out else None, res, a.format, steps=steps)
         if rows.ref_policy is not None:
-            _, worst, bad = compare_ref(rows, res, a.tol)
+            _, worst_abs, worst_rel, bad = compare_ref(rows, res, a.tol)
             msg = f"[ref] 与夹具里的 Python 参考 logits：{'一致' if not bad else '不一致'}"
-            print(f"{msg}（maxΔ={worst:.3e}，tol={a.tol:g}）", file=sys.stderr)
+            print(f"{msg}（maxΔ 相对 {worst_rel:.3e} ≤ {a.tol:g} × max(1,|ref|)；绝对 {worst_abs:.3e}）",
+                  file=sys.stderr)
             for b in bad[:5]:
                 print(f"  ✗ {b}", file=sys.stderr)
-            if bad or worst > a.tol:
+            if bad or worst_rel > a.tol:
                 return EXIT_MISMATCH
         if not a.quiet:
             print(f"[done] {rows.source} → {len(res.n)} 行；{res.seconds:.3f}s；"

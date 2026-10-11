@@ -1,5 +1,5 @@
 {
-  "cases": 10,
+  "cases": 11,
   "format": 2,
   "dims": {
     "d_model": 32,
@@ -8,7 +8,7 @@
     "value_bins": 5
   },
   "net_bytes": 213248,
-  "bytes": 596377,
+  "bytes": 631551,
   "trace": "S:\\mahjong-training\\raw\\v4-golden",
   "seed": 20260928,
   "blocks_fingerprint": "e1f5dd0fc1e9aba8",
@@ -22,7 +22,8 @@
     "turn",
     "turn",
     "turn",
-    "turn"
+    "turn",
+    "claim"
   ],
   "coverage": [
     "aka_evt",
@@ -31,6 +32,7 @@
     "evt_meld",
     "evt_short",
     "ippatsu",
+    "legal_kan",
     "own_meld",
     "riichi_any",
     "self_riichi",
@@ -44,7 +46,8 @@
     "own_meld",
     "riichi_any",
     "ippatsu",
-    "evt_short"
+    "evt_short",
+    "legal_kan"
   ],
   "perturbed_zero_params": [
     "tile.attn.in_proj_bias",
@@ -63,9 +66,9 @@
     "heads.policy_gate.weight",
     "heads.policy_gate.bias"
   ],
-  "mem_probe_max_dlogit": 0.023003697395324707,
+  "mem_probe_max_dlogit": 0.023003578186035156,
   "h0_probe_max_dlogit": 0.15334594249725342,
-  "logit_spread_min": 0.00018680095672607422,
+  "logit_spread_min": 0.00018656253814697266,
   "cases_with_long_carry": 1,
   "tol": 0.0001
 }
