@@ -299,19 +299,24 @@ java -jar server\build\mahjong-server.jar --selftest
 > —— 慢的是里面那十来个"整场模拟"用例（teacher 变聪明了，每步算得更多），不是断言数。
 > ⚠ 上面这些都是**历史读数**；"当前 N 项"只在 `AGENTS.md` §4 记一处（L1 / L2 / `selfcheck.py`），别处写指针。
 
-> ⚠ **本机偶发 JVM 崩溃（2026-10 实测，与代码无关）**：`--selftest` 偶尔在
-> `mahjong.rules.Shanten.dfs` 的 **C2 编译帧**里以 `EXCEPTION_ACCESS_VIOLATION (0xc0000005)` 崩掉：
-> `hs_err_pid*.log` 的 `Problematic frame: J ... c2 mahjong.rules.Shanten.dfs([IIIII[I)V`，
-> **读地址 `0x2c`**，运行约 **9~10 秒**时崩（本机 i9-14900HX / 32 核 / 31G / Win11）。
-> **重跑即过** —— 仓库根现存 4 份同签名日志，最早一份是**改动之前**（2026-10-05）就有的。
-> 与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
+> ⚠ **本机偶发 JVM 崩溃（2026-10 实测）—— 根因已定性为硬件（2026-10-11）**：`--selftest` 偶尔在 `mahjong.rules.Shanten.dfs` 的 **C2 编译帧**里以 `EXCEPTION_ACCESS_VIOLATION (0xc0000005)` 崩掉（`hs_err_pid*.log` 的 `Problematic frame: J ... c2 mahjong.rules.Shanten.dfs([IIIII[I)V`，**读地址 `0x2c`**，运行约 **9~10 秒**时崩）。
+> 本机 = **Intel(R) Core(TM) i9-14900HX** / 32 核 / 31G / Win11（14 代 **Raptor Lake-HX** —— 该族有公开记录的**高负载不稳定**问题）。
+> **重跑即过**：仓库根现存 4 份同签名日志，最早一份是**改动之前**（2026-10-05）就有的；与 HANDOVER 记的「torch/node 的 `0xC0000005`、重跑即过」是同一类机器级偶发不稳。
+> **证据链**：`WHEA-Logger` **ID 19** 近 3 天数**十**条 —— 「出现已更正的硬件错误。由以下组件报告: 处理器核心 错误源: Corrected Machine Check 错误类型: Internal parity error 处理器 APIC ID: 33」（另有 **32**）；
+> 密集时段 2026-10-10 22:29 → 2026-10-11 03:39；`Microsoft-Windows-Kernel-Power` **ID 41**（2026-10-11 12:38:57）「系统已在未先正常关机的情况下重新启动…」+ `EventLog` **6008**「上一次系统的 3:36:27 在 2026/10/11 上的关闭是意外的」。
+> ⇒ **⛔ 不是 JDK/JIT 的锅，也不能靠 `-XX:CompileCommand` 规避**（无代码 bug 的间歇性访问违例：`--selftest` 也会崩、20 分钟曾撞 2 次）；**缓解 = 降负载 / 限频 / 更新 BIOS 微码**。
+> 已施加（可逆）：`powercfg` 最大处理器状态 **100% → 80%**（`PROCTHROTTLEMAX` 0x64→0x50）并 `setactive`；**还原命令** =
+> `powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setactive SCHEME_CURRENT`（⚠ 也把 `PERFBOOSTMODE` 还原成 2）。
 > 判据：**输出里出现 `SELFTEST PASS` 才算过**；看到 `hs_err` 横幅 + 退出码 1 时**先重跑**，别改代码。
-> 真变频繁了再考虑 `-XX:TieredStopAtLevel=1`（只 C1，慢数倍）或换 JDK 构建（21.0.10+7 Microsoft）。
 > 新加自检用例时**优先用 `Table.debugMaxHands` 限制小局数**（`SelfTest.PROBE_HANDS`），
 > 否则一个用例就是 2~3 秒。**需要"定向局面"时别靠发牌运气**：直接摆手牌 + 用现成的钩子问结论
 > （`Round.debugClaimOutcome` 问鸣牌仲裁、`debugRonDeltas` 跑荣和结算、`debugTurnKan` 跑
 > 暗杠/加杠（**抢杠那条路只有这个钩子测得到**，含《雀魂》的国士抢暗杠）、`debugDoRiichi` 走生产的立直宣告、
 > `debugDrainWallTo` 推进牌山、`debugPushDiscard` 走生产记账）—— 比"多跑几百场碰运气"可靠得多。
+
+> ⚠ **低 CPU 压力运行策略（本机硬件条件下；2026-10-11）**：① **一次只跑一个重负载任务**（⛔ 不并行训练与评测）；② 自对弈 `--workers` 上限 **≤6**（原来 12）；③ torch/OpenMP 线程上限 **≤6**（`OMP_NUM_THREADS` / `MKL_NUM_THREADS`）；
+> ④ **优先短跑 + 频繁落盘/提交**（崩溃会打断长任务）；⑤ 重要产物**先提交/推送再跑重负载**。
+> 依据见上方 L1 注解的硬件证据链（WHEA 处理器核 corrected machine check + 意外重启）。
 
 ### L2 客户端自检（秒级）
 

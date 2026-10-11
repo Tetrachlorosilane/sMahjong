@@ -30,6 +30,7 @@ node tools\jvm-guard.mjs --selftest                                # 5/5（3 条
 | 项 | 内容 |
 | --- | --- |
 | 为什么 | 本机偶发 `EXCEPTION_ACCESS_VIOLATION @ c2 mahjong.rules.Shanten.dfs`（`NOTES.md` §4 L1 注解已登记，2026-10-07 20 分钟内撞 2 次） |
+| 用途扩展（2026-10-11） | **重试 + 记录崩溃签名，并作为不稳定环境的证据来源**（签名 / elapsed / 局号可回填 `NOTES.md` §4 的硬件根因链）；⛔ 它**不能**规避硬件错误（WHEA 处理器核 corrected machine check + 意外重启），只把"偶发失败"变成**可数的证据** |
 | 判据 | 一次尝试"干净" ⇔ 退出码 0 **且** 没新落 `hs_err_pid*.log` **且**（给了 `--mark` 时）输出里有标记。⛔ **重试不算通过**：状态只有 `PASS` / `RETRIED-PASS`（退出码 **3**）/ `FAIL`，汇总**永远**打印**原始失败次数**与全部签名（崩溃帧 / elapsed / 局号） |
 | 附带 | `--port` 跑完按端口杀 + **复查残留监听**（收尾用）；`--echo`… 不需要，逐次 stdout/stderr 落盘 |
 
