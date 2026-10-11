@@ -8,86 +8,46 @@
 
 **三份文件，一套章节号**：**本文件 = 手册**（判据 / 命令 / 不变量 / 速查表，**动代码前必读**）·
 **`NOTES.md` = 细节分册**（案例 / 红证 / 推导 / 全量症状 / 已知限制，**需要时查**；章节号与本文件一一对应）·
-**`docs/INDEX.md` = 文档总索引**（六个板块 · 按任务 / 按角色查 · 目录树 · 文档清单；玩家看 `README.md`）·
-⚠ **接手/续接会话先读 `docs/HANDOVER.md`**（当前进度 · 已完成判据 · 下一步 · 环境命令 · 待决问题）。
+**`docs/INDEX.md` = 文档总索引**（六个板块 · 按任务/角色查 · 目录树 · 文档清单；玩家看 `README.md`）·
+⚠ **接手/续接会话先读 `docs/HANDOVER.md`**（进度 · 判据 · 下一步 · 环境命令 · 待决问题）。
 
-> ⚠ **本文件必须"每次会话都读得完"**：它是自动加载的工作区指令，而**指令预算只有 64 KB** ——
-> 超了会被**静默截断**（后面的章节等于不存在，而且不报错）。所以**判据留下、细节进 `NOTES.md`**（见 §8）。
+> ⚠ **本文件必须"每次会话都读得完"**：它是自动加载的工作区指令，**指令预算只有 64 KB** ——
+> 超了会被**静默截断**（后面章节等于不存在、不报错）。所以**判据留下、细节进 `NOTES.md`**（见 §8）。
 
-**按轻重缓急读**：① §2 铁律（违反必出 bug，改代码前先扫一遍）→ ② §3 构建 / §4 验证五层
-（"编译通过"不算验证）→ ③ §6 代码约定（按主题分组的硬约束）→ ④ §7 症状表（报障时按症状查）
-→ 其余（§5 板块地图、§8 文档维护）需要时再翻。
+**按轻重缓急读**：① §2 铁律（违反必出 bug）→ ② §3 构建 / §4 验证五层（"编译通过"不算验证）
+→ ③ §6 代码约定 → ④ §7 症状表 → 其余（§5 板块地图、§8 文档维护）需要时再翻。
 ### 2.3 十五条曾经踩过的坑（同类问题会再犯）
 
 > 这里只有**判据**（"再遇到同类问题，代码该怎么写"）。每条的**报障原文 / 根因推导 / 红证数据**
 > 在 **`NOTES.md` §2.3**（同编号）。**新踩的坑请按同样格式加在这里 + 详情写进 NOTES。**
 
-1. **`riichi` 事件里绝不能标记"牌河最后一张"为横置**：服务端**先广播 `riichi` 再广播 `discard`**，
-   那一刻最后一张还是宣言牌**之前**那张 → 一家两张横置。客户端**只按 `discard.sideways` 画**。（NOTES §2.3-1）
-2. **`Round` 构造时必须把 `menzen[]` 初始化为 `true`。** Java `boolean[]` 默认 false，
-   漏了会让**所有门前役**在实局失效，而单测因为显式传 `ctx.menzen=true` 照样通过。（NOTES §2.3-2）
+1. **`riichi` 事件里绝不能标记"牌河最后一张"为横置**（服务端**先 `riichi` 后 `discard`**）：客户端**只按 `discard.sideways` 画**。（NOTES §2.3-1）
+2. **`Round` 构造时必须把 `menzen[]` 初始化为 `true`**：漏了**所有门前役**在实局失效，而单测显式传 `ctx.menzen=true` 照样通过。（NOTES §2.3-2）
 3. **向听 DFS 里 `melds + partials` 必须封顶到 4**，否则 `1112223334445m` 这类会被误判成和了形。（NOTES §2.3-3）
-4. **庄家的第 14 张在配牌时就发了，第一巡不能再摸。** 第一巡要用 `openingTile` 当"本次摸到的牌"
-   （保住自摸/暗杠/天和判定），且**不重复下发 `draw`**（客户端已从 `round_start` 收到 14 张）。（NOTES §2.3-4）
-5. **Qt 的 SVG 渲染器不支持 CSS 类选择器**（Illustrator 导出的 `<style>`+`class=` 会被忽略 → 只剩黑白轮廓）。
-   新素材先跑 `tools/inline-svg-style.ps1` 内联成表现属性。（NOTES §2.3-5）
-6. **`--shot` 必须抓"活动顶层窗口"**，不能直接 `grab()` 主窗口：结算/大厅是**独立顶层窗口**。（NOTES §2.3-6）
-7. **改文件用 `edit` 工具，别用 PowerShell 做多行替换**：CRLF 与 `` `n `` 不匹配时会**静默不生效**
-   （极易被当成"改过了"）。真要脚本替换：先确认 LF，且只用单行替换/按行号拼接。（NOTES §2.3-7）
-8. **服务端只有一条命令队列 `responses`**：`confirm` 必须从**`submit()` 写入的那条队列**里消费
-   （`drainConfirm`），而且**认领答复时必须确认它是动作**（有 `type`）——否则局间残留的 `confirm`
-   会被下一巡当作出牌答复（症状：**点了确认键后，下一局第一巡自动出牌**）。（NOTES §2.3-8）
-9. **「重复点击」= 同一个询问发出两条动作，客户端必须自己先锁住**：所有动作只能从
-   `ActionBar::actionCmd()` 组包（带 `ask_id`）、出牌/立直只能走 `MainWindow::onActionReady()`
-   （先 `clearAsk()`）；服务端兜底：**立直不成立退回默认摸切**，绝不把宣言牌当普通打牌执行。（NOTES §2.3-9）
-10. **鸣牌仲裁三条一体**：① 优先级「荣和 > 杠 = 碰 > 吃」同级看座次，这把尺子在 `RoundClaims.rankOf/
-    canBeat` 与 `claimPhase` 仲裁循环里**必须同一把**；② 提前收工（`shouldStop`：最优鸣牌没人能压过
-    就收工；`askedBestRank` 缺项时**保守继续等**）；③ **队列卫生**：收工后仍在 `asked` 的要
-    `cancelAsk` + `dropReplies`，认领处校验 `type ∈ 本次 option.type`。（NOTES §2.3-10）
-11. **「哪张是刚摸到的」只能由服务端点名**（`round_start.drawn`，仅庄家），客户端不许猜；
-    **出牌取牌只认牌码**（`Round.pickDiscardId`）；⚠ **手切要从"除摸牌位之外"的暗手里取**
-    （同码牌在按 id 排序的 `hand[]` 里谁先撞上纯属偶然）——否则动画/牌谱的手切被演成摸切。
-    客户端对账也按牌码，顺序不能反。
-    ⚠ **牌谱导出踩过同一条**：庄家第 14 张若取"排序后最后一张"而不是 `drawn`，整场手牌账会错位，
-    复盘器（状态机重放）会直接拒收整份牌谱；**鸣牌串也必须写真实牌码**（赤五 51/52/53 与普通五
-    15/25/35 是两套码，别把被鸣那张复制 n 份）。判据：`tools/tenhou-log-check.mjs` 的第 ⑧ 条。
-    ⚠ **`rule` 里 `aka` 与 `aka51/52/53` 必须说同一件事**（都是"**每种**赤五几张"）：真天鳳牌譜里
-    日本客户端写 `"aka":1`、国际客户端只写 aka51/52/53 —— 别再写 `aka:0` + `aka51:1` 这种官方格式里
-    不存在的组合。该检查器现在还查 ⑨摸牌 ≤70 / ⑩立直必须真听牌 / ⑪和了形（含七对子·国士）/
-    ⑫赤五每局唯一 / ⑬天鳳规则的立直门槛。（NOTES §2.3-11、§9.6.4~§9.6.6）
-12. **振听有三种，且「自己打出过的牌」≠「牌河」**：舍张振听要算上**被鸣走的舍牌**
-    （唯一记账点 `Round.recordDiscard`，账在 `discardKindsEver`）；同巡振听在被给 `ron` 却见逃
-    （含超时未答）时置位、自家下次摸牌解除；立直见逃 → `furitenPerm` 到本局结束。
-    ⚠ **测试不许绕过记账点**（老用例直接往 `discards[]` 里塞牌＝给 bug 背书）。（NOTES §2.3-12）
-13. **掉线 ≠ 换机器人。** 掉线/退房只标 `Seat.away`（**不置 `bot`**）：该家回合**自动摸切**、
-    鸣牌**连 `ask` 都不发**；托管的座位**仍算被占**（`occupied()` 含 `away`，别人抢不走）、
-    但 `readyToStart()` 不认它；四人全掉线才回收房间；房主掉线自动转给在场第一位真人。
-    同一 uuid 重连**接回原座位**（§6.8）。判据只看 `Seat.away`。（NOTES §2.3-13）
-14. **"投票通过"发生在别的线程上，牌局线程必须能被叫醒**：`finishVoteLocked(passed)` 要
-    `voteEnded = true` **且** `wake()`（投一个**没有 `type`** 的哨兵进命令队列）；牌局线程在
-    **五个检查点**看这个标志（`play()` 主循环开头 / `ask()` 后 / `claimPhase()` 后与它的等待循环 /
-    `Table.awaitAction` 循环开头），局间由 `sleepMs`（切片）与 `awaitRoundConfirm` 提前醒。
-    漏一个就是"票都通过了，牌桌还在等"。（NOTES §2.3-14）
-15. **规则预设决定"能不能喂复盘器"：M.League 独有的合法动作会被天鳳规则的复盘器整份拒收。**
-    《天鳳》《雀魂》要求「持点 ≥1000 **且** 剩余可摸牌 ≥4 张」才能立直；**M.League 两者都不要**
-    （mleague 预设 `riichiMinScore=0 / riichiMinTilesLeft=0`，docs/日本麻将.md L382）。网页版复盘器
-    （Mortal）按**天鳳规则**重放，遇到这种立直会判**规则违规、整份牌谱拒收**，而且**只有"被分析的那家"
-    自己做了该动作时才报错** —— 症状是「换一个座位分析就正常」（2026-09-27 用户那份就是：座位 2
-    在東3 只剩 2 张牌时立直）。判据：`tools/tenhou-log-check.mjs` 第 ⑬ 条；导出时客户端会往
-    `problems` 塞 `riichi_few_tiles_r<N>s<seat>` / `riichi_low_score_r<N>s<seat>`（回放窗口状态栏可见）。
-    **要复盘就用 tenhou 预设建房**（大厅有预设下拉）。（NOTES §2.3-15、§9.6.6）
+4. **庄家的第 14 张在配牌时就发了，第一巡不能再摸**：用 `openingTile` 当"本次摸到的牌"（保住自摸/暗杠/天和），且**不重复下发 `draw`**。（NOTES §2.3-4）
+5. **Qt 的 SVG 渲染器不支持 CSS 类选择器**（`<style>`+`class=` 被忽略 → 只剩黑白轮廓）：新素材先跑 `tools/inline-svg-style.ps1` 内联成表现属性。（NOTES §2.3-5）
+6. **`--shot` 必须抓"活动顶层窗口"**，不能直接 `grab()` 主窗口（结算/大厅是**独立顶层窗口**）。（NOTES §2.3-6）
+7. **改文件用 `edit` 工具，别用 PowerShell 做多行替换**（CRLF 与 `` `n `` 不匹配会**静默不生效**）；真要脚本替换：先确认 LF，只用单行替换/按行号拼接。（NOTES §2.3-7）
+8. **服务端只有一条命令队列 `responses`**：`confirm` 必须从**`submit()` 写入的那条队列**里消费（`drainConfirm`），且**认领答复时必须确认它是动作**（有 `type`）—— 否则局间残留的 `confirm` 被下一巡当出牌答复（该症状见 §7）。（NOTES §2.3-8）
+9. **「重复点击」= 同一个询问发出两条动作，客户端必须自己先锁住**：所有动作只能从 `ActionBar::actionCmd()` 组包（带 `ask_id`）、出牌/立直只能走 `MainWindow::onActionReady()`（先 `clearAsk()`）；服务端兜底：**立直不成立退回默认摸切**，绝不把宣言牌当普通打牌执行。（NOTES §2.3-9）
+10. **鸣牌仲裁三条一体**：① 优先级「荣和 > 杠 = 碰 > 吃」同级看座次，这把尺子在 `RoundClaims.rankOf/canBeat` 与 `claimPhase` 仲裁循环里**必须同一把**；② 提前收工（`shouldStop`：最优鸣牌没人能压过就收工；`askedBestRank` 缺项时**保守继续等**）；③ **队列卫生**：收工后仍在 `asked` 的要 `cancelAsk` + `dropReplies`，认领处校验 `type ∈ 本次 option.type`。（NOTES §2.3-10）
+11. **「哪张是刚摸到的」只能由服务端点名**（`round_start.drawn`，仅庄家），客户端不许猜；**出牌取牌只认牌码**（`Round.pickDiscardId`）；⚠ **手切要从"除摸牌位之外"的暗手里取**，客户端对账也按牌码、顺序不能反。⚠ **牌谱导出同一条**：庄家第 14 张取 `drawn` 而非"排序后最后一张"，**鸣牌串必须写真实牌码**（赤五 51/52/53 ≠ 普通五 15/25/35）；⛔ `rule` 里 `aka` 与 `aka51/52/53` **必须说同一件事**（都指"**每种**赤五几张"，别写 `aka:0` + `aka51:1`）。判据：`tools/tenhou-log-check.mjs` 第 ⑧ 条（⑨–⑬ 见 NOTES §9.6.4~§9.6.6）。（NOTES §2.3-11）
+12. **振听有三种，且「自己打出过的牌」≠「牌河」**：舍张振听要算上**被鸣走的舍牌**（唯一记账点 `Round.recordDiscard`，账在 `discardKindsEver`）；同巡振听在被给 `ron` 却见逃（含超时未答）时置位、自家下次摸牌解除；立直见逃 → `furitenPerm` 到本局结束。⚠ **测试不许绕过记账点**（往 `discards[]` 里塞牌＝给 bug 背书）。（NOTES §2.3-12）
+13. **掉线 ≠ 换机器人**：只标 `Seat.away`（**不置 `bot`**）：该家回合**自动摸切**、鸣牌**连 `ask` 都不发**；托管座位**仍算被占**（`occupied()` 含 `away`）、但 `readyToStart()` 不认它；四人全掉线才回收房间；房主掉线转给在场第一位真人；同 uuid 重连**接回原座位**（§6.8）。判据只看 `Seat.away`。（NOTES §2.3-13）
+14. **"投票通过"发生在别的线程上，牌局线程必须能被叫醒**：`finishVoteLocked(passed)` 要 `voteEnded = true` **且** `wake()`（投一个**没有 `type`** 的哨兵进命令队列）；牌局线程在**五个检查点**看这个标志（五处清单见 NOTES §2.3-14），局间由 `sleepMs`（切片）与 `awaitRoundConfirm` 提前醒。漏一个就是"票都通过了，牌桌还在等"。（NOTES §2.3-14）
+15. **规则预设决定"能不能喂复盘器"：M.League 独有的合法动作会被天鳳规则的复盘器整份拒收** —— 《天鳳》《雀魂》要求「持点 ≥1000 **且** 剩余可摸牌 ≥4 张」才能立直，**M.League 两者都不要**（`riichiMinScore=0 / riichiMinTilesLeft=0`）；Mortal 按**天鳳规则**重放 ⇒ 判**规则违规、整份拒收**，且**只有"被分析的那家"自己做该动作时才报错**。判据：`tools/tenhou-log-check.mjs` 第 ⑬ 条；导出时往 `problems` 塞 `riichi_few_tiles_r<N>s<seat>` / `riichi_low_score_r<N>s<seat>`。**要复盘就用 tenhou 预设建房**。（NOTES §2.3-15、§9.6.6）
 ## 1. 这是什么
 
 一套完整可运行的四人立直麻将联网游戏：
 
-- **服务端** `server/` —— Java 21，**零第三方依赖**（只用 JDK 标准库，没有 Maven/Gradle）。
-  跑在 Ubuntu 上，是**唯一权威方**：洗牌、配牌、摸切、鸣牌、和牌判定、役种/符数/点数、振听、流局、连庄、精算。
-- **客户端** `client/` —— Qt 6 Widgets + C++17，MinGW 构建，跑在 Windows 上。
-  只负责牌桌绘制、操作收集、事件反馈、网络收发。**不做任何规则判定**（§2.1）。
-- **规则依据** `docs/日本麻将.md`（2026-09 版，逐节标注《雀魂》《天凤》与 **M.League** 的差异）；
-  **规则预设** `rules.preset` = `mleague`（默认）/ `tenhou` / `majsoul` / `custom`：预设先铺一整套、
-  报文里的单项字段再覆盖。⚠ 新增取舍项要**五处一起改**（字段 / 三套预设 / `fromJson`+`toJson` /
-  `clampToSane` / 断言），且**取舍类断言必须两侧都显式传规则集**（只测默认值 = 在测"默认值恰好是什么"）。
+- **服务端** `server/` —— Java 21，**零第三方依赖**（只用 JDK 标准库，没有 Maven/Gradle）。跑在 Ubuntu 上，
+  是**唯一权威方**：洗牌、配牌、摸切、鸣牌、和牌判定、役种/符数/点数、振听、流局、连庄、精算。
+- **客户端** `client/` —— Qt 6 Widgets + C++17，MinGW 构建，跑在 Windows 上。只负责牌桌绘制、操作收集、
+  事件反馈、网络收发。**不做任何规则判定**（§2.1）。
+- **规则依据** `docs/日本麻将.md`（逐节标注《雀魂》《天凤》与 **M.League** 的差异）；**规则预设**
+  `rules.preset` = `mleague`（默认）/ `tenhou` / `majsoul` / `custom`：预设先铺一整套、报文里的单项字段再覆盖。
+  ⚠ 新增取舍项要**五处一起改**（字段 / 三套预设 / `fromJson`+`toJson` / `clampToSane` / 断言），
+  且**取舍类断言必须两侧都显式传规则集**（只测默认值 = 在测"默认值恰好是什么"）。
   取舍清单见 `docs/DESIGN.md`，字段表见 `docs/PROTOCOL.md` §5。
 - **对局记录/回放** `server/.../replay/` + 客户端 `ReplayWindow`/`WallView`：整场下行报文按 `seq` 记，
   终局**先落盘再广播 `game_end`**（否则结算界面点「看本局回放」查不到）；回放 ID **先校验形状再拼路径**
@@ -108,22 +68,21 @@
 
 ### 2.2 协议字段是权威，不要靠猜
 
-> 这里只留**"这条字段该怎么用"的一句话判据**；**为什么必须有它、当初怎么踩的**在
-> **`NOTES.md` §6.4.1**（逐字段明细）。改代码前先看注释。
+> 只留**"这条字段该怎么用"的一句话判据**；**为什么必须有它、当初怎么踩的**在 **`NOTES.md` §6.4.1**。
 
 | 字段 | 位置 | 规则 |
 | --- | --- | --- |
-| `tsumogiri` | `discard` | 「手切 / 摸切」**只能用这个字段**，不能靠"牌的 kind 是否等于摸到的牌"去猜（会多出一张）。 |
-| `sideways` | `discard` | 牌河**只有立直宣言牌横置**（被鸣走就顺延）；客户端**只按它画**，不要自己推断（§2.3-1）。 |
+| `tsumogiri` | `discard` | 「手切 / 摸切」**只能用这个字段**，不能靠"kind 是否等于摸到的牌"去猜（会多出一张）。 |
+| `sideways` | `discard` | 牌河**只有立直宣言牌横置**（被鸣走就顺延）；客户端**只按它画**（§2.3-1）。 |
 | `called_index` | `meld` | 被鸣那张在**原牌河**的下标：鸣牌是「移动」，客户端要 `removeAt()`。 |
 | `win_note` | `ask` | 能和却不能和的**原因**（`furiten` / `no_yaku`）；没有这个字段就不要瞎猜。 |
-| `ask_id` | `ask` | 回包原样带回。⚠ 三道闸门：老客户端的**无 `ask_id` 回包也认** → 认领时必须确认**是动作**（§2.3-8）；`type ∈ 本次 option.type`（§2.3-10）；客户端**只许从 `ActionBar::actionCmd()` 组包**（§2.3-9）。 |
+| `ask_id` | `ask` | 回包原样带回。⚠ 三道闸门：**无 `ask_id` 的老客户端回包也认** → 认领时必须确认**是动作**（§2.3-8）；`type ∈ 本次 option.type`（§2.3-10）；客户端**只许从 `ActionBar::actionCmd()` 组包**（§2.3-9）。 |
 | `confirm` | `cmd` | 局间「看完了」。**没有 `ask_id`**，必须由 `Table.awaitRoundConfirm` 从**同一条队列**消费（§2.3-8）。 |
 | `kind` | `ask` | `turn` / `claim` / **`chankan`**（抢杠：选项**只有** `ron`+`pass`）。⛔ 见逃（含超时未答）= 置**同巡振听**且**那次杠照常成立**；⚠ **决策漏斗的 kind 恒为 `claim`**（训练口径）。见 PROTOCOL §3.6 |
-| `base_ms` / `bank_ms` | `ask` | 本巡基本 / 剩余额外时长。**扣减与取整由服务端算**；规格写作「额外+每巡」（`20+5`，别写反）。 |
+| `base_ms` / `bank_ms` | `ask` | 本巡基本 / 剩余额外时长。**扣减与取整由服务端算**；规格写「额外+每巡」（`20+5`，别写反）。 |
 | `yaku[].code` / `.tile` | `agari` | 役种**只发 ASCII 码**（参数化役种另带牌码），**没有 `name`**；认不出的码原样显示（§6.4）。 |
 | `limit` / `reason` / `error.code` | 结算 / `error` | 同样只发码，`error.arg` 是可选的 ASCII 参数。报文里**只有** `name`/`text`/`msg` 允许非 ASCII。 |
-| `dead_wall_left` | `draw` / `round_start` / `state` | 剩余岭上数，**每次摸牌都要带**（`tiles_left` 在岭上摸牌时不动，只能看它）。 |
+| `dead_wall_left` | `draw` / `round_start` / `state` | 剩余岭上数，**每次摸牌都要带**（岭上摸牌不动 `tiles_left`，只能看它）。 |
 | `drawn` | `round_start`（仅庄家） | 本巡「刚摸到的那张」的牌码。`hand` 是**已排序**下发的，推不出来（§2.3-11）。 |
 | `turn` / `drawn_seat` | `state` | **两件事**：`turn` = **当前行动者**、`drawn_seat` = **最后摸牌者**；「谁有 14 张」= `turn == drawn_seat` 那一家（否则**无人**）。混起来 = 重连/观战错一家（PROTOCOL §3.8） |
 | `away` | `room.seats[]` | **掉线托管的唯一判据**；别拿 `bot` 或 session 空不空去猜（§2.3-13）。 |
@@ -172,16 +131,14 @@ client\dist\mahjong-client.exe         # 可直接双击，无需装 Qt / 配 PA
 
 **这套 Qt 是 shared 构建，物理上无法静态链接**（`static` 是 disabled feature）：本项目用「构建后把
 Qt DLL + 插件拷到 exe 同级目录」达成等价的绿色版，`build.ps1` 已自动化。
-
 **Qt 既不预装也不进仓库**：找不到就从 download.qt.io 自动取（→ 仓库根 `.qt/`，已 gitignore）。
 参数与"哪些能自动取"见 `client/README.md`。
 
 ### 3.4 `build\` 与 `dist\` 的关系
 
 **判据**：`build\` **每次**构建都更新；`dist\` **只有带 `-Deploy`** 时更新 ⇒ **发布前必须先 `-Deploy`**
-（否则包里是旧 exe）。⚠ **不要比 exe 哈希**：clean 重建 + 重新链接会改 PE 头时间戳，同一份源码哈希也会变，
-比哈希次次报警（等于没有信号）—— 比**可交付子集**（exe + Qt DLL + platforms/styles/tls + tiles/ + fonts/）
-的有无与内容。表的注解与踩坑见 `NOTES.md` §3.4。
+（否则包里是旧 exe）。⚠ **不要比 exe 哈希**：clean 重建 + 重新链接会改 PE 头时间戳，比哈希次次报警（等于没有信号）—— 比**可交付子集**（exe + Qt DLL + platforms/styles/tls + tiles/ + fonts/）的有无与内容。
+注解见 `NOTES.md` §3.4。
 
 ### 3.5 构建避坑
 
@@ -204,16 +161,13 @@ java -jar server\build\mahjong-server.jar --selftest
 # 期望：通过 N 项，失败 0 项 / SELFTEST PASS（当前 1507 项）
 ```
 
-覆盖：牌编解码、向听、听牌、役种、符数、**完整打点表逐格比对**、授受守恒、包牌、不听罚符、振听、
-立直条件、和牌选项下发、横置顺延、**杠后岭上摸牌的账**、**身份/托管/投票**、
-**训练接口的全部不变式**（§6.5）、**teacher 的取舍**（§6.6），以及 **3 次「4 机器人整场半庄」**的
-点数守恒。**改了 `rules/` / `game/` 下任何东西都要重跑。**
-
-> ⏱ 全量耗时与"哪些用例慢"见 NOTES §4。
+覆盖：牌编解码 / 向听 / 听牌 / 役种 / 符数 / **打点表逐格比对** / 授受守恒 / 包牌 / 不听罚符 / 振听 /
+立直条件 / 和牌选项下发 / 横置顺延 / **杠后岭上摸牌的账** / **身份·托管·投票** /
+**训练接口全部不变式**（§6.5）/ **teacher 取舍**（§6.6）/ **3 次「4 机器人整场半庄」**点数守恒（逐项注解见 NOTES §4）。**改了 `rules/` / `game/` 下任何东西都要重跑。**
 
 > 新用例**优先用 `Table.debugMaxHands` 限小局数**；要"定向局面"就用现成钩子
 > （`debugClaimOutcome` / `debugRonDeltas` / `debugTurnKan` / `debugDoRiichi` /
-> `debugDrainWallTo` / `debugPushDiscard`），别靠发牌运气。
+> `debugDrainWallTo` / `debugPushDiscard`），别靠发牌运气。⏱ 耗时与慢用例见 NOTES §4。
 
 ### L2 客户端自检（秒级）
 
@@ -222,9 +176,9 @@ client\dist\mahjong-client.exe --selftest client\build\st
 # 期望：检查项 N，失败 0 / SELFTEST PASS（当前 899 项）；并产出 tiles.png / table.png / river_overflow.png
 ```
 
-覆盖：牌码↔kind 双向、NDJSON 编解码、`TableModel` 事件应用、手切/摸切、横置张数、
-**风盘布局全部断言**（尺寸/居中共面/名牌不重叠/牌河固定左缘/超 18 张仍逐行）、
-**身份与投票界面**（按钮可见性、组包、冷却）、掉线标记、并出图。
+覆盖：牌码↔kind 双向 / NDJSON 编解码 / `TableModel` 事件应用 / 手切·摸切 / 横置张数 /
+**风盘布局全部断言**（尺寸·居中共面·名牌不重叠·牌河固定左缘·超 18 张仍逐行）/
+**身份与投票界面**（按钮可见性·组包·冷却）/ 掉线标记 / 并出图。
 
 > ⚠ **看 PNG 不要用 `-platform offscreen`**：那个插件在 Windows 上没字体库，中文会画成空心方框。
 
@@ -234,12 +188,12 @@ client\dist\mahjong-client.exe --selftest client\build\st
 java -jar server\build\mahjong-server.jar --port 10086   # 另开一个终端；要快可加 --fast
 node tools\e2e-test.mjs 127.0.0.1 10086          # E2E PASS（整场东风战；含报文 ASCII 审计与点数守恒）
 node tools\timeout-test.mjs 127.0.0.1 10086      # 超时摸切 + 真人全掉线后房间回收
-node tools\uuid-test.mjs 127.0.0.1 10086         # 身份：连接即问/同 uuid 同一玩家/坏形状按无记录/**掉线接回原座位**
-node tools\away-test.mjs 127.0.0.1 10086         # 托管：away=true·bot=false / 托管后只摸切 / 0 次鸣牌 / 牌局不结束
+node tools\uuid-test.mjs 127.0.0.1 10086         # 身份：连接即问/同 uuid 同一玩家/坏形状按无记录/**接回原座位**
+node tools\away-test.mjs 127.0.0.1 10086         # 托管：away=true·bot=false / 只摸切 / 0 次鸣牌 / 牌局不结束
 node tools\vote-test.mjs 127.0.0.1 10086         # 投票：分母=在场真人 / 够票→game_end{reason:vote} / 冷却 wait_ms
 node tools\discard-align-test.mjs 127.0.0.1 10086 # 出牌对齐（幽灵手牌）：drawn 必带 + 错报摸切按牌码取牌
 node tools\seat-swap-test.mjs 127.0.0.1 10086    # 换座/洗座：准备落在自己座位 + 座位表恒为四家排列
-node tools\claim-priority-test.mjs 127.0.0.1 10086 3000  # 鸣牌优先级 + 废包不漏到下一巡（⚠ 采样不到 → 退出码 2，重跑）
+node tools\claim-priority-test.mjs 127.0.0.1 10086 3000  # 鸣牌优先级 + 废包不漏到下一巡（⚠ 采样不到 → 退出码 2）
 node tools\clock-test.mjs 127.0.0.1 10086        # 思考时间：基本/额外扣减 + 鸣牌也扣
 node tools\firstturn-test.mjs 127.0.0.1 10086 3000  # 第一巡实测等待 = 声明 deadline
 node tools\riichi-stale-test.mjs 127.0.0.1 10086 3000  # 作废的立直不得替玩家打牌
@@ -256,7 +210,7 @@ node tools\check-i18n.mjs        # 服务端每个码都有客户端译文（词
 node tools\i18n-scan.mjs --check # 源码里不许剩中文字面量
 node tools\i18n-gen.mjs --check  # 映射表 ↔ 语言文件一致（不漏 key）
 python\selfcheck.py              # 训练侧自检（当前 **867** 项；必须在 python\ 下跑）
-node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4：前向 = trainer-v4-parity.mjs、增量缓存 = v4-cache-check.mjs
+node tools\selfplay-check.mjs <轨迹目录>   # 训练数据集校验（独立实现，见 §6.5）；v4 前向/缓存 = trainer-v4-parity.mjs / v4-cache-check.mjs
 node tools\trainer-parity-check.mjs 24    # 训练端 C++ 引擎 ↔ Java：牌山/配牌**逐整数**对拍（见 docs/TRAINER-CPP.md）
 node tools\trainer-rule-parity.mjs        # 同上：向听/进张/听牌形
 node tools\trainer-score-parity.mjs       # 同上：役种/符数/点数/授受
@@ -266,8 +220,8 @@ node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/in
 # 改过导出格式再拿**上游真解析器**验一遍（探针 / `mjai-reviewer --no-review`）：
 #   tools\upstream-parse-check\README.md（判据与负向对照见 NOTES §9.6.2）
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解 + `docs/INDEX.md` 完整性（见 §8）
-node tools\handover-facts.mjs --check   # `docs/HANDOVER.md` §1 的 git 事实（基线 sha 是 HEAD 祖先 / 远端 sha 是头或其祖先 / 未推送>0 时不许写"已同步"）
-node tools\round-index.mjs --check      # `NOTES.md` §6.5 的轮次索引表覆盖全部轮次小节（"加了轮次忘了登记"判红；⛔ 不重排正文）
+node tools\handover-facts.mjs --check   # `docs/HANDOVER.md` §1 的 git 事实（基线 sha 是 HEAD 祖先 / 远端 sha 是头或其祖先 / ⛔ 未推送>0 不许写"已同步"）
+node tools\round-index.mjs --check      # `NOTES.md` §6.5 的轮次索引表覆盖全部轮次小节（⛔ 不重排正文）
 ```
 
 > ⏱ `e2e-test` 耗时与加速开关见 NOTES §4。
@@ -296,7 +250,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 `--gentiles` / `--fontprobe`）的说明见 **NOTES §4 末表**。
 ## 5. 目录结构（板块地图）
 
-**完整目录树、文档清单与"哪个文件属于哪个板块"见 `docs/INDEX.md`**（它同时是文档总索引）。一句话版：
+**完整目录树、文档清单与"哪个文件属于哪个板块"见 `docs/INDEX.md`**。一句话版：
 
 | 板块 | 主要落点 |
 | --- | --- |
@@ -307,8 +261,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 | ⑤ 运维与发布 | `docs/DEPLOY.md` · `docs/THIRD-PARTY.md` · `tools/package-release.ps1` + `make-zip.mjs` |
 | ⑥ 验证与文档纪律 | `tools/*-test.mjs` · `tools/*-parity*.mjs` · `python/selfcheck.py` · `AGENTS.md` · `NOTES.md` · `docs/INDEX.md` |
 
-运行时数据（**都不进仓库**，见 `.gitignore`）：`replays/` 对局记录 · `players/` 玩家档案 ·
-`bot-ai/` 机器人 AI 包（与 `jar`/`start.sh` 同层，启动时自动挂载）。
+运行时数据（**都不进仓库**，见 `.gitignore`）：`replays/` 对局记录 · `players/` 玩家档案 · `bot-ai/` 机器人 AI 包。
 
 ---
 
@@ -319,19 +272,8 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 - **注释用中文**，解释「为什么」而不是「做了什么」。
 - **协议改动流程**：先改 `docs/PROTOCOL.md` → 再改服务端 → 再改客户端 → 补两侧测试。
 - **新增规则判定**：写进 `rules/`，在 `server/src/main/java/mahjong/test/SelfTest.java` 加断言。
-  **两侧断言参数顺序不同，别写混**：
-
-  ```java
-  // 服务端：check(名称, 条件)  /  eq(名称, 实际, 期望)
-  check("自摸时下发 tsumo 选项: " + list, list.contains("tsumo"));
-  eq("连风雀头符", s.fu, 40);
-  ```
-
-  ```cpp
-  // 客户端：check(条件, 名称)  /  checkEq(实际, 期望, 名称)
-  check(tiles.size() == 37, QStringLiteral("牌种数量应为 37，实际 %1").arg(tiles.size()));
-  checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌河横置张数"));
-  ```
+  ⚠ **两侧断言参数顺序不同，别写混**：服务端是 `check(名称, 条件)` / `eq(名称, 实际, 期望)`；
+  客户端是 `check(条件, 名称)` / `checkEq(实际, 期望, 名称)`。样例见 NOTES §6.1。
 - **牌面素材走 SVG，可替换**：`client/assets/tiles/<牌码>.svg`（38 个 = 37 种牌 + `back.svg`），构建时拷到
   exe 同级 `tiles/`；加载顺序 **目录 → qrc → 程序化绘制**（删掉整个 `tiles/` 也不白屏）。替换只需保持
   **文件名 = 牌码**与 `viewBox="0 0 300 400"`，**重启客户端即生效、无需重编译**（占位符见 NOTES §9.1）。
@@ -339,17 +281,15 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   字体取不到或串含非法字元时**整块不显示**、回退文字（详见 NOTES §9）。
 - **UI 扁平化**：纯色 + 1px 描边，**牌片单层外框、不画厚度层**，不用渐变/阴影/发光。
 - **文档分工**：`README.md` 面向玩家（操作、规则取舍、常见问题），**不含技术细节**；技术内容一律进
-  AGENTS 与 `docs/`。**改了玩家看得见的行为（操作、开关、规则取舍、常见问题）就要同步 README。**
-- **第三方许可**：客户端以 **LGPLv3 动态链接**使用 Qt，`client/licenses/` 随 `dist/` 一起分发
-  （内含 LGPLv3 + GPLv3 全文与版权声明）。**不要删它，也不要给 Qt 的 DLL 加校验/签名锁定**
-  —— 那会阻止用户替换 Qt，直接违反 LGPLv3。新增 Qt 模块或第三方库时同步 `docs/THIRD-PARTY.md`、
-  `licenses/NOTICE.txt` 与 `build.ps1` 的必需 DLL 清单。
+  AGENTS 与 `docs/`。**改了玩家看得见的行为就要同步 README。**
+- **第三方许可**：客户端以 **LGPLv3 动态链接**使用 Qt，`client/licenses/` 随 `dist/` 一起分发。
+  **不要删它，也不要给 Qt 的 DLL 加校验/签名锁定**（那会阻止用户替换 Qt，直接违反 LGPLv3）。
+  新增 Qt 模块或第三方库时同步 `docs/THIRD-PARTY.md`、`licenses/NOTICE.txt` 与 `build.ps1` 的必需 DLL 清单。
 
 ### 6.2 牌桌布局与绘制（客户端 —— 最容易被改坏的一块）
 
-> **不变量清单**（改这里必须守住的东西）。**几何推导与"为什么是这个数"** —— 例如固定左缘是怎么定的、
-> 区带怎么反推、踩过哪三次 —— 见 **`NOTES.md` §6.2**。自检里有一整套断言钉住下面每一条，
-> **改完必须重跑 `client --selftest` 并看图**。
+> **不变量清单**（改这里必须守住的东西）；**几何推导与"为什么是这个数"**（固定左缘、区带、踩过的坑）
+> 见 **`NOTES.md` §6.2**。自检里有一整套断言钉住每一条，**改完必须重跑 `client --selftest` 并看图**。
 
 - **手牌区不能抖**：`TableView::layoutHand()` 的手牌左缘锚点按**满手 13 张**算（与当前张数无关）；
   摸牌**紧贴手牌**（间隔 `0.26 × 牌宽`），手牌因副露变短时摸牌一起左收。
@@ -396,18 +336,18 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   里绘制再整体旋转到屏幕 —— 侧家的牌自然横置、"横置以牌主视角判定"自动成立。
 ### 6.3 牌桌行为、规则与资源
 
+> 判据在这里；**当初怎么踩的 / 为什么是两次清零**见 **`NOTES.md` §6.3**。
+
 - **牌桌外的三个自动开关（`AutoBar` + `autopolicy::decide`）：自动胡了 / 不吃碰杠 / 自动摸切**。
   按钮在牌桌下方（**不进 ActionBar** —— 那里按钮动态增删、高度固定），文案全在 `ui.auto.*`。
   判据**只看 `ask.options`**（客户端不自己算听牌，见 §2.1），且**和牌永远优先**：options 里有
   `tsumo`/`ron` 时**只有「自动胡了」**能替玩家动 —— 自动摸切绝不切出能胡的那张牌、
-  不吃碰杠绝不把到手荣和 `pass` 掉（用户点名的要求）。自动动作也必须走
-  `ActionBar::actionCmd/discardCmd`（带 `ask_id`；询问失效时它们返回空对象 → 自动动作自动作废）。
+  不吃碰杠绝不把到手荣和 `pass` 掉（用户点名）。自动动作也必须走
+  `ActionBar::actionCmd/discardCmd`（带 `ask_id`；询问失效时返回空对象 → 自动动作自动作废）。
   **每小局结束（`round_end`）立刻 `resetAutoFlags()` 全关**，且**每小局开始（`round_start`）
-  再复位一次** —— 一小局两次（用户要求：局间结算期间点开的自动不许带进新的一局）。
-  ⚠ 这条**口径被用户改过**：原文是"只在 `round_end` 清，别改到 `round_start`"（担心吞掉
-  玩家在局间为下一局准备的设置）。现在是**刻意**两次都清；再看到 `round_start` 里那句
-  `resetAutoFlags()`，不要当成 bug 删掉。
-  回归：`client --selftest` 的「自动开关」两组（含命令钩子抓真实报文）。
+  再复位一次**（局间结算期间点开的自动不许带进新的一局）。⚠ 这条**口径被用户改过**（原文"只在
+  `round_end` 清"），现在是**刻意**两次都清；看到 `round_start` 里那句 `resetAutoFlags()`，
+  **不要当成 bug 删掉**。回归：`client --selftest` 的「自动开关」两组。
 - **「吃」必须由服务端自己校验顺子**（`Round.pickChiTiles`）：`want` 来自客户端，
   只查"手里有没有这两张"的话 1m+5m 能配 3m 吃下去，而 `Evaluator` 是按 `Meld.baseKind()+isRun()`
   **重建**面子形状算役的 → 假顺子按真顺子计分（一条报文就能改分）。`want` 还必须**恰好两张**
@@ -417,9 +357,8 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
   `readLine()` 收完再判）、同时在线上限 `Server.MAX_SESSIONS`、`fill_bots` ≤ 4、
   客户端传来的 `rules` 一律过 `Rules.clampToSane()`；**发牌种子**用 `SecureRandom` 基准 +
   每局 SplitMix 打散，且**每小局都从"当前时刻毫秒数"重新起步**（`Table.nextRoundSeed()`）——
-  原来每局只有 `mixSeed(seedBase + 局序号)`，同一个 `seedBase` 推出来的一整场是确定序列
-  （推出一局即推出整场）。自检要可复现，所以它显式打开 `Table.debugDeterministicSeed`
-  走旧的确定岔路；**生产路径永远是时刻种子**，别把那条岔路当默认行为。
+  别退回"`mixSeed(seedBase + 局序号)`"那种"推出一局即推出整场"。自检要可复现，所以它显式打开
+  `Table.debugDeterministicSeed` 走旧的确定岔路；**生产路径永远是时刻种子**。
 - **局间时序：服务端先等满 5 秒（或所有人确认），再开下一局**：
   `round_end` → `sleepMs(roundDelayMs)` → `awaitRoundConfirm()`（广播 `round_wait{ms:5000}` 后等）
   → 下一局 `round_start`。**服务端两条铁律**：`drainConfirm()` 只从 `submit()` 写的**那条队列**取
@@ -436,14 +375,14 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 两端都显式钉死 UTF-8（服务端 `StandardCharsets.UTF_8`、客户端 `QJsonDocument`）。
 
 - **只有三类字段是用户数据**：`seats[].name` / `room.name`·`hello_ok.name` / `chat.text`；其余全是**码**
-  （事件名 / `type` / `win_note` / 牌码 / `yaku[].code`(参数化役种带 `tile`) / `limit` / `reason` /
-  `error.code`·`arg`）。判据一律 ASCII，**客户端不许拿中文串做逻辑判断**（那等于把服务端文案当协议常量）。
+  （事件名 / `type` / `win_note` / 牌码 / `yaku[].code`(参数化役种带 `tile`) / `limit` / `reason` / `error.code`·`arg`）。
+  判据一律 ASCII，**客户端不许拿中文串做逻辑判断**。
 - **码表的唯一映射处** = `server/.../rules/YakuCodes.java`（`Evaluator` 内部仍用中文名，只在发报文时翻码）。
   ⚠ **新增役种必须在那里登记**，否则整场自检会因 `YakuCodes.misses() > 0` 红。
 - **语言文件** `client/assets/i18n/<locale>.json`（键 = `<族>.<码>`）：加载顺序与 `tiles/` 同约定
-  （**exe 同级 `i18n/` → qrc → 码本身**）⇒ **改文案不用重编译**。⚠ 认不出的码**原样显示码本身**
-  （一眼可见"服务端加了码、语言文件没跟上"）；码为空串时回退老字段（`yaku[].name` / `error.msg`）。
-- **界面固定文案全在 `ui.*`**（源码里不留中文字面量，例外用 `// i18n-keep`，如牌面字形）。⚠ **`// i18n-keep` 必须与它豁免的字面量同行**（`i18n-scan` 按字面量所在行取豁免）。
+  （**exe 同级 `i18n/` → qrc → 码本身**）⇒ **改文案不用重编译**。⚠ 认不出的码**原样显示码本身**；
+  码为空串时回退老字段（`yaku[].name` / `error.msg`）。
+- **界面固定文案全在 `ui.*`**（源码里不留中文字面量，例外用 `// i18n-keep`）。⚠ **`// i18n-keep` 必须与它豁免的字面量同行**（`i18n-scan` 按字面量所在行取豁免）。
   **新文案走三件套**：`i18n-map.mjs`（唯一数据源）→ `i18n-apply.mjs` → `i18n-gen.mjs`（只补缺）
   —— **先写字面量再加进 map**；改文案直接编辑 json。
 - **截断按「码点」不按 UTF-16 码元**（`Json.clampCodePoints`）。
@@ -461,7 +400,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 
 **③ 能用图形表示的就不再重复文字** —— `agariHtml()` 只在 `schematicRenderable(schematicOf(...))` 为假
 （字体缺失 / 牌码串非法）时才补「手牌 / 宝牌指示牌 / 里宝指示牌」三行文字；**该判据与构造函数显示图形块的
-判据必须共用同一个函数**。**数字类信息（宝牌/赤宝/里宝张数、番符、点数收支）照常保留**（图形给不出这些数）。
+判据必须共用同一个函数**。**数字类信息（宝牌/赤宝/里宝张数、番符、点数收支）照常保留**。
 
 **④ 鸣牌仲裁：优先级、提前收工、队列卫生**（三条一体，判据见 §2.3-10）。实现位置：
 `RoundClaims.rankOf/canBeat`（等级 → 座次，**与仲裁循环同一把尺子**）· `RoundClaims.shouldStop`
@@ -480,8 +419,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 把「判据 + 改座位 + `broadcastRoom`」放进 `synchronized (t.roomLock())`，牌桌线程在**同一把锁**里置
 `playing = true`。
 ⚠ 另一条独立坑：换座必须 `resyncSessionSeats()`，且等待室命令按 `Table.seatOfSession(this)` **反查**
-自己的座位（不信 `session.seat`）—— 否则「准备」会写到别人座位上。
-**细节与探针记录见 NOTES §6.4。**
+自己的座位（不信 `session.seat`）—— 否则「准备」会写到别人座位上。**细节见 NOTES §6.4。**
 
 **⑦ 赤宝牌张数**：合法值只有 **0 / 3**（0 = 发牌期就把赤五换成普通五，136 张不变）；**1/2/4 一律
 归一化到 0/3 并记一条 WARN**（1/2 说不出"少放哪几张"、4 没有码位）——⛔ 绝不静默保留（否则就是 §2.3-11
@@ -501,7 +439,7 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   进程内一不留神就训出**作弊**模型。
 - **观测只许含合法信息**：新增字段必须三处一起改 —— ① 确认公开可见；② `Observation` 字段白名单
   （`SelfTest.trainingInterfaceTests`）+ `tools/selfplay-check.mjs` 的 `OBS_KEYS`；③ PROTOCOL §8.2 的表。
-  ⚠ 自家回合**别调 `Round.isFuriten()`**（14 张时等价于两个标志位，却会白跑 34 次向听 DFS）。
+  ⚠ 自家回合**别调 `Round.isFuriten()`**（会白跑 34 次向听 DFS）。
 - **可复现是硬要求**：`debugDeterministicSeed=true` + **每局一份策略实例**（`PolicyFactory`）+
   每场种子预先算好（`SelfPlay.seedFor`）；策略跨局带状态会让同 seed 不再产出同一轨迹。
 - **奖励是事后回填的**：`hand_delta` / `placement` 在小局、整场结束时才补；`placement` 必须是
@@ -511,16 +449,15 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 - **P2 DAgger 轮**：`--teacher-label`（学生座位另记 `teacher`/`teacher_index`）+ `python -m mahjong_ml.dagger`。
   ⚠ 三条不许省：① 对比只用"两个模型都没训过"的场次；② 显著性**按场聚类**；③ 带同数据量的 BC-only 对照臂。
 - **P5b 混合（teacher 先验）**：`net:<权重文件>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`。
-  ① 先验**只加在 logit 上**（α 极大 ⇒ 必是老师那条 ⇒ "不会比老师差"是构造出来的）；
+  ① 先验**只加在 logit 上**（"不会比老师差"是构造出来的）；
   ② 必须是 **`Policy` 级组合**（`ActionPolicy` 拿不到 `Round`）；③ α 随**训练过的网**的 logit 尺度走
   （别照抄常数）。回归：`SelfTest.hybridPolicyTests` + NOTES §6.5。
 - **P4 探索口**：策略串 `net:<权重文件>[@<α>][#<T>]` = 按温度从 `softmax(logits/T)` 采样
   （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
   （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另三条硬口径：**λ=1**、
   **优势只在 `is_student==1` 的行上归一化**、**两边同一个 `softmax(logits/T)`**
-  （温度只作用一侧 ⇒ 整网 NaN；`inf×0` 与四道闸门见 NOTES §6.5 第十轮）。
-  ⚠ **跨代对局**：`dataset build --student <这一轮学生的确切策略串>`（缺省"任何 `net:`"会把对手网的决策
-  算进策略损失；实测学生行 0.75 而非 0.25，静默）。回归：`SelfTest.samplingPolicyTests` + `selfcheck` P4 组。
+  （温度只作用一侧 ⇒ 整网 NaN）。⚠ **跨代对局**：`dataset build --student <这一轮学生的确切策略串>`
+  （缺省"任何 `net:`"会把对手决策算进策略损失，静默）。回归：`SelfTest.samplingPolicyTests` + `selfcheck` P4 组。
 - **特征 v3**：state **615** = 544 + 71（`VERSION=3`）；三条硬判据：① 四家块**旋转到自己为下标 0**；
   ② 状态段只放**便宜且别处没有**的量（`HandEval.of` ≈0.94 ms/决策 ⇒ 进张留逐候选段）；
   ③ sidecar 逐决策段 **int16**，老 607 维**构造期拒绝**。见 NOTES §6.5。
@@ -533,31 +470,27 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
   *且* **真的命中**（只有"相等"是假绿）。回归：`SelfTest.v4CacheTests` + `tools\v4-cache-check.mjs`。
   ⚠ **W1 起 `h_evt` 被融合消费** ⇒ 多两条**逐位**判据（缓存 carry == 整手重放；前缀 carry + 窗口 == 整手重放），
   且训练侧没有 `h0` 列就**硬拒**（不许静默退化成窗口冷启动）；⚠ **逐行事件编码函数必须自带清零**
-  （调用方复用同一缓冲 ⇒ 不清零 = 静默累积）；⚠ **可缺张量**（`policy_gate` / `fusion.mem`）在**所有**
+  （复用同一缓冲 ⇒ 不清零 = 静默累积）；⚠ **可缺张量**（`policy_gate` / `fusion.mem`）在**所有**
   加载点走 `normalize_state` 补 0（= 恒等 ⇒ 旧网逐位不变）。见 NOTES §6.5 第十一/六十一轮。
 - **头是否"上线"= 前向是否读取**（⛔ 非"训练过"）：判据 = 去掉该头后动作**逐位不变**，且**必须带非退化 `policy_gate`**（零初始化会假绿）；当前实测 `ONLINE_HEADS = ('policy','belief_tenpai')`；被融合/门控消费 ⇒ 并入 + 照 W1 补两条逐位判据。见 `docs/TRAINER-CPP.md` §6.25。
 - ⛔ **critic 只剩"基线尺度"这一件事可做**（三条探针：`--ev-ref legit` / `--readout` / `--shaping`）：
-  ① 判据**别用绝对门槛、也别拿标签侧真值当参照** —— `win_flag` 是**本小局结局本身**、`opp_*` 是隐藏真值，
-  那样量出的 `EV(delta)=0.632` 是**作弊上界**；**合法**天花板只有 **0.069** ⇒ 闸门 = `EV ≥ 0.7 × 合法天花板`
-  + 覆盖率 ≤3pp；② **基线必须与奖励同尺度**（`--baseline-fit scale`：`α+β·V`；基线是状态函数 ⇒
-  线性重标定不改梯度期望、只降方差）—— `std(A)/std(delta)=2.671×` 就是**量纲事故**；
-  ③ **加宽/加深读出头没用**（池化全换 +0.019、MLP 反而过拟合）；④ **PBRS shaping 也没用**
-  （`Q'=Q−Φ`、`V'=V−Φ` ⇒ **`A'=A`**）。⚠ ③④ 的判据要用**绝对量纲的残差比**，**别用 EV**。
-  详见 NOTES §6.5 第十九/二十轮、`docs/TRAINING-V4.md` §14.8–§14.9。
+  ① 判据**别用绝对门槛、也别拿标签侧真值当参照**（`win_flag`/`opp_*` 都是隐藏真值 ⇒ 那样量出的是**作弊上界**）；闸门 = `EV ≥ 0.7 × 合法天花板` + 覆盖率 ≤3pp；
+  ② **基线必须与奖励同尺度**（`--baseline-fit scale`：`α+β·V`；基线是状态函数 ⇒ 线性重标定不改梯度期望、只降方差）；
+  ③ **加宽/加深读出头没用**；④ **PBRS shaping 也没用**（`Q'=Q−Φ`、`V'=V−Φ` ⇒ **`A'=A`**）。
+  ⚠ ③④ 的判据要用**绝对量纲的残差比**，**别用 EV**。红证数字见 NOTES §6.5 第十九/二十轮、`docs/TRAINING-V4.md` §14.8–§14.9。
 - ⛔ **贴标签的读数不是强弱判据**（`engine_top1`/引擎 CE/危险度旧 AUC）：强弱只能由闸门（多套新牌山配对、CI 排除 0 且为正）答。详见 NOTES §6.5。
 - **PPO 数值口径 + 回路**：`--grad-clip 0.5`（日志 `|g|` 是**裁剪前**范数）、`--kl-early-stop 0.03`
   （纯函数 `kl_stop_hit`，越过停**整轮**）、**双口径 KL**（只看 `kl` 会被少数大 `ρ` 的行掩盖）、
-  `ppo` 与 `--rwr-beta>0` **硬拒**、优势**只归一化一次**；训练口径的开关（含 **`--max-steps`** =
-  「每轮短」、`--value-target delta`、`--advantage`、`--rank-weight`）**必须走 `v4 loop`**，
-  不许只活在 shell 历史里。⚠ 实测：裁剪前 `|g|=6.33`（上限 0.5）、单批 KL 在第一处生效点就
-  **0.0707 > 0.03**，而 **102 步**的 top1 与跑满 5144 步只差 0.004 ⇒ **一轮的价值在"重新采一批"**；
-  小冒烟**别**用 `--hands 2`（`reward_to_go` 会退化成整场结果，`selfplay-check` 判红并中止回路）。
-  见 NOTES §6.5 第二十一/二十二轮、`docs/TRAINING-V4.md` §14.10。
+  `ppo` 与 `--rwr-beta>0` **硬拒**、优势**只归一化一次**；训练口径的开关（含 **`--max-steps`** =「每轮短」、
+  `--value-target delta`、`--advantage`、`--rank-weight`）**必须走 `v4 loop`**，不许只活在 shell 历史里。
+  ⚠ 实测：裁剪前 `|g|` 远超上限、单批 KL 在第一处生效点就越线 ⇒ **一轮的价值在"重新采一批"**；
+  小冒烟**别**用 `--hands 2`（`reward_to_go` 退化成整场结果 ⇒ `selfplay-check` 判红并中止回路）。
+  实测数字见 NOTES §6.5 第二十一/二十二轮、`docs/TRAINING-V4.md` §14.10。
 - **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
   `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-{selfplay,aux}-parity.mjs`），
-  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、
-  `net:` 的 `@α` 先验）**显式报错**，不悄悄降级；
-  `net:<权重文件>[@0][#T]` 与 `teacher` 都已落地（§6.16/§6.17）。⚠ 完整半庄验收**≥200 场**；§6.15 是唯一"绕过内置 Bot"的例外。
+  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、`net:` 的 `@α` 先验）**显式报错**，不悄悄降级；
+  `net:<权重文件>[@0][#T]` 与 `teacher` 都已落地（§6.16/§6.17）。⚠ 完整半庄验收**≥200 场**；
+  §6.15 是唯一"绕过内置 Bot"的例外。
 ### 6.6 teacher（内置机器人）的五层取舍
 
 `Bot` 同时是**补位机器人**和**训练用的 teacher**：它怎么打，直接决定自对弈数据集里的标签质量
@@ -570,37 +503,32 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 **完整策略说明（每层的判据、权重与理由）见 `NOTES.md` §6.6。**
 配套：`docs/DESIGN.md` 的「AI 取舍」、`§8.2` 的特征判据表（`HandEval` / `Danger` / `Visible` / `scoreIfWin`）。
 
-**机器人用哪一代 AI**（`mahjong.ai.BotAis`，2026-09）：房间可选机器人座位用**哪一代**
-（内置 teacher / 各代训练网络），但**客户端只传注册表里的名字** —— `net:<路径>` 是**服务器本机文件**，
-让房间指定路径就等于开放"读服务器任意文件"。清单来自**启动时自动挂载的 `bot-ai/` 包目录**
-（与 `replays/` 同层；一个一级子目录 = 一个包，**深度模型与启发搜索同一套接口**），
-`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir` 可覆盖（后面的赢）。**格式与打包见 `docs/BOT-AI.md`**；
-装配每场一次、只装机器人座位、坏包只跳过它一个（细节见 `NOTES.md` §6.6）。
+**机器人用哪一代 AI**（`mahjong.ai.BotAis`）：房间可选机器人座位用**哪一代**（内置 teacher / 各代训练网络），
+但**客户端只传注册表里的名字** —— `net:<路径>` 是**服务器本机文件**，让房间指定路径就等于开放
+"读服务器任意文件"。清单来自**启动时自动挂载的 `bot-ai/` 包目录**（与 `replays/` 同层；一个一级子目录
+= 一个包；深度模型与启发搜索同一套接口），`--bot-ai` / `--bot-ai-reg` / `--bot-ai-dir` 可覆盖（后面的赢）。
+**格式与打包见 `docs/BOT-AI.md`**；装配每场一次、只装机器人座位、坏包只跳过它一个（细节见 `NOTES.md` §6.6）。
 回归：`SelfTest.botAiTests` + `client --selftest` 的「机器人 AI」组 + `node tools\bot-ai-test.mjs`。
 ### 6.7 无用代码清理（可重复的判据）
 
-**`node tools/deadcode-scan.mjs [java|cpp]`** 扫出"只在声明/定义处出现"的函数 —— 2026-09 的一次全仓清理
-就是靠它：服务端删了 **27** 个、客户端删了 **10** 个（另清掉 6 条随之失效的 `import`）。
-**删掉的完整名单、以及"为什么它们确实没人调"见 `NOTES.md` §6.7。**
-
-⚠ 它给的是**候选**，不是判决书 —— 反射、宏、Qt 元对象（信号槽）、虚函数/接口实现、以及"故意留给外部使用者"
-的公开 API 都会漏判。删之前按这个顺序过一遍：
+**`node tools/deadcode-scan.mjs [java|cpp]`** 扫出"只在声明/定义处出现"的函数（用法与全仓清理的
+实测数字见 `NOTES.md` §6.7）。⚠ 它给的是**候选**，不是判决书 —— 反射、宏、Qt 元对象（信号槽）、
+虚函数/接口实现、以及"故意留给外部使用者"的公开 API 都会漏判。删之前按这个顺序过一遍：
 
 1. 读一眼那段代码，确认没有副作用（初始化、注册、JNI/反射入口）；
 2. `override` / `virtual` / `signals:` / `slots:` / `Q_INVOKABLE` 段里的一律**别删**；
 3. **文档里写成契约的不删**：例 `Visible.unseen` 只被 PROTOCOL §8 的观测字段表引用（代码里没人调），
    那也算"在用"，扫描器照样会报它 —— 这类要**留着并在代码注释里写清为什么**；
-4. 删完**编译 + 跑对应层自检**（服务端 `--selftest`、客户端 `--selftest`）—— 这一步才是判据：
-   有测试引用就会被抓出来（本次清理的实测数字见 `NOTES.md` §6.7）。
+4. 删完**编译 + 跑对应层自检**（服务端 `--selftest`、客户端 `--selftest`）—— 这一步才是判据。
 
-顺带：`server/build/unused-imports.mjs` 一类的临时脚本不必进仓库；真正可复用的（扫描器）放 `tools/`。
+顺带：`server/build/unused-imports.mjs` 一类临时脚本不必进仓库；可复用的（扫描器）放 `tools/`。
 
 ### 6.8 身份（uuid）与玩家档案
 
-需求（2026-09）：**连接后服务端立刻问客户端要一个保存过的 uuid**，客户端应答；客户端没有就由服务端
-生成并回发（客户端必须存下来）；服务端没有这个 uuid 的档案就建一份**初始玩家**。
-**同一个 uuid = 同一个玩家**，显示仍以昵称为准；每个 uuid 记一个时间戳、登录时更新；
-定期清理**超过 2 个月**没登录的。uuid 将来是**玩家信息的主键**。协议见 PROTOCOL §2.0。
+**连接后服务端立刻问客户端要一个保存过的 uuid**，客户端应答；客户端没有就由服务端生成并回发
+（客户端必须存下来）；服务端没有这个 uuid 的档案就建一份**初始玩家**。**同一个 uuid = 同一个玩家**，
+显示仍以昵称为准；每个 uuid 记一个时间戳、登录时更新；定期清理**超过 2 个月**没登录的。
+uuid 将来是**玩家信息的主键**。协议见 PROTOCOL §2.0，需求由来见 NOTES §6.8。
 
 - 服务端：`server/.../player/PlayerStore.java`（进程级单例，和 `ReplayStore` 一个套路）。
   落盘 `<--player-dir>/players.json`（默认 `players/`，`--uuid-ttl-days` 默认 60，`--no-player-store` 关掉）。
@@ -647,29 +575,29 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 | 大厅按钮是灰的 | `MainWindow::onConnected()` 必须调 `m_lobby->setConnected(true)`（曾漏过） |
 | **掉线后那一格变成机器人（会吃碰杠/胡牌）**，或掉线就没法继续 | `Table.markAway` 是不是把 `bot` 置真了？托管只该置 `away`（§2.3-13）。定性：`node tools\away-test.mjs` |
 | **对局中有人掉线，其他三家突然看到"准备/开始游戏"** | 对局中的 `room` 事件被当成"回等待室"了：`MainWindow` 的 `room` 分支要看 `playing`（L2 有断言） |
-| **掉线的人重连没回原座位 / 每次连上都是"新玩家"** | ① `uuid_ok{issued:true}` 有没有**落盘**（`MainWindow::saveIdentity`）？② 有没有存 `hello_ok` 的 **`pid`+`token`** 并在连上时发 `rejoin`（光有 uuid 接不回托管座位，§6.8）？定性：`node tools\uuid-test.mjs` |
-| **牌局卡住、按钮点了没反应、什么提示都没有** | 客户端**收包超时**：60 s 无任何下行**字节**（服务端空闲时每 20 s 有 `pong` 心跳）⇒ 报 `ui.net.recv_timeout` + 断开回「未连接」。⚠ 判据是"**任何**字节"而非"完整报文"；覆盖开关 `MAHJONG_RECV_TIMEOUT_MS`（L2 用它压到 300 ms，见 NOTES §6.4） |
+| **掉线的人重连没回原座位 / 每次连上都是"新玩家"** | ① `uuid_ok{issued:true}` 有没有**落盘**（`MainWindow::saveIdentity`）？② 有没有存 `hello_ok` 的 **`pid`+`token`** 并发 `rejoin`（光有 uuid 接不回托管座位，§6.8）？定性：`node tools\uuid-test.mjs` |
+| **牌局卡住、按钮点了没反应、什么提示都没有** | 客户端**收包超时**：60 s 无任何下行**字节**（空闲每 20 s 有 `pong`）⇒ `ui.net.recv_timeout` + 断开回「未连接」。⚠ 判据是"**任何**字节"而非"完整报文"；开关 `MAHJONG_RECV_TIMEOUT_MS`（L2 压到 300 ms，见 NOTES §6.4） |
 | **投票通过了牌局还在等出牌/还在打** | §2.3-14：`finishVoteLocked` 要 `wake()`，且**五个检查点**都要看 `voteEnded`。定性：`node tools\vote-test.mjs` |
 | 点了「结束对局」没反应 / 一直显示冷却 | 看 `vote_denied.reason`（`not_playing` / `running` / `cooldown`）；冷却**只在服务端**记时 |
 | 手牌数量对不上 | `tsumogiri` 用了吗？有没有靠 kind 猜？（§2.3-11） |
-| **庄家第一巡点牌却打出另一张 / 张数对但内容差一张（幽灵手牌）** | `round_start.drawn` 有没有发？出牌取牌是不是按**牌码**？客户端对账是不是也按牌码？见 §2.3-11；定性：`node tools\discard-align-test.mjs` |
+| **庄家第一巡点牌却打出另一张 / 张数对但内容差一张（幽灵手牌）** | `round_start.drawn` 有没有发？出牌取牌是不是按**牌码**？客户端对账也按牌码？见 §2.3-11；定性：`node tools\discard-align-test.mjs` |
 | 一人牌河两张横置 | `riichi` 事件里是不是又去标"最后一张"了？横置**只认 `discard.sideways`**（§2.3-1） |
 | 鸣牌后牌河对不上 | `meld` 的 `called_index` 有没有 `removeAt`（鸣牌是"移动"不是"复制"） |
 | 换座后点「准备」没反应 / 把别人设成已准备 | 被换走那家的 `session.seat` 没跟着改 → 必须 `resyncSessionSeats()` + 用 `seatOfSession(this)` 反查（§6.3）。定性：`node tools\seat-swap-test.mjs` |
-| **某家"没动就被代打"** | 废包（被取消询问的迟到回包 / 局间残留的 `confirm`）被当成本巡答复：`dropReplies` + `type ∈ option.type` + 认领要确认"是动作"（§2.3-10、§2.3-8） |
+| **某家"没动就被代打"** | 废包（迟到回包 / 局间残留的 `confirm`）被当成本巡答复：`dropReplies` + `type ∈ option.type` + 认领要确认"是动作"（§2.3-10、§2.3-8） |
 | 门前役全不生效 | `menzen[]` 是不是漏了初始化？（§2.3-2） |
 | 和了形误判 | 向听 DFS 里 `melds + partials` 没封顶到 4（§2.3-3） |
 | 放过一张荣和牌后马上又能荣和同一张 | 振听三种记在哪、有没有被鸣走的舍牌账（§2.3-12） |
-| 杠后「岭上」数不减 | `dead_wall_left` 必须**每次摸牌都带**（`tiles_left` 在岭上摸牌时不动，见 PROTOCOL §3.4） |
+| 杠后「岭上」数不减 | `dead_wall_left` 必须**每次摸牌都带**（岭上摸牌不动 `tiles_left`，见 PROTOCOL §3.4） |
 | 役满显示成「0 番」 / 结算既画牌又写字 | 界面判据一律看 `yakuman` 字段；图形块与文字块共用 `schematicRenderable()`（§6.4） |
 | **界面显示成 `yaku.riichi` 这种裸键** | 语言文件缺 key（`check-i18n` / `i18n-gen --check`）；认不出的码**原样显示码**是刻意的 |
 | 中文/玩家名变乱码或 `?` | 显式 UTF-8；截断按**码点**（`Json.clampCodePoints`）；别用 `QLatin1String` 接中文 |
 | 改了 `zh_CN.json` 界面还是旧文案 | 客户端要重启（语言文件是**运行时**从 exe 同级 `i18n/` 读的） |
-| 新增界面文案忘了搬 | 三件套流程：字面量 → `i18n-map.mjs` → `i18n-apply.mjs` → `i18n-gen.mjs`（§6.4） |
+| 新增界面文案忘了搬 | 三件套：字面量 → `i18n-map.mjs` → `i18n-apply.mjs` → `i18n-gen.mjs`（§6.4） |
 | 牌河/副露牌太小、盘偏扁、立直棒叠点数 | §6.2 的不变量（比例、区带、固定左缘）；改完**必须看图**（L2 出 `table.png`） |
 | `dist\` 里的 exe 不是最新 | 带 `-Deploy` 重新构建（`build\` 每次更新，`dist\` 只在 `-Deploy` 时更新） |
-| **训练盘（`S:`）采集/训练中途开始报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样（目录一度还能枚举、余量正常），⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据见 `NOTES.md` §6.5 |
-| **网页版复盘器「只有分析某一家时报错」**（换一个座位就正常） | 那一家做过**天鳳规则不允许**的动作（M.League 允许）：最常见是**立直时牌山不足 4 张**或**持点不足 1000**（§2.3-15）。引擎只校验"被分析那家"自己的动作。判据：`node tools\tenhou-log-check.mjs` 第 ⑬ 条；要复盘就用 **tenhou 预设**建房 |
+| **训练盘（`S:`）采集/训练中途报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样，⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据见 `NOTES.md` §6.5 |
+| **网页版复盘器「只有分析某一家时报错」**（换个座位就正常） | 那一家做过**天鳳规则不允许**的动作（M.League 允许）：最常见**立直时牌山不足 4 张**或**持点不足 1000**（§2.3-15）。判据：`node tools\tenhou-log-check.mjs` 第 ⑬ 条；要复盘用 **tenhou 预设**建房 |
 ## 8. 文档维护约定（AGENTS.md / NOTES.md 的分工）
 
 **本文件是"每次会话自动加载"的工作区指令，而指令预算只有 64 KB —— 一旦超过，后面的章节会被
@@ -689,14 +617,14 @@ start_game/add_bot/remove_bot`），读写的却是同一份座位数组 → 房
 ⚠ **`NOTES.md` 独有**的章节一律取编号 **≥10**（AGENTS 里同号常是别的主题：AGENTS §8 是文档维护，
 而"已知限制"原来也叫 §8，于是「见 §8」指不明白 —— 现已改号为 **NOTES §10**）；
 ③ **改完跑 `node tools\doc-refs-check.mjs`**：它会查 AGENTS 的**字节预算**、章节号**完整性**、
-   全仓 `§引用`是否**都解得出目标**（拆分/搬章节时最该跑的一条），以及 **`docs/INDEX.md` 的完整性**
-   （索引列出的路径都存在 + `docs/` 下每份 `.md` 都被登记 —— 加文档忘了登记会被抓出来）。
+   全仓 `§引用`是否**都解得出目标**，以及 **`docs/INDEX.md` 的完整性**
+   （索引列出的路径都存在 + `docs/` 下每份 `.md` 都被登记）。
 
 其它：`README.md` 面向玩家（改了玩家看得见的行为就同步）；`docs/PROTOCOL.md` 两端唯一契约
 （**改协议先改它**）；`docs/DESIGN.md` 架构与取舍；`docs/AUDIT.md` 审计条目（`S-nn`）；`docs/DEPLOY.md` 部署。
 ## 9. 素材与字体管线（牌面 SVG + 结算字体 + 音效 + 打包）
 
-**要改素材/字体/音效或发布打包时才需要读这一节**（细节见 `NOTES.md` §9）。速记：
+**要改素材/字体/音效或发布打包时才读这一节**（细节见 `NOTES.md` §9）。速记：
 
 - **牌面 = `client/assets/tiles/<牌码>.svg`**（38 个 = 37 种牌 + `back.svg`），构建时拷到 exe 同级 `tiles/`；
   加载顺序 **目录 → qrc → 程序化绘制**（删掉整个 `tiles/` 也不白屏）。换素材只要保持
