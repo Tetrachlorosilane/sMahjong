@@ -306,7 +306,7 @@ java -jar server\build\mahjong-server.jar --selftest
 > 密集时段 2026-10-10 22:29 → 2026-10-11 03:39；`Microsoft-Windows-Kernel-Power` **ID 41**（2026-10-11 12:38:57）「系统已在未先正常关机的情况下重新启动…」+ `EventLog` **6008**「上一次系统的 3:36:27 在 2026/10/11 上的关闭是意外的」。
 > ⇒ **⛔ 不是 JDK/JIT 的锅，也不能靠 `-XX:CompileCommand` 规避**（无代码 bug 的间歇性访问违例：`--selftest` 也会崩、20 分钟曾撞 2 次）。
 > **正确缓解（两条腿）**：① **硬件侧** = **BIOS/微码更新 + Intel Default/Baseline 设定 + 把 PL1/PL2 设回规格**（i9-14900HX 约 **55/157 W**，以官方为准）+ 可选**限倍频**或**轻微降压**；
-> ② **软件侧我们只降并行度**（一次一个重负载任务 · `--workers ≤6` · `OMP_NUM_THREADS`/`MKL_NUM_THREADS` ≤6，见下方"低压力运行策略"）。
+> ② **软件侧我们只降并行度**（一次一个重负载任务 · `--workers` 默认 **8** / 上限 **9** · `OMP_NUM_THREADS`/`MKL_NUM_THREADS` **8**，见下方"低压力运行策略"）。
 > ⚠ **曾试 `powercfg` 最大处理器状态 `PROCTHROTTLEMAX` 100%→80%，但已判定不合理并已还原**（原因：该设置**先关睿频、再把频率压到基准 2.2 GHz 以下**，而本机健康工作点是**全核睿频 3.4–3.7 GHz**）⇒ 现状 = **100% + `PERFBOOSTMODE=2`**；⛔ **不要再按"限频 80%"重做**（若你手动改过、要还原到 100% + boost：`powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2; powercfg /setactive SCHEME_CURRENT`）。
 > **效果判据** = 近 24h `WHEA-Logger` **ID 19** 计数（改前 **18** → 重启前已 **22** ⇒ **限频并没有止住**）+ 是否再现 `Kernel-Power` **41** / `EventLog` **6008**。
 > 判据：**输出里出现 `SELFTEST PASS` 才算过**；看到 `hs_err` 横幅 + 退出码 1 时**先重跑**，别改代码。
@@ -316,8 +316,8 @@ java -jar server\build\mahjong-server.jar --selftest
 > 暗杠/加杠（**抢杠那条路只有这个钩子测得到**，含《雀魂》的国士抢暗杠）、`debugDoRiichi` 走生产的立直宣告、
 > `debugDrainWallTo` 推进牌山、`debugPushDiscard` 走生产记账）—— 比"多跑几百场碰运气"可靠得多。
 
-> ⚠ **低 CPU 压力运行策略（本机硬件条件下；2026-10-11）**：① **一次只跑一个重负载任务**（⛔ 不并行训练与评测）；② 自对弈 `--workers` 上限 **≤6**（原来 12）；③ torch/OpenMP 线程上限 **≤6**（`OMP_NUM_THREADS` / `MKL_NUM_THREADS`）；
-> ④ **优先短跑 + 频繁落盘/提交**（崩溃会打断长任务）；⑤ 重要产物**先提交/推送再跑重负载**。
+> ⚠ **低 CPU 压力运行策略（本机硬件条件下；2026-10-11，并行度口径 2026-10-12 更新）**：① **一次只跑一个重负载任务**（⛔ 不并行训练与评测）；② 自对弈 `--workers` 默认 **8** / 上限 **9**（原 ≤6，更早 12）；③ torch/OpenMP 线程上限 **8**（`OMP_NUM_THREADS` / `MKL_NUM_THREADS`）；
+> ④ **优先短跑 + 频繁落盘/提交**（崩溃会打断长任务）；⑤ 重要产物**先提交/推送再跑重负载**；⑥ **降级规则**：若再出现 `WHEA` **新增**或崩溃 ⇒ 把 `--workers` **降到 4** 并**记录**（⛔ 不动 `powercfg`）；⚠ 预算按同命令**慢 ~1.9×** 估。
 > 依据见上方 L1 注解的硬件证据链（WHEA 处理器核 corrected machine check + 意外重启）。
 
 ### L2 客户端自检（秒级）
