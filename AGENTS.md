@@ -485,6 +485,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 - **批前向（`selfplay --batch-forward K`，缺省关；`trainer/src/batchforward.hpp`）**：键 = `(场号, 该场第几次询问, 座位)`；批 = **屏障时刻未决键里字典序最小的 min(K,|未决|) 个** —— ⛔ **按到达顺序凑批永远红**；**规范序 + K 是运行身份的一部分**：同 seed + 同 K ⇒ **同批计划指纹**。
 - ⛔ **"同种子 ⇒ 逐字节相同"在批前向上已退役**：批模式判据 = **argmax 逐行全同 + 统计可复现**；开关**关着**时旧路径必须**逐位不变**。
 - ⛔ **跨片/跨轮链式续训若 `--init` ≠ 数据生成策略 ⇒ `pretrain.py` 的 PPO 口径闸门会 `raise SystemExit`（退出码 1、无 traceback）**：要按预注册跑多段训练，**必须先有优化器状态续跑（或单进程分片循环）能力**。
+- ⛔ 多段训练须 `--save-optimizer`+`--resume-optimizer`（缺省全关 ⇒ 老路径逐字节不变）：**续跑逐位 == 一口气跑**（同数据同 seed ⇒ `net.bin` sha256 同 + 逐 step 日志逐字同 + 数据顺序指纹同）且 **负向：清零动量必不同**（"相等"假绿）；尺子 = 策略 sha256·`kl0`·`kl_probe`；⚠ 外来 `--init` 须 `SystemExit`、exit 1、无 traceback。见 `TRAINING-V4 §17`。
 - ⛔ **包装器绕过该闸门不得用于产出结论**（只能用于探索，且读数必须标注"口径已动"）。
 - **判"有没有可用信号"的判据**：样本外 **AUC/增益必须同时胜过 0.5 与最强安慰剂**（打乱标签 / 非学生席 / 只用动作键），且幻想增益要**显著高于同量纲神谕的 0.2**。
 - ⛔ **"状态条件下的方向选择"（押し引き / fold）已由四条独立证据判为不可学 ⇒ 不再投算力**。
@@ -496,7 +497,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 
 - ① ⛔ **任何环境探针（进程表 / 传感器 / 计数器 / 文件比较）必须 fail-closed**：**取不到数据 ⇒ 报 FAIL / 拒跑**，⛔ **绝不当"干净"或"相同"**（同族 = "两文件都缺 ⇒ 哈希都空 ⇒ 判成相同"）；修法 = 命令行只能从 **`Win32_Process.CommandLine`** 取（每 pid 最多一次）+ 探针"已调用 / 取到过"状态，**进程还活着却取不到 ⇒ 拒跑**。
 - ② ⭐ ⛔ **静窗 / 竞争闸门必须带"枚举自检"三条**：① 自己的 pid 在枚举里；② `smss`/`csrss`/`wininit`/`services`/`lsass` 至少 3 个；③ `netstat -ano` 的 LISTENING 属主 pid 必须都在枚举里（**TCP 表不受令牌限域 = 唯一独立通道**）——**缺一 ⇒ 拒跑**。
-- ③ ⛔ **内存峰值口径**：只认**已提交私有字节**（committed），**常驻工作集（ws）另报**；⚠ **口径必须先拿已知负载标定**（1 GiB **文件 mmap** ⇒ ws≈+1038 MB 而 committed 仅 +8.8 MB）⇒ 否则会把 mmap 文件页当成真实内存。
+- ③ ⛔ **内存峰值口径**：只认**已提交私有字节**（committed），**常驻工作集（ws）另报**；⚠ **口径必须先拿已知负载标定**（1 GiB **文件 mmap** ⇒ ws≈+1038 MB 而 committed 仅 +8.8 MB）⇒ 否则会把 mmap 文件页当成真实内存。⚠ **shim 假绿**：`.venv\Scripts\python.exe` 真身子进程 ⇒ 报 committed 1.2 MB / 真身 ws 8.96 GB ⇒ 须直起 `.uv-python\`。
 - ④ ⛔ **大输入必须分块物化**（跑完即释放）；**`--limit` 必须真夹住读取行数**（旧实现在紧凑集路径上从没生效）；峰值**随 `--chunk` 线性、与总行数无关**；**`--chunk ≤ 0` 必须报错**（不是"不限"）。
 - ⑤ ⛔ **"零训练 / 零负载"探测的判据 = 解释器镜像 ∧ 特征两个条件同时成立**：单看命令行特征会**误报**（DSH 自己的命令行里带着本会话任务文本、含 `--grad-clip`）。
 - ⑥ ⛔ **零和对开口径下 ρ(Δ, 基准) 恒为 −1**（设计恒等式）⇒ **先判"可识别性"**，真 ρ 只能从**学生席口径**读；另：**便宜 ceiling 闸门已制度化**（`tools/ceiling-gate.py`：`verdict.json` 的 `mde` **反解 `eval.required_n`** · `usable_as_veto` 在 `tol < MDE` 时必须 false · **fail-closed**；`tools/AUTOMATION.md` §7）；**新臂先过它（≤30 min、零训练）否则不许开训**，见 `PREREGISTRATION-TEMPLATE.md` 第 6 条。
