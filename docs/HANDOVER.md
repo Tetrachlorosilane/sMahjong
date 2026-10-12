@@ -12,8 +12,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 分支 / HEAD | `Training` · 基线 **`cb3dd51`**（`notes: P3-01 实测——训练「无 traceback exit=1」真`）；其父 `34472cd`；tree `dc631a4442e6…`；**未推送 0 个提交**（`@{u}..HEAD`）。⚠ 本行记的是**基线**（§1 改动建立在它之上）：§1 自身提交后 HEAD 会 +1，所以判据是"它仍是 HEAD 的祖先"，不是"它 == HEAD" |
-| 远端 | `origin/Training` 头 = **`cb3dd51`**（2026-10-12）⇒ **落后本地 0 个提交**（`behind 0`）。⚠ 推送前的判据见 §5 |
+| 分支 / HEAD | `Training` · 基线 **`2eec879`**（`docs: P3-01 结案入档（判定=按预注册跑不出来）+ gate.py:4`）；其父 `cb3dd51`；tree `44eadfbbf65d…`；**未推送 0 个提交**（`@{u}..HEAD`）。⚠ 本行记的是**基线**（§1 改动建立在它之上）：§1 自身提交后 HEAD 会 +1，所以判据是"它仍是 HEAD 的祖先"，不是"它 == HEAD" |
+| 远端 | `origin/Training` 头 = **`2eec879`**（2026-10-12）⇒ **落后本地 0 个提交**（`behind 0`）。⚠ 推送前的判据见 §5 |
 | 发布 | **v1.13.0 已上线**（release **#397762262** → <https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.13.0>，tag `v1.13.0` → 远端 `4d7cb9ec`，6 个资产）：**第一次随包发布 v4 的 3 代网络**（`v4-bc-004` / `v4-p3-001` / `v4-ppo-001`，格式 2 权重）+ 逐决策 reward-to-go 契约。上一版 v1.12.0（#397670321）只带 client + server（那时 v4 还不能导出）。逐资产 sha256 / asset id 见 `NOTES.md` §9.5 |
 | 数据盘 | `S:\mahjong-training`：**清理后可用 ≈ 221 GB**（2026-10-08 实测；本次清理**释放 142.6 GB**：gate 轨迹 24,761 个 `jsonl` 64.8 GB + 旧季 raw/compact/arena/ckpt）。**现存**：raw 2.3（只在跑的 def7）/ compact 5.8（只留 `v4-heads-g01`，去留待定）/ gate **0.1**（⛔ 只留 `summary.json`·`verdict.json` —— 按"**删轨迹、留摘要**"规矩，`regate_gate.py` 仍能复算历季判决）/ ckpt·league·logs·arena 0。⚠ **配额口径看 `python/mahjong_ml/paths.py`（80/116/2/1/1，总 200、留 ≥10）**；本行旧读数（112 GB、gate 63.9…）**已过时，别再引** |
 | **⏸ 挂起快照（2026-10-09）** | **用户指示"先挂起测量，晚些时候再继续"** ⇒ 已停掉在跑的实验（子代理 + 0 残留进程）。**下次从这里接**：① 读 `S:\mahjong-training\w-ladder\PREREGISTRATION.md`（**已写好**：剂量 `w∈{0, ~300, w_for_parity≈2600}` × **每档 2 条链** × **2 代**；主判据 = 立直率随 `w` **单调↑**；次判据 = **臂对臂直接对打**；护栏 = 顺位点下界 ≥ −1.0；两条 `w=0` 链兼作 `def7` +3.69 的复现）；② 工具已就位：`--style-bonus`（默认关、逐位不变，selfcheck **859/0**）、`tools/style-vector.py`（9 维风格向量）、`tools/style-reward-{run,report,gate-table}.py`；③ 上一轮的账：`S:\mahjong-training\style-reward\REPORT.md` + `gate-table.json`（A/B 各 4 代）+ **A-vs-B 对打** `S:\mahjong-training\gate\h2h-sty-a-vs-b\verdict.json`（`deals` Δ=+0.008 CI[−0.016,+0.032] **无差**；顺位点 +1.17 [+0.20,+2.12]）。**⚠ 挂起时未提交 25 个文件**（三端 + 文档 + 4 个新工具）；`w-ladder` 下留了一次未完成的采集（1,000 个 `g*.jsonl`，无 net ⇒ 可删）。**⚠ 两条独立的环境约定**：解释器必须用 `S:\mahjong-training\tools\py312\python.exe`（仓库 `.venv` 不能写数据根）、`MAHJONG_TRAINER` 必须指 S: 的 trainer（工作区里的 exe 写数据根会被**静默吞掉**） |
@@ -27,6 +27,7 @@
 
 | **本机稳定性（2026-10-11）** | WHEA 处理器核 corrected machine check（`WHEA-Logger` ID 19，internal parity error，APIC ID 33/32）+ 意外重启历史 ⇒ **曾试 `powercfg` 80% 限频，已判定不合理并已还原**（先关睿频、再把频率压到基准 2.2 GHz 以下；本机健康工作点 = 全核睿频 3.4–3.7 GHz）⇒ 现状 = **100% + `PERFBOOSTMODE=2`**；**正确缓解** = BIOS/微码更新 + Intel Default/Baseline 设定 + PL1/PL2 设回规格（i9-14900HX 约 55/157 W，以官方为准）+ 可选限倍频/轻微降压，**软件侧我们只降并行度**（一次一个重负载任务 · `--workers` 默认 8 / 上限 9 · `OMP/MKL` 8，见 `NOTES.md` 低压力策略）；效果判据 = 近 24h WHEA **ID 19** 计数（改前 18 → 重启前已 22 ⇒ 限频没止住）+ 是否再现 `Kernel-Power` 41 / `EventLog` 6008；**本次为主动重启**（本次开机后无 41/6008） |
 | **P3-01（2026-10-12 结案）** | **按预注册跑不出来**（自变量"数据新鲜度"未实现 + 两臂口径被动过）⇒ 详见 `NOTES.md` §6.5 与数据根 `P3-01-RESULT.md` §8；⛔ 不是"无差"结论 |
+| **方向族（2026-10-12 封存）** | **"状态条件下的方向选择"不可学**（同状态对比预测 AUC **0.4799** CI[0.4300,0.5302] 含 0.5、**低于最强安慰剂 0.0491**、ρ=−0.694；四条独立证据同向）⇒ 风格奖励只对**动作频率/类型**轴有效；详见 `NOTES.md` §6.5 与数据根 `PROBE-CONTRAST-RESULT.md` |
 
 ### 1.1 训练路线现状（2026-10-06）
 
