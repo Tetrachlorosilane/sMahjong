@@ -81,6 +81,7 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | `tools\verify-push.mjs --selftest` | 5/5 | ③ tree 不同 ⇒ `TREE_MISMATCH` 退出码 1；④ 拿不到远端 tree ⇒ `UNKNOWN` 退出码 2；⑤ 取不到远端头 ⇒ `NO_REMOTE` 退出码 2 |
 | `tools\paired-eval.mjs --selftest` | 桥内 23 项 | 采集目录不存在 ⇒ 非 0 退出；落点选 `docs/` ⇒ 拒绝写；桥内：未登记方向的量 ⇒ **当场报错**（⛔ 无缺省兜底） |
 | `tools\ceiling-gate.py --selftest` | 32 条检查（`say` 行；另有 55 条探针行、8 条**故意红**的负向探针） | 缺目录（两文件都缺）⇒ 探针必红、族数 0；缺 `per_game` ⇒ 既有 `load_run` 当场报错；缺权重 / 两臂同权重 / 与旧 `verdict.json` 复算对不上 / 零训练自证取不到 ⇒ **`ERROR` + 退出码 2**；单族（1 族）不许判「过」；墙钟超预算不许判「过」；容忍带 < MDE ⇒ 标 `usable_as_veto=false` 且**不判破**（tol ≥ MDE 才判破）|
+| `tools\overlap-orchestrator.py selftest` | **8/8** | ① 未知 kind/phase ⇒ 拒（fail closed）；② 命令行探针取不到数据 ⇒ **FAIL/拒跑**；③ 闸门不过 ⇒ **一条命令都不打**（桩 marker 作证）；④ 两文件都缺的比较 ⇒ **必红**（假绿守卫）；⑤ `--chunk<=0` 是坏值、预算用尽置 **0**（⛔ 非 −1）；⑥ 收尸删完**复验消失**、被占用 ⇒ **exit 5**；⑦ 枚举自检不过（令牌限域）⇒ **FAIL/拒跑**；⑧ 某一相非 0 退出 ⇒ **exit 7**（⛔ 不被"污染 6"吃掉）、`own_wall` 不被别的相虚大（见 §8） |
 | `tools\v4-forward-gpu.py --selftest` | 45/45 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU**；⑤ `--rows <npz>` + `--index-file` 在**没有 `steps` 列**时也必须出文件（旧实现在 `forward` **之后**才 `TypeError`，`[fwd]` 照打而 `--out` 的文件不存在）；⑥ **紧凑集/分块负向**：目录不存在（**本批新判据：先断存在性**）/ 缺列文件 / 列文件截断 ⇒ 报错，`--chunk 0` 与 `--chunk -1` ⇒ **exit=2 且不留半截输出**，分块区间越界/空块 ⇒ 报错，`--materialize-all` vs `--chunk 1` 输出**逐字节相同**；⑦ 分块 == 全量（chunk 1/2/3/7/33/100 两档口径，见 §6） |
 | `tools\v4-batch-serve.py --selftest` | 26/26 | **乱序的批计划 ⇒ 报错不许提交**（批内乱序 / 批间乱序 / 中间批少一行）；行对齐（`row` 越界 / 重复 / 未覆盖 / `(game,step)` 重复）⇒ 报错；`K>行数` / `K=1` / `不整除`（`keep`/`drop`/`error`，含"`drop` 必须能过守卫"）/ `K=0` 行为逐条断言；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
 | `tools\v4dforward-gpu.py`（评估路径的等价替换，无自检，靠与 `trainer v4net` 逐行对拍） | — | `--select-from` 里重复键 / 键在 `--traces` 找不到 / 枚举行数与 `materialize` 不等 ⇒ **当场报错**（⛔ 不"看着差不多就往下算"）；⚠ 选行**必须按 `trace_files` 的规范序**（数值序），字典序会让两边整片错位而 flip 数仍然相同 |
@@ -130,4 +131,31 @@ python tools\ceiling-gate.py --selftest                            # 离线自�
 | 护栏 | 容忍带 **< 实际 MDE** ⇒ 标 `usable_as_veto=false`（**不得作为否决依据**，天生必破 = 假警报），⛔ **不据此判破**；只有 `tol ≥ MDE` 的护栏越界才判「不过」（AGENTS.md §6.5 第七十一轮） |
 | 零训练自证 | 起跑 / 收尾各扫一次全部进程的**命令行**；判据 = **解释器镜像（`python*` / `trainer*`）∧ 训练特征**两个条件同时成立（单看特征词会误报：DSH 自己的命令行里就带着本会话的任务文本）⇒ 命中即 `ERROR`；采集只走 `style-vector.py`（⛔ 无 PPO / pretrain / v4 loop） |
 | ⚠ ρ 的可识别性 | `--gate-dir` 的 `a,a,b,b` 对开 + **零和指标** ⇒ `Δ` 与基准**机械地** −1 相关（实测 −1.000000）⇒ 判 `identified=false`、**不作判据**；要真 ρ 用 `--family` 口径（同座位、同牌山、只换权重；实测 −0.693） |
+
+## 8. 重叠编排器（`tools\overlap-orchestrator.py`）
+
+> **一句话**：把"两条互不依赖的相并跑"从**数据根的三份手写脚本**（`b1/b2/b3b-overlap.py`，三者同族演进）
+> 收敛成**仓库内一个工具 + 七闸门 G1–G7**；数据根那三份**保留**、文件头各加一行指向本工具。
+
+```powershell
+python tools\overlap-orchestrator.py selftest --out python\.tmp\ov-selftest.json          # 8/8（含 5 条负向）
+python tools\overlap-orchestrator.py check --driver <spec.json> --pair compact:collect   # 只跑闸门，⛔ 不打任何命令
+python tools\overlap-orchestrator.py pair  --driver <spec.json> --pair train:collect --overlap `
+     --data-root <根> --compact-root <独立根> --raw-root <根> --workers 8 --timeout 0 --out <结果.json>
+python tools\overlap-orchestrator.py calibrate-mem --anon-gb 2 --file-gb 1 --out <标定.json>
+```
+
+| 项 | 内容 |
+| --- | --- |
+| 参数化 | `--data-root` / `--compact-root` / `--raw-root` / `--workers`（**硬上限 8**）/ `--timeout`（`<=0` ⇒ 不限）/ `--chunk`（`<=0` ⇒ **exit 2**，⛔ 不是"不限"）/ `--driver`（驱动规格 JSON）。spec 里可写 `${DATA_ROOT}` `${COMPACT_ROOT}` `${RAW_ROOT}` `${WORKERS}` `${REPO}` `${PY}` ⇒ **换根不用改 spec 一个字节**（全文件除"缺省值（可覆盖）"那一段外**零绝对盘符**） |
+| 七闸门 | **G1** 主相 `phase ∈ {compact,readings,train}` ∧ 从相 `kind ∈ {collect}`（`train`/`critic`/`audit`/`eval`/**第二个 compact**/**未知一律拒** ⇒ fail closed）· **G2** 两臂写目录不相交 · **G3** 主相输入分片冻结 · **G4** 采集权重+可执行文件跑前/跑后各 pin sha256 · **G5** 采集命令行不引用正在被写的产物（**按解析后绝对路径**判，⛔ 不按目录名）· **G6** 独占锁（一次一个重叠对）· **G7** 静窗（`trainer.exe` 一律算；`python`/`java` ≥200 MB；**`java -jar mahjong-server.jar` 按命令行、不看内存**） |
+| ⛔ 探针 fail-closed | 命令行取自 **`Win32_Process.CommandLine`**（CIM **每 pid 最多一次**，⛔ 不在采样循环里）→ `wmic` → 老 `tasklist /V` 解析；**已调用/取到过/取不到的 pid** 三态。**进程还活着却取不到 ⇒ FAIL / 拒跑（exit 4）**，⛔ **没有**任何"忽略探针失败"的开关；⚠ 进程已退 ⇒ 那是竞态、不算（否则永久误拒）。红证：`tasklist /V` 在本机只有 **9 个字段且第 9 个是可执行路径**，旧解析 `len(cols)>10` 永不成立 ⇒ 真机 138 MB 的 `server.jar` 在跑而旧口径报 **算竞争 0 个 / exit=0（假绿）** |
+| ⛔ 枚举也 fail-closed（本批新抓） | `tasklist`（带不带 `/FI`）、`.NET GetProcessesByName`、`Get-CimInstance Win32_Process`、`Get-Counter '\Process(*)\ID Process'` 会**一起瞎**：同一台机器上，工作区**外**的 Python314 枚举到 **336** 个进程，工作区**内** uv 的 3.12 只枚举到 **18** 个（受限令牌）⇒ G7 会报"算竞争 0 个"= 假绿。⇒ 加**枚举自检**：① 自己的 pid 必须在枚举里；② `smss/csrss/wininit/services/lsass` 至少看见 3 个；③ `netstat -ano` 里 **LISTENING 的属主 pid 必须都在枚举里**（TCP 表**不受令牌限域** ⇒ 唯一独立通道）。三条缺一条 ⇒ **拒跑（exit 4）** |
+| 内存口径 | 峰值**只认已提交私有字节**（`GetProcessMemoryInfo` 的 `PagefileUsage`），**常驻 ws 另报**（⛔ 不许混用）。标定（`calibrate-mem`，本机可复现）：2 GiB 匿名 ⇒ committed ≈ +2059 MB；1 GiB **文件 mmap** ⇒ ws ≈ +1038 MB 而 **committed 仅 +8.8 MB**。采样器 **1 s 栅格、零 CIM/WMI**（`GlobalMemoryStatusEx` + `GetProcessTimes` + P/Invoke），CIM 只出现在 G7 的**一次性**命令行探针里 |
+| 收尸与回退 | tree-kill（`taskkill /T /F`）→ **等它真退** → 带重试删 → **复验消失** → **看回退退出码**；删不掉 ⇒ **不回退并 exit 5**。`rm_safe` 只许删白名单根内的目录，越界**拒绝删** |
+| 退出码 | **0** = OK / **2** = 参数坏值或 spec 读不了 / **3** = G1–G6 拒（**一条命令都不打**）/ **4** = G7 拒（竞争负载，或探针/枚举 fail-closed）/ **5** = 收尸回退失败 / **6** = 读数被别人的负载污染（调用方应重测）/ **7** = **某一相非 0 退出**（⛔ 优先级高于 6；不许被"污染"吃掉） |
+| 输出 JSON | 每相 `own_wall_s`（**按采样器看到的真的退出时刻**算，⛔ 不是"我去 `wait` 它的时刻"）/ `code` / `peak_committed_mb` / `peak_ws_mb` · `wall_s` · `overlap_interval_s` · `capture_rate`（= 重叠区间 / 较短那一相的 own_wall）· `both_present_samples`（真并发的**独立**证据，不靠墙钟）· `commit_free_min_gb` + 采样点数 · 闸门逐条结论 · `probe` / `enumeration_selfcheck` · `pin_changed` / `src_manifest_changed` · `contaminated` / `phase_failures` / `timing_reliable` |
+| ⚠ 用什么解释器跑 | ⛔ **工作区内的解释器**（`python\.venv`、`.uv-python`）拿的是**受限令牌**：枚举不全、写不了独立根那些盘（`WinError 5`）。实测工作区外的 `Python314` 可写、但**没有 torch** ⇒ 真 `compact` 相那一侧目前只能用受限解释器。⇒ 跑本工具用**不受限**的解释器（枚举自检会替你判），真 compact 的落盘路径要落在它写得到的地方 |
+| 不做 | ⛔ 不把任何数据读进本进程（只"起进程 + 采样 + 收尸"）· ⛔ 不改 `powercfg` / 页面文件 · ⛔ 不用 junction（compact 只读独立根）· ⛔ 不一相多次并发（G6） |
+
 
