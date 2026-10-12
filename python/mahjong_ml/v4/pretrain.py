@@ -1143,7 +1143,12 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict) -> None:
 # **必须不同**（否则就是假绿）。
 #
 #: 续跑存档的格式号 —— 改了字段**语义**就 +1 ⇒ 老存档**当场被拒**（⛔ 不静默按新语义读）
-RESUME_FORMAT = 1
+#:  · 1 → 2（2026-10-13，第七十九轮）：新增 `ref` 段（**KL 锚 π_ref 的来源 + 权重指纹**）。
+#:    为什么必须 +1：格式 1 的存档**压根没记"锚是谁"**，而 `--ref-beta > 0` 且没给 `--ref` 时锚的缺省
+#:    是"**这一段的** `--init`" ⇒ 续跑那一段的 `--init` 是上一段的存档 ⇒ 锚**静默换成了上一段的权重**。
+#:    后果：`--ref-beta > 0` 的配方上"续跑 == 一口气跑"**必然红**（实测 MSLT 配方 10+10 ≠ 20），
+#:    而日志里只有一行不起眼的路径。老存档继续按格式 1 读 = 把这个静默洞带下去。
+RESUME_FORMAT = 2
 
 #: 续跑状态在 `model.pt` 里的键名（与 `model` / `ssl_head` / `config` 同级）
 RESUME_KEY = "resume"
@@ -1423,9 +1428,36 @@ def train(args) -> dict:
         raise SystemExit(f"--ref-beta 不能为负（收到 {ref_beta:g}）：它是「把 π_θ 拉回现任」的力度")
     ref_spec = getattr(args, "ref", None)
     ref_model: M.V4Model | None = None
+    # ★ BL-04（第七十九轮）：`π_ref` 是"续跑必须**原样恢复**"的状态之一 —— 这里把它的**来源**与
+    #   **权重指纹**记下来，`--save-optimizer` 时进存档；续跑时以**存档记的那一份**为准。
+    ref_src: str | None = None
+    ref_sha: str | None = None
+    ref_explicit = bool(ref_spec)
     if ref_beta > 0:
+        arch_ref = dict(resume["resume"].get("ref") or {}) if resume is not None else {}
+        if resume is not None:
+            got_beta = float(arch_ref.get("beta", 0.0) or 0.0)
+            if abs(got_beta - ref_beta) > 1e-12:
+                raise SystemExit(
+                    f"⛔ 续跑的 KL 锚力度与存档不一致：存档 β={got_beta:g} vs 本次 {ref_beta:g}"
+                    f"（锚是轨迹的一部分，换了它接出来的不是同一条轨迹）")
+            if not arch_ref.get("sha256"):
+                raise SystemExit(
+                    f"⛔ 这份续跑存档没记 **KL 锚的来源**（`{RESUME_KEY}.ref` 段，格式 1 的老存档）"
+                    f"⇒ 锚会被按「本段的 `--init`」现推，而续跑时 `--init` 恰好是**上一段的存档**"
+                    f"⇒ π_ref 悄悄换了一份网。要接着练请**重新起一段**（`--init` 给这份权重、"
+                    f"不带 `--resume-optimizer`）")
         # 缺省锚 = `--init` 那一份**现任**（"单调精修"要锚的就是现任，不是随便一份权重）
-        source = ref_spec or init_spec
+        # ⚠★ 续跑时**不**走这一条：`--init` 是"上一段的存档"，拿它当锚 = 每段都换一次参考策略。
+        if ref_spec:
+            source = ref_spec
+        elif resume is not None:
+            source = arch_ref.get("source")
+            ref_explicit = bool(arch_ref.get("explicit"))
+            print(f"续跑：KL 锚**沿用存档记录的参考策略**（⛔ 不再按本段的 `--init` 现推 —— "
+                  f"那会让段与段之间的 π_ref 悄悄换人）")
+        else:
+            source = init_spec
         if not source:
             raise SystemExit("--ref-beta > 0 但**没有参考策略**：给 `--ref <net.bin|model.pt|ckpt 目录>`，"
                              "或给 `--init`（缺省锚 = `--init` 那一份现任网）")
@@ -1434,9 +1466,19 @@ def train(args) -> dict:
         #   + `_ref_logits` 里的 `no_grad`（它的 logits 绝不进反向图）。
         ref_model.requires_grad_(False)
         ref_model.eval()
+        ref_src = str(source)
+        # 指纹取**权重**本身（`net.bin` 与含它的 ckpt 目录会给出**同一个**指纹 ⇒ 判的是"是不是同一份网"，
+        # 不是"是不是同一个路径"）。⚠ 必须在 `del ref_model` 之前算。
+        ref_sha = _state_sha256(ref_model.state_dict())
+        if resume is not None and ref_sha != str(arch_ref.get("sha256")):
+            raise SystemExit(
+                f"⛔ 续跑换了一份 **π_ref**：本次 {ref_src}（权重指纹 {ref_sha[:16]}…）vs 存档 "
+                f"{arch_ref.get('source')}（{str(arch_ref.get('sha256'))[:16]}…）—— 锚是轨迹的一部分，"
+                f"换了它，「续跑 == 一口气跑」必然不成立；要换锚就**重新起一段**")
         print(f"KL 锚（W3）：β={ref_beta:g}，参考策略 {source}"
-              f"{'（**缺省 = `--init` 那一份现任**）' if not ref_spec else '（`--ref` 显式指定）'}"
-              f"；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）")
+              f"{'（`--ref` 显式指定）' if ref_spec else ('（**续跑：沿用存档**）' if resume is not None else '（**缺省 = `--init` 那一份现任**）')}"
+              f"；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）"
+              f"{'' if ref_sha is None else f'；权重指纹 {ref_sha[:16]}…'}")
         # ⚠ **锚不是目标**（P2 护栏）：它只把 π_θ 拉回现任 —— "别乱动"是**约束**，不是**方向**。
         #   实测：β=0.5 会把 `--il-weight` 的一致率增益**砍半**（KL(π‖init) 0.377→0.168）。
         #   所以"放宽 KL 预算 + 加锚"这一对里，**位移额度靠别的东西给**，锚只负责别跑偏。
@@ -2146,6 +2188,10 @@ def train(args) -> dict:
                 **{f"ssl.{k}": bool(v.requires_grad) for k, v in ssl_head.named_parameters()}},
             "rng": _rng_fingerprint(rng_gen),
             "behaviour": beh_rec,
+            # ★ BL-04（第七十九轮）：`π_ref` 的**来源 + 权重指纹**。少了它，续跑那一段的锚会被按
+            #   「本段的 `--init`」现推 ⇒ `--ref-beta > 0` 时每段换一次参考策略（静默，只体现在权重上）。
+            "ref": {"beta": float(ref_beta), "source": ref_src, "sha256": ref_sha,
+                    "explicit": bool(ref_explicit) if ref_beta > 0 else False},
             "recipe": _resume_recipe(args, resolved_data=str(Path(args.data).resolve()), n=n,
                                      steps=steps, total_steps=total_steps),
             "stop_reason": stop_reason,
@@ -2176,7 +2222,10 @@ def train(args) -> dict:
         # W3（对现任的 KL 锚）：β 与**这一轮实测的** `ref_kl`（最后一个 epoch 的学生行均值）。
         # 台账里"β=0.5 那一轮到底离现任多远"就是一个数；β=0 时是 None（那一项压根没算）。
         "ref_beta": float(ref_beta),
-        "ref_source": (ref_spec or init_spec) if ref_beta > 0 else None,
+        # ⚠ 记的是**这一轮真正载进去的那一份**（续跑时 = 存档记录的那一份，不是本段的 `--init`）——
+        #   台账里这一行必须与 π_ref 的实际来源一致，否则"续跑换了锚"在 metrics 里看不出来。
+        "ref_source": (ref_src if ref_beta > 0 else None),
+        "ref_weights_sha256": (ref_sha if ref_beta > 0 else None),
         "ref_kl": (history[-1]["train_parts"].get("ref_kl") if (history and ref_beta > 0) else None),
         "ref_kl_mean": (float(np.mean([h["train_parts"]["ref_kl"] for h in history
                                        if "ref_kl" in h["train_parts"]]))

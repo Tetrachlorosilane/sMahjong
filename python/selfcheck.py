@@ -2301,6 +2301,54 @@ _ra1 = v4_pt._recorded_args(argparse.Namespace(save_optimizer=True, resume_optim
 eq("BL-04：`_recorded_args` 缺省时**不含**新开关（旧路径台账逐字节不变）", sorted(_ra0), ["foo"])
 eq("BL-04：`_recorded_args` 非缺省时**带上**新开关", sorted(_ra1),
    ["foo", "resume_optimizer", "save_optimizer", "stop_after_steps"])
+# ①c ★ 第七十九轮：**KL 锚 π_ref 也必须逐位恢复**。为什么必须单独钉一遍：
+#   `--ref-beta > 0` 且没给 `--ref` 时，锚的缺省是「**本段的** `--init`」，而续跑那一段的 `--init`
+#   恰好是**上一段的存档** ⇒ 不在存档里记锚，段与段之间就会**悄悄换一份参考策略**
+#   （实测 MSLT 配方：`10+10` 的 `ref_kl=0.0162` vs 一口气 `0.0182`，`net.bin` sha 不同）。
+#   ⚠ 这一组用**独立**的 `_rr_base`（不改 `_rs_base`），免得动上面那 17 条既有判据的数值。
+_rr_base = {**_rs_base, "ref_beta": 0.5}
+_rr1, _rrlog1 = _run_capture(argparse.Namespace(**{**_rr_base, "label": "v4-rs-ref-oneshot"}))
+_rr_eq = _wsha("v4-rs-ref-oneshot")
+ok("KL 锚（W3）：β=0.5" in _rrlog1 and "权重指纹" in _rrlog1,
+   "BL-04+锚：日志里报出 π_ref 的**权重指纹**（判据不是空转）")
+_rrA, _rrlogA = _run_capture(argparse.Namespace(**{
+    **_rr_base, "label": "v4-rs-ref-segA", "save_optimizer": True, "stop_after_steps": 1}))
+_rrck = torch.load(_ck("v4-rs-ref-segA"), map_location="cpu", weights_only=False)["resume"]
+ok(_rrck.get("format") == v4_pt.RESUME_FORMAT and (_rrck.get("ref") or {}).get("sha256"),
+   f"BL-04+锚：续跑存档带上 `ref` 段（格式号 {_rrck.get('format')} · "
+   f"锚指纹 {str((_rrck.get('ref') or {}).get('sha256'))[:12]}…）")
+# 续跑**不给** `--ref` ⇒ 必须沿用存档记的那一份（而不是本段 `--init` 的那一份）
+_rrB, _rrlogB = _run_capture(_rs_ns("v4-rs-ref-segB", save_optimizer=True, ref_beta=0.5,
+                                    resume_optimizer=_ck("v4-rs-ref-segA")))
+eq("BL-04+锚：`--ref-beta > 0` 时**分段续跑 == 一口气跑**（锚从存档继承）",
+   _wsha("v4-rs-ref-segB"), _rr_eq)
+ok("沿用存档记录的参考策略" in _rrlogB,
+   "BL-04+锚：续跑那一段**沿用存档记的 π_ref**（⛔ 不按本段 `--init` 现推）")
+_rr_other = scratch("v4-rs-ref-other") / "net.bin"
+v4_export.save_net(v4_model.build(seed=99).state_dict(), dict(v4_model.build(seed=1).dims()), _rr_other)
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rr_base, "label": "v4-rs-ref-badref", "init": str(_ck("v4-rs-ref-segA")),
+        "resume_optimizer": _ck("v4-rs-ref-segA"), "ref": str(_rr_other)}))
+    ok(False, "BL-04+锚：续跑时换一份 `--ref` 必须报错（锚是轨迹的一部分）")
+except SystemExit as _e:
+    ok("换了一份 **π_ref**" in str(_e), "BL-04+锚：续跑换锚被硬拒 ✓", str(_e)[:70])
+# 老格式（格式 1：没记锚）必须 **fail-closed**，⛔ 不许按新语义静默读
+_rr_old = paths.DATA_ROOT / "ckpt" / "v4-rs-ref-oldfmt"
+_rr_old.mkdir(parents=True, exist_ok=True)
+_rrck2 = dict(_rrck)
+_rrck2["format"] = 1
+_rrck2.pop("ref", None)
+torch.save({**torch.load(_ck("v4-rs-ref-segA"), map_location="cpu", weights_only=False),
+            "resume": _rrck2}, _rr_old / "model.pt")
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rr_base, "label": "v4-rs-ref-oldfmt", "init": str(_rr_old / "model.pt"),
+        "resume_optimizer": _rr_old}))
+    ok(False, "BL-04+锚：从**没记锚**的老格式存档续跑必须报错")
+except SystemExit as _e:
+    ok("格式号" in str(_e) or "没记" in str(_e),
+       "BL-04+锚：老格式存档被 fail-closed 硬拒 ✓", str(_e)[:70])
 
 # 发散就停：把 `compute_loss` 临时换成"返回 NaN"，train() 必须报错、不落盘废 checkpoint
 _orig_cl = v4_pt.compute_loss
