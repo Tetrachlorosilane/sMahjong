@@ -406,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.incumbent and args.candidate):
         ap.error("要么给 --incumbent/--candidate，要么用 --self-check")
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
-    # 风格线 ⇒ 主口径换成目标轴、通用强度退护栏（`--metric` 显式给定时以它为准）
+    # 风格线 ⇒ 主口径换成目标轴、通用强度退护栏（⚠ 下一行：给了 `--line` 时**它覆盖 `--metric`**，不是"`--metric` 优先" —— 注释原先写反，2026-10-12 只改注释、代码未动）
     metric = LINE_METRIC[args.line] if args.line else args.metric
     # ★ 追加护栏（缺省空表 ⇒ 输出逐位不变）：显式 `--guard-metric` + `--with-quality` 预设。
     guard_metrics: list[tuple[str, float]] = [parse_guard_metric(s) for s in args.guard_metric]
