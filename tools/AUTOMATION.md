@@ -80,7 +80,7 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | `tools\jvm-guard.mjs --selftest` | 5/5 | ② 一直崩 ⇒ FAIL（不许出现 PASS）；③ 退出码 0 但新落 `hs_err` ⇒ FAIL；⑤ 被包装命令里的 `--selftest` 不许触发 guard 自己的自检 |
 | `tools\verify-push.mjs --selftest` | 5/5 | ③ tree 不同 ⇒ `TREE_MISMATCH` 退出码 1；④ 拿不到远端 tree ⇒ `UNKNOWN` 退出码 2；⑤ 取不到远端头 ⇒ `NO_REMOTE` 退出码 2 |
 | `tools\paired-eval.mjs --selftest` | 桥内 23 项 | 采集目录不存在 ⇒ 非 0 退出；落点选 `docs/` ⇒ 拒绝写；桥内：未登记方向的量 ⇒ **当场报错**（⛔ 无缺省兜底） |
-| `tools\ceiling-gate.py --selftest` | 15 条（含 1 条正向合成信号 + 2 条真机进程扫描） | 缺目录（两文件都缺）⇒ 探针必红、族数 0；缺 `per_game` ⇒ 既有 `load_run` 当场报错；缺权重 / 两臂同权重 / 与旧 `verdict.json` 复算对不上 / 零训练自证取不到 ⇒ **`ERROR` + 退出码 2**；单族（1 族）不许判「过」；墙钟超预算不许判「过」；容忍带 < MDE ⇒ 标 `usable_as_veto=false` 且**不判破**（tol ≥ MDE 才判破）|
+| `tools\ceiling-gate.py --selftest` | 32 条检查（`say` 行；另有 55 条探针行、8 条**故意红**的负向探针） | 缺目录（两文件都缺）⇒ 探针必红、族数 0；缺 `per_game` ⇒ 既有 `load_run` 当场报错；缺权重 / 两臂同权重 / 与旧 `verdict.json` 复算对不上 / 零训练自证取不到 ⇒ **`ERROR` + 退出码 2**；单族（1 族）不许判「过」；墙钟超预算不许判「过」；容忍带 < MDE ⇒ 标 `usable_as_veto=false` 且**不判破**（tol ≥ MDE 才判破）|
 | `tools\v4-forward-gpu.py --selftest` | 45/45 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU**；⑤ `--rows <npz>` + `--index-file` 在**没有 `steps` 列**时也必须出文件（旧实现在 `forward` **之后**才 `TypeError`，`[fwd]` 照打而 `--out` 的文件不存在）；⑥ **紧凑集/分块负向**：目录不存在（**本批新判据：先断存在性**）/ 缺列文件 / 列文件截断 ⇒ 报错，`--chunk 0` 与 `--chunk -1` ⇒ **exit=2 且不留半截输出**，分块区间越界/空块 ⇒ 报错，`--materialize-all` vs `--chunk 1` 输出**逐字节相同**；⑦ 分块 == 全量（chunk 1/2/3/7/33/100 两档口径，见 §6） |
 | `tools\v4-batch-serve.py --selftest` | 26/26 | **乱序的批计划 ⇒ 报错不许提交**（批内乱序 / 批间乱序 / 中间批少一行）；行对齐（`row` 越界 / 重复 / 未覆盖 / `(game,step)` 重复）⇒ 报错；`K>行数` / `K=1` / `不整除`（`keep`/`drop`/`error`，含"`drop` 必须能过守卫"）/ `K=0` 行为逐条断言；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
 | `tools\v4dforward-gpu.py`（评估路径的等价替换，无自检，靠与 `trainer v4net` 逐行对拍） | — | `--select-from` 里重复键 / 键在 `--traces` 找不到 / 枚举行数与 `materialize` 不等 ⇒ **当场报错**（⛔ 不"看着差不多就往下算"）；⚠ 选行**必须按 `trace_files` 的规范序**（数值序），字典序会让两边整片错位而 flip 数仍然相同 |
@@ -118,7 +118,7 @@ python tools\ceiling-gate.py --tag <闸门标签>                      # ① 零
 python tools\ceiling-gate.py --family <标签>=<base目录>;<cand目录>   # ② 零采集：两条既有采集按**学生席**逐族配对（可重复）
 python tools\ceiling-gate.py --collect --tag <标签> --wall <族seed> --games 500 --workers 8 `
      --base-net <现任 net.bin> --cand-net <新臂 net.bin> --table <def7>,<win2>,<atk3>    # ③ 新臂自采（⛔ 不训练）
-python tools\ceiling-gate.py --selftest                            # 离线自检（15 条，含负向红证；不采集、不出网）
+python tools\ceiling-gate.py --selftest                            # 离线自检（32 条检查 + 负向红证；不采集、不出网）
 ```
 
 | 项 | 内容 |

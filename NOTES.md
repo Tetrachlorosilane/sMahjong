@@ -5786,7 +5786,7 @@ KL 锚，`docs/TRAINING-V4.md` §14.11.1）—— ⚠ **别乱动它**，它是"
 `verdict.json`（主口径 Δ/SE/t/CI · 套间散布/CI 半宽 · 实际 MDE · 护栏 · 安慰剂 · 均值回归 ρ · 判决 + 口径声明）；
 三种口径 = `--gate-dir`（**零采集**复算既有闸门 `gate/<tag>/s*/summary.json`）· `--family`（两条既有采集按
 **学生席**逐族配对）· `--collect`（新臂自采，`style-vector.py` → `trainer.exe selfplay`，⛔ 不训练）；
-统计量**全部借** `mahjong_ml.eval` / `v4.gate` / `v4.arena`（⛔ 不自算第二套），`--selftest` 离线 15 条（含负向）。
+统计量**全部借** `mahjong_ml.eval` / `v4.gate` / `v4.arena`（⛔ 不自算第二套），`--selftest` 离线 **32 条检查**（另 8 条故意红的负向探针，不采集、不出网）。
 **判据与实测**：① 验收跑 `--tag p3pkg-B-g06-vs-defrep`（2 族 × 6,000 场）：主口径 **+2.544658333**、
 CI[+1.565,+3.509]、n=12000 —— 与**既有** `verdict.json` **逐位一致**（`crosscheck.match=true`，逐族 Δ 也与
 `wall_deltas` 逐位一致）⇒ 判决「过」、**墙钟 69.7 s**（内部 56.9 s；预算 30 min）；② 第二次零采集验收
