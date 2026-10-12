@@ -932,6 +932,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 > （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
 > 编号被 `docs/TRAINING-V4.md` / `docs/HANDOVER.md` / 代码注释大量引用。
 > 表由 `node tools/round-index.mjs` 生成，`--check` 会对"加了轮次忘了登记"判红。
+> ⚠ **P3-01 实测（2026-10-12，别重犯）**：训练子进程"**无 traceback 的 `exit=1`**"真因是 `pretrain.py:1390` 的 PPO 口径闸门 `raise SystemExit`（`--init` ≠ 生成数据的策略时**必然**触发），**不是显存** —— 那次死亡时 `nvidia-smi` 峰值只有 1.70/8.15 GB，而 15.7 GB 是 mmap 进来的 compact 页（**宿主**工作集，平台值 = 该分片字节数）；⛔ 别再用"降 batch"当药（峰值与 batch 无关，且**改了训练语义**）。详见 `S:\mahjong-training\w-ladder\P3-01-RESULT.md` 的显存治理一节。
 | 轮次 | 日期 | 主题（点进去搜这串就行） |
 | --- | --- | --- |
 | 第五轮 | 2026-09-27 | 第一轮 teacher 预训练（P1/P2 雏形） |
