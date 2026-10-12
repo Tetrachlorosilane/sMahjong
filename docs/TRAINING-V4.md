@@ -2634,3 +2634,15 @@ python -m mahjong_ml.v4.pretrain --data <紧凑集> --label bl04-segB --objectiv
    而真身当时 `ws 8.96 GB` = **内存读数假绿**。⇒ 采集/训练要么直接起真解释器
    （`.uv-python\…\python.exe` + `PYTHONPATH=<venv 的 site-packages>`，实测能 import
    `torch 2.11.0+cu128`），要么在报告里明确"这一段的 `peak_committed` 量到的是 shim"。
+
+### 17.8 ⚠ 适用边界：等价性是**有条件**的，且合规链长有硬上限（MSLT 第一轮实测，2026-10-13）
+
+- **§17.4 ① 的「续跑 == 一口气跑（逐位）」只在「同配方 + 同 epoch 内切」下被验过**，⛔ **不是无条件等价性**：
+  换配方后实测**已被反驳** —— 同 epoch 内 10+10 续跑 `950E2C93…` vs 一口气 20 步 `B37DA91A…`（`net.bin`
+  sha 不同、根因未定位；`--mask-frac 0` 仍不同；同命令两次则逐位相同）⇒ **换配方必须重验该等价性**。
+- ⛔ **合规链长有上限（该 recipe 实测最多 2 段）**：段 1（100 步）后 `kl0=0.0331 > 1e-2` ⇒ 段 3 被
+  `assert_resume_behaviour` fail-closed 硬拒；段 2 在 step 101 触发 KL 早停（0.1233 > 0.10）。
+  ⇒ **≥3 段的链天然要绕 PPO 口径闸门 ⇒ 那类端点只能作探索、不得作为强度结论**。
+- ⛔ **护栏 `usable_as_veto=false` 时的正确处置 = 不得否决**：三条护栏 `tol/MDE` = 0.862 / 0.821 / 0.505
+  **全 <1** ⇒ "ok=False" 是**分辨率不够**、不是变差 ⇒ 判决只能按主口径（本批 = **测不出**）。
+- 逐字数字 / 红证 / 判决见 **`NOTES.md` §6.5 第七十八轮**；`MSLT-RESULT.md` 是权威报告。
