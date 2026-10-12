@@ -220,6 +220,18 @@
     同族的还有「持点 <1000 立直」（`riichiMinScore`：tenhou 1000 / mleague 0）。
     **判据工具**：`tools/tenhou-log-check.mjs` 第 ⑬ 条（重放活牌山，点名座位）；导出时客户端写
     `problems` 提示。**要喂网页版复盘就用 tenhou 预设建房。**完整推导见 §9.6.6。
+16. **`tasklist /FO CSV /V` 在本机没有命令行列 ⇒ 靠解析它实现的规则静默永不生效。**
+    原始输出：本机 `tasklist /FO CSV /V` 的表头**只有 9 个字段**（`Image Name` / `PID` / `Session Name` /
+    `Session#` / `Mem Usage` / `Status` / `User Name` / `CPU Time` / `Window Title`），**第 9 个是可执行路径**
+    —— 没有 `CommandLine` 这一列。旧 `server_jar` 探针靠解析它 ⇒ **恒返回 False** ⇒ 真机起着的 **134 MB**
+    `java -jar mahjong-server.jar` 仍被判"竞争 0 个"、**exit=0（假绿）**。
+    **判据**：命令行只能从 **`Win32_Process.CommandLine`** 取（每 pid 最多一次），并带"已调用 / 取到过"状态；
+    **进程还活着却取不到 ⇒ 拒跑**，⛔ 不许当成"机器很安静"。见 §6.5 第七十六轮判据 ① 与 `AGENTS.md` §6.5。
+
+> **第三次指令预算压缩时从 `AGENTS.md` §2.3-15 搬来的逐字行**（判据见 `AGENTS.md` §2.3-15；下面那半句
+> 「只有"被分析的那家"自己做该动作时才报错」是压缩掉的原文，⛔ 判据语义没变）：
+>
+> 15. **规则预设决定"能不能喂复盘器"：M.League 独有的合法动作会被天鳳规则的复盘器整份拒收** —— 《天鳳》《雀魂》要求「持点 ≥1000 **且** 剩余可摸牌 ≥4 张」才能立直，**M.League 两者都不要**（`riichiMinScore=0 / riichiMinTilesLeft=0`）；Mortal 按**天鳳规则**重放 ⇒ 判**规则违规、整份拒收**，且**只有"被分析的那家"自己做该动作时才报错**。判据：`tools/tenhou-log-check.mjs` 第 ⑬ 条；导出时往 `problems` 塞 `riichi_few_tiles_r<N>s<seat>` / `riichi_low_score_r<N>s<seat>`。**要复盘就用 tenhou 预设建房**。（NOTES §2.3-15、§9.6.6）
 
 
 ---
@@ -999,6 +1011,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第七十三轮 | 2026-10-12 | B2「有界读数 ‖ 采集」—— `--rows` 分块物化（663,176 行：15.1 GB → 峰值提交 3.85 GB）、跨块 argmax 0 处不符、G7 补 server.jar、重叠省 27.4 s（10.5%） |
 | 第七十四轮 | 2026-10-12 | B3b 训练 ‖ 采集的生产比例干净重测 —— 两次省 25.0%/27.8% 同号、捕获率 100%、真凶是内存子系统争用而非核不够，以及 G7 的 `server.jar` 规则**静默失效** |
 | 第七十五轮 | 2026-10-12 | 便宜 ceiling 闸门制度化（BL-03）—— `tools/ceiling-gate.py` 一条命令 ⇒ `verdict.json`（两种零采集口径：逐位复算既有闸门 verdict / 学生席配对）；实测 69.7 s 与 5.3 s、零训练进程；钉住「2+2 零和对开下 ρ 是设计恒等式」与「容忍带 < MDE 不得否决」 |
+| 第七十六轮 | 2026-10-12 | 本会话七条判据入档（探针 fail-closed · 枚举自检 · committed 口径 · 分块物化/`--limit` · 零负载探测双条件 · 零和 ρ 恒等 + ceiling 闸门 · 退出码/计时）+ 第三次压缩 AGENTS §6.5（逐字底稿见 §6.5 附录 C） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -4046,6 +4059,82 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 `create/join/leave/ready/take_seat/shuffle_seats/ start_game/add_bot/remove_bot`
 （等待室命令 = 各连接自己的线程直接执行；原文里 `/` 后有折行空格，压缩时不再折行 ⇒ 这里留一条原始形态备查。）
 
+### 6.5 附录 C：第三次指令预算压缩时从 `AGENTS.md` §6.5 搬来的段落（**逐字**；判据见 `AGENTS.md` §6.5）
+
+> 2026-10-12 第三次压缩（63,294 B → 见 §8 规矩）：AGENTS 侧每条只留**可执行判据**（+ 第七十六轮新增的判据 ①–⑦），
+> 下面这段是**压缩前 §6.5 正文的逐字副本**（含全部实测数字 / 红证 / 原始输出 / 事故经过），逐条对应压缩后的那条判据。
+> ⚠ 这是"判据零丢失"的审计底稿 —— **判据本身在 `AGENTS.md` §6.5**，⛔ 不要在这里改判据（要改判据请改 AGENTS 侧）。
+
+- **只有一个决策漏斗**：`Table.decideBot(seat, Decision)`。自家摸打（`Round.ask`）与鸣牌段都汇到它；
+  `policy[seat] == null` 时走内置 `Bot`。**不要再往第三个地方直接调 `Bot.decide`**。
+- ⚠ **鸣牌段不走 `Round.ask()`** → `debugAskTap` **看不到鸣牌**；
+  任何"每次询问都要做的事"都挂在漏斗上（用 `debugChoiceTap` 才看得到两段）。
+- **策略不许把异常抛给牌桌线程**：`decideBot` 必须兜底（异常 / 返回 `null` → 内置机器人），
+  否则一局异常会让**整场半庄静默死亡**。
+- **训练侧只实现 `ActionPolicy`（拿不到 `Round`）**：`Round` 里有别家手牌、牌山顺序、里宝 ——
+  进程内一不留神就训出**作弊**模型。
+- **观测只许含合法信息**：新增字段必须三处一起改 —— ① 确认公开可见；② `Observation` 字段白名单
+  （`SelfTest.trainingInterfaceTests`）+ `tools/selfplay-check.mjs` 的 `OBS_KEYS`；③ PROTOCOL §8.2 的表。
+  ⚠ 自家回合**别调 `Round.isFuriten()`**（白跑 34 次向听 DFS，见 NOTES §6.5）。
+- **可复现是硬要求**：`debugDeterministicSeed=true` + **每局一份策略实例**（`PolicyFactory`）+
+  每场种子预先算好（`SelfPlay.seedFor`）；策略跨局带状态会破坏同 seed 可复现。
+- **奖励是事后回填的**：`hand_delta` / `placement` 在小局、整场结束时才补；`placement` 必须是
+  `1..4` 的排列（同点按座次拆开）。
+- **不给服务端加 ML 依赖**（Maven/ONNX/PyTorch）：外面训练、导出权重、**纯 Java 手写前向**。
+- **改产出格式就三处一起改**：`TraceRecorder` / PROTOCOL §8.4 / `tools/selfplay-check.mjs`。
+- **P2 DAgger 轮**：`--teacher-label`（学生座位另记 `teacher`/`teacher_index`）+ `python -m mahjong_ml.dagger`。
+  ⚠ 三条不许省：① 对比只用"两个模型都没训过"的场次；② 显著性**按场聚类**；③ 带同数据量的 BC-only 对照臂。
+- **P5b 混合（teacher 先验）**：`net:<权重文件>@<α>` = `argmax(student + α·1[该候选 == 老师动作])`。
+  ① 先验**只加在 logit 上**（"不会比老师差"是构造出来的）；
+  ② 必须是 **`Policy` 级组合**（`ActionPolicy` 拿不到 `Round`）；③ α 随**训练过的网**的 logit 尺度走
+  （别照抄常数）。回归：`SelfTest.hybridPolicyTests` + NOTES §6.5。
+- **P4 探索口**：策略串 `net:<权重文件>[@<α>][#<T>]` = 按温度从 `softmax(logits/T)` 采样
+  （`T≤0`/省略 = argmax，与加它之前**逐决策相同**）。⚠ 随机源必须**每局按 `(seat, gameSeed)` 派生**
+  （`Policies.mixSeed`），跨局共享会破坏"同种子可复现"。在线 PPO 另三条硬口径：**λ=1**、
+  **优势只在 `is_student==1` 的行上归一化**、**两边同一个 `softmax(logits/T)`**。⚠ **跨代对局**：
+  `dataset build --student <这一轮学生的确切策略串>`（缺省"任何 `net:`"会把对手决策算进策略损失，静默）。
+  回归：`SelfTest.samplingPolicyTests` + `selfcheck` P4 组。原文与温度只作用一侧的崩法见 NOTES §6.5。
+- **特征 v3**：state **615** = 544 + 71（`VERSION=3`）；三条硬判据：① 四家块**旋转到自己为下标 0**；
+  ② 状态段只放**便宜且别处没有**的量（`HandEval.of` ≈0.94 ms/决策 ⇒ 进张留逐候选段）；
+  ③ sidecar 逐决策段 **int16**，老 607 维**构造期拒绝**。见 NOTES §6.5。
+- **"一轮"由时间预算定**（缺省 `--target-minutes 20`）且**只跑缓存档**（`--cache-gb`=0.8×内存；
+  越档直接掉进 45 分钟那档）：场次由 `budget.py` 从**台账实测回填**反推 + 闸门夹逼（**点名谁限制的**）；
+  跨代选人与续训见 NOTES §6.5（`online screen` / `--opponents` / `--student-seats`）。
+- ⛔ **风格线用"风格桌"**：四席 = 学生 1 + **每个风格各 1**（座位要 `--rotate-perm` 的 **24 排列**平均，循环移位不够）；⛔ 别用 `-PoolSeed`。见 NOTES §6.5。
+- 回归：`SelfTest.trainingInterfaceTests` + `tools\selfplay-check.mjs`。
+- **v4 前向的增量事件缓存**（默认开，`--no-v4-cache` 关）：判据必须**成对** —— **增量 == 全量（逐位）**
+  *且* **真的命中**（只有"相等"是假绿）。回归：`SelfTest.v4CacheTests` + `tools\v4-cache-check.mjs`。
+  ⚠ W1 起 `h_evt` 被融合消费 ⇒ 三条**逐位**判据与 `normalize_state` 补 0 见 NOTES §6.5。
+- ⛔ **v4 事件 GRU 增量 carry 的四条永久判据**（C++ 采集端默认开、`--no-v4-cache` 关；判据与红证见 `docs/TRAINER-CPP.md` §6.27 + NOTES §6.5 第七十二轮）：
+  ① 逐位判据 = **≥20 万真实决策行上七个头 + `h_evt` 逐位 0 不符**（实测 205,416 行）**且命中率 >0**（0.9344）；另两条逐位 = **缓存 carry == 整手重放**、**前缀 carry + 窗口 == 整手重放**；回归 `--selftest` + `v4-cache-check.mjs`（Java 侧）+ `trainer-v4-parity.mjs`；端到端 **省 15.1%（36.19 s / 1,000 场，w=8）**。
+  ② ⛔ **"整场轨迹逐字节相同"绝不能替代逐位判据**：`--v4-carry-bug skip1` 在 **3 场整场轨迹逐字节相同**（1,940 决策、argmax 一次没翻），而同一注入在逐位判据下 **11,973/12,880 行不符**。
+  ③ **"0=关 / <0=不限"式标志位必须写 `<= 0`，预算用尽要置 0（不是 −1）** —— 本批两次十分钟级白跑都出在这（`--limit` 过冲成负数被当"不限"、`--h0-rows` 用尽置 −1 反成"不限"）。
+  ④ **跨头文件引用的类型必须定义在具名 namespace**：`V4CarryCache` 放进匿名 namespace ⇒ `shared_ptr<V4CarryCache>` 变成另一个类型，而报错却是误导性的 "incomplete type"；⑤ **比较脚本先断文件存在**（两文件都缺 ⇒ 哈希都空 ⇒ 会被判成"相同"= 假绿，要加 `Test-Path` 守卫）。
+- **头是否"上线"= 前向是否读取**（⛔ 非"训练过"）：判据 = 去掉该头后动作**逐位不变**，且**必须带非退化 `policy_gate`**（零初始化会假绿）；当前实测 `ONLINE_HEADS = ('policy','belief_tenpai')`；被融合/门控消费 ⇒ 并入 + 照 W1 补两条逐位判据。见 `docs/TRAINER-CPP.md` §6.25。
+- ⛔ **critic 只剩"基线尺度"这一件事可做**（三条探针：`--ev-ref legit` / `--readout` / `--shaping`）：
+  ① 判据**别用绝对门槛、也别拿标签侧真值当参照**（`win_flag`/`opp_*` 都是隐藏真值 ⇒ 那样量出的是**作弊上界**）；闸门 = `EV ≥ 0.7 × 合法天花板` + 覆盖率 ≤3pp；
+  ② **基线必须与奖励同尺度**（`--baseline-fit scale`：`α+β·V`；基线是状态函数 ⇒ 线性重标定不改梯度期望、只降方差）；
+  ③ **加宽/加深读出头没用**；④ **PBRS shaping 也没用**（`Q'=Q−Φ`、`V'=V−Φ` ⇒ **`A'=A`**）。
+  ⚠ ③④ 的判据要用**绝对量纲的残差比**，**别用 EV**。红证数字见 NOTES §6.5 第十九/二十轮、`docs/TRAINING-V4.md` §14.8–§14.9。
+- ⛔ **贴标签的读数不是强弱判据**（`engine_top1`/引擎 CE/危险度旧 AUC）：强弱只能由闸门（多套新牌山配对、CI 排除 0 且为正）答。详见 NOTES §6.5。
+- **PPO 数值口径**：`--grad-clip 0.5`（日志 `|g|` 是**裁剪前**范数）、`--kl-early-stop 0.03`
+  （纯函数 `kl_stop_hit`，越过停**整轮**）、**双口径 KL**（只看 `kl` 会被少数大 `ρ` 的行掩盖）、
+  `ppo` 与 `--rwr-beta>0` **硬拒**、优势**只归一化一次**；训练口径的开关（含 **`--max-steps`** =「每轮短」、
+  `--value-target delta`、`--advantage`、`--rank-weight`）**必须走 `v4 loop`**，不许只活在 shell 历史里。
+  实测数字与小冒烟那条见 NOTES §6.5。
+- **数据生产者可切**：`MAHJONG_PRODUCER=java|cpp`（缺省 java）—— 采集与 `--features` 两处都走
+  `python/mahjong_ml/producer.py`；判据 = **同种子产物逐字节相同**（`tools\trainer-{selfplay,aux}-parity.mjs`），
+  不是"能跑"。C++ 侧还没实现的（`--teacher-label`、`net:` 的 `@α` 先验）**显式报错**，不悄悄降级。
+  ⚠ 完整半庄验收**≥200 场**；§6.15 是唯一"绕过内置 Bot"的例外。细节见 NOTES §6.5。
+- **批前向（`selfplay --batch-forward K`，缺省关；`trainer/src/batchforward.hpp`）**：键 = `(场号, 该场第几次询问, 座位)`；批 = **屏障时刻未决键里字典序最小的 min(K,|未决|) 个** —— ⛔ **按到达顺序凑批永远红**；**规范序 + K 是运行身份的一部分**：同 seed + 同 K ⇒ **同批计划指纹**。见 NOTES §6.5。
+- ⛔ **"同种子 ⇒ 逐字节相同"在批前向上已退役**：批模式判据 = **argmax 逐行全同 + 统计可复现**；开关**关着**时旧路径必须**逐位不变**。见 NOTES §6.5。
+- ⛔ **跨片/跨轮链式续训若 `--init` ≠ 数据生成策略 ⇒ `pretrain.py` 的 PPO 口径闸门会 `raise SystemExit`（退出码 1、无 traceback）**：要按预注册跑多段训练，**必须先有优化器状态续跑（或单进程分片循环）能力**。红证见 NOTES §6.5 第六十八轮。
+- ⛔ **包装器绕过该闸门不得用于产出结论**（只能用于探索，且读数必须标注"口径已动"）。
+- **判"有没有可用信号"的判据**：样本外 **AUC/增益必须同时胜过 0.5 与最强安慰剂**（打乱标签 / 非学生席 / 只用动作键），且幻想增益要**显著高于同量纲神谕的 0.2**。
+- ⛔ **"状态条件下的方向选择"（押し引き / fold）已由四条独立证据判为不可学 ⇒ 不再投算力**（NOTES §6.5 第六十九轮）。
+- ⛔ **护栏容忍带必须与计划 N 的实际 MDE 对账**：`score:150` 在 12,000 场下实际 **MDE = 399.7 点/场/席**（SE 203.9）⇒ 容忍带只有分辨率的 **1/2.7** ⇒ **天生必破 = 假警报**（同源：`quality --metric dama_rate` 的 tol 2pp < SE 1.32pp）。判据：**跑前先算该 N 下每条主/护栏指标的 MDE，并声明"容忍带/MDE"比值；比值 <1 的护栏不得作为否决依据**。见 NOTES §6.5 第七十一轮。
+- ⛔ **跨族不自洽 ⇒ 判决只对本族成立、不跨族外推**：本族（53060001/2，n=12,000）读出 (B−现任)−(A−现任) ≈ **+2.19**，而另一族（52930001/2）直接测 B−A 只有 **+0.05[−0.90,+1.03]**（座次组合不同、混淆未解），族内却极一致（套间极差 = CI 半宽 **0.09×/0.24×**）。判据：**判决必须写明"条件于哪一族牌山"；比较两网时"族间散布"要事先写进判据**（~2.2 点量级的族间差会淹没单轮效应）；经验 = **3 族 × 4,000 场 优于 1 族 × 12,000 场**。
+
 ## 6.6 teacher（内置机器人）的五层取舍
 
 详细设计见 `docs/DESIGN.md`「teacher（内置机器人）的取舍」；这里只列改它时必须守的：
@@ -4323,6 +4412,11 @@ trainer→python→trainer 正是这个形状）。**结论：联赛必须在 DS
 
 
 ---
+
+> **第三次指令预算压缩时从 `AGENTS.md` §7 搬来的逐字行**（判据见 `AGENTS.md` §7；⛔ 语义没变，
+> 只是把括号里的取样命令与判据出处留在这一份里）：
+>
+> | **训练盘（`S:`）采集/训练中途报 `AccessDeniedException`、读报 `ERROR_IO_DEVICE`** | **先去查盘符还在不在**（`[System.IO.DriveInfo]::GetDrives()`）：卷掉了也长这样，⛔ 别误诊成沙箱权限去放宽沙箱或改路径。判据见 `NOTES.md` §6.5 |
 
 ## 10 已知限制与状态
 
@@ -5804,6 +5898,37 @@ CI[+1.565,+3.509]、n=12000 —— 与**既有** `verdict.json` **逐位一致**
 **指向**：`tools/AUTOMATION.md` §7（一条命令 + 判据表）· `PREREGISTRATION-TEMPLATE.md`（新硬前置 6）·
 `verdict.json` 落 `S:\mahjong-training\w-ladder\ceiling-gate\{p3pkg-B-g06-vs-defrep,BL03-family-AB}-verdict.json` ·
 `BACKLOG.md` BL-03（本批）。
+
+**第七十六轮：本会话七条判据入档 —— 环境探针 fail-closed · 枚举自检 · 内存峰值 committed · 分块物化/`--limit` · 零负载探测双条件 · 零和 ρ 恒等 + ceiling 闸门 · 退出码/计时口径（2026-10-12）**
+
+**做什么**：把本批新增的七条判据写进 `AGENTS.md` §6.5（①–⑦，各 1 行）+ §2.3-16，并在 §4 L3 加一行
+`python tools\overlap-orchestrator.py selftest`；同时**第三次压缩** `AGENTS.md`（63,294 B → **63,676 B**，含新判据；
+**新判据之前 61,375 B**）—— 压缩前 §6.5 正文**逐字**存进本文件 **§6.5 附录 C**。⛔ 未改任何工具/训练代码。
+
+**① / §2.3-16 环境探针 fail-closed 的红证**：本机 `tasklist /FO CSV /V` **只有 9 个字段、没有命令行列**
+（第 9 个是可执行路径）⇒ 旧 `server_jar` 探针**恒 False** ⇒ 真机起着的 **134 MB** `java -jar mahjong-server.jar`
+仍被判"竞争 0 个"、**exit=0（假绿）**；同族 = 两文件都缺 ⇒ 哈希都空 ⇒ 判成"相同"。修法 = 命令行只能从
+`Win32_Process.CommandLine` 取（每 pid 最多一次）+ 探针"已调用/取到过"状态，**进程还活着却取不到 ⇒ 拒跑**。
+
+**② 枚举自检（⭐ 本批价值最高）的红证**：同一台机器上 —— 工作区外 Python314 **枚举到 336 个进程**，工作区内
+受限令牌的 venv **只枚举到 18 个**（`Get-CimInstance` / `Get-Process` / `Get-Counter` 同样瞎）⇒ 闸门会报
+"竞争 0 个"= **假绿**。判据三条（自身 pid 在枚举里 / `smss`,`csrss`,`wininit`,`services`,`lsass` 至少 3 个 /
+`netstat -ano` 的 LISTENING 属主 pid 都在枚举里）**缺一 ⇒ 拒跑**；`netstat` 的 **TCP 表不受令牌限域 = 唯一
+独立通道**。回归（单变量）：真机 **138 MB** `java -jar mahjong-server.jar` ⇒ **exit=4 且点名 java**；
+**同一个 jar 换文件名 ⇒ exit=0**。
+
+**③–⑦ 的实测**：内存标定 —— 2 GiB **匿名** ⇒ committed≈+2059 MB / ws≈+2062 MB；1 GiB **文件 mmap** ⇒
+ws≈+1038 MB 而 **committed 仅 +8.8 MB**（本轮曾把 1.28 GB 误读成 15.1 GB）。分块物化 —— 每行当量 **≈74 KB**、
+峰值**随 `--chunk` 线性、与总行数无关**；`--limit` 在**紧凑集路径**上旧实现从没生效；`--chunk ≤ 0` 旧行为是
+"不限"。零负载探测 —— DSH 自己的命令行里带着本会话的任务文本（含 `--grad-clip`）⇒ 单看命令行特征会**误报**。
+零和 ρ —— `gate` 的 2+2 对开 + `rank_points` 四席合计 ≡ 0 ⇒ ρ 是**设计恒等式**（实测 ρ=−1.000000、
+`sd(sum)=2.8e-15`，见第七十五轮坑 ①）⇒ 先判**可识别性**，真 ρ 只能从学生席口径读（−0.693）；ceiling 闸门见第七十五轮。
+退出码/计时 —— compact **1 秒即死**却被印成 `exit=6`"脏了" ⇒ 新增 **exit 7**，优先级 **5>7>6>0**；
+`own_wall` / 重叠区间必须按采样器看到的**真退出时刻**算（按"我去 `wait` 它的时刻"会把它的时长虚大 = 关于重叠效率的假绿）。
+
+**指向**：`AGENTS.md` §6.5（判据 ①–⑦）· §2.3-16 · §4 L3 · `tools/overlap-orchestrator.py` ·
+`tools/AUTOMATION.md` **§8**（§7 = `ceiling-gate.py`）· `PREREGISTRATION-TEMPLATE.md` 第 6 条 ·
+本文件 §6.5 附录 C（压缩前 §6.5 的逐字底稿）。
 
 ---
 
