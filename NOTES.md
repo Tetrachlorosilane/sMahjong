@@ -998,6 +998,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第七十二轮 | 2026-10-12 | v4 事件 GRU 增量 carry 进 C++ 采集端 —— 205,416 行逐位 0 不符、命中率 0.9344、负向三模式齐红、端到端 −15.1% |
 | 第七十三轮 | 2026-10-12 | B2「有界读数 ‖ 采集」—— `--rows` 分块物化（663,176 行：15.1 GB → 峰值提交 3.85 GB）、跨块 argmax 0 处不符、G7 补 server.jar、重叠省 27.4 s（10.5%） |
 | 第七十四轮 | 2026-10-12 | B3b 训练 ‖ 采集的生产比例干净重测 —— 两次省 25.0%/27.8% 同号、捕获率 100%、真凶是内存子系统争用而非核不够，以及 G7 的 `server.jar` 规则**静默失效** |
+| 第七十五轮 | 2026-10-12 | 便宜 ceiling 闸门制度化（BL-03）—— `tools/ceiling-gate.py` 一条命令 ⇒ `verdict.json`（两种零采集口径：逐位复算既有闸门 verdict / 学生席配对）；实测 69.7 s 与 5.3 s、零训练进程；钉住「2+2 零和对开下 ρ 是设计恒等式」与「容忍带 < MDE 不得否决」 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -5778,6 +5779,31 @@ KL 锚，`docs/TRAINING-V4.md` §14.11.1）—— ⚠ **别乱动它**，它是"
 **指向**：`OVERLAP-EXPLORATION.md` §7（追加节，⛔ 未改原文）· 数据根 `w-ladder\_overlap\b3b\`
 （`driver.log` 四段原文 / 四个 `*.b1.jsonl` 原始账本 / `summary.log` / `phases.log` / `memprobe.log` / `crit5-*`）·
 `BACKLOG.md` BL-02（本批）/ BL-05（G7 名单：**修在数据根 `b2-overlap.py`，未进仓库**）。
+
+**第七十五轮：便宜 ceiling 闸门制度化（BL-03 / P3-09）—— 一条命令 + `verdict.json`，零采集验收（2026-10-12）**
+
+**做什么**：`tools/ceiling-gate.py`（新，进仓库）：把"新臂先过 ceiling"从每次手搓收口成一条命令，输出
+`verdict.json`（主口径 Δ/SE/t/CI · 套间散布/CI 半宽 · 实际 MDE · 护栏 · 安慰剂 · 均值回归 ρ · 判决 + 口径声明）；
+三种口径 = `--gate-dir`（**零采集**复算既有闸门 `gate/<tag>/s*/summary.json`）· `--family`（两条既有采集按
+**学生席**逐族配对）· `--collect`（新臂自采，`style-vector.py` → `trainer.exe selfplay`，⛔ 不训练）；
+统计量**全部借** `mahjong_ml.eval` / `v4.gate` / `v4.arena`（⛔ 不自算第二套），`--selftest` 离线 15 条（含负向）。
+**判据与实测**：① 验收跑 `--tag p3pkg-B-g06-vs-defrep`（2 族 × 6,000 场）：主口径 **+2.544658333**、
+CI[+1.565,+3.509]、n=12000 —— 与**既有** `verdict.json` **逐位一致**（`crosscheck.match=true`，逐族 Δ 也与
+`wall_deltas` 逐位一致）⇒ 判决「过」、**墙钟 69.7 s**（内部 56.9 s；预算 30 min）；② 第二次零采集验收
+`--family` 三族（`style-reward/traces/v4-sty-{b,a}-g0*`，各 1,000 场）：**墙钟 5.3 s**、ρ=−0.693**可识别**、
+安慰剂（非学生席同策略）Δ=+0.788 CI[−1.56,+3.12] 不显著 ⇒ 判决「不过」（可用护栏 `wins` 越界）；两跑都
+`no_training_proof.training_hits = []`（起跑扫 331 个进程的**命令行**）。③ 实际 MDE 用**反解既有
+`eval.required_n`**（⛔ 不写 z 公式），自检代回自证 MDE 恰好够、再小 1% 就不够。
+**两个坑（都留了原始输出）**：① ★ **2+2 对开 + 零和指标下 ρ 是设计恒等式** —— `gate` 的跑法是 `a,a,b,b`
+两两对开、`rank_points` 四席合计 ≡ 0 ⇒ `Δ = 候选 − 基准` 与基准**机械地** −1 相关（实测 ρ=−1.000000、
+`sd(候选+基准)=2.8e-15`）⇒ 那不是均值回归证据；判据改成先判**可识别性**（零和 ⇒ 本条不进判据），
+真实的 ρ 只能从"同座位、同牌山、只换权重"的 `--family` 口径读（实测 −0.693，与 `PROBE-CONTRAST` 的 −0.694 同量级）；
+同一原因，**剔基准最差 X% 在 2+2 下也是机械的**（基准最差 ⇔ 候选最好）⇒ 只作读数。
+② 单看命令行特征做"零训练"探测会**误报**：DSH 自己的进程命令行里带着本会话的任务文本（里面就有
+`--grad-clip`/`--kl-early-stop`）⇒ 判据必须是「**解释器镜像 ∧ 命令行特征**」两个条件同时成立。
+**指向**：`tools/AUTOMATION.md` §7（一条命令 + 判据表）· `PREREGISTRATION-TEMPLATE.md`（新硬前置 6）·
+`verdict.json` 落 `S:\mahjong-training\w-ladder\ceiling-gate\{p3pkg-B-g06-vs-defrep,BL03-family-AB}-verdict.json` ·
+`BACKLOG.md` BL-03（本批）。
 
 ---
 

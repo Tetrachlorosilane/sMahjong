@@ -64,7 +64,7 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | 产物 | `paired/<标签>.json`（含逐场 Δ 明细）+ `<标签>.md`；`--out` 落在仓库受管目录（`docs/` `server/` `client/` `tools/` …）**直接拒绝写** |
 | 退出码 | 0 = 全部未越界 / 3 = 有伴随量越界（与 `w-ladder.py quality` 同义） / 1 = 出错 |
 
-## 4. 本轮**没有**新增（及其理由）
+## 4. 其它候选：**没有**新增（及其理由）
 
 | 候选 | 为什么不新增 |
 | --- | --- |
@@ -80,6 +80,7 @@ node tools\paired-eval.mjs --selftest          # 桥内 23 项 + 2 条负向自�
 | `tools\jvm-guard.mjs --selftest` | 5/5 | ② 一直崩 ⇒ FAIL（不许出现 PASS）；③ 退出码 0 但新落 `hs_err` ⇒ FAIL；⑤ 被包装命令里的 `--selftest` 不许触发 guard 自己的自检 |
 | `tools\verify-push.mjs --selftest` | 5/5 | ③ tree 不同 ⇒ `TREE_MISMATCH` 退出码 1；④ 拿不到远端 tree ⇒ `UNKNOWN` 退出码 2；⑤ 取不到远端头 ⇒ `NO_REMOTE` 退出码 2 |
 | `tools\paired-eval.mjs --selftest` | 桥内 23 项 | 采集目录不存在 ⇒ 非 0 退出；落点选 `docs/` ⇒ 拒绝写；桥内：未登记方向的量 ⇒ **当场报错**（⛔ 无缺省兜底） |
+| `tools\ceiling-gate.py --selftest` | 15 条（含 1 条正向合成信号 + 2 条真机进程扫描） | 缺目录（两文件都缺）⇒ 探针必红、族数 0；缺 `per_game` ⇒ 既有 `load_run` 当场报错；缺权重 / 两臂同权重 / 与旧 `verdict.json` 复算对不上 / 零训练自证取不到 ⇒ **`ERROR` + 退出码 2**；单族（1 族）不许判「过」；墙钟超预算不许判「过」；容忍带 < MDE ⇒ 标 `usable_as_veto=false` 且**不判破**（tol ≥ MDE 才判破）|
 | `tools\v4-forward-gpu.py --selftest` | 45/45 | 权重（不存在 / 空 / 截断 / 魔数坏）⇒ 报错；张量（行数不齐 / `nlegal` 越界 / tile 非 34 行 / `nlegal=0`）⇒ 报错；**`cuda` 不可用 ⇒ 报错不回落 CPU**；⑤ `--rows <npz>` + `--index-file` 在**没有 `steps` 列**时也必须出文件（旧实现在 `forward` **之后**才 `TypeError`，`[fwd]` 照打而 `--out` 的文件不存在）；⑥ **紧凑集/分块负向**：目录不存在（**本批新判据：先断存在性**）/ 缺列文件 / 列文件截断 ⇒ 报错，`--chunk 0` 与 `--chunk -1` ⇒ **exit=2 且不留半截输出**，分块区间越界/空块 ⇒ 报错，`--materialize-all` vs `--chunk 1` 输出**逐字节相同**；⑦ 分块 == 全量（chunk 1/2/3/7/33/100 两档口径，见 §6） |
 | `tools\v4-batch-serve.py --selftest` | 26/26 | **乱序的批计划 ⇒ 报错不许提交**（批内乱序 / 批间乱序 / 中间批少一行）；行对齐（`row` 越界 / 重复 / 未覆盖 / `(game,step)` 重复）⇒ 报错；`K>行数` / `K=1` / `不整除`（`keep`/`drop`/`error`，含"`drop` 必须能过守卫"）/ `K=0` 行为逐条断言；**`cuda` 不可用 ⇒ 报错不回落 CPU** |
 | `tools\v4dforward-gpu.py`（评估路径的等价替换，无自检，靠与 `trainer v4net` 逐行对拍） | — | `--select-from` 里重复键 / 键在 `--traces` 找不到 / 枚举行数与 `materialize` 不等 ⇒ **当场报错**（⛔ 不"看着差不多就往下算"）；⚠ 选行**必须按 `trace_files` 的规范序**（数值序），字典序会让两边整片错位而 flip 数仍然相同 |
@@ -109,4 +110,24 @@ python\.venv\Scripts\python.exe tools\v4-batch-serve.py --selftest
 | ⚠ 现状（2026-10-11 **R2**） | **五条判据全过 ⇒ 已切到 GPU**。R1 的两条不过都修掉了：① 真 bug = `features.py` 的 `action_parts` 对 `kan:daiminkan:a+b+c` **既没拆整个键、也没填主牌槽**（契约是 Java `Action.parse` 拆整个键得 3 段 + `Action.kan(kind, tile, hand)` **同时**带 `tile`/`tiles`，`Features.candidate` 两处都读）⇒ 51/13,408 行该候选 logit 差 4.4~10、1 行 argmax 翻转；② `1e-5` 是**绝对**阈值而 \|logits\| 中位 29.5 ⇒ fp32 1 ulp ≈ 1.3e-5（比阈值还大），改成**相对** `maxΔ ≤ tol × max(1,\|ref\|)`、`tol = 1e-4`（= 仓库对**同一条前向**既有的夹具 tol）。**R2 实测**：argmax **13,408/13,408**、相对 maxΔ 最大 **1.502e-05**（超限 0 行）、51 行大明杠候选格 \|Δ\| ≤ **1.53e-05**、GPU↔CPU argmax 13,408/13,408（相对 maxΔ 1.192e-05）、P5 夹具已补 `kan:` 覆盖 ⇒ **11 例**、两条路径 argmax 11/11。CUDA 冷启动 ≈16 s 是一次性预热（⛔ 不摊进吞吐）。详见 `NOTES.md` §6.5（R2 段） |
 | 退出码 | 0 = 通过 / 1 = 判据不过（夹具参考 logits 不符） / 2 = 用法、环境或输入坏了 |
 | **在线确定批**（`trainer.exe selfplay --batch-forward K --batch-games L [--batch-tail keep\|drop\|error] [--batch-order canonical\|arrival] [--batch-plan F.json]`，2026-10-11 **R4**） | 与上面那个**离线**工具的规范序**不是同一个东西**（离线是按场串行的全序，在线不可能复现）：在线 = **屏障最小 K 键**（一波 = 全部在场 worker 都阻塞在自己那一个询问上，取未决键里最小的 `min(K,\|未决\|)` 个）；守卫 `assertCanonical` 在**前向之前**拦"批内乱序 / 跳过更小的键 / 键重复" ⇒ 整波硬失败退出码非 0；`--batch-order arrival` = **故意红的负向控制**（必红）；判据 = 同 seed + 同 K + 同 L ⇒ **同批计划指纹**（`--batch-plan` 落盘）。开关关着时路径逐位不变。见 `docs/TRAINER-CPP.md` §6.26 |
+
+## 7. 便宜 ceiling 闸门（`tools\ceiling-gate.py`，BL-03）
+
+```powershell
+python tools\ceiling-gate.py --tag <闸门标签>                      # ① 零采集：复算既有 gate\<tag>\s*\summary.json
+python tools\ceiling-gate.py --family <标签>=<base目录>;<cand目录>   # ② 零采集：两条既有采集按**学生席**逐族配对（可重复）
+python tools\ceiling-gate.py --collect --tag <标签> --wall <族seed> --games 500 --workers 8 `
+     --base-net <现任 net.bin> --cand-net <新臂 net.bin> --table <def7>,<win2>,<atk3>    # ③ 新臂自采（⛔ 不训练）
+python tools\ceiling-gate.py --selftest                            # 离线自检（15 条，含负向红证；不采集、不出网）
+```
+
+| 项 | 内容 |
+| --- | --- |
+| 产物 | `verdict.json`（主口径 Δ/SE/t/CI · 套间散布/CI 半宽 · **实际 MDE** · 护栏 · 安慰剂 · 均值回归 ρ · 判决 + 口径声明 + 探针账 + 零训练自证） |
+| 退出码 | **0 = 过** / **3 = 不过** / **4 = 测不出** / **2 = ERROR**。⛔ **fail-closed**：目录 / `summary.json` / `per_game` / 权重 / 进程扫描任一条取不到 ⇒ `ERROR` + 非 0（⛔ 不许"取不到就当干净"） |
+| ⛔ 只有一份口径 | 统计量**全部借** `mahjong_ml.eval`（逐场取值 / 配对 / 自助 CI / 符号检验 / 合并 / 随机效应 / `required_n`）· `mahjong_ml.v4.gate`（`pooled_diffs` / `guard_row` / `decide`）· `mahjong_ml.v4.arena`（`judge_pair` / `judge_series`）；本工具只补三个**既有实现里没有**的读数：**实际 MDE**（**反解** `required_n`，⛔ 不写 z 公式）、均值回归 ρ、安慰剂对照 |
+| 判决 | 过 ⇔ 主口径 CI 下界 > 0 ∧ **可用**护栏未越界 ∧ 安慰剂不显著 ∧ 族数 ≥ `--min-walls`（缺省 2）∧ 各族逐族为正 ∧ 各族是**同一对权重** ∧ \|ρ\| < 0.9（**可识别**时）∧ 墙钟 ≤ `--budget-min`（缺省 30）；不过 ⇔ CI 上界 < 0 **或**可用护栏确凿越界 |
+| 护栏 | 容忍带 **< 实际 MDE** ⇒ 标 `usable_as_veto=false`（**不得作为否决依据**，天生必破 = 假警报），⛔ **不据此判破**；只有 `tol ≥ MDE` 的护栏越界才判「不过」（AGENTS.md §6.5 第七十一轮） |
+| 零训练自证 | 起跑 / 收尾各扫一次全部进程的**命令行**；判据 = **解释器镜像（`python*` / `trainer*`）∧ 训练特征**两个条件同时成立（单看特征词会误报：DSH 自己的命令行里就带着本会话的任务文本）⇒ 命中即 `ERROR`；采集只走 `style-vector.py`（⛔ 无 PPO / pretrain / v4 loop） |
+| ⚠ ρ 的可识别性 | `--gate-dir` 的 `a,a,b,b` 对开 + **零和指标** ⇒ `Δ` 与基准**机械地** −1 相关（实测 −1.000000）⇒ 判 `identified=false`、**不作判据**；要真 ρ 用 `--family` 口径（同座位、同牌山、只换权重；实测 −0.693） |
 
