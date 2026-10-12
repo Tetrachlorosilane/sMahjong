@@ -485,7 +485,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 - **批前向（`selfplay --batch-forward K`，缺省关；`trainer/src/batchforward.hpp`）**：键 = `(场号, 该场第几次询问, 座位)`；批 = **屏障时刻未决键里字典序最小的 min(K,|未决|) 个** —— ⛔ **按到达顺序凑批永远红**；**规范序 + K 是运行身份的一部分**：同 seed + 同 K ⇒ **同批计划指纹**。
 - ⛔ **"同种子 ⇒ 逐字节相同"在批前向上已退役**：批模式判据 = **argmax 逐行全同 + 统计可复现**；开关**关着**时旧路径必须**逐位不变**。
 - ⛔ **跨片/跨轮链式续训若 `--init` ≠ 数据生成策略 ⇒ `pretrain.py` 的 PPO 口径闸门会 `raise SystemExit`（退出码 1、无 traceback）**：要按预注册跑多段训练，**必须先有优化器状态续跑（或单进程分片循环）能力**。
-- ⛔ 多段训练须 `--save-optimizer`+`--resume-optimizer`（缺省全关 ⇒ 老路径逐字节不变）：**续跑逐位 == 一口气跑**（同数据同 seed ⇒ `net.bin` sha256 同 + 逐 step 日志逐字同 + 数据顺序指纹同）且 **负向：清零动量必不同**（"相等"假绿）；尺子 = 策略 sha256·`kl0`·`kl_probe`；⚠ 外来 `--init` 须 `SystemExit`、exit 1、无 traceback。⚠ 该等价性**已在 MSLT recipe 下被实测反驳**（同 epoch 内 10+10 vs 20 步 ⇒ sha 不同、根因未定位；同命令两次则逐位相同）⇒ **换配方必须重验该等价性**，⛔ 不得无条件宣称（见 NOTES §6.5 第七十八轮）。见 `TRAINING-V4 §17`。
+- ⛔ 多段训练须 `--save-optimizer`+`--resume-optimizer`（缺省全关 ⇒ 老路径逐字节不变）：**续跑逐位 == 一口气跑**（同数据同 seed ⇒ `net.bin` sha256 同 + 逐 step 日志逐字同 + 数据顺序指纹同）且 **负向：清零动量必不同**（"相等"假绿）；尺子 = 策略 sha256·`kl0`·`kl_probe`；⚠ 外来 `--init` 须 `SystemExit`、exit 1、无 traceback。⚠ **合法切点 = 同 epoch 内 ∧ `opt.step()` 边界（本实现每个整数步都是）∧ `stop-after-steps` 正常收尾 ∧ 全部历史敏感状态逐位同一份 —— 含 `--ref-beta>0` 时的 KL 锚 π_ref**（第七十九轮：锚没进存档 ⇒ MSLT 配方 10+10 ≠ 20，修好后逐位相同）。见 NOTES §6.5 第七十九轮 / `TRAINING-V4 §17.9`。
 - ⛔ **链式续训的合规段数有上限**（本 recipe 实测**最多 2 段**：段 1 后 `kl0=0.0331>1e-2` ⇒ 段 3 被 `assert_resume_behaviour` fail-closed 硬拒；段 2 在 step 101 KL 早停）⇒ **≥3 段的链天然要绕 PPO 口径闸门 ⇒ 只作探索、不得作强度结论**（`wl-p301-B-g06` 的"口径已动"是**结构性必然**）。
 - ⛔ **包装器绕过该闸门不得用于产出结论**（只能用于探索，且读数必须标注"口径已动"）。
 - **判"有没有可用信号"的判据**：样本外 **AUC/增益必须同时胜过 0.5 与最强安慰剂**（打乱标签 / 非学生席 / 只用动作键），且幻想增益要**显著高于同量纲神谕的 0.2**。
