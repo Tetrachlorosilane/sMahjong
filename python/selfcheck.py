@@ -2350,6 +2350,71 @@ except SystemExit as _e:
     ok("格式号" in str(_e) or "没记" in str(_e),
        "BL-04+锚：老格式存档被 fail-closed 硬拒 ✓", str(_e)[:70])
 
+# ①d ★ 第八十轮：**口径判据 ≠ 漂移记账** —— `behaviour.kl0` 必须始终是「**链条起点**」那一次读数
+#   （逐段沿用），而**本段边界**的漂移进 `kl_segment`（只记账）。
+#   为什么必须单独钉：旧实现把续跑那一段的 `kl0` 覆写成**本段边界**的行为 KL ⇒ 链一长就被
+#   `kl0 > 1e-2` 误拒（MSLT 配方实测段 2 起来 `kl0=0.0331` = 段 1 的 `kl_probe` ⇒ **段 3 被拒**、
+#   结论变成"合规链最多 2 段"）。这里用**三段链**证明：起点读数三段一模一样、边界读数逐段在长。
+_k3 = {**_rs_base, "epochs": 4}
+# ⚠ 这一段**一律用 `--init None`**（权重从存档载）：`--init <a.bin>` 那条路要过"权重指纹 == 存档"的
+#   核对，而这里测的是**起点语义**，不该被那条核对抢答（同族假绿/假红都在这儿绕开）。
+_k3n = lambda lab, **kw: argparse.Namespace(**{**_k3, "label": lab, "init": None, **kw})
+# ⚠ 清掉历史残留（`paths.allocate` 会复用同名目录 ⇒ 上一版自检留下的 `model.pt` 会让用例读到旧档）
+for _d in ("v4-rs-k3segA", "v4-rs-k3segB", "v4-rs-k3segC"):
+    shutil.rmtree(paths.DATA_ROOT / "ckpt" / _d, ignore_errors=True)
+_run_capture(_k3n("v4-rs-k3segA", save_optimizer=True, stop_after_steps=1))
+_run_capture(_k3n("v4-rs-k3segB", save_optimizer=True, stop_after_steps=2,
+                  resume_optimizer=_ck("v4-rs-k3segA")))
+_resC3, _logC3 = _run_capture(_k3n("v4-rs-k3segC", save_optimizer=True, stop_after_steps=3,
+                                   resume_optimizer=_ck("v4-rs-k3segB")))
+_bA = torch.load(_ck("v4-rs-k3segA"), map_location="cpu", weights_only=False)["resume"]["behaviour"]
+_bB = torch.load(_ck("v4-rs-k3segB"), map_location="cpu", weights_only=False)["resume"]["behaviour"]
+_bC = torch.load(_ck("v4-rs-k3segC"), map_location="cpu", weights_only=False)["resume"]["behaviour"]
+eq("第八十轮：`kl0` 逐段都是**链条起点**（B 段不覆写 A 段的）", _bB["kl0"], _bA["kl0"])
+eq("第八十轮：`kl0` 逐段都是**链条起点**（C 段不覆写）", _bC["kl0"], _bA["kl0"])
+eq("第八十轮：`kl_segment` 记的是**本段边界**（B 段 = A 段的 `kl_probe`）",
+   _bB["kl_segment"], _bA["kl_probe"])
+eq("第八十轮：`kl_segment` 记的是**本段边界**（C 段 = B 段的 `kl_probe`）",
+   _bC["kl_segment"], _bB["kl_probe"])
+ok(_bA.get("kl_segment") is None,
+   "第八十轮：链条起点那一段没有「本段边界」（`kl_segment` 为 None）", repr(_bA.get("kl_segment")))
+# 三段链必须**跑通**（判据不是"没炸"，而是"真的落盘了第三段"）
+eq("第八十轮：三段链跑通（第三段的 gstep == 3）",
+   int(torch.load(_ck("v4-rs-k3segC"), map_location="cpu",
+                  weights_only=False)["resume"]["counters"]["gstep"]), 3)
+ok("本段边界" in _logC3 and "漂移" in _logC3,
+   "第八十轮：续跑日志把「口径判据」与「漂移记账」分行说清")
+# 负向 ①：**链条起点不干净**仍必须硬拒（⛔ 降级的是漂移量，不是起点判据）
+_k3bad = paths.DATA_ROOT / "ckpt" / "v4-rs-k3badstart"
+shutil.rmtree(_k3bad, ignore_errors=True)
+_k3bad.mkdir(parents=True, exist_ok=True)
+_ckbad = torch.load(_ck("v4-rs-k3segB"), map_location="cpu", weights_only=False)
+_ckbad["resume"]["behaviour"] = {**_ckbad["resume"]["behaviour"], "kl0": 0.5}
+torch.save(_ckbad, _k3bad / "model.pt")
+_trybad = _k3n("v4-rs-k3badstart", save_optimizer=True, stop_after_steps=3,
+               resume_optimizer=_k3bad)
+try:
+    v4_pt.train(_trybad)
+    ok(False, "第八十轮：链条起点 `kl0=0.5` 的存档续跑必须报错（起点判据不许被削弱）")
+except SystemExit as _e:
+    ok("起点口径" in str(_e),
+       "第八十轮：起点口径不干净的存档被硬拒 ✓（降级的只是漂移量）", str(_e)[:60])
+# 负向 ②：**没记** `kl_segment` 的老存档不许炸（只记账的字段，缺了就是 None）
+_k3old = paths.DATA_ROOT / "ckpt" / "v4-rs-k3oldseg"
+shutil.rmtree(_k3old, ignore_errors=True)
+_k3old.mkdir(parents=True, exist_ok=True)
+_ckold = torch.load(_ck("v4-rs-k3segB"), map_location="cpu", weights_only=False)
+_ckold["resume"]["behaviour"] = {k: v for k, v in _ckold["resume"]["behaviour"].items()
+                                 if k != "kl_segment"}
+torch.save(_ckold, _k3old / "model.pt")
+_tryold = _k3n("v4-rs-k3oldseg", save_optimizer=True, stop_after_steps=3,
+               resume_optimizer=_k3old)
+_tryold2, _logold = _run_capture(_tryold)
+_bold = torch.load(_ck("v4-rs-k3oldseg"), map_location="cpu", weights_only=False)["resume"]["behaviour"]
+ok(_bold.get("kl_segment") is not None and "本段边界" in _logold,
+   "第八十轮：存档没记 `kl_segment`（只记账的字段）⇒ 续跑照跑并把本段的值补上",
+   repr(_bold.get("kl_segment")))
+
 # 发散就停：把 `compute_loss` 临时换成"返回 NaN"，train() 必须报错、不落盘废 checkpoint
 _orig_cl = v4_pt.compute_loss
 

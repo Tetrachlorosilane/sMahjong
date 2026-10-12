@@ -1143,12 +1143,19 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict) -> None:
 # **必须不同**（否则就是假绿）。
 #
 #: 续跑存档的格式号 —— 改了字段**语义**就 +1 ⇒ 老存档**当场被拒**（⛔ 不静默按新语义读）
+#:  · 2 → 3（2026-10-13，第八十轮）：`behaviour.kl0` 恢复"**链条起点**"语义 + 新增
+#:    `behaviour.kl_segment`（**本段边界**的漂移量，只记账 + 超 KL 早停阈值时告警）。
+#:    为什么必须 +1：格式 2 的存档里 `kl0` 被**续跑那一段覆写**成了本段边界的漂移量
+#:    （`kl0 := assert_resume_behaviour(...)` 的返回值），于是"起点 ≈0"那条硬拒判据
+#:    实际变成了"段边界漂移 ≤1e-2" —— MSLT 配方实测段 2 起来 `kl0=0.0331`（= 段 1 的
+#:    `kl_probe`）⇒ **段 3 被误拒**、"合规链最多 2 段"。格式 2 的 `kl0` 分不清是哪一个量
+#:    ⇒ 按新语义静默读会把一个错值当成起点判据（正是这条闸门要防的）。
 #:  · 1 → 2（2026-10-13，第七十九轮）：新增 `ref` 段（**KL 锚 π_ref 的来源 + 权重指纹**）。
 #:    为什么必须 +1：格式 1 的存档**压根没记"锚是谁"**，而 `--ref-beta > 0` 且没给 `--ref` 时锚的缺省
 #:    是"**这一段的** `--init`" ⇒ 续跑那一段的 `--init` 是上一段的存档 ⇒ 锚**静默换成了上一段的权重**。
 #:    后果：`--ref-beta > 0` 的配方上"续跑 == 一口气跑"**必然红**（实测 MSLT 配方 10+10 ≠ 20），
 #:    而日志里只有一行不起眼的路径。老存档继续按格式 1 读 = 把这个静默洞带下去。
-RESUME_FORMAT = 2
+RESUME_FORMAT = 3
 
 #: 续跑状态在 `model.pt` 里的键名（与 `model` / `ssl_head` / `config` 同级）
 RESUME_KEY = "resume"
@@ -1201,7 +1208,7 @@ def _behaviour_record(spec_str: str, meta: dict) -> dict:
     p = resolve_weight_path(spec_str)
     return {"spec": str(spec_str), "sha256": _sha256_file(p),
             "policy": str((meta or {}).get("student") or ""),
-            "temp": None, "kl0": None, "kl_probe": None, "probe_n": None}
+            "temp": None, "kl0": None, "kl_segment": None, "kl_probe": None, "probe_n": None}
 
 
 def _resume_recipe(args, *, resolved_data: str, n: int, steps: int, total_steps: int) -> dict:
@@ -1276,7 +1283,7 @@ def load_resume_state(spec_str: str) -> dict:
 
 def assert_resume_behaviour(resume: dict, beh_spec: str, temp: float, model: M.V4Model,
                             data: dict, meta: dict, logp_old: torch.Tensor, idx,
-                            device: str) -> float | None:
+                            device: str) -> tuple[float | None, float | None]:
     """**续跑口径闸门**：替代"初始化时 KL(π_old‖π_new) ≈ 0"那把在续跑路径上**必然红**的尺子。
 
     为什么需要换一把尺子：续跑时 π_new **本来就不等于** π_old（已经走过 N₁ 步）。但闸门想守的
@@ -1285,10 +1292,18 @@ def assert_resume_behaviour(resume: dict, beh_spec: str, temp: float, model: M.V
 
       ① **行为策略标识**：`sha256(权重文件)` + 温度 + 策略串必须与存档**逐项相同**
          （`--behaviour` 换一份网 ⇒ 当场拒；那是换了一个分布，静默把 ρ 带偏）；
-      ② **链条起点口径**：存档记的 `kl0`（起跑那一次闸门的读数）必须有限且 ≤1e-2
+      ② **链条起点口径**：存档记的 `kl0`（**链条起点**那一次闸门的读数）必须有限且 ≤1e-2
          —— ⛔ 不许拿一条"起点就不干净"的链继续跑；
       ③ **连续性**：同一条**固定探针行**上的 KL 必须与存档记录的 `kl_probe` 一致
          —— 权重 / 行为策略 / 温度任一处不同都会当场露出来。
+
+    ⚠★ 第八十轮（**口径分家**）：**本段边界**的行为 KL **不是**口径判据，它只是**漂移记账**
+    （`kl_segment`）。为什么必须分开：那条 1e-2 判据守的是"**起点**那一轮 `--init` 与
+    `--behaviour` 是同一份网"，而"在自己数据上多训几轮 ⇒ 现任离数据生成策略越来越远"是
+    **训练的正常后果**，不是口径不一致。实测：MSLT 配方段 1 尾部行为 KL 已经 **0.0331**（很正常），
+    旧实现把它当成 `kl0` 记进存档 ⇒ 段 3 被误拒、结论变成"合规链最多 2 段"。
+    ⇒ **返回 `(kl_start, kl_segment)`**：前者进 `behaviour.kl0`（起点语义，逐段沿用），
+    后者进 `behaviour.kl_segment`（本段边界，只记账 + 超过 KL 早停阈值时告警）。
     """
     p = resume["path"]
     rec = resume["resume"].get("behaviour")
@@ -1320,14 +1335,14 @@ def assert_resume_behaviour(resume: dict, beh_spec: str, temp: float, model: M.V
     want = rec.get("kl_probe")
     if want is None:
         print(f"PPO 续跑口径：连续性探针 KL={kl_now:+.6e}（存档没记探针 ⇒ 只查标识与起点）")
-        return None
+        return float(kl0), kl_now
     print(f"PPO 续跑口径：连续性探针（固定 {int(idx.size)} 行）KL={kl_now:+.6e}"
           f" vs 存档 {float(want):+.6e}")
     if abs(kl_now - float(want)) > 1e-9:
         raise SystemExit(
             f"⛔ 续跑的**连续性探针**与存档不一致：本次 {kl_now:+.9e} vs 存档 {float(want):+.9e}"
             f"（同一份权重 + 同一份行为策略 + 同一温度在同一条探针行上必须给出**同一个数**）")
-    return kl_now
+    return float(kl0), kl_now
 
 
 def train(args) -> dict:
@@ -1694,13 +1709,28 @@ def train(args) -> dict:
         if resume is None:
             kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
                                                logp_tr, temp, device)
+            kl_seg = None
             print(f"PPO：口径自检 KL(π_old‖π_new)={kl0:+.2e}（≈0 = 权重与温度都对上了）")
         else:
-            kl0 = assert_resume_behaviour(resume, str(beh), float(temp), model, train_data,
-                                          meta, logp_tr, np.arange(min(64, n)), device)
+            # ★ 第八十轮：**口径判据 ≠ 漂移记账**。`kl0` 是**链条起点**的读数（逐段沿用，硬拒判据）；
+            #   `kl_seg` 是**本段边界**的行为 KL（训练的自然后果，只记账 + 告警，⛔ 不作判据）。
+            kl0, kl_seg = assert_resume_behaviour(resume, str(beh), float(temp), model, train_data,
+                                                  meta, logp_tr, np.arange(min(64, n)), device)
+            if kl_seg is not None:
+                # 告警阈值 = 本 recipe 的 KL 早停阈值：越过它意味着"这一段基本走不动了"，
+                # 那是**训练量**的信号（该换新鲜采集），不是口径不一致。
+                thr = float(getattr(args, "kl_early_stop", 0.03) or 0.0)
+                tail = (f"；⚠ 已达本 recipe 的 KL 早停阈值 {thr:g} ⇒ 这一段的可用步数基本到顶，"
+                        f"要更长就该换**新鲜采集**（BL-13/BL-14），⛔ 不是继续加步数"
+                        if thr > 0 and abs(float(kl_seg)) > thr else "")
+                print(f"PPO 续跑口径：**本段边界**漂移 KL(π_old‖π_new)={float(kl_seg):+.6e}"
+                      f"（= 记账 `behaviour.kl_segment`，⛔ 不是口径判据：口径由「行为策略身份 + 链条起点"
+                      f" + 连续性探针」三把尺子守）{tail}")
         if beh_rec is not None:
+            # ⚠ `kl0` **只在链条起点那一段**由闸门现算（续跑沿用存档值）；`kl_segment` 记本段边界。
             beh_rec.update({"temp": float(temp),
-                            "kl0": (None if kl0 is None else float(kl0))})
+                            "kl0": (None if kl0 is None else float(kl0)),
+                            "kl_segment": (None if kl_seg is None else float(kl_seg))})
     # ---- 手级 GAE（§14 P1）：`--advantage gae-hand` 的预计算（行为策略的 V ⇒ GAE ⇒ 冻结）----
     adv_tr = None
     val_extra: dict[str, np.ndarray] | None = None
