@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -63,6 +64,8 @@ inline const std::vector<std::string> ONLINE_HEADS = {"policy", "belief_tenpai"}
 inline const std::vector<std::string> TRAIN_HEADS = {"policy", "value", "belief_tenpai", "danger"};
 
 struct V4Scratch;
+/** 增量 carry 缓存的实现细节（定义在 `v4policy.cpp`：只有那里拿得到 `kCEvt` / `kKEvt`）。 */
+struct V4CarryCache;
 
 /** 一份加载好的 v4 权重（字段与 Java `V4Policy` 同构）。 */
 struct V4Policy {    int dModel = 0;
@@ -139,6 +142,47 @@ struct V4Policy {    int dModel = 0;
 };
 
 /**
+ * 增量事件 carry 缓存的**只读读数**（自检 / CLI / 判据要看得见"到底命中没有"）。
+ *
+ * <p>⛔ 只有"增量 == 全量（逐位）"一条是**假绿**：缓存从不命中也永远相等 —— 所以命中计数
+ * 与逐位比对**成对**出现（AGENTS §6.5）。
+ */
+struct V4CarryStats {
+    long long decisions = 0;     /**< 走缓存路径的决策次数。 */
+    long long hits = 0;          /**< 前缀校验通过 ⇒ 只推进新事件。 */
+    long long cold = 0;          /**< 建槽（首见该小局 / 换小局）。 */
+    long long stale = 0;         /**< 前缀对不上 ⇒ 丢槽整手重放。 */
+    long long rowsReplayed = 0;  /**< 建槽时重放的事件行数。 */
+    long long rowsEncoded = 0;   /**< 逐行编码（`event.enc` + GRU）的事件行数。 */
+    long long rowsWindow = 0;    /**< 直接取窗口批编码行喂 GRU 的事件行数。 */
+};
+
+/** 增量事件 carry 的**进程级缺省**（`--no-v4-cache` 置 false；= Java `V4Policy.cacheEnabled`）。 */
+bool v4CarryEnabledDefault();
+/** 改进程级缺省（`main` 解析 `--no-v4-cache` 后调一次）。 */
+void v4SetCarryEnabled(bool on);
+/**
+ * **负向判据注入**（`--v4-carry-bug skip1|stale|noclear`）：⛔ 只许判据用 —— 采集 / 训练里
+ * 绝不能给（给了产出的轨迹就是错的）。未知模式 ⇒ false 且填 `err`（不静默忽略）。
+ */
+bool v4SetCarryBug(const std::string &mode, std::string &err);
+/** 当前注入的模式名（没注入 = 空串）。 */
+const char *v4CarryBugName();
+
+/**
+ * 小局身份（增量缓存的失效键）= Java `V4Features.handKey`：`场风-几局-本场@座位`。
+ *
+ * <p>`round` 缺失 ⇒ false（**不使用缓存**：宁可不省，也不能拿上一局的窗口当这一局的）。
+ * 单独暴露出来是为了让判据能在**没有权重**的情况下钉住"换局必须换键"。
+ */
+bool v4CarryHandKeyOf(const JVal &obs, int &seat, std::string &key);
+
+/** 读某个 scratch 上的增量 carry 计数器（没建过缓存 ⇒ 全 0）。 */
+V4CarryStats v4CarryStatsOf(const V4Scratch &scr);
+/** 复位计数器（判据要量"这一段"的命中率时用；**不动槽里的 carry**）。 */
+void v4CarryResetStats(V4Scratch &scr);
+
+/**
  * **一次前向的中间缓冲**（扁平 `float` + 步长；只增不缩）。
  *
  * <p>⛔ **不能放进 `V4Policy`**：一份权重是全进程（多 worker 线程）共享只读的，
@@ -193,6 +237,19 @@ struct V4Scratch {
     std::vector<float> btProb;     // 3
     std::vector<float> policy;     // n
     std::vector<float> meanU;      // dModel
+    /** 只给**负向注入** `--v4-carry-bug noclear` 用的"上一行"缓冲（正常路径不碰它）。 */
+    std::vector<float> bugTok;
+
+    /**
+     * **增量事件 GRU carry**（默认开；`--no-v4-cache` 走进程级缺省置 false）。
+     *
+     * <p>为什么放在 scratch 而不是 `V4Policy`：权重是**多 worker 共享只读**的，缓存是**可变态**
+     * ⇒ 挂在权重上就是数据竞争（与 `V4Scratch` 存在的理由同一条）。而 C++ 的策略实例本来就是
+     * "每场每席一份"，所以"一份 scratch = 一个槽位集合"与 Java 的"按座位分槽"同义
+     * （槽由 `V4CarryCache` 按 `obs.seat` 分，因为同一份 scratch 也可能被逐行回放工具用）。
+     */
+    bool carryEnabled = v4CarryEnabledDefault();
+    std::shared_ptr<V4CarryCache> carryCache;
 };
 
 /** 从文件加载（失败填 `err`）= Java `V4Policy.load`。 */
@@ -259,5 +316,18 @@ int v4BenchCli(int argc, char **argv);
  * 核对 ① 四张量逐元素 ② 四个推理头逐元素 + policy argmax 逐条 ③ 红证（策略头偏置 +1）。
  */
 int v4GoldenCli(int argc, char **argv);
+
+/**
+ * `trainer v4cache <net.bin> <轨迹1.jsonl|目录> … [--workers K] [--limit N] [--h0-rows N]`：
+ * **增量 carry 的硬判据**（Java 侧没有对应物 —— 那一侧的判据是 `SelfTest.v4CacheTests`）。
+ *
+ * <p>逐条真实决策行上跑两条事件塔路径并**逐位**比对七个头 + `h_evt`：
+ *   ① 增量 carry（缓存开）== 整手重放（缓存关）—— 这就是"增量 == 全量"；
+ *   ② `h_evt` 的那一格同时就是"**缓存 carry == 整手重放**"（W1 起的第二条判据）；
+ *   ③ 前 `--h0-rows` 行额外做"**前缀 carry + 窗口 == 整手重放**"（`forwardAll(h0)` 那条路）。
+ *
+ * <p>⛔ 只有"相等"是假绿 ⇒ 命中数 / 建槽 / 陈旧退回与**命中率**一起打印；命中率 0 ⇒ 退出码非 0。
+ */
+int v4CacheCli(int argc, char **argv);
 
 }  // namespace trainer

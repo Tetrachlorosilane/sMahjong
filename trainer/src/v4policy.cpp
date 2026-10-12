@@ -10,13 +10,17 @@
 #include "v4policy.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <mutex>
+#include <thread>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -1168,6 +1172,38 @@ bool realRows(const V4Tensors &t, int &out, std::string &err) {
     return true;
 }
 
+/** 负向判据注入（缺省关；只有 `--v4-carry-bug` 会打开，见 hpp）。 */
+enum class CarryBug { None, SkipFirst, StaleKey, NoClear };
+CarryBug g_carryBug = CarryBug::None;
+const char *g_carryBugName = "";
+bool g_carryEnabledDefault = true;
+
+/**
+ * **逐行事件编码的唯一入口** —— `v4EventRow` 自带清零（纪律③：调用方复用同一支缓冲，
+ * 不清零就是"前 i 条事件按位或"的静默累积，Java 第六十轮踩过）。
+ *
+ * <p>`noclear` 负向注入：把"本次没写的格"从上一行搬回来 —— 那正是"没清零"时缓冲里实际留着的
+ * 东西（写 0 与没写区分不了）。它同时作用于**整手重放**与增量路径的逐行编码 ⇒ 两条路会分叉，
+ * 判据必然红（这正是"不清零"必须被抓住的理由）。
+ */
+bool encodeRowTok(const JVal &e, int seat, V4Scratch &sc, std::string &err) {
+    if (!v4EventRow(e, seat, sc.tok.data(), err)) {
+        return false;
+    }
+    if (g_carryBug == CarryBug::NoClear) {
+        if (sc.bugTok.size() != static_cast<size_t>(kCEvt)) {
+            sc.bugTok.assign(static_cast<size_t>(kCEvt), 0.f);
+        }
+        for (int c = 0; c < kCEvt; c++) {
+            if (sc.tok[static_cast<size_t>(c)] == 0.f) {
+                sc.tok[static_cast<size_t>(c)] = sc.bugTok[static_cast<size_t>(c)];
+            }
+        }
+        std::copy(sc.tok.begin(), sc.tok.begin() + kCEvt, sc.bugTok.begin());
+    }
+    return true;
+}
+
 /**
  * 把 `ev[0, upto)` 这 `upto` 条**真实**事件行喂进 GRU（从 0 起）= Java `replayCarry`。
  *
@@ -1179,11 +1215,37 @@ bool replayCarry(const V4Policy &p, const std::vector<const JVal *> &ev, int sea
                  const EventEnc &enc, const EventGru &gru, V4Scratch &sc, std::string &err) {
     const int dm = p.dModel;
     for (int i = 0; i < upto; i++) {
-        if (!v4EventRow(*ev[static_cast<size_t>(i)], seat, sc.tok.data(), err)) {
+        if (!encodeRowTok(*ev[static_cast<size_t>(i)], seat, sc, err)) {
             return false;
         }
         enc.row(sc.tok.data(), sc.rowTmp.data(), sc);
         gruStepBuf(sc.rowTmp.data(), sc.carry.data(), gru, dm, sc);
+    }
+    return true;
+}
+
+/**
+ * **整手重放的后半段**（窗口那 60 行**已经编码好**）：先逐行重放 `events[0, max(0, n-K))`，
+ * 再喂窗口里的**真实**行 ⇒ "整手 carry"（= 增量路径槽里的 `s.h`）= Java `eventTowerRound`。
+ *
+ * <p>拆出来只是为了让"没有 round 信息 ⇒ 不缓存"那条路**不用把窗口再编码一遍**；
+ * 算子顺序与拆分前**逐句相同**（判据：同种子轨迹逐字节）。
+ */
+bool roundAdvance(const V4Policy &p, const JVal &obs, const V4Tensors &t, const EventEnc &enc,
+                  const EventGru &gru, V4Scratch &sc, std::string &err) {
+    const std::vector<const JVal *> ev = v4EventsOf(obs);
+    const int events = static_cast<int>(ev.size());
+    // obs 的 `seat` 是**数字**（`v4Assemble` 已核过它在 0..3）：这里只要那一条语义。
+    const JVal *seatVal = obs.find("seat");
+    const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
+    std::fill(sc.carry.begin(), sc.carry.end(), 0.f);
+    if (!replayCarry(p, ev, seat, std::max(0, events - kKEvt), enc, gru, sc, err)) {
+        return false;
+    }
+    const int dm = p.dModel;
+    const int real = std::min(events, kKEvt);
+    for (int i = kKEvt - real; i < kKEvt; i++) {
+        gruStepBuf(sc.eRows.data() + static_cast<size_t>(i) * dm, sc.carry.data(), gru, dm, sc);
     }
     return true;
 }
@@ -1231,24 +1293,266 @@ bool eventTowerRound(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4S
     if (!encodeWindow(p, t, enc, sc, err)) {
         return false;
     }
-    const std::vector<const JVal *> ev = v4EventsOf(obs);
-    const int events = static_cast<int>(ev.size());
-    // obs 的 `seat` 是**数字**（`v4Assemble` 已核过它在 0..3）：这里只要那一条语义。
-    const JVal *seatVal = obs.find("seat");
-    const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
-    std::fill(sc.carry.begin(), sc.carry.end(), 0.f);
-    if (!replayCarry(p, ev, seat, std::max(0, events - kKEvt), enc, gru, sc, err)) {
+    return roundAdvance(p, obs, t, enc, gru, sc, err);
+}
+
+}  // namespace
+
+// ⚠ 从这里起是**具名** namespace：`V4CarryCache` 必须是 `trainer::V4CarryCache`（头文件里
+//   `V4Scratch` 的 `shared_ptr<V4CarryCache>` 指的就是它）—— 匿名 namespace 里的同名类型是
+//   **另一个类型**，那正是"shared_ptr 类型不匹配 / 成员访问到不完整类型"的来源。
+
+// ---------------------------------------------------------------- 增量事件 GRU carry（缓存）
+//
+// 为什么做：生产全量路径每决策都要从事件 0 重放**整手**（`events[0, n-K)` 逐行编码 + GRU），
+// 固定 `nlegal` 解耦后实测占前向 **18.6%**（NOTES §6.5 第十一/六十一轮）。而"一条事件的 token 行 /
+// 它的编码行 / GRU 的一步"都只依赖 `(那条事件, 自己座位)` ⇒ 只要"小局身份没变 + 前缀逐位没变"，
+// carry 就可以**增量推进**：每决策只喂新增的 delta 行（实测中位数 1–2 行）。
+//
+// 语义与 Java `V4Policy.eventTowerCached`（`V4Cache`）**同一套**：按座位分槽 · 键 = 小局身份 ·
+// 前缀逐行校验 · 对不上就丢槽退回整手重放。⛔ 四条不许省（每条都对应一次真事故或一条判据）：
+//   ① **键换了必须重建**（每小局 carry 清零）—— 拿上一局的 carry 接着推是静默错；
+//   ② **前缀必须逐位校验**（不信"应该是它"）：任何一格不等 ⇒ 丢槽重建（计 stale）；
+//   ③ 逐行编码走 `v4EventRow`（**自带清零**）—— 复用同一支缓冲不清零 = 静默累积（第六十轮）；
+//   ④ **只喂真实事件行**（前部零 padding 不喂）：`GRUCell(0,h) ≠ h`，喂了两条路差 1e-2。
+
+/** 一个座位的 carry 槽（= Java `V4Cache.Slot`：只留"增量 carry"必需的那两样）。 */
+struct CarrySlot {
+    std::string key;          // 小局身份（场风-局-本场@座位）
+    int seen = 0;             // 已经推进（编码 + GRU）的**绝对**事件条数
+    int len = 0;              // 上一次窗口里的真实事件行数
+    bool valid = false;
+    std::vector<float> h;     // dModel：`events[0, seen)` 的 carry
+    /**
+     * 上一次的**窗口 token 行**（`kKEvt × kCEvt` 扁平；行 p = 绝对下标 `seen-K+p`）——
+     * 只给前缀校验用（Java `Slot.tok`）。⛔ 校验必须逐位，不信"应该是它"。
+     */
+    std::vector<float> win;
+};
+
+/** 四个槽 + 计数器（= Java `V4Cache` 的状态部分；`V4Scratch` 里持一份 `shared_ptr`）。 */
+struct V4CarryCache {
+    CarrySlot slots[4];
+    V4CarryStats st;
+};
+
+/** 座位 → 槽（`floorMod`；= Java `V4Cache.slot`）。 */
+inline int carrySlotOf(int seat) {
+    const int m = seat % 4;
+    return m < 0 ? m + 4 : m;
+}
+
+/** 事件窗口的**重叠区间**逐位比对（= Java `V4Cache.overlapOk`，判据与它同一把尺子）。 */
+bool carryOverlapOk(const CarrySlot &s, const V4Tensors &t, int events) {
+    if (s.win.size() != static_cast<size_t>(kKEvt) * static_cast<size_t>(kCEvt)) {
         return false;
     }
-    const int dm = p.dModel;
-    const int real = std::min(events, kKEvt);
-    for (int i = kKEvt - real; i < kKEvt; i++) {
-        gruStepBuf(sc.eRows.data() + static_cast<size_t>(i) * dm, sc.carry.data(), gru, dm, sc);
+    const int lo = std::max(0, events - kKEvt);
+    const int hi = std::min(s.seen, events);
+    for (int i = lo; i < hi; i++) {
+        // ⚠ 行位置恒为 `绝对下标 - seen + K`（窗口贴着事件流尾巴：前部 padding、新事件在尾部）。
+        //   写成 `i-(seen-len)` 只在窗口满时才对 ⇒ 每小局前 K 条事件全被判"陈旧"、缓存形同虚设
+        //   （Java 第十一轮踩过：600 决策里退回 533 次，而"增量 == 全量"照样全绿）。
+        const int oldRow = i - s.seen + kKEvt;
+        const int newRow = i - events + kKEvt;
+        if (oldRow < 0 || oldRow >= kKEvt || newRow < 0 || newRow >= kKEvt) {
+            return false;
+        }
+        const float *a = s.win.data() + static_cast<size_t>(oldRow) * kCEvt;
+        const float *b = t.evt[static_cast<size_t>(newRow)].data();
+        if (std::memcmp(a, b, static_cast<size_t>(kCEvt) * sizeof(float)) != 0) {
+            return false;                     // 逐位：NaN / -0.0 也不会被放过
+        }
     }
     return true;
 }
 
-}  // namespace
+/**
+ * 把 `ev[from, upto)` 喂进 GRU（`h` 原地推进）。
+ *
+ * <p>行从哪来：绝对下标 ≥ `events-K` 的行**直接取窗口的批编码行**（`sc.eRows`）—— 与整手重放
+ * 走的是**同一批比特**（`encodeWindow` 已经算好）；更早的行逐行编码（`v4EventRow` + `enc.row`，
+ * 与 `replayCarry` 同一条）。
+ */
+bool advanceCarry(const V4Policy &p, const std::vector<const JVal *> &ev, int seat, int from,
+                  int upto, int events, const EventEnc &enc, const EventGru &gru, float *h,
+                  V4Scratch &sc, V4CarryCache &cc, bool rebuilt, std::string &err) {
+    const int dm = p.dModel;
+    const int winBase = events - kKEvt;
+    for (int i = from; i < upto; i++) {
+        const float *row = nullptr;
+        if (i >= winBase) {
+            row = sc.eRows.data() + static_cast<size_t>(i - winBase) * dm;
+            cc.st.rowsWindow++;
+        } else {
+            if (!encodeRowTok(*ev[static_cast<size_t>(i)], seat, sc, err)) {
+                return false;
+            }
+            enc.row(sc.tok.data(), sc.rowTmp.data(), sc);
+            row = sc.rowTmp.data();
+            cc.st.rowsEncoded++;
+        }
+        if (rebuilt) {
+            cc.st.rowsReplayed++;      // 建槽那一次是把整手重放一遍（两个来源都算）
+        }
+        gruStepBuf(row, h, gru, dm, sc);
+    }
+    return true;
+}
+
+/**
+ * **增量路径的事件塔**（生产缺省）= Java `V4Policy.eventTowerCached`。
+ *
+ * <p>每决策：① 窗口那 60 行照常批编码（Transformer 的输入**必须**重算）；② carry 只推进
+ * `[seen, events)` 的新事件；③ 把本决策的窗口行存进槽里当**下次**的前缀校验基准。
+ * 产出的 carry 与整手重放**逐位相同**（判据：`trainer v4cache` 的逐位比对）。
+ */
+bool eventTowerCached(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4Scratch &sc,
+                      std::string &err) {
+    EventEnc enc;
+    EventGru gru;
+    if (!enc.bind(p, err) || !gru.bind(p, err)) {
+        return false;
+    }
+    if (!encodeWindow(p, t, enc, sc, err)) {
+        return false;
+    }
+    const std::vector<const JVal *> ev = v4EventsOf(obs);
+    const int events = static_cast<int>(ev.size());
+    const JVal *seatVal = obs.find("seat");
+    const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
+    std::string key;
+    int keySeat = seat;
+    if (!v4CarryHandKeyOf(obs, keySeat, key)) {
+        // 没有 `round` 信息 ⇒ **不缓存**，但仍是整手 carry（宁可不省，也不能拿上一局的当这一局的）
+        return roundAdvance(p, obs, t, enc, gru, sc, err);
+    }
+    if (sc.carryCache == nullptr) {
+        sc.carryCache = std::make_shared<V4CarryCache>();
+    }
+    V4CarryCache &cc = *sc.carryCache;
+    CarrySlot &s = cc.slots[static_cast<size_t>(carrySlotOf(keySeat))];
+    cc.st.decisions++;
+    bool rebuild = !s.valid || s.key != key;
+    const bool trustSlot = g_carryBug == CarryBug::StaleKey;
+    if (trustSlot) {
+        // 负向注入：**不认小局键、也不做前缀校验**（= "缓存做旧但结果看起来正常"那条失败模式）
+        rebuild = !s.valid;
+    }
+    if (!rebuild && !trustSlot && (events < s.seen || !carryOverlapOk(s, t, events))) {
+        cc.st.stale++;
+        rebuild = true;                     // 前缀对不上：丢掉整个槽（Java 同一条）
+    }
+    if (rebuild) {
+        cc.st.cold++;
+        s.key = key;
+        s.seen = 0;
+        s.len = 0;
+        s.valid = true;
+        if (s.h.size() != static_cast<size_t>(p.dModel)) {
+            s.h.assign(static_cast<size_t>(p.dModel), 0.f);      // 每小局从 0 起（纪律①）
+        } else {
+            std::fill(s.h.begin(), s.h.end(), 0.f);
+        }
+    } else {
+        cc.st.hits++;
+    }
+    float *h = s.h.data();
+    int from = s.seen;
+    if (!rebuild && g_carryBug == CarryBug::SkipFirst) {
+        from = std::min(events, s.seen + 1);   // 负向注入：漏喂第一条新事件
+    }
+    if (!advanceCarry(p, ev, keySeat, rebuild ? 0 : from, events, events, enc, gru, h, sc, cc,
+                      rebuild, err)) {
+        return false;
+    }
+    s.seen = events;
+    s.len = std::min(events, kKEvt);
+    // 存下本决策的窗口行（**下一次**的前缀校验基准）。⚠ 必须**整窗**存（含前部零 padding）：
+    // 行的绝对位置 = `i - seen + K`，只存真实行会让"窗口没满"时下标对不上（Java 每决策刷新
+    // padding 行是同一条理由）。
+    s.win.resize(static_cast<size_t>(kKEvt) * static_cast<size_t>(kCEvt));
+    std::memcpy(s.win.data(), t.evt[0].data(),
+                static_cast<size_t>(kKEvt) * static_cast<size_t>(kCEvt) * sizeof(float));
+    // carry 交回 `sc.carry`（融合从它读 `h_evt`；槽里那份是权威、这份是本次前向的入口）
+    std::copy(s.h.begin(), s.h.end(), sc.carry.begin());
+    return true;
+}
+
+/** 事件塔的**生产入口**：缓存开（缺省）走增量，关走整手重放（= 判据的基准路径）。 */
+bool eventTowerProduction(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4Scratch &sc,
+                          std::string &err) {
+    if (!sc.carryEnabled) {
+        return eventTowerRound(p, obs, t, sc, err);
+    }
+    return eventTowerCached(p, obs, t, sc, err);
+}
+
+// ---------------------------------------------------------------- 增量 carry 的对外口（开关 / 读数 / 键）
+
+bool v4CarryEnabledDefault() { return g_carryEnabledDefault; }
+
+void v4SetCarryEnabled(bool on) { g_carryEnabledDefault = on; }
+
+bool v4SetCarryBug(const std::string &mode, std::string &err) {
+    if (mode.empty() || mode == "off" || mode == "none") {
+        g_carryBug = CarryBug::None;
+        g_carryBugName = "";
+        return true;
+    }
+    if (mode == "skip1") {
+        g_carryBug = CarryBug::SkipFirst;
+        g_carryBugName = "skip1";
+        return true;
+    }
+    if (mode == "stale") {
+        g_carryBug = CarryBug::StaleKey;
+        g_carryBugName = "stale";
+        return true;
+    }
+    if (mode == "noclear") {
+        g_carryBug = CarryBug::NoClear;
+        g_carryBugName = "noclear";
+        return true;
+    }
+    err = "未知的 --v4-carry-bug 模式：" + mode
+          + "（只有 skip1 / stale / noclear；⛔ 这是**负向判据**开关，采集与训练里绝不能给）";
+    return false;
+}
+
+const char *v4CarryBugName() { return g_carryBugName; }
+
+bool v4CarryHandKeyOf(const JVal &obs, int &seat, std::string &key) {
+    // `seat` 是**出参**：键里带座位（同一份 scratch 也可能服务多个座位 —— Java `V4Cache` 同式）。
+    const JVal *seatVal = obs.find("seat");
+    seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
+    const JVal *rnd = obs.find("round");
+    if (rnd == nullptr || !rnd->isObj()) {
+        key.clear();
+        return false;
+    }
+    const JVal *b = rnd->find("bakaze");
+    const JVal *ky = rnd->find("kyoku");
+    const JVal *hb = rnd->find("honba");
+    key = (b != nullptr && b->isStr() ? b->strVal : std::string("?")) + "-"
+          + std::to_string(ky == nullptr ? 0 : ky->asInt(0)) + "-"
+          + std::to_string(hb == nullptr ? 0 : hb->asInt(0)) + "@" + std::to_string(seat);
+    return true;
+}
+
+V4CarryStats v4CarryStatsOf(const V4Scratch &scr) {
+    V4CarryStats out;
+    if (scr.carryCache != nullptr) {
+        out = scr.carryCache->st;
+    }
+    return out;
+}
+
+void v4CarryResetStats(V4Scratch &scr) {
+    if (scr.carryCache != nullptr) {
+        scr.carryCache->st = V4CarryStats{};
+    }
+}
 
 bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
                           std::string &err, const std::vector<float> *h0, V4Scratch *scr) const {
@@ -1281,7 +1585,7 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         if (!eventTowerWindow(*this, t, sc, err)) {
             return false;
         }
-    } else if (!eventTowerRound(*this, obs, t, sc, err)) {
+    } else if (!eventTowerProduction(*this, obs, t, sc, err)) {
         return false;
     }
     const float *eTokens = sc.eTokens.data();
@@ -2408,6 +2712,398 @@ int v4GoldenCli(int argc, char **argv) {
                 javaPercentG(static_cast<double>(dValue), 3).c_str(),
                 javaPercentG(static_cast<double>(dBelief), 3).c_str(),
                 javaPercentG(static_cast<double>(dGate), 3).c_str());
+    return pass ? 0 : 1;
+}
+
+// ---------------------------------------------------------------- CLI：v4cache（增量 carry 的硬判据）
+
+namespace {
+
+/** 两条前向的逐位比对（**逐头逐元素**；NaN / -0.0 也按比特比，绝不放过大）。 */
+struct HeadDiff {
+    int badHeads = 0;
+    int badElems = 0;
+    std::string firstHead;
+    size_t firstIdx = 0;
+    float a = 0.f;
+    float b = 0.f;
+};
+
+bool bitsEqual(float x, float y) {
+    return std::memcmp(&x, &y, sizeof(float)) == 0;
+}
+
+void diffHeads(const std::map<std::string, std::vector<float>> &x,
+               const std::map<std::string, std::vector<float>> &y, HeadDiff &out) {
+    for (const auto &kv : x) {
+        const auto it = y.find(kv.first);
+        if (it == y.end() || it->second.size() != kv.second.size()) {
+            out.badHeads++;
+            if (out.firstHead.empty()) {
+                out.firstHead = kv.first + "（形状不一致）";
+            }
+            continue;
+        }
+        int bad = 0;
+        size_t firstBad = 0;
+        for (size_t i = 0; i < kv.second.size(); i++) {
+            if (!bitsEqual(kv.second[i], it->second[i])) {
+                if (bad == 0) {
+                    firstBad = i;
+                }
+                bad++;
+            }
+        }
+        if (bad > 0) {
+            out.badHeads++;
+            out.badElems += bad;
+            if (out.firstHead.empty()) {
+                out.firstHead = kv.first;
+                out.firstIdx = firstBad;
+                out.a = kv.second[firstBad];
+                out.b = it->second[firstBad];
+            }
+        }
+    }
+}
+
+/** 一个 worker 的累计读数（线程内累加，最后合并）。 */
+struct CacheRun {
+    long long rows = 0;
+    long long badRows = 0;
+    long long badHeads = 0;
+    long long badElems = 0;
+    long long h0Rows = 0;
+    long long h0BadRows = 0;
+    long long eventsTotal = 0;      // 逐决策的 `events` 之和（= 整手重放要喂的行数）
+    long long grnRows = 0;          // 增量路径实际喂进 GRU 的行数（编码 + 窗口）
+    double secFull = 0;
+    double secCached = 0;
+    V4CarryStats st;
+    std::string firstBad;           // 首个不符的定位（file:line head[i] a vs b）
+};
+
+/** 一个文件里的 decision 行逐条对拍（`maxRows < 0` = 不限条数；`maxRows` 是**本文件**的条数上限）。 */
+bool oneFile(const V4Policy &net, const std::string &path, int maxRows, int h0BudgetLeft,
+             int &h0Used, CacheRun &run, std::string &err) {
+    std::string text;
+    if (!readTextFile(path, text)) {
+        err = "读不了文件：" + path;
+        return false;
+    }
+    // ⚠ 两个 scratch **每个文件新建**（= 生产语义：每场一份策略实例 ⇒ 每场一份 scratch），
+    //   于是"换小局必须重建"这条路径被逐场真实走过；跨文件复用留给 `batchforward` 那种时序。
+    V4Scratch scrFull;
+    scrFull.carryEnabled = false;
+    V4Scratch scrCached;
+    scrCached.carryEnabled = true;
+    V4Scratch scrH0;
+    scrH0.carryEnabled = false;
+    size_t pos = 0;
+    int lineNo = 0;
+    int rowsThisFile = 0;       // ⚠ 必须按**本文件**计数：拿 `run.rows`（线程累计）去比"全局余额"会在
+                                //   余额小于累计时**立刻 break**，于是外层循环把剩下的文件空跑一遍
+                                //   （本轮实测：`--limit 20000 --workers 1` 空转了 11,985 个文件、
+                                //   最终只数到 10,148 行）。
+    while (pos <= text.size()) {
+        const size_t nl = text.find('\n', pos);
+        const size_t end = nl == std::string::npos ? text.size() : nl;
+        const std::string line = text.substr(pos, end - pos);
+        const bool last = nl == std::string::npos;
+        pos = last ? text.size() + 1 : nl + 1;
+        lineNo++;
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            if (last) {
+                break;
+            }
+            continue;
+        }
+        JVal row;
+        if (!jsonParse(line, row) || !row.isObj()) {
+            continue;
+        }
+        const JVal *type = row.find("type");
+        if (type == nullptr || !type->isStr() || type->strVal != "decision") {
+            continue;
+        }
+        const JVal *obs = row.find("obs");
+        if (obs == nullptr || !obs->isObj()) {
+            err = path + "：decision 行缺 obs";
+            return false;
+        }
+        if (maxRows >= 0 && rowsThisFile >= maxRows) {
+            break;
+        }
+        rowsThisFile++;
+        // ① 全量（基准）：整手重放
+        std::map<std::string, std::vector<float>> outFull;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!net.forwardAll(*obs, outFull, err, nullptr, &scrFull)) {
+            err = path + "：" + err;
+            return false;
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        // ② 增量（被测）：只推进新事件
+        std::map<std::string, std::vector<float>> outCached;
+        if (!net.forwardAll(*obs, outCached, err, nullptr, &scrCached)) {
+            err = path + "：" + err;
+            return false;
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        run.secFull += std::chrono::duration<double>(t1 - t0).count();
+        run.secCached += std::chrono::duration<double>(t2 - t1).count();
+        HeadDiff d;
+        diffHeads(outFull, outCached, d);
+        run.rows++;
+        if (d.badHeads > 0) {
+            run.badRows++;
+            run.badHeads += d.badHeads;
+            run.badElems += d.badElems;
+            if (run.firstBad.empty()) {
+                run.firstBad = path + ":" + std::to_string(lineNo) + "  头 " + d.firstHead + "["
+                        + std::to_string(d.firstIdx) + "]  全量=" + std::to_string(d.a)
+                        + " 增量=" + std::to_string(d.b) + "（本行 " + std::to_string(d.badHeads)
+                        + " 个头不符）";
+            }
+        }
+        // ③ 第三条逐位判据（W1）：前缀 carry + 窗口 == 整手重放
+        const std::vector<const JVal *> ev = v4EventsOf(*obs);
+        run.eventsTotal += static_cast<long long>(ev.size());
+        if (h0BudgetLeft != 0) {          // 0 = 本文件不再跑；<0 = 不限；>0 = 还允许这么多次
+            const int dm = net.dModel;
+            const JVal *seatVal = obs->find("seat");
+            const int seat = seatVal == nullptr ? 0 : seatVal->asInt(0);
+            EventEnc enc;
+            EventGru gru;
+            if (!enc.bind(net, err) || !gru.bind(net, err)) {
+                return false;
+            }
+            if (scrH0.carry.size() < static_cast<size_t>(dm)) {
+                scrH0.carry.assign(static_cast<size_t>(dm), 0.f);
+                scrH0.tok.assign(static_cast<size_t>(kCEvt), 0.f);
+                scrH0.rowTmp.assign(static_cast<size_t>(dm), 0.f);
+            }
+            std::fill(scrH0.carry.begin(), scrH0.carry.end(), 0.f);
+            if (!replayCarry(net, ev, seat, std::max(0, static_cast<int>(ev.size()) - kKEvt), enc, gru,
+                             scrH0, err)) {
+                err = path + "：" + err;
+                return false;
+            }
+            const std::vector<float> h0(scrH0.carry.begin(), scrH0.carry.end());
+            std::map<std::string, std::vector<float>> outH0;
+            if (!net.forwardAll(*obs, outH0, err, &h0, &scrH0)) {
+                err = path + "：" + err;
+                return false;
+            }
+            HeadDiff d0;
+            diffHeads(outFull, outH0, d0);
+            run.h0Rows++;
+            h0Used++;
+            if (d0.badHeads > 0) {
+                run.h0BadRows++;
+                if (run.firstBad.empty()) {
+                    run.firstBad = path + ":" + std::to_string(lineNo) + "  h0 路 头 " + d0.firstHead
+                            + "[" + std::to_string(d0.firstIdx) + "]  全量=" + std::to_string(d0.a)
+                            + " 前缀+窗口=" + std::to_string(d0.b);
+                }
+            }
+            if (h0BudgetLeft > 0) {
+                h0BudgetLeft--;         // 预算用完 ⇒ 本文件余下行不再跑第三条（⛔ 别写成 `-1`：
+                                        //   `-1` 在本函数里的含义是"**不限**"，写反了就是把整份语料
+                                        //   全都跑第三条 —— 本轮实测踩到，205,416 行全跑了 h0 路）
+            }
+        }
+        if (last) {
+            break;
+        }
+    }
+    const V4CarryStats st = v4CarryStatsOf(scrCached);
+    run.st.decisions += st.decisions;
+    run.st.hits += st.hits;
+    run.st.cold += st.cold;
+    run.st.stale += st.stale;
+    run.st.rowsReplayed += st.rowsReplayed;
+    run.st.rowsEncoded += st.rowsEncoded;
+    run.st.rowsWindow += st.rowsWindow;
+    run.grnRows += st.rowsEncoded + st.rowsWindow;
+    return true;
+}
+
+}  // namespace
+
+int v4CacheCli(int argc, char **argv) {
+    if (argc < 3) {
+        std::fprintf(stderr,
+                     "用法：trainer v4cache <net.bin> <轨迹1.jsonl|目录> [更多…]\n"
+                     "                 [--workers K] [--limit N] [--h0-rows N]\n"
+                     "  逐条真实决策行跑两条事件塔路径并**逐位**比对七个头 + `h_evt`：\n"
+                     "    ① 增量 carry（缓存开）== 整手重放（缓存关）   ← 判据「增量 == 全量」\n"
+                     "    ② `h_evt` 那一格同时就是「缓存 carry == 整手重放」（W1 起 h_evt 被融合消费）\n"
+                     "    ③ 前 `--h0-rows`（缺省 2000）行额外判「前缀 carry + 窗口 == 整手重放」\n"
+                     "  ⛔ 只有「相等」是假绿 ⇒ 命中率一起打印；命中率 0 ⇒ 退出码非 0。\n"
+                     "  `--limit N` = 总条数上限（0/缺省 = 不限）；`--workers` 缺省 1（按文件切）。\n");
+        return 2;
+    }
+    V4Policy net;
+    std::string err;
+    if (!v4LoadPolicy(argv[1], net, err)) {
+        std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<std::string> files;
+    int workers = 1;
+    long long limit = 0;
+    long long h0Rows = 2000;
+    int i = 2;
+    for (; i < argc; i++) {
+        const std::string a = argv[i];
+        auto next = [&](const char *what) -> const char * {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "[trainer] %s 需要一个参数\n", what);
+                std::exit(2);
+            }
+            return argv[++i];
+        };
+        if (a == "--workers") {
+            workers = std::atoi(next("--workers"));
+        } else if (a == "--limit") {
+            limit = std::atoll(next("--limit"));
+        } else if (a == "--h0-rows") {
+            h0Rows = std::atoll(next("--h0-rows"));
+        } else if (!a.empty() && a[0] == '-') {
+            std::fprintf(stderr, "[trainer] 未知参数：%s\n", a.c_str());
+            return 2;
+        } else {
+            std::error_code ec;
+            if (std::filesystem::is_directory(a, ec)) {
+                std::filesystem::directory_iterator it(a, ec);
+                if (ec) {
+                    std::fprintf(stderr, "[trainer] 目录读不了：%s\n", a.c_str());
+                    return 2;
+                }
+                for (const auto &ent : it) {
+                    if (!ent.is_regular_file(ec)) {
+                        continue;
+                    }
+                    const std::string name = ent.path().filename().string();
+                    if (name.size() > 6 && name.rfind("g") == 0
+                        && name.substr(name.size() - 6) == ".jsonl") {
+                        files.push_back(ent.path().string());
+                    }
+                }
+            } else {
+                files.push_back(a);
+            }
+        }
+    }
+    if (files.empty()) {
+        std::fprintf(stderr, "[trainer] 没有可查的 g*.jsonl\n");
+        return 2;
+    }
+    std::sort(files.begin(), files.end());
+    const int w = std::max(1, std::min(workers, static_cast<int>(files.size())));
+    std::fprintf(stderr, "[trainer] v4cache：%s（%s）· %d 个文件 · workers=%d · limit=%lld · h0-rows=%lld%s\n",
+                 argv[1], v4Describe(net).c_str(), static_cast<int>(files.size()), w, limit, h0Rows,
+                 v4CarryBugName()[0] == '\0' ? "" : "  ⚠ --v4-carry-bug 已打开（负向判据专用）");
+    const auto t0 = std::chrono::steady_clock::now();
+    CacheRun total;
+    std::mutex mu;
+    std::atomic<int> nextFile{0};
+    std::atomic<long long> rowsSoFar{0};
+    std::atomic<int> h0Used{0};
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(w));
+    for (int t = 0; t < w; t++) {
+        pool.emplace_back([&]() {
+            CacheRun local;
+            int idx;
+            while ((idx = nextFile.fetch_add(1)) < static_cast<int>(files.size())) {
+                // ⚠ `left` 是**全局剩余**（不是线程本地）：`rowsSoFar` 只在整文件结束后更新 ⇒ 8 条线程
+                //   会过冲一轮（最多 workers × 每文件条数）。⛔ 这里必须判 `<= 0` —— 写成 `== 0` 时
+                //   一旦过冲成负数就会被当成"-1 = 不限"，于是**把整个目录跑完**（本轮实测踩到：
+                //   `--limit 5000 --workers 8` 于 12,000 个文件的目录上跑了 10 分钟还没停）。
+                //   ⚠ 传给 `oneFile` 的必须是**每文件上限**（文件内单独计数），不是"线程累计"。
+                if (limit > 0 && rowsSoFar.load() >= limit) {
+                    break;
+                }
+                const long long left = limit <= 0 ? -1 : (limit - rowsSoFar.load());
+                const long long before = local.rows;
+                int used = static_cast<int>(h0Used.load());
+                std::string e2;
+                const int budget = h0Rows <= 0 ? -1
+                                               : std::max(0, static_cast<int>(h0Rows) - used);
+                if (!oneFile(net, files[static_cast<size_t>(idx)],
+                             left < 0 ? -1 : static_cast<int>(left), budget, used, local, e2)) {
+                    std::lock_guard<std::mutex> lk(mu);
+                    std::fprintf(stderr, "[trainer] %s\n", e2.c_str());
+                    std::exit(1);
+                }
+                h0Used.store(used);
+                rowsSoFar.fetch_add(local.rows - before);
+            }
+            std::lock_guard<std::mutex> lk(mu);
+            total.rows += local.rows;
+            total.badRows += local.badRows;
+            total.badHeads += local.badHeads;
+            total.badElems += local.badElems;
+            total.h0Rows += local.h0Rows;
+            total.h0BadRows += local.h0BadRows;
+            total.eventsTotal += local.eventsTotal;
+            total.grnRows += local.grnRows;
+            total.secFull += local.secFull;
+            total.secCached += local.secCached;
+            total.st.decisions += local.st.decisions;
+            total.st.hits += local.st.hits;
+            total.st.cold += local.st.cold;
+            total.st.stale += local.st.stale;
+            total.st.rowsReplayed += local.st.rowsReplayed;
+            total.st.rowsEncoded += local.st.rowsEncoded;
+            total.st.rowsWindow += local.st.rowsWindow;
+            if (total.firstBad.empty()) {
+                total.firstBad = local.firstBad;
+            }
+        });
+    }
+    for (std::thread &th : pool) {
+        th.join();
+    }
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double hitRate = total.st.decisions == 0
+            ? 0.0
+            : static_cast<double>(total.st.hits) / static_cast<double>(total.st.decisions);
+    const double reuse = total.grnRows == 0
+            ? 0.0
+            : static_cast<double>(total.eventsTotal) / static_cast<double>(total.grnRows);
+    std::printf("v4cache 决策行=%lld（逐位不符行 %lld / 不符头 %lld / 不符格 %lld）\n", total.rows,
+                total.badRows, total.badHeads, total.badElems);
+    std::printf("  命中 %lld / 建槽 %lld / 陈旧退回 %lld ⇒ 命中率 %.4f\n", total.st.hits,
+                total.st.cold, total.st.stale, hitRate);
+    std::printf("  喂进 GRU 的事件行：编码 %lld + 窗口 %lld = %lld（其中建槽重放 %lld，净增量 %lld）；"
+                "整手重放需 %lld 行 ⇒ 少喂 %.2f×\n",
+                total.st.rowsEncoded, total.st.rowsWindow, total.grnRows, total.st.rowsReplayed,
+                total.grnRows - total.st.rowsReplayed, total.eventsTotal, reuse);
+    std::printf("  判据③（前缀 carry + 窗口 == 整手重放）：%lld 行，不符 %lld 行\n", total.h0Rows,
+                total.h0BadRows);
+    std::printf("  单线程每决策：整手重放 %.4f ms / 增量 %.4f ms（含特征拼装）⇒ %+.1f%%\n",
+                total.rows == 0 ? 0.0 : 1000.0 * total.secFull / static_cast<double>(total.rows),
+                total.rows == 0 ? 0.0 : 1000.0 * total.secCached / static_cast<double>(total.rows),
+                total.secFull <= 0 ? 0.0 : 100.0 * (total.secCached - total.secFull) / total.secFull);
+    std::printf("  端到端（%d workers）%.2fs / %.0f 行每秒；取文件 %d/%d（`--limit` 是**软上限**："
+                "全局余额只在整文件结束后刷新 ⇒ 最多过冲 workers × 每文件条数）\n",
+                w, sec, sec <= 0 ? 0.0 : static_cast<double>(total.rows) / sec,
+                std::min(nextFile.load(), static_cast<int>(files.size())),
+                static_cast<int>(files.size()));
+    if (!total.firstBad.empty()) {
+        std::printf("  首个不符：%s\n", total.firstBad.c_str());
+    }
+    // ⛔ 假绿守卫：只有"相等"不够 —— 缓存从不命中时"增量 == 全量"永远成立。
+    const bool hitOk = total.st.decisions <= 1 || total.st.hits > 0;
+    const bool pass = total.rows > 0 && total.badRows == 0 && total.h0BadRows == 0 && hitOk;
+    if (!hitOk) {
+        std::printf("  ⛔ 命中 0（决策 %lld 条）：缓存**根本没被用上** ⇒ 这条绿色是空转，判 FAIL\n",
+                    total.st.decisions);
+    }
+    std::printf("v4cache %s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }
 

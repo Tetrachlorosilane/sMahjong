@@ -511,6 +511,11 @@ struct GameScope {
 /** `rowloop`：进程内逐行 `v4Logits`（**同内容的对照臂**，不是 GPU）。 */
 inline bool engineRowLoop(const std::vector<std::shared_ptr<Slot>> &rows, std::string &err) {
     V4Scratch scr;
+    // ⛔ **这条对照臂显式关掉增量事件 carry**（`policies.hpp` 的生产路径是默认开的）：
+    //   批路径的行序**不是"同一小局连续"**（批 = 屏障时刻的规范序键），缓存只会一直"陈旧退回"
+    //   （每行白付一次 23 KB 窗口拷贝），而 §6.26 的读数就是这条臂量出来的 —— 关掉才能
+    //   "关着开关 = 旧路径逐位不变"那条判据继续成立（数值上开不开都逐位相同，见 §6.27 判据①）。
+    scr.carryEnabled = false;
     for (const auto &s : rows) {
         if (s->net == nullptr) {
             err = "批前向（rowloop）：槽位没有权重（" + keyText(s->key) + "）";

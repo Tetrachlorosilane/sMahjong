@@ -1241,6 +1241,55 @@ int selftest() {
     // （判据与接线见 `batchforward.hpp` 顶部与 docs/TRAINER-CPP.md §6.26）
     trainer::batchfw::selftest(check);
 
+    // 增量事件 GRU carry（默认开）：**不需要权重**的那几条判据 —— 小局键必须带座位/局数、
+    // 缺 `round` 必须不缓存（宁可不省，也不能拿上一局的当这一局的）、负向开关只认三个白名单值。
+    {
+        trainer::JVal o1;
+        int seat = -1;
+        std::string key;
+        const bool ok1 = trainer::jsonParse(
+                                 "{\"seat\":2,\"round\":{\"bakaze\":\"E\",\"kyoku\":1,\"honba\":0}}", o1)
+                && trainer::v4CarryHandKeyOf(o1, seat, key);
+        check(("v4 增量 carry：小局键 = `场风-局-本场@座位`（得 " + (ok1 ? key : std::string("解析失败"))
+               + "）").c_str(),
+              ok1 && seat == 2 && key == "E-1-0@2");
+        trainer::JVal o2;
+        int seat2 = -1;
+        std::string key2;
+        const bool ok2 = trainer::jsonParse(
+                                 "{\"seat\":0,\"round\":{\"bakaze\":\"E\",\"kyoku\":1,\"honba\":0}}", o2)
+                && trainer::v4CarryHandKeyOf(o2, seat2, key2);
+        check("v4 增量 carry：键里必须带座位（同一小局、不同座位 ⇒ 不同键）",
+              ok2 && key2 == "E-1-0@0" && key2 != key);
+        trainer::JVal o3;
+        int seat3 = -1;
+        std::string key3;
+        const bool ok3 = trainer::jsonParse(
+                                 "{\"seat\":2,\"round\":{\"bakaze\":\"E\",\"kyoku\":2,\"honba\":0}}", o3)
+                && trainer::v4CarryHandKeyOf(o3, seat3, key3);
+        check(("v4 增量 carry：换小局必须换键（1 局 " + key + " ⇒ 2 局 " + (ok3 ? key3 : "?")
+               + "）").c_str(),
+              ok3 && key3 != key);
+        trainer::JVal o4;
+        int seat4 = -1;
+        std::string key4;
+        const bool parsed4 = trainer::jsonParse("{\"seat\":1}", o4);
+        check("v4 增量 carry：缺 `round` ⇒ **不缓存**（键函数必须返回 false）",
+              parsed4 && !trainer::v4CarryHandKeyOf(o4, seat4, key4));
+        std::string be;
+        const bool bugOk = trainer::v4SetCarryBug("skip1", be) && be.empty()
+                && std::string(trainer::v4CarryBugName()) == "skip1"
+                && trainer::v4SetCarryBug("stale", be) && trainer::v4SetCarryBug("noclear", be)
+                && trainer::v4SetCarryBug("off", be)
+                && std::string(trainer::v4CarryBugName()).empty();
+        std::string be2;
+        const bool bugRejected = !trainer::v4SetCarryBug("nonsense", be2) && !be2.empty();
+        check("v4 增量 carry：`--v4-carry-bug` 只认 skip1/stale/noclear/off，别的必须报错",
+              bugOk && bugRejected);
+        check("v4 增量 carry：**缺省开**（= Java `V4Policy.cacheEnabled` 的缺省）",
+              trainer::v4CarryEnabledDefault());
+    }
+
     std::printf(fails == 0 ? "TRAINER SELFTEST PASS\n" : "TRAINER SELFTEST FAIL（%d）\n", fails);
     return fails == 0 ? 0 : 1;
 }
@@ -2592,6 +2641,39 @@ int cmdTurnOpts(int argc, char **argv) {
 }
 
 int main(int argc, char** argv) {
+    // **全局开关先扫一遍**（每个子命令都认，省得 selfplay / v4net / v4cache 各写一份）：
+    //   `--no-v4-cache`     关掉增量事件 GRU carry（= Java `--no-v4-cache`；留它才能对拍基准路径）
+    //   `--v4-carry-bug M`  负向判据注入（skip1|stale|noclear）—— ⛔ 采集/训练里绝不能给
+    // 被吃掉的参数**不再传下去**（否则各子命令会报"未知参数"）。
+    std::vector<char*> args;
+    args.reserve(static_cast<size_t>(argc));
+    args.push_back(argv[0]);
+    for (int i = 1; i < argc; i++) {
+        const std::string a = argv[i];
+        if (a == "--no-v4-cache") {
+            trainer::v4SetCarryEnabled(false);
+            continue;
+        }
+        if (a == "--v4-carry-bug") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "[trainer] --v4-carry-bug 需要一个模式（skip1|stale|noclear）\n");
+                return 2;
+            }
+            std::string bugErr;
+            if (!trainer::v4SetCarryBug(argv[i + 1], bugErr)) {
+                std::fprintf(stderr, "[trainer] %s\n", bugErr.c_str());
+                return 2;
+            }
+            std::fprintf(stderr, "[trainer] ⚠ 增量 carry 负向注入已打开：--v4-carry-bug %s"
+                                 "（**只许判据用**：这条路径产出的轨迹/读数都不是生产口径）\n",
+                         argv[i + 1]);
+            i++;
+            continue;
+        }
+        args.push_back(argv[i]);
+    }
+    argc = static_cast<int>(args.size());
+    argv = args.data();
     if (argc < 2) {
         std::fprintf(stderr,
                      "用法：trainer <wall|rng|rules|bench|score|settle|action|turnopts|selfplay|features|--selftest> …\n"
@@ -2623,7 +2705,13 @@ int main(int argc, char** argv) {
                      "                                   四张量 + 四个推理头 + `h_evt` + 两条红证（偏置 +1 / 扰动 h0）\n"
                      "                                   + 三条**头表判据**（§6.25：清零 value 必须逐位不变，清零\n"
                      "                                   belief_tenpai / policy_gate 必须变，见汇总行的 d* 字段）\n"
-                     "                                   全部通过 exit 0 并打印一行汇总；任一不过 exit 1\n");
+                     "                                   全部通过 exit 0 并打印一行汇总；任一不过 exit 1\n"
+                     "  v4cache <net.bin> <轨迹|目录> …   **增量事件 GRU carry 的硬判据**（逐位 + 真命中）：\n"
+                     "                 [--workers K] [--limit N] [--h0-rows N]\n"
+                     "                 每条决策行跑「增量 carry」与「整手重放」并**逐位**比七个头 + `h_evt`\n"
+                     "                 （= 判据「增量 == 全量」；`h_evt` 那一格同时是「缓存 carry == 整手重放」），\n"
+                     "                 再按 `--h0-rows` 判「前缀 carry + 窗口 == 整手重放」（0 = 全跑；缺省 2000 行）；\n"
+                     "                 ⛔ 只有「相等」是假绿 ⇒ 命中率 0 判 FAIL（退出码 1）\n");
         return 2;
     }
     const std::string cmd = argv[1];
@@ -2638,6 +2726,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "v4golden") {
         return trainer::v4GoldenCli(argc - 1, argv + 1);
+    }
+    if (cmd == "v4cache") {
+        return trainer::v4CacheCli(argc - 1, argv + 1);
     }
     if (cmd == "selfplay") {
         return trainer::selfplayCli(argc - 1, argv + 1);
