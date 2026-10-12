@@ -16,7 +16,7 @@
 
 **阅读顺序**：① §2 铁律（违反必出 bug）→ ② §3 构建 / §4 验证五层（"编译通过"不算验证）
 → ③ §6 代码约定 → ④ §7 症状表 → 其余（§5 板块地图、§8 文档维护）需要时再翻。
-### 2.3 十五条曾经踩过的坑（同类问题会再犯）
+### 2.3 十六条曾经踩过的坑（同类问题会再犯）
 
 > 这里只有**判据**（"再遇到同类问题，代码该怎么写"）。每条的**报障原文 / 根因推导 / 红证数据**
 > 在 **`NOTES.md` §2.3**（同编号）。**新踩的坑请按同样格式加在这里 + 详情写进 NOTES。**
@@ -222,7 +222,7 @@ node tools\tenhou-log-check.mjs <导出.json> # 牌谱导出校验（按 docs/in
 node tools\doc-refs-check.mjs   # 文档自检：AGENTS 预算 + 章节号完整 + 全仓 §引用可解 + `docs/INDEX.md` 完整性（见 §8）
 node tools\handover-facts.mjs --check   # `docs/HANDOVER.md` §1 的 git 事实（基线 sha 是 HEAD 祖先 / 远端 sha 是头或其祖先 / ⛔ 未推送>0 不许写"已同步"）
 node tools\round-index.mjs --check      # `NOTES.md` §6.5 的轮次索引表覆盖全部轮次小节（⛔ 不重排正文）
-python tools\overlap-orchestrator.py selftest  # 编排器自检 8/8（含 5 条负向；⛔ 不采集/不训练；见 tools/AUTOMATION.md §8）
+python tools\overlap-orchestrator.py selftest  # 编排器自检 8/8（含 5 条负向；⛔ 不采集/不训练；见 tools/AUTOMATION.md §8）（实测 2026-10-12：用工作区外 Python314；venv 限域会拒跑 ≠ 用例坏）
 ```
 
 > ⏱ `e2e-test` 耗时与加速开关见 NOTES §4。
