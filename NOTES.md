@@ -939,7 +939,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 
 ## 6.5 训练接口（机器学习 / 自对弈）
 
-> **轮次索引**（61 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
+> **轮次索引**（66 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
 > ⚠ **编号不单调是历史事实**：第六十七轮物理上在第六十六轮**之前**；**1–4 / 48–54 没有独立小节**
 > （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
 > 编号被 `docs/TRAINING-V4.md` / `docs/HANDOVER.md` / 代码注释大量引用。
@@ -1012,6 +1012,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第七十四轮 | 2026-10-12 | B3b 训练 ‖ 采集的生产比例干净重测 —— 两次省 25.0%/27.8% 同号、捕获率 100%、真凶是内存子系统争用而非核不够，以及 G7 的 `server.jar` 规则**静默失效** |
 | 第七十五轮 | 2026-10-12 | 便宜 ceiling 闸门制度化（BL-03）—— `tools/ceiling-gate.py` 一条命令 ⇒ `verdict.json`（两种零采集口径：逐位复算既有闸门 verdict / 学生席配对）；实测 69.7 s 与 5.3 s、零训练进程；钉住「2+2 零和对开下 ρ 是设计恒等式」与「容忍带 < MDE 不得否决」 |
 | 第七十六轮 | 2026-10-12 | 本会话七条判据入档（探针 fail-closed · 枚举自检 · committed 口径 · 分块物化/`--limit` · 零负载探测双条件 · 零和 ρ 恒等 + ceiling 闸门 · 退出码/计时）+ 第三次压缩 AGENTS §6.5（逐字底稿见 §6.5 附录 C） |
+| 第七十七轮 | 2026-10-12 | 优化器状态续跑（BL-04）—— 冻结集上的多段/少轮长训练 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -5937,6 +5938,41 @@ ws≈+1038 MB 而 **committed 仅 +8.8 MB**（本轮曾把 1.28 GB 误读成 15.
 **指向**：`AGENTS.md` §6.5（判据 ①–⑦）· §2.3-16 · §4 L3 · `tools/overlap-orchestrator.py` ·
 `tools/AUTOMATION.md` **§8**（§7 = `ceiling-gate.py`）· `PREREGISTRATION-TEMPLATE.md` 第 6 条 ·
 本文件 §6.5 附录 C（压缩前 §6.5 的逐字底稿）。
+
+---
+
+**第七十七轮：优化器状态续跑（BL-04）—— 冻结集上的多段/少轮长训练（2026-10-12）**
+
+**做什么**：`pretrain.py` 加三个开关（`--save-optimizer` / `--resume-optimizer <ckpt>` / `--stop-after-steps N`，
+**缺省全关 ⇒ 旧路径逐字节不变**：与 `62c71e2` 的 `pretrain.py` 同参数跑一遭，`model.pt` 与导出的 `net.bin`
+**sha256 逐字节相同**、`metrics.json` 只差 `wall_seconds`（墙钟）、逐 step 日志逐字相同）；`model.pt` 的 `resume` 段
+装：Adam 动量/方差 + `base_lrs` + 全局步数与轮次（含 epoch 内位置/累加器/阶段）+ 四路 RNG + **数据顺序指纹**
+`perm_sha256` + 行为策略标识（`sha256(权重)` + 策略串 + 温度）+ 参数冻结状态 + 验证集早停历史。
+
+**闸门怎么换的**：续跑时 π_new **本来就不等于** π_old ⇒ "初始化 KL≈0" 那把尺子必然红；等价的三把尺子
+（`assert_resume_behaviour`）= 行为策略标识 · 链条起点 `kl0` · 连续性探针 `kl_probe`（存档里现算、续跑重算，
+`|Δ| ≤ 1e-9`）；**老路径那一行逐字节不变**（红证与事故记忆都在）。
+
+**判据（`E:\mahjong-training\compact\ov-A-s00` = 950 场 / 663,176 条；PPO `--lr 1e-3`、2×40 步、温度 0.5、`--kl-early-stop 0`）**：
+① ⭐ **续跑 == 一口气跑**：`net.bin` sha256 **相同**（`1604a29162d22e25…`）、8 行逐 step 日志（阶段切换 + 两轮
+loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界切**（40+40）与 **epoch 中间切**（45+35，此时
+`数据顺序核对：epoch 2 的洗牌指纹 87e1972c53b5dd13… == 存档`）。② 负向：存档里**只清零动量**（权重指纹
+`b545281d…` 与连续性探针 `KL=+1.969309e-01` 都与 segA **逐位相同** ⇒ 唯一自变量就是优化器状态）
+⇒ `net.bin` `3569f65af804e629…` **不同**（epoch 2 `policy 1.046 vs 1.022`、`train 2.7151 vs 2.6914`）。
+③ 闸门牙齿：`--init` 换成外来网 ⇒ `PPO 口径不一致：… KL(π_old‖π_new) = 1.533`、**退出码 1、无 traceback**
+（编排器如实记 `exit=7`，优先级 5>7>6）；续跑时把 `--behaviour` 换成外来网 ⇒
+`⛔ 续跑的行为策略与存档不是同一份 … sha256 167a7002… vs 44a5c2d1…` 同样硬拒。
+
+**内存/墙钟（如实）**：9 次真跑**峰值已提交 1557–1801 MB**（同刻 ws 15.2–16.1 GB = mmap 进来的 compact 页，
+第七十六轮判据 ③ 那个口径）⇒ 14.78 GB 分片下 committed 与数据总量**无关**（现有 `load_split(mmap_mode="r")`
+本来就是 out-of-core，⛔ 没另造第二套分片循环）；`commit_free` 最低 16.67 GB（闸门 8 GB）。
+⚠ **分段不是免费的**：同 80 步，一口气 **358.6 s** vs 40+40 分段 **321.7+331.0 = 652.7 s（1.82×）**
+—— 每段都要重算一次全量 `logp_old`（≈4–5 min 固定开销）。回归：`python selfcheck.py` **886 项 0 失败**
+（+17 条 BL-04 断言：两种切法的逐位相等 / 清零动量必须不同 / 缺段·外来网·外来 `--init`·换日程·早停存档一律拒）。
+
+**指向**：`docs/TRAINING-V4.md` **§17**（开关语义 · checkpoint 字段表 · 硬判据 · 与 PPO 口径闸门的关系 · 两条环境坑）·
+`python/mahjong_ml/v4/pretrain.py`（`RESUME_FORMAT` · `_behaviour_kl` · `assert_resume_behaviour` · `_recorded_args`）·
+`python/selfcheck.py` §BL-04 · `BACKLOG.md` BL-04（§4 里被 BL-07/BL-13/BL-14/BL-24 依赖的那个前置）。
 
 ---
 

@@ -2154,6 +2154,154 @@ except SystemExit as _e:
 # 温度只在一边生效（= `#0.5` 那次的事故）在闸门眼里**也是**"分布不一致"，只是这个夹具量不出它：
 # 夹具的逐候选 logits 差 ~1e-9 ⇒ 换温度只差 ~1e-5（< 1e-2 阈值），所以上一条负证用"直接改 logp_old"。
 # 真数据上的量级：`logp_gap = 3.54`（前 64 行）/ `ρ ≈ e^65`（整份）—— 见上面的实测注释。
+
+# ---- ★ BL-04：优化器状态续跑（**分段 == 一口气** · 缺状态必须不同 · 闸门三把尺子）-------------
+# 这一组钉住 `docs/TRAINING-V4.md` §15 的硬判据（小夹具上只验**机制**；真规模逐位判据在报告里）：
+#   ① 一段跑 N 步 == N₁ 步 + 存档 + 续跑 (N−N₁) 步（权重 sha256 + 逐 step 日志）；
+#   ② **清零动量**（其余逐字节相同）必须给出**不同**的权重（只有"相等"是假绿）；
+#   ③ 续跑的口径闸门：同策略放行、外来 `--behaviour` / 外来 `--init` / 换日程 / 早停存档一律硬拒。
+import contextlib                                                          # noqa: E402
+import io                                                                  # noqa: E402
+
+_rs_labels: list[str] = []
+
+
+def _run_capture(ns) -> tuple:
+    """跑一次 `train()` 并**捕获 stdout**（逐 step 日志就是它的那几行）。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        res = v4_pt.train(ns)
+    return res, buf.getvalue()
+
+
+def _steplog(text: str) -> list:
+    """逐 step 日志：阶段切换 / val 探针 / epoch 汇总 / 早停 —— 只留这些行，
+    把 banner·"续跑："·"checkpoint："这类**每次调用都会有的**行排除掉（它们不是步的读数）。
+    ⚠ `--stop-after-steps` 的收尾行也排除：那是**分段开关自己的控制行**，不是这一步的读数
+    （真规模实验里同一条滤法，并附完整 diff 说明只多了哪些行）。"""
+    keep = ("  -- 进入阶段", "  [val]", "epoch ", "  !!", "        按类型")
+    return [ln for ln in text.splitlines()
+            if ln.startswith(keep) and not ln.startswith("  !! --stop-after-steps")]
+
+
+def _ck(rel: str) -> Path:
+    return paths.DATA_ROOT / "ckpt" / rel / "model.pt"
+
+
+def _wsha(rel: str) -> str:
+    _c = torch.load(_ck(rel), map_location="cpu", weights_only=False)
+    return v4_pt._state_sha256(_c["model"], _c["ssl_head"])
+
+
+# 夹具：`epochs=2 × max_steps=2`（n=4 / batch=2 ⇒ 每 epoch 2 步、共 4 步、三个阶段都走到），
+# `mask_frac>0` ⇒ 掩码生成器（`rng_gen`）真的被消耗 ⇒ "RNG 状态有没有恢复"是可证的。
+_rs_base = dict(_ptbase, data=str(_sp_src / "ds"), objective="ppo", value_target="final",
+                behaviour=str(_net_a), init=str(_net_a), behaviour_temp=1.0, epochs=2,
+                max_steps=2, batch=2, mask_frac=0.3, kl_early_stop=0.0, kl_min_steps=1)
+_res1, _log1 = _run_capture(argparse.Namespace(**{**_rs_base, "label": "v4-rs-oneshot"}))
+_eq_whole = _wsha("v4-rs-oneshot")
+ok(len(_steplog(_log1)) >= 4, "BL-04 夹具：一口气跑产出 ≥4 行逐 step 日志（判据不是空转）",
+   f"{len(_steplog(_log1))} 行")
+
+
+def _rs_ns(label: str, **kw):
+    """续跑那几段用的 Namespace：**不带 `--init`**（权重从存档载 —— 那是 `--init` 缺省时的正规用法；
+    `--init` == 存档那条路径由下面 `_rs_ok` 的负向组覆盖）。"""
+    d = {**_rs_base, "label": label}
+    d.pop("init", None)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+# ① 在 **epoch 中间**切（1 步）+ 续跑到底：权重与逐 step 日志都必须与一口气跑**逐位相同**
+_resA, _logA = _run_capture(argparse.Namespace(**{
+    **_rs_base, "label": "v4-rs-segA", "save_optimizer": True, "stop_after_steps": 1}))
+_resB, _logB = _run_capture(_rs_ns("v4-rs-segB", save_optimizer=True,
+                                   resume_optimizer=_ck("v4-rs-segA")))
+eq("BL-04：分段（epoch 中间切）续跑 == 一口气跑（权重 sha256 逐位相同）",
+   _wsha("v4-rs-segB"), _eq_whole)
+eq("BL-04：分段续跑的**逐 step 日志**与一口气跑逐字相同（A 段 + B 段拼接）",
+   _steplog(_logA) + _steplog(_logB), _steplog(_log1))
+ok("数据顺序核对" in _logB and "PPO 续跑口径" in _logB,
+   "BL-04：续跑真的核对了**数据顺序指纹**并走了续跑口径闸门（日志里有那两行）")
+eq("BL-04：A 段的 stop_reason 记的是 `--stop-after-steps`（不是早停）",
+   str(_resA["stop_reason"]).find("--stop-after-steps") >= 0, True)
+ok(_resB.get("resumed_from") is not None and _resB["resume_entry_gstep"] == 1,
+   "BL-04：续跑那一段的 metrics 记下 `resumed_from` 与入口 gstep", )
+# ①b 在 **epoch 边界**切（2 步）：走的是另一条分支（start_skip=0 ⇒ 新一轮的累加器与阶段复位）
+_resA2, _logA2 = _run_capture(argparse.Namespace(**{
+    **_rs_base, "label": "v4-rs-segA2", "save_optimizer": True, "stop_after_steps": 2}))
+_resB2, _logB2 = _run_capture(_rs_ns("v4-rs-segB2", save_optimizer=True,
+                                     resume_optimizer=_ck("v4-rs-segA2")))
+eq("BL-04：分段（epoch 边界切）续跑 == 一口气跑（权重 sha256 逐位相同）",
+   _wsha("v4-rs-segB2"), _eq_whole)
+eq("BL-04：边界切的逐 step 日志也逐字相同", _steplog(_logA2) + _steplog(_logB2),
+   _steplog(_log1))
+# ② 负向：**清零动量**（其余逐字节相同）⇒ 必须与上面**不同**（只有"相等"是假绿）
+_cz = torch.load(_ck("v4-rs-segA"), map_location="cpu", weights_only=False)
+for _pid, _s in _cz["resume"]["optimizer"]["state"].items():
+    for _k in ("exp_avg", "exp_avg_sq"):
+        if _k in _s:
+            _s[_k] = torch.zeros_like(_s[_k])
+    if "step" in _s and torch.is_tensor(_s["step"]):
+        _s["step"] = torch.zeros_like(_s["step"])
+_zd = paths.DATA_ROOT / "ckpt" / "v4-rs-zero"
+_zd.mkdir(parents=True, exist_ok=True)
+torch.save(_cz, _zd / "model.pt")
+_resZ, _logZ = _run_capture(_rs_ns("v4-rs-segZ", save_optimizer=True,
+                                   resume_optimizer=_zd / "model.pt"))
+ok(_wsha("v4-rs-segZ") != _eq_whole,
+   "BL-04 负向：**清零动量**的存档 ⇒ 权重与一口气跑**不同**（防「只有相等是假绿」）",
+   f"zero={_wsha('v4-rs-segZ')[:12]}… vs whole={_eq_whole[:12]}…")
+# ③ 续跑口径闸门：同策略放行（上面 B 段已过）· 三处**外来**/不一致一律硬拒
+ok("resume" not in torch.load(_ck("v4-rs-oneshot"), map_location="cpu",
+                              weights_only=False),
+   "BL-04：`--save-optimizer` 关着 ⇒ checkpoint 里**没有** `resume` 段")
+try:
+    v4_pt.train(argparse.Namespace(**{**_rs_base, "label": "v4-rs-nokey",
+                                      "resume_optimizer": _ck("v4-rs-oneshot")}))
+    ok(False, "BL-04：从**没有续跑段**的 checkpoint 续跑必须报错")
+except SystemExit as _e:
+    ok("没有优化器状态" in str(_e), "BL-04：缺续跑段被硬拒 ✓（fail-closed）", str(_e)[:60])
+# ⚠ 下面四条都**必须带上 `_ck("v4-rs-segA")` 当 `--init`**：否则先炸在"权重不是同一份"上，
+#   测不到真正想测的那条闸门（同族假绿 = 判据打偏）。
+_rs_ok = {"init": str(_ck("v4-rs-segA")), "resume_optimizer": _ck("v4-rs-segA")}
+_rs_fake = scratch("v4-rs-fake") / "net.bin"
+v4_export.save_net(v4_model.build(seed=77).state_dict(),
+                   dict(v4_model.build(seed=1).dims()), _rs_fake)
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rs_base, **_rs_ok, "label": "v4-rs-badbeh", "behaviour": str(_rs_fake)}))
+    ok(False, "BL-04：续跑时换一份 `--behaviour` 必须报错")
+except SystemExit as _e:
+    ok("不是同一份" in str(_e), "BL-04：续跑换行为策略被硬拒 ✓", str(_e)[:70])
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rs_base, **_rs_ok, "label": "v4-rs-badinit", "init": str(_rs_fake)}))
+    ok(False, "BL-04：`--init` 与续跑存档不是同一份权重时必须报错")
+except SystemExit as _e:
+    ok("不是同一份权重" in str(_e), "BL-04：`--init` ≠ 续跑存档被硬拒 ✓", str(_e)[:70])
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rs_base, **_rs_ok, "label": "v4-rs-badrecipe", "lr": 3e-4}))
+    ok(False, "BL-04：续跑换了日程（`--lr`）必须报错（否则接着跑的不是同一条轨迹）")
+except SystemExit as _e:
+    ok("口径/日程" in str(_e), "BL-04：续跑换日程被硬拒 ✓", str(_e)[:70])
+try:
+    v4_pt.train(argparse.Namespace(**{
+        **_rs_base, **_rs_ok, "label": "v4-rs-badstop", "stop_after_steps": 1}))
+    ok(False, "BL-04：`--stop-after-steps` ≤ 存档 gstep 必须报错（否则是静默的空跑）")
+except SystemExit as _e:
+    ok("一步都不跑" in str(_e), "BL-04：续跑点已过被硬拒 ✓", str(_e)[:60])
+# 台账的"缺省关 ⇒ 一个键都不多"：`_recorded_args` 是 model.pt / metrics.json 逐字节不变的前提
+_ra0 = v4_pt._recorded_args(argparse.Namespace(save_optimizer=False, resume_optimizer=None,
+                                               stop_after_steps=0, foo=1))
+_ra1 = v4_pt._recorded_args(argparse.Namespace(save_optimizer=True, resume_optimizer="x",
+                                               stop_after_steps=3, foo=1))
+eq("BL-04：`_recorded_args` 缺省时**不含**新开关（旧路径台账逐字节不变）", sorted(_ra0), ["foo"])
+eq("BL-04：`_recorded_args` 非缺省时**带上**新开关", sorted(_ra1),
+   ["foo", "resume_optimizer", "save_optimizer", "stop_after_steps"])
+
 # 发散就停：把 `compute_loss` 临时换成"返回 NaN"，train() 必须报错、不落盘废 checkpoint
 _orig_cl = v4_pt.compute_loss
 

@@ -2536,3 +2536,101 @@ $env:PYTHONPATH='C:\Users\HP\source\games\mahjong\python;C:\Users\HP\source\game
     --dir S:\mahjong-training\raw\stage4 --out S:\mahjong-training\reports\stage4-chooser.json
 & S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.chooser_probe --self-check   # 47 项
 ```
+
+---
+
+## 17. 优化器状态续跑（BL-04）：冻结集上的**多段 / 少轮长训练**（2026-10-12）
+
+`BACKLOG.md` BL-04（P1）——§4 依赖图里被 **BL-07 / BL-13 / BL-14 / BL-24 四条同时依赖**的唯一前置。
+判据的**实测原始输出**在 `NOTES.md` §6.5 第七十七轮；这里写语义、字段表与"再遇到同类问题代码该怎么写"。
+
+### 17.1 它解决的那个死结
+
+`pretrain.py` 的 **PPO 口径闸门**（`assert_behaviour_consistency`：初始化时 `KL(π_old‖π_new)` 必须 ≈0）
+守的是"`logp_old` 必须来自**数据生成策略**"。于是**跨片/跨轮链式续训必然撞墙**：第 N₁ 步的存档
+**已经不再是**数据生成策略 ⇒ 拿它当 `--init` 会被闸门当场 `raise SystemExit`（退出码 1、**无 traceback**；
+红证见 `NOTES.md` §6.5 第六十八轮）。⇒ "冻结集上的多段/少轮长训练"要么一次跑完（中途崩了全丢），
+要么改口径（⛔ 不许用于产出结论）。这一节给的是**第三条路**：把**除权重之外**的状态也存下来。
+
+### 17.2 三个新开关（**缺省全关 ⇒ 旧路径逐字节不变**）
+
+| 开关 | 语义 | 缺省 |
+| --- | --- | --- |
+| `--save-optimizer` | 把**续跑状态**写进这一次的 checkpoint（`model.pt` 的 `resume` 段） | 关 |
+| `--resume-optimizer <ckpt>` | 从这份存档的续跑状态**接着跑**；不给 `--init` 时连权重也从它载 | `None` |
+| `--stop-after-steps N` | 跑到**全局第 N 步**就正常收尾并落盘（分段训练用）；命中在 epoch 中间时**不产出**半个 epoch 的读数行 | 0（不限） |
+
+"缺省全关 ⇒ 旧路径逐字节不变"的实现：`_recorded_args()` 在三个开关都取缺省值时**一个键都不写进台账**
+（`model.pt` 的 `args` 与 `metrics.json` 的 `args` 都来自它）——与仓库里"只在非缺省时才进命令行"
+同一个做法，只是这里的落点是台账。**判据** = 与当前 HEAD 同参数跑一遭，`model.pt` / `metrics.json` /
+导出的 `net.bin` **逐字节相同**（sha256）。
+
+### 17.3 checkpoint 字段表（`model.pt` → `resume` 段）
+
+| 字段 | 内容 | 少了它会发生什么 |
+| --- | --- | --- |
+| `optimizer` | Adam 的 `state_dict()`（`exp_avg` 动量 / `exp_avg_sq` 方差 / 每参数 `step`） | 从零动量重新加速 = **另一条轨迹**（负向判据 ② 就是它） |
+| `base_lrs` | 优化器**创建时**的基准 lr（主干 / 头两组） | `load_state_dict` 会把 `param_groups.lr` 覆盖成"存档那一刻的**调度值**" ⇒ 阶段 c 的余弦会重开一段（静默，只体现在权重上） |
+| `weights_sha256` | `sha256(参数名排序 → 逐张量原始字节)`（模型 + SSL 头） | 分不清"拿 A 的权重套 B 的优化器状态" |
+| `counters` | `gstep` · `epoch` · `step_in_epoch` · `steps`/`total_steps` · `n`/`batch`/`seed` · `cur_stage` · `stage_steps` · **epoch 内累加器**（`run`/`seen`/`run_parts`）· **数据顺序指纹** `perm_sha256` · 验证集早停的 `best_val_ce`/`no_improve`/`ce_log` | 阶段划分（`_stage_of(gstep, total_steps)`）、阶段 c 的余弦 lr、KL 早停的 `min_steps`、`--val-every` 的判据全都读这些数 |
+| `rng` | 四路 RNG：`torch` 全局 / `numpy` 全局 / python `random` / **掩码专用生成器** `rng_gen` | `--mask-frac > 0` 时掩码序列错位（**静默**：loss 照降） |
+| `requires_grad` | 逐参数冻结状态（`--only-heads` / 阶段 b 的 `trunk`） | 冻/解冻的段位错位 |
+| `behaviour` | **行为策略标识**：`sha256(权重文件)` + 策略串（数据集 meta 的 `student`）+ 温度 + **链条起点 `kl0`** + **连续性探针 `kl_probe`** | 续跑时判不出"`--behaviour` 还是不是数据生成策略" |
+| `recipe` | 口径/日程指纹（`data`/`n`/`steps`/`total_steps`/`epochs`/`batch`/`seed`/`lr`/`stage_*`/`mask_frac`/`grad_clip`/KL 阈值/`objective`/`value_target`/`advantage`/`ref_beta`/`il_weight`/`val_*`/`blocks_fingerprint`…） | 悄悄换超参接着跑 —— 得到的不是同一条轨迹 |
+| `stop_reason` | 这一段为什么结束 | 分辨"正常收尾"与"**早停**收尾"（后者不许续，见 §17.5） |
+| `history` / `chain` | 已跑完的 epoch 行 + **链条起点**的行为策略基线（`il_init*`） | 分段跑的台账拼不成链条（"开训前那一份网"会变成"这一段开跑前"） |
+
+### 17.4 判据：**续跑 == 一口气跑（逐位）**
+
+| # | 判据 | 怎么证伪 |
+| --- | --- | --- |
+| ① ⭐ | 同数据/同 seed/同超参：**一段跑 N 步** ≡ **N₁ 步 + 存档 + 重启续跑 (N−N₁) 步** —— 导出权重 `sha256(net.bin)` 相同 · 逐 step 日志（阶段切换 / epoch 的 loss·KL·`\|g\|`·top1）逐字相同 · 数据顺序指纹相同 | 任一处不同即红 |
+| ② | **故意清零动量**（其余逐字节相同）⇒ 必须与 ① **不同** | ⚠ **只有"相等"是假绿** —— 与 v4 缓存判据同源（`AGENTS.md` §6.5） |
+| ③ | 续跑**同一策略** ⇒ 不触发口径闸门；真不一致（外来 `--init` / 外来 `--behaviour` / 换日程 / 早停存档）⇒ **仍然** `SystemExit`（退出码 1、无 traceback） | 静默放过即红 |
+| ④ | 开关**关着**时与 HEAD 产物**逐字节相同** | 哈希不等即红 |
+| ⑤ | 峰值**已提交**内存由片大小决定、与总数据量无关（只认 committed，ws 另报） | 见 §17.7 的口径 |
+
+### 17.5 与 PPO 口径闸门的关系（**牙齿一颗不少**）
+
+- **不给 `--resume-optimizer`（= 老路径）**：那一行**逐字节不变** —— 数值闸门照旧在初始化时算一次
+  `KL(π_old‖π_new)`，超过 `1e-2` 当场 `SystemExit`（消息里带 KL 数字）。**红证与事故记忆都还在**。
+- **给了 `--resume-optimizer`**：π_new **本来就不等于** π_old（已经走过 N₁ 步）⇒ "初始化时 KL≈0"
+  这把尺子在这里**必然红**，而它想守的那件事仍然必须守住。换成**等价的三把尺子**（`assert_resume_behaviour`，
+  缺一即 `SystemExit`）：
+  1. **行为策略标识**：`sha256(权重文件)` + 温度 + 策略串必须与存档逐项相同
+     （换一份 `--behaviour` ⇒ `logp_old` 就是另一个分布，静默把 ρ 带偏）；
+  2. **链条起点口径**：存档记的 `kl0`（起跑那一次闸门的读数）必须有限且 ≤`1e-2`
+     —— ⛔ 不许拿一条"起点就不干净"的链继续跑；
+  3. **连续性**：同一条**固定探针行**（`np.arange(min(64, n))`）上的 KL 必须与存档记录的 `kl_probe`
+     一致（`|Δ| ≤ 1e-9`）—— 权重 / 行为策略 / 温度任一处不同都会当场露出来。
+- **fail-closed**（⛔ 不静默、不降级）：存档里没有 `resume` 段 · 格式号不符 · `recipe` 任一项不一致 ·
+  `--init` 与存档不是同一份权重 · 存档的 `stop_reason` 是**早停**（KL 早停那一支在 `gstep += 1` **之前**
+  就 break，而 `opt.step()` 已经执行过 ⇒ 续跑会把同一步跑第二遍）· `--stop-after-steps` ≤ 存档 `gstep` ·
+  `--epochs` 已满 —— 全部当场 `SystemExit`（退出码 1、无 traceback）。
+
+### 17.6 用法（分段链）
+
+```powershell
+# 第 1 段：跑到全局第 40 步就收尾，并把续跑状态落进 ckpt
+python -m mahjong_ml.v4.pretrain --data <紧凑集> --label bl04-segA --objective ppo `
+    --behaviour <采集用的 net.bin> --behaviour-temp 0.5 --init <同一份 net.bin> `
+    --epochs 2 --max-steps 40 --save-optimizer --stop-after-steps 40
+# 第 2 段：接着跑剩下的（`--init` 给第 1 段的 ckpt；`--behaviour` **仍然是**数据生成策略）
+python -m mahjong_ml.v4.pretrain --data <紧凑集> --label bl04-segB --objective ppo `
+    --behaviour <采集用的 net.bin> --behaviour-temp 0.5 `
+    --init <DATA_ROOT>\ckpt\bl04-segA --resume-optimizer <DATA_ROOT>\ckpt\bl04-segA `
+    --epochs 2 --max-steps 40 --save-optimizer
+```
+
+### 17.7 本会话实测的两条环境事实（⛔ 不是本功能的问题，别误诊）
+
+1. **工作区内的解释器拿的是受限令牌**：`python\.venv\Scripts\python.exe` 写 `S:\` / `E:\` 都是
+   `PermissionError` ⇒ `paths.ensure_root()` 抛 `DataRootError`（消息里已经写明）。要么用不受限的解释器，
+   要么把数据根放到工作区内（`MAHJONG_DATA_ROOT=<工作区内的目录>`，`selfcheck.py` 的注释也是这么说的）。
+   ⚠ 工作区**外**的 `Python314` 可写但**没有 torch** ⇒ 两者不可互相替代。
+2. **`python\.venv\Scripts\python.exe` 是 shim**：它把真解释器（`.uv-python\…\python.exe`）作为
+   **子进程**再起（实测 shim pid 37232 / 真身 pid 41208）。凡"起进程 + 按 pid 采样"的工具
+   （`tools/overlap-orchestrator.py` 的内存采样器）都会量到 **shim** ⇒ 报 `committed 1.2 MB`
+   而真身当时 `ws 8.96 GB` = **内存读数假绿**。⇒ 采集/训练要么直接起真解释器
+   （`.uv-python\…\python.exe` + `PYTHONPATH=<venv 的 site-packages>`，实测能 import
+   `torch 2.11.0+cu128`），要么在报告里明确"这一段的 `peak_committed` 量到的是 shim"。

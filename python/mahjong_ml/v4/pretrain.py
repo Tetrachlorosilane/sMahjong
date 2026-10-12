@@ -30,8 +30,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import random
 import time
 from pathlib import Path
 
@@ -666,6 +668,30 @@ def _policy_logits(out: dict[str, torch.Tensor], temp: float) -> torch.Tensor:
     return out["policy"] if float(temp) == 1.0 else out["policy"] / float(temp)
 
 
+def _behaviour_kl(model: M.V4Model, data: dict, idx: np.ndarray,
+                  logp_old: torch.Tensor, temp: float, device: str) -> float:
+    """`KL(π_old‖π_new)` 的**逐行均值**（在给定行子集上；`π_new` 用 `softmax(logits/T)`）。
+
+    ⚠ 这是**闸门的量本身**，单独抽出来是为了让**续跑路径**能拿同一条探针行做"连续性"判据
+    （见 `assert_resume_behaviour` 的第 ③ 条）—— 两份实现必然漂移，所以只留这一个。
+
+    ⚠ 模式：探针必须在**同一个模式**下算 —— 存档那一刻模型可能刚被 `evaluate()` 置 eval，
+    而续跑时它还是 train。模型现在**没有** dropout/BN（`model.py` 开头的硬要求：前向必须确定性），
+    所以这一步对数值**零影响**；它只是把"模式"从判据里排除掉（将来真加了 dropout 也不会假红）。
+    """
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            b0 = _batch(data, idx, device)
+            o0 = model(b0["tile"], b0["evt"], b0["ctx"], b0["cand"], mask=b0["mask"], h=b0.get("h"))
+            lp_new = torch.log_softmax(_policy_logits(o0, temp), dim=-1).gather(
+                1, b0["label"][:, None]).squeeze(1)
+            return float((logp_old[idx].to(device) - lp_new).mean())
+    finally:
+        model.train(was_training)
+
+
 def assert_behaviour_consistency(model: M.V4Model, data: dict, idx: np.ndarray,
                                  logp_old: torch.Tensor, temp: float,
                                  device: str) -> float:
@@ -681,12 +707,7 @@ def assert_behaviour_consistency(model: M.V4Model, data: dict, idx: np.ndarray,
     或温度只用在了一侧，都会在这里当场炸。它**查不出**"温度填成了另一个值但两边一致" ——
     那条由 `train()` 里"`--behaviour-temp` 必须与 meta 的 `#T` 一致"那条闸门管。
     """
-    with torch.no_grad():
-        b0 = _batch(data, idx, device)
-        o0 = model(b0["tile"], b0["evt"], b0["ctx"], b0["cand"], mask=b0["mask"], h=b0.get("h"))
-        lp_new = torch.log_softmax(_policy_logits(o0, temp), dim=-1).gather(
-            1, b0["label"][:, None]).squeeze(1)
-        kl = float((logp_old[idx].to(device) - lp_new).mean())
+    kl = _behaviour_kl(model, data, idx, logp_old, temp, device)
     if not math.isfinite(kl) or abs(kl) > 1e-2:
         raise SystemExit(
             f"PPO 口径不一致：初始化时 KL(π_old‖π_new) = {kl:.4g}（应为 ≈0）—— 检查"
@@ -1108,6 +1129,202 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict) -> None:
                 **extra}, path)
 
 
+# ================================================================ ★ BL-04：优化器状态续跑
+# 为什么需要它（2026-10-12）：`pretrain` 的 **PPO 口径闸门**要求"初始化时 KL(π_old‖π_new) ≈ 0"，
+# 它守的是"`logp_old` 必须来自数据生成策略"这件事。于是**跨片/跨轮链式续训必然撞墙**：
+# 第 N₁ 步的存档已经**不是**数据生成策略了，拿它当 `--init` 会被闸门当场 `SystemExit`
+# （退出码 1、无 traceback）。⇒ 要按预注册跑"冻结集上的多段/少轮长训练"，就得能把
+# **除权重之外**的那部分状态也存下来并接着走：
+#   · Adam 的动量/方差（缺了它 = 从零动量重新加速，**是另一条轨迹**）；
+#   · 全局步数与轮次（阶段划分 / 余弦降 lr / KL 早停的 `min_steps` 都看它）；
+#   · 四路 RNG（torch / numpy / python / 掩码生成器）+ **数据顺序指纹**；
+#   · 段的边界状态（当前阶段、epoch 内累加器、验证集早停的历史）。
+# 判据（`docs/TRAINING-V4.md` §17）：**续跑 == 一口气跑（逐位）**；而"故意不加载优化器状态"
+# **必须不同**（否则就是假绿）。
+#
+#: 续跑存档的格式号 —— 改了字段**语义**就 +1 ⇒ 老存档**当场被拒**（⛔ 不静默按新语义读）
+RESUME_FORMAT = 1
+
+#: 续跑状态在 `model.pt` 里的键名（与 `model` / `ssl_head` / `config` 同级）
+RESUME_KEY = "resume"
+
+
+def _sha256_file(p) -> str:
+    """文件指纹（**行为策略标识**用：`sha256(net.bin)`）—— 逐字节判"是不是同一份网"。"""
+    h = hashlib.sha256()
+    with Path(p).open("rb") as fh:
+        for blk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def _state_sha256(*sds) -> str:
+    """权重指纹：按**参数名排序**逐张量取原始字节（与 `torch.save` 的容器格式无关）。"""
+    h = hashlib.sha256()
+    for sd in sds:
+        for name in sorted(sd):
+            t = sd[name].detach().to("cpu")
+            h.update(name.encode("utf-8"))
+            h.update(np.ascontiguousarray(t.numpy()).tobytes())
+    return h.hexdigest()
+
+
+def _perm_sha256(perm) -> str:
+    """**数据顺序**指纹（某个 epoch 的洗牌结果）——续跑时逐字节核对，⛔ 不靠"种子一样所以一样"。"""
+    return hashlib.sha256(np.ascontiguousarray(perm, dtype=np.int64).tobytes()).hexdigest()
+
+
+def _rng_fingerprint(mask_gen: torch.Generator) -> dict:
+    """四路 RNG 状态：torch 全局 / numpy 全局 / python `random` / 掩码用的**独立生成器**。"""
+    return {"torch": torch.get_rng_state(), "numpy": np.random.get_state(),
+            "python": random.getstate(), "mask_gen": mask_gen.get_state()}
+
+
+def _restore_rng(state: dict, mask_gen: torch.Generator) -> None:
+    torch.set_rng_state(state["torch"])
+    np.random.set_state(state["numpy"])
+    random.setstate(state["python"])
+    mask_gen.set_state(state["mask_gen"])
+
+
+def _behaviour_record(spec_str: str, meta: dict) -> dict:
+    """**行为策略标识**：`sha256(权重文件)` + 策略串（数据集 meta 的 `student`）+ 温度占位。
+
+    ⚠ 为什么不能只记路径：路径可以指向**被换过的**文件，而"是不是同一份网"必须由**字节**判
+    （同族假绿 = "两文件都缺 ⇒ 哈希都空 ⇒ 判成相同"）。
+    """
+    p = resolve_weight_path(spec_str)
+    return {"spec": str(spec_str), "sha256": _sha256_file(p),
+            "policy": str((meta or {}).get("student") or ""),
+            "temp": None, "kl0": None, "kl_probe": None, "probe_n": None}
+
+
+def _resume_recipe(args, *, resolved_data: str, n: int, steps: int, total_steps: int) -> dict:
+    """**口径/日程指纹**：续跑时逐项核对 —— 只要有一项不同，接着跑出来的就不是同一条轨迹。"""
+    g = getattr
+    return {
+        "data": resolved_data, "n": int(n), "steps": int(steps), "total_steps": int(total_steps),
+        "epochs": int(g(args, "epochs", 0)), "batch": int(g(args, "batch", 0)),
+        "seed": int(g(args, "seed", 0)),
+        "lr": float(g(args, "lr", 0.0)), "head_lr_mult": float(g(args, "head_lr_mult", 3.0)),
+        "stage_a": float(g(args, "stage_a", 0.25)), "stage_b": float(g(args, "stage_b", 0.35)),
+        "stage_c_lr_mult": float(g(args, "stage_c_lr_mult", 1.0)),
+        "mask_frac": float(g(args, "mask_frac", 0.0)),
+        "ssl_weight": float(g(args, "ssl_weight", 0.0)),
+        "grad_clip": float(g(args, "grad_clip", 0.5)),
+        "kl_early_stop": float(g(args, "kl_early_stop", 0.03)),
+        "kl_min_steps": int(g(args, "kl_min_steps", 100)),
+        "objective": str(g(args, "objective", "bc") or "bc"),
+        "value_target": str(g(args, "value_target", "final") or "final"),
+        "advantage": str(g(args, "advantage", "auto") or "auto"),
+        "only_heads": str(g(args, "only_heads", "") or ""),
+        "drop_heads": str(g(args, "drop_heads", "") or ""),
+        "freeze_trunk": bool(g(args, "freeze_trunk", False)),
+        "ablate_blocks": str(g(args, "ablate_blocks", "") or ""),
+        "ref_beta": float(g(args, "ref_beta", 0.0)), "il_weight": float(g(args, "il_weight", 0.0)),
+        "rank_weight": float(g(args, "rank_weight", 0.0)),
+        "rwr_beta": float(g(args, "rwr_beta", 0.0)),
+        "val_every": int(g(args, "val_every", 0)), "val_patience": int(g(args, "val_patience", 3)),
+        "val_metric": str(g(args, "val_metric", "policy") or "policy"),
+        "gae_lambda": float(g(args, "gae_lambda", 0.9)), "gae_gamma": float(g(args, "gae_gamma", 1.0)),
+        "baseline_fit": str(g(args, "baseline_fit", "scale") or "scale"),
+        "feature_version": int(spec.FEATURE_VERSION_V4), "blocks_fingerprint": spec.fingerprint(),
+    }
+
+
+def _recorded_args(args) -> dict:
+    """台账里的 `args`：**新开关在缺省值时一个键都不进**。
+
+    这是"缺省关 ⇒ 旧路径**逐字节**不变"的实现方式（`model.pt` 与 `metrics.json` 都含这份 `args`）：
+    与仓库里"只在非缺省时才进命令行"同一个做法，只是这里的落点是台账。
+    """
+    d = dict(vars(args))
+    for k, default in (("save_optimizer", False), ("resume_optimizer", None),
+                       ("stop_after_steps", 0)):
+        if d.get(k) == default:
+            d.pop(k, None)
+    # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
+    #   台账要落 `metrics.json`（JSON）⇒ 这里统一转 str（否则会在最后写文件那一步才 TypeError）。
+    return {k: (str(v) if isinstance(v, Path) else v) for k, v in d.items()}
+
+
+def load_resume_state(spec_str: str) -> dict:
+    """读**续跑存档**（`model.pt` 里的 `resume` 段）—— 缺段 / 格式号不对**当场报错**（fail-closed）。
+
+    返回整份 checkpoint（顶层 `model` / `ssl_head` 也在里面：没给 `--init` 时就用它载权重）。
+    """
+    p = resolve_weight_path(spec_str)
+    ck = torch.load(p, map_location="cpu", weights_only=False)
+    if not isinstance(ck, dict) or RESUME_KEY not in ck:
+        raise SystemExit(
+            f"这份 checkpoint 里没有优化器状态（`{RESUME_KEY}` 段）：{p} —— 落盘时要用 "
+            f"`--save-optimizer` 才写它。⛔ 缺了还「接着跑」只会得到一条**从零动量开始**的"
+            f"另一条轨迹，正是这个开关要防的假绿")
+    res = ck[RESUME_KEY]
+    fmt = int(res.get("format", 0))
+    if fmt != RESUME_FORMAT:
+        raise SystemExit(f"续跑存档格式号 {fmt} ≠ 本版 {RESUME_FORMAT}（{p}）—— "
+                         f"字段语义变过就**重新起一段**，⛔ 不按新语义读老存档")
+    return {"path": str(p), "model": ck.get("model"), "ssl_head": ck.get("ssl_head"),
+            "resume": res}
+
+
+def assert_resume_behaviour(resume: dict, beh_spec: str, temp: float, model: M.V4Model,
+                            data: dict, meta: dict, logp_old: torch.Tensor, idx,
+                            device: str) -> float | None:
+    """**续跑口径闸门**：替代"初始化时 KL(π_old‖π_new) ≈ 0"那把在续跑路径上**必然红**的尺子。
+
+    为什么需要换一把尺子：续跑时 π_new **本来就不等于** π_old（已经走过 N₁ 步）。但闸门想守的
+    那件事仍然成立且**必须被守住** —— "`logp_old` 与数据生成策略是同一个分布"。等价的三把尺子
+    （缺一即 `SystemExit`，退出码 1、无 traceback）：
+
+      ① **行为策略标识**：`sha256(权重文件)` + 温度 + 策略串必须与存档**逐项相同**
+         （`--behaviour` 换一份网 ⇒ 当场拒；那是换了一个分布，静默把 ρ 带偏）；
+      ② **链条起点口径**：存档记的 `kl0`（起跑那一次闸门的读数）必须有限且 ≤1e-2
+         —— ⛔ 不许拿一条"起点就不干净"的链继续跑；
+      ③ **连续性**：同一条**固定探针行**上的 KL 必须与存档记录的 `kl_probe` 一致
+         —— 权重 / 行为策略 / 温度任一处不同都会当场露出来。
+    """
+    p = resume["path"]
+    rec = resume["resume"].get("behaviour")
+    if rec is None:
+        raise SystemExit(
+            f"⛔ 续跑需要**行为策略标识**，但这份存档没有记（{p}）—— 证明不了 `--behaviour` 与"
+            f"数据生成策略是同一份 ⇒ 按 fail-closed 拒跑（⛔ 不许把「没记」当成「对上了」）")
+    got_sha = _sha256_file(resolve_weight_path(beh_spec))
+    diffs: list[str] = []
+    if got_sha != str(rec.get("sha256")):
+        diffs.append(f"权重 sha256 {str(rec.get('sha256'))[:16]}… vs {got_sha[:16]}…")
+    if rec.get("temp") is not None and abs(float(rec["temp"]) - float(temp)) > 1e-9:
+        diffs.append(f"温度 {rec['temp']:g} vs {temp:g}")
+    got_pol = str((meta or {}).get("student") or "")
+    if str(rec.get("policy") or "") and str(rec["policy"]) != got_pol:
+        diffs.append(f"策略串 {rec['policy']!r} vs {got_pol!r}")
+    if diffs:
+        raise SystemExit(
+            f"⛔ 续跑的行为策略与存档**不是同一份**（{p}）：" + "；".join(diffs)
+            + " —— `logp_old` 必须来自**数据生成策略**，换一份网就是换一个分布")
+    kl0 = rec.get("kl0")
+    if kl0 is None or not math.isfinite(float(kl0)) or abs(float(kl0)) > 1e-2:
+        raise SystemExit(
+            f"⛔ 这条链的**起点口径**不干净：存档记的 KL(π_old‖π_new)={kl0}（应为 ≈0，阈值 1e-2）"
+            f"—— 起点那一轮 `--init` 与 `--behaviour` 就不是同一份，续跑只会放大它")
+    kl_now = _behaviour_kl(model, data, idx, logp_old, temp, device)
+    print(f"PPO 续跑口径：行为策略 {beh_spec}（sha256 {got_sha[:16]}… == 存档）· 温度 {temp:g}"
+          f" · 链条起点 KL={float(kl0):+.2e}（≈0 = 起点那一轮口径对上了）")
+    want = rec.get("kl_probe")
+    if want is None:
+        print(f"PPO 续跑口径：连续性探针 KL={kl_now:+.6e}（存档没记探针 ⇒ 只查标识与起点）")
+        return None
+    print(f"PPO 续跑口径：连续性探针（固定 {int(idx.size)} 行）KL={kl_now:+.6e}"
+          f" vs 存档 {float(want):+.6e}")
+    if abs(kl_now - float(want)) > 1e-9:
+        raise SystemExit(
+            f"⛔ 续跑的**连续性探针**与存档不一致：本次 {kl_now:+.9e} vs 存档 {float(want):+.9e}"
+            f"（同一份权重 + 同一份行为策略 + 同一温度在同一条探针行上必须给出**同一个数**）")
+    return kl_now
+
+
 def train(args) -> dict:
     paths.ensure_root()
     data_dir = Path(args.data)
@@ -1161,6 +1378,38 @@ def train(args) -> dict:
         src = _load_behaviour(init_spec, device)
         model.load_state_dict(src.state_dict(), strict=True)
         print(f"初始化：从 {init_spec} 载入权重")
+    # ---- ★ BL-04：**优化器状态续跑**（`--resume-optimizer`；不给 ⇒ 这一段一行都不走）----------
+    # ⚠ 顺序：SSL 头**只有存档里有**（`--init` 不管它）⇒ 无条件先从存档载，再核对"权重是不是
+    #   存档那一刻的那一份"（JSON 哈希对不上就是「拿 A 的权重套 B 的优化器状态」= 无意义轨迹）。
+    resume_spec = getattr(args, "resume_optimizer", None)
+    resume: dict | None = None
+    entry_gstep = 0
+    if resume_spec:
+        resume = load_resume_state(resume_spec)
+        res0 = resume["resume"]
+        ssl_head.load_state_dict(resume["ssl_head"], strict=True)
+        if init_spec:
+            pass                                  # 权重已由 `--init` 载入，下面核对指纹
+        else:
+            model.load_state_dict(resume["model"], strict=True)
+            print(f"续跑：权重 + SSL 头从 {resume['path']} 载入（`--init` 没给 ⇒ 就用存档那一份）")
+        got_w = _state_sha256(model.state_dict(), ssl_head.state_dict())
+        if got_w != str(res0.get("weights_sha256")):
+            raise SystemExit(
+                f"`--init` 与 `--resume-optimizer` **不是同一份权重**"
+                f"（{init_spec or '（未给）'} vs {resume['path']}）—— 续跑必须从**存档那一刻**的权重"
+                f"接着走；⛔ 换个起点再套上别人的优化器状态只会得到一条无意义的轨迹")
+        # 参数冻结状态（`--only-heads` / 阶段 b 的 `requires_grad`）必须原样恢复
+        rg = dict(res0.get("requires_grad") or {})
+        for kind, mod in (("model", model), ("ssl", ssl_head)):
+            for name, p in list(mod.named_parameters()):
+                key = f"{kind}.{name}"
+                if key in rg:
+                    p.requires_grad = bool(rg[key])
+        entry_gstep = int(res0["counters"]["gstep"])
+        print(f"续跑存档：{resume['path']} · gstep={entry_gstep} · "
+              f"epoch={res0['counters']['epoch']} · epoch 内第 {res0['counters']['step_in_epoch']} 步 · "
+              f"权重指纹 {got_w[:16]}…（Adam 动量/方差 + 四路 RNG + 数据顺序指纹都在里面）")
     # ---- ★ W3：对**现任**的 KL 锚 `β · KL(π_θ‖π_ref)` -------------------------------------
     # `docs/VALVES-AND-FIXTURES.md` §3 的 W3：历季"每轮只走 66/600 步 ⇒ 候选只是现任的微小扰动"，
     # 而闸门的分辨率（n=2000 时 ±2.35 顺位点）**看不见**那个量级。⇒ 改成"让每轮真的能动
@@ -1353,6 +1602,11 @@ def train(args) -> dict:
     logp_tr = None
     ppo_cfg = None
     p_temp = 1.0                     # 策略温度：非 PPO 恒为 1.0（= 不缩放）
+    # ★ BL-04：**行为策略标识**（`sha256(权重文件)` + 策略串）—— 续跑时"是不是同一份网"由它判。
+    # 只要给了 `--behaviour` 就记（PPO 与 gae-hand 两条路都要它）。
+    beh_rec: dict | None = None
+    if getattr(args, "behaviour", None):
+        beh_rec = _behaviour_record(str(args.behaviour), meta)
     if objective == "ppo":
         beh = getattr(args, "behaviour", None)
         if not beh:
@@ -1390,9 +1644,21 @@ def train(args) -> dict:
               f"KL 早停阈值 {float(getattr(args, 'kl_early_stop', 0.03) or 0.0):g}"
               f"（min_steps {kl_min_eff}）")
         # ---- 口径闸门（2026-09-28 加；这条闸门就是为了不让 `#0.5` 那个 bug 再发生一次）----
-        kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
-                                           logp_tr, temp, device)
-        print(f"PPO：口径自检 KL(π_old‖π_new)={kl0:+.2e}（≈0 = 权重与温度都对上了）")
+        # ⚠★ BL-04：**续跑时 π_new 本来就不等于 π_old**（已经走过 N₁ 步）⇒ "初始化时 KL≈0" 这把
+        #   尺子在续跑路径上**必然是红的**，而它想守的那件事（`logp_old` 必须来自数据生成策略）
+        #   要用**等价**的一组判据守：行为策略标识（sha256 + 策略串 + 温度）· 链条起点口径
+        #   （存档记的 kl0 ≈ 0）· 连续性（同一条探针行的 KL 与存档逐位一致）。
+        #   ⇒ **不给 `--resume-optimizer` 时这一行逐字节不变**（旧路径的牙齿一颗不少）。
+        if resume is None:
+            kl0 = assert_behaviour_consistency(model, train_data, np.arange(min(64, n)),
+                                               logp_tr, temp, device)
+            print(f"PPO：口径自检 KL(π_old‖π_new)={kl0:+.2e}（≈0 = 权重与温度都对上了）")
+        else:
+            kl0 = assert_resume_behaviour(resume, str(beh), float(temp), model, train_data,
+                                          meta, logp_tr, np.arange(min(64, n)), device)
+        if beh_rec is not None:
+            beh_rec.update({"temp": float(temp),
+                            "kl0": (None if kl0 is None else float(kl0))})
     # ---- 手级 GAE（§14 P1）：`--advantage gae-hand` 的预计算（行为策略的 V ⇒ GAE ⇒ 冻结）----
     adv_tr = None
     val_extra: dict[str, np.ndarray] | None = None
@@ -1402,6 +1668,8 @@ def train(args) -> dict:
         if not beh:
             raise SystemExit(f"--advantage {advantage} 需要 --behaviour <采集用的 ckpt/net.bin>："
                              "V_old 必须来自**行为策略**（与 logp_old 同一份权重）")
+        if beh_rec is None:              # ★ BL-04：这一路也要记标识（续跑时同一把尺子）
+            beh_rec = _behaviour_record(str(beh), meta)
         beh_model = _load_behaviour(beh, device)
         t_v = time.perf_counter()
         print(f"小局级优势（{mode}）：用行为策略 {beh} 重算 V_old（train {n} / val {nv} 条）…")
@@ -1543,8 +1811,16 @@ def train(args) -> dict:
     print(f"分阶段：a 策略+牌效（{int(args.stage_a * 100)}%）→ b 冻主干只训头"
           f"（{int(args.stage_b * 100)}%）→ c 联合微调（其余）；每 epoch {steps} 步 × batch {args.batch}")
 
+    # ---- ★ BL-04 续跑：优化器 / 计数器 / RNG 的恢复（**必须在 `base_lrs` 之前**）------------
+    # ⚠ 为什么 `base_lrs` 要单独存：`opt.load_state_dict()` 会把 `param_groups` 里的 `lr`
+    #   覆盖成**存档那一刻的调度值**（阶段 c 的余弦），拿它当"基准 lr"会让余弦重开一段
+    #   ⇒ 分段跑与一口气跑**从这里开始分岔**（静默、只体现在权重上，日志看不出来）。
+    save_optimizer = bool(getattr(args, "save_optimizer", False))
+    stop_after = int(getattr(args, "stop_after_steps", 0) or 0)
+    if stop_after < 0:
+        raise SystemExit(f"--stop-after-steps 不能为负（收到 {stop_after}）；0 = 不限制")
     base_lrs = [pg["lr"] for pg in opt.param_groups]
-    history = []
+    history: list[dict] = []
     stage_steps = {"a": 0, "b": 0, "c": 0}
     t0 = time.perf_counter()
     gstep = 0
@@ -1554,15 +1830,106 @@ def train(args) -> dict:
     best_val_ce: float | None = None
     no_improve = 0
     ce_log: list[dict[str, float]] = []
-    for epoch in range(1, args.epochs + 1):
+    start_epoch, start_skip = 1, 0
+    resume_cur_stage: str | None = None
+    resume_acc: dict = {"run": 0.0, "seen": 0, "run_parts": {}}
+    c0: dict = {}
+    if resume is not None:
+        res0 = resume["resume"]
+        c0 = res0["counters"]
+        want = _resume_recipe(args, resolved_data=str(Path(args.data).resolve()), n=n,
+                              steps=steps, total_steps=total_steps)
+        got_recipe = dict(res0.get("recipe") or {})
+        diff = {k: [got_recipe.get(k), want[k]] for k in want if got_recipe.get(k) != want[k]}
+        if diff:
+            raise SystemExit(
+                "⛔ 续跑的**口径/日程**与存档不一致（接着跑出来的不是同一条轨迹）："
+                + json.dumps(diff, ensure_ascii=False)
+                + " —— 要换参数就**重新起一段**（`--init` 给这份权重、不带 `--resume-optimizer`）")
+        sr = str(res0.get("stop_reason") or "")
+        if sr and "--stop-after-steps" not in sr:
+            raise SystemExit(
+                f"这份存档是**早停收尾**的（{sr}）：KL 早停那一支在 `gstep += 1` **之前**就 break，"
+                f"而 `opt.step()` 已经执行过 ⇒ 续跑会把同一步跑第二遍。⛔ 早停就是这一段的终点；"
+                f"要接着练请重新起一段")
+        opt.load_state_dict(res0["optimizer"])
+        base_lrs = [float(x) for x in res0["base_lrs"]]
+        for pg, lr in zip(opt.param_groups, base_lrs):
+            pg["lr"] = lr
+        gstep = int(c0["gstep"])
+        start_epoch = int(c0["epoch"])
+        start_skip = int(c0["step_in_epoch"])
+        resume_cur_stage = c0.get("cur_stage")
+        stage_steps.update({k: int(v) for k, v in (c0.get("stage_steps") or {}).items()})
+        resume_acc = {"run": float(c0["accum"]["run"]), "seen": int(c0["accum"]["seen"]),
+                      "run_parts": {k: float(v) for k, v in (c0["accum"]["run_parts"] or {}).items()}}
+        best_val_ce = c0.get("best_val_ce")
+        no_improve = int(c0.get("no_improve") or 0)
+        ce_log = list(c0.get("ce_log") or [])
+        # 分段跑的 metrics 要能拼成**链条**（否则"续跑"在台账里看着像另一轮）：history 前缀 +
+        # 链条起点的行为策略基线（`il_init` 是"开训前那一份网"的读数 ⇒ 续跑沿用链条起点，
+        # ⛔ 别用"这一段开跑前"的数，那会让台账里那条判据悄悄换尺子）。
+        history = list(res0.get("history") or [])
+        chain = res0.get("chain") or {}
+        if chain.get("il_init_student") is not None:
+            il_init = chain["il_init_student"]
+            il_init_all = chain.get("il_init_all")
+            il_rand = chain.get("il_rand")
+        _restore_rng(res0["rng"], rng_gen)
+        if stop_after and stop_after <= gstep:
+            raise SystemExit(f"`--stop-after-steps {stop_after}` ≤ 存档的 gstep {gstep}"
+                             f" ⇒ 本次一步都不跑（要接着走就把它调大）")
+        if start_epoch > args.epochs:
+            raise SystemExit(f"存档已经跑满 `--epochs {args.epochs}`（存档停在第 {start_epoch} 个 "
+                             f"epoch 的开头）⇒ 没有可续的步；要接着练就把 `--epochs` 调大并"
+                             f"**重新起一段**")
+        n_adam = len(res0["optimizer"].get("state") or {})
+        print(f"续跑：从 epoch {start_epoch} 的第 {start_skip} 步接着跑（gstep {gstep}/{total_steps}）；"
+              f"Adam 状态已恢复（{n_adam} 个参数张量的动量/方差）；RNG 四路已恢复"
+              f"（torch/numpy/python/掩码生成器）")
+    cut_epoch: tuple | None = None      # `--stop-after-steps` 命中在 epoch **中间**时的累加器
+    last_epoch = start_epoch - 1        # 最后一个**跑完**的 epoch（分段存档要用它定位续跑点）
+    cur_perm_sha: str | None = None
+    for epoch in range(start_epoch, args.epochs + 1):
+        if stop_after and gstep >= stop_after:
+            stop_reason = (f"--stop-after-steps {stop_after}：已跑到全局第 {gstep} 步（在 epoch "
+                           f"{epoch} 的边界上）⇒ 正常收尾并落盘")
+            print(f"  !! {stop_reason}")
+            break
         rng = np.random.default_rng(args.seed + epoch)
         perm = rng.permutation(n)
+        # ⚠ **数据顺序是判据的一部分**：续跑的当前 epoch 必须与存档记录的洗牌结果**逐字节**相同
+        #   （⛔ 不靠"种子一样所以顺序应该一样" —— 那正是假绿的来源）。
+        if resume is not None and epoch == start_epoch and start_skip > 0:
+            got_perm = _perm_sha256(perm)
+            if got_perm != str(c0["perm_sha256"]):
+                raise SystemExit(
+                    f"续跑的**数据顺序**与存档不一致（epoch {epoch}）：存档 "
+                    f"{str(c0['perm_sha256'])[:16]}… vs 本次 {got_perm[:16]}…"
+                    f" —— 数据/种子/步数任一处不同都会这样，⛔ 不许接着跑")
+            print(f"数据顺序核对：epoch {epoch} 的洗牌指纹 {got_perm[:16]}… == 存档（逐字节相同）")
+        cur_perm_sha = _perm_sha256(perm)
         model.train()
         ssl_head.train()
-        run, seen = 0.0, 0
-        run_parts: dict[str, float] = {}
-        cur_stage = None
-        for step in range(steps):
+        if resume is not None and epoch == start_epoch and start_skip > 0:
+            run, seen = resume_acc["run"], resume_acc["seen"]
+            run_parts: dict[str, float] = dict(resume_acc["run_parts"])
+            cur_stage = resume_cur_stage
+            done_in_epoch = start_skip
+        else:
+            run, seen = 0.0, 0
+            run_parts = {}
+            cur_stage = None
+            done_in_epoch = 0
+        for step in range(done_in_epoch, steps):
+            if stop_after and gstep >= stop_after:
+                stop_reason = (f"--stop-after-steps {stop_after}：跑到全局第 {gstep} 步"
+                               f"（epoch {epoch} 内已走 {done_in_epoch} 步）⇒ 正常收尾并落盘")
+                print(f"  !! {stop_reason}")
+                # 半截 epoch：**不** evaluate、**不** append history（那会让"分段 vs 一口气"
+                # 的 epoch 读数行对不上）；累加器与步号原样进存档
+                cut_epoch = (epoch, done_in_epoch, run, seen, dict(run_parts))
+                break
             stage = _stage_of(gstep, total_steps, args.stage_a, args.stage_b)
             stage_steps[stage] += 1
             if stage != cur_stage:
@@ -1640,6 +2007,7 @@ def train(args) -> dict:
             for k, v in parts.items():
                 run_parts[k] = run_parts.get(k, 0.0) + v * idx.size
             gstep += 1
+            done_in_epoch = step + 1          # ★ BL-04：续跑要用它定位"这一轮走到第几步"
             # ★ **验证集早停**（防过拟合）：每 `--val-every` 步在**固定子集**上读一次 train/val 的
             #   policy CE。判据是"val CE 相对**历史最好值**没有再降（容忍 `CE_IMPROVE_TOL`）"，
             #   连续 `--val-patience` 次 ⇒ 停这一轮。**正常收尾**：只置 `stop_reason` 后 break，
@@ -1674,6 +2042,10 @@ def train(args) -> dict:
                                    f"、train {t_ce:.4f}")
                     print(f"  !! {stop_reason}")
                     break
+        if cut_epoch is not None:
+            # ★ BL-04：`--stop-after-steps` 命中在 epoch 中间 ⇒ **不产出**半个 epoch 的读数行，
+            # 直接带着累加器去落盘（续跑那一段会把这一轮补完 ⇒ 日志与一口气跑逐字相同）
+            break
         ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
                       mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
                       extra=val_extra, il_target=il_va)
@@ -1728,22 +2100,72 @@ def train(args) -> dict:
                  if ce_log else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
+        last_epoch = epoch
         if stop_reason:
             break
     if mon:
         mon.close()
     wall = time.perf_counter() - t0
 
+    # ---- ★ BL-04：这一段的**续跑点**（`--stop-after-steps` 半截 ⇒ 累加器原样带走）------------
+    if cut_epoch is not None:
+        seg_epoch, seg_step = int(cut_epoch[0]), int(cut_epoch[1])
+        seg_acc: dict = {"run": float(cut_epoch[2]), "seen": int(cut_epoch[3]),
+                         "run_parts": dict(cut_epoch[4])}
+    else:
+        seg_epoch, seg_step = int(last_epoch) + 1, 0
+        seg_acc = {"run": 0.0, "seen": 0, "run_parts": {}}
+
     out = paths.allocate("ckpt", args.label, need_bytes=16 * 1024**2)
-    save_checkpoint(out / "model.pt", model, ssl_head, meta, weights,
-                    {"args": vars(args), "stage_steps": stage_steps})
+    extra: dict = {"args": _recorded_args(args), "stage_steps": stage_steps}
+    if save_optimizer:
+        # **行为策略标识**：续跑闸门的三把尺子里有两把（链条起点 kl0 / 连续性探针 kl_probe）要用
+        # 存档那一刻的量 ⇒ 探针**在这里**现算（模型已是这一段的最终权重，与续跑时的重算严格同源）。
+        if beh_rec is not None and logp_tr is not None:
+            probe_idx = np.arange(min(64, n))
+            beh_rec = {**beh_rec, "probe_n": int(probe_idx.size),
+                       "kl_probe": _behaviour_kl(model, train_data, probe_idx, logp_tr,
+                                                 p_temp, device)}
+        extra[RESUME_KEY] = {
+            "format": RESUME_FORMAT,
+            "optimizer": opt.state_dict(),
+            "base_lrs": [float(x) for x in base_lrs],
+            "weights_sha256": _state_sha256(model.state_dict(), ssl_head.state_dict()),
+            "counters": {
+                "gstep": int(gstep), "epoch": int(seg_epoch), "step_in_epoch": int(seg_step),
+                "steps": int(steps), "total_steps": int(total_steps), "n": int(n),
+                "batch": int(args.batch), "seed": int(args.seed),
+                "cur_stage": (cur_stage if seg_step > 0 else None),
+                "stage_steps": {k: int(v) for k, v in stage_steps.items()},
+                "accum": seg_acc,
+                "perm_sha256": (cur_perm_sha if seg_step > 0 else None),
+                "best_val_ce": best_val_ce, "no_improve": int(no_improve), "ce_log": ce_log,
+            },
+            "requires_grad": {
+                **{f"model.{k}": bool(v.requires_grad) for k, v in model.named_parameters()},
+                **{f"ssl.{k}": bool(v.requires_grad) for k, v in ssl_head.named_parameters()}},
+            "rng": _rng_fingerprint(rng_gen),
+            "behaviour": beh_rec,
+            "recipe": _resume_recipe(args, resolved_data=str(Path(args.data).resolve()), n=n,
+                                     steps=steps, total_steps=total_steps),
+            "stop_reason": stop_reason,
+            "history": history,
+            # 链条起点的读数（续跑时沿用 ⇒ 台账里"开训前那一份网"始终指**链条**起点）
+            "chain": {"il_init_student": il_init, "il_init_all": il_init_all, "il_rand": il_rand},
+        }
+    save_checkpoint(out / "model.pt", model, ssl_head, meta, weights, extra)
     result = {
         "label": args.label, "data": str(args.data), "dataset_meta": meta,
         "params": model.param_count(), "device": device, "torch_threads": threads,
-        "args": {k: v for k, v in vars(args).items()},
+        "args": _recorded_args(args),
         "epochs": args.epochs, "batch": args.batch, "steps_per_epoch": steps,
         "stage_steps": stage_steps, "wall_seconds": wall, "history": history,
         "stop_reason": stop_reason, "grad_clip": float(getattr(args, "grad_clip", 0.5) or 0.0),
+        # ★ BL-04：续跑的那一段**只在真续跑时**多这几个键（缺省关 ⇒ `metrics.json` 逐字节不变）
+        **({"resumed_from": resume["path"], "resume_entry_gstep": int(entry_gstep),
+            "resume_state_written": bool(save_optimizer),
+            "resume_point": {"epoch": int(seg_epoch), "step_in_epoch": int(seg_step)}}
+           if resume is not None else {}),
         "kl_early_stop": float(getattr(args, "kl_early_stop", 0.03) or 0.0),
         "adv_norm": ("global" if adv_tr is not None else
                      ("batch" if objective == "ppo" else "n/a")),
@@ -1859,6 +2281,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--init", default=None,
                     help="从这份权重起步（ckpt / net.bin / 含 model.pt 的 ckpt 目录）—— "
                          "缺省随机初始化（纯模仿那几轮的口径）")
+    # ---- ★ BL-04：优化器状态续跑（**缺省关 ⇒ 旧路径逐字节不变**）--------------------------
+    ap.add_argument("--save-optimizer", action="store_true",
+                    help="把**续跑状态**写进 checkpoint：Adam 动量/方差 · 优化器创建时的基准 lr · "
+                         "全局步数与轮次（含 epoch 内位置与阶段）· 四路 RNG（torch/numpy/python/"
+                         "掩码生成器）· **数据顺序指纹** · 行为策略标识（`sha256(权重)` + 策略串 + "
+                         "温度）· 参数冻结状态 · 验证集早停的历史。多段/少轮长训练用"
+                         "（`docs/TRAINING-V4.md` §15）")
+    ap.add_argument("--resume-optimizer", default=None, metavar="CKPT",
+                    help="从这份 checkpoint 的续跑状态**接着跑**（`--save-optimizer` 落的那一份；"
+                         "不给 `--init` 时连权重也从它载）。⚠ 续跑时 PPO 口径闸门换成等价的三把"
+                         "尺子（行为策略标识 / 链条起点 KL / 连续性探针）—— `--init` 与 "
+                         "`--behaviour` 本来就不是同一份了。缺省 None ⇒ 旧路径")
+    ap.add_argument("--stop-after-steps", type=int, default=0, metavar="N",
+                    help="跑到**全局第 N 步**就正常收尾并落盘（分段训练用；0 = 不限制）。"
+                         "命中在 epoch 中间时不产出半个 epoch 的读数行，累加器与步号进存档")
     # ---- ★ W3：对**现任**的 KL 锚（`docs/VALVES-AND-FIXTURES.md` §3 W3）--------------------
     ap.add_argument("--ref", default=None, metavar="NET.BIN|MODEL.PT|CKPT 目录",
                     help="KL 锚的**参考策略** π_ref（冻结）；缺省 = `--init` 那一份（**现任**）。"
