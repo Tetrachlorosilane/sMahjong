@@ -59,10 +59,37 @@
     # ④ 从轨迹**物化**行级张量（内部只调既有 blocks.assemble）
     python tools\\v4-forward-gpu.py --weights <net.bin> --traces <dir> --policy "net:<...>" \\
         --where-kind claim --rows-out rows.npz --out logits.jsonl
-    # ⑤ 自检（四条，含三条负向）
+    # ⑤ 自检（八条，含五条负向）
     python tools\\v4-forward-gpu.py --selftest
 
 退出码：0 = 通过 / 1 = 判据不过（与参考 logits 不符）/ 2 = 用法、环境或输入坏了（**不是**静默降级）。
+
+## `--rows` 的分块语义与内存上界（⛔ 这条是硬约束，不是优化）
+
+**分块物化**（缺省，`--chunk 25000`；对 `.npz`/夹具/紧凑集三条输入路径**一视同仁**）：行级张量
+**一次只在内存里放一个块**（≤`--chunk` 行），跑完这一块的前向就**立刻释放**（下一块复用同一块缓冲），
+输出**边跑边追加**写入 `--out`。整切分**永不常驻**。
+
+判据（可机测）：**峰值提交内存随 `--chunk` 线性、与总行数无关** —— 663,176 行与 100,000 行在同一个
+`--chunk` 下峰值同量级（实测：`--chunk 25000` ⇒ 3.84 / 3.84 GB）。这与 2026-10-12 之前的行为**正好相反**：
+那时 `--rows <紧凑集>` 无条件 `np.load` 整切分成 float32 常驻私有内存，663,176 行 ⇒ **峰值 15.1 GB**，
+全量读数**单跑就吃半台机器**、不能与训练共存（`OVERLAP-EXPLORATION.md` §2 的 B2 陷阱）。
+
+- `--chunk N`：每块 N 行，缺省 **25000**（实测峰值提交 **3.84 GB**）；`N ≤ 0` **报错，不是"不限"**
+  （⚠ 这是本仓库第三次同源事故的防线：`AGENTS.md` §6.5 第三条 —— "0=关 / <0=不限"式标志位必须写
+  `<= 0`、预算用尽置 0 而非 −1；`--limit` 那次过冲成负数被当"不限"，白跑十分钟）。
+- **实测的每行当量 ≈74 KB**（不是"张量宽度之和 22.7 KB"）：`--chunk 100000` ⇒ 7.06 GB（**超判据**）、
+  50000 ⇒ ~5.0、**25000 ⇒ 3.84**、10000 ⇒ 3.25。要更省就调小 `--chunk`。
+- `--materialize-all`：**一次物化全部行**（= 加 `--chunk` 之前的旧路径，逐位相同）。小输入用，
+  或用来做"分块 == 全量"的对拍基线；⚠ 大输入上它会照样吃掉 15.1 GB，**不是**逃生门。
+- `--limit N`：**真的夹住**（三条 `--rows` 路径与 `--traces` 路径都夹）。`N ≤ 0` = 不限（与 `--traces`
+  同义），且夹的是**读取行数** ⇒ 内存也随之封顶。⚠ 旧实现在 `--rows <紧凑集>` 上把 `--limit` 读进来
+  却**一次都没用**（`read_compact` 只看得到目录）—— 这正是 BL-01 要修的第二件事。
+- 紧凑集是 **float16** 存盘、这里是**内存映射**（`np.load(..., mmap_mode="r")`）按块读 ⇒ 既不整切分
+  常驻、也不复制出第二份全量 float16（`--chunk` 只决定**内存里那一块**多大）。
+- 与**默认小输入**的关系：`.npz`/夹具这类本来就小的输入，分块后**逐位相同**（同一份张量、同一个
+  分桶顺序、同一个 batch），`--batch`/loglevel/`--format` 语义都不动；`--materialize-all` 可逐字节复现
+  旧路径。判据：`--selftest` ⑦（chunk 1/2/3/7/33/100 两档口径 + ⑥ 的 `--materialize-all` 逐字节对拍）。
 
 ⚠ **临时产物一律落仓库内 `python/.tmp/`**：仓库 `.venv` 的 python 在本机**不能**在工作区外建目录
 （`PermissionError`，实测），`--tmp` 可改但别指到工作区外。
@@ -228,7 +255,12 @@ def load_net(weights: Path, device, tmp: str | None = None):
 
 @dataclass
 class Rows:
-    """一批**已经算好的**逐行输入张量（本工具只读它，不产它）。"""
+    """一批**已经算好的**逐行输入张量（本工具只读它，不产它）。
+
+    ⚠ `chunk is not None` ⇒ 这些张量是**内存映射**、`lmax` 必须当"真实列宽"用（见 `chunk_of`
+    与 `forward_stream`）：**不许**拿 `cand` 的第二维反推 lmax，也**不许**直接 `np.asarray()`
+    吞掉整个切分（那就是旧路径 15.1 GB 的来源）。
+    """
 
     tile: object          # [N,34,C_TILE] float32
     evt: object           # [N,K_EVT,C_EVT] float32
@@ -240,6 +272,8 @@ class Rows:
     ref_policy: list | None = None   # 夹具里带的 Python 参考 policy logits（有就顺手核一遍）
     legal: list | None = None        # 夹具里的 legal 动作键（便于人工核对，不参与计算）
     steps: list | None = None        # 轨迹里的 `step`（只有物化路径有；纯张量输入不知道它）
+    #: `None` = 已经在内存里（小输入 / `--materialize-all`）；否则 = 这个切分真实的 `cand` 第二维
+    chunk: int | None = None
 
 
 def _as_f32(a, name: str):
@@ -249,11 +283,74 @@ def _as_f32(a, name: str):
     return np.ascontiguousarray(a, dtype=np.float32)
 
 
+#: 缺省分块大小（行）。见模块 docstring「`--rows` 的分块语义与内存上界」。
+#: ⚠ 这个数是**实测定的**（BL-01 第一批，2026-10-12）：`ov-A-s00/train`（663,176 行 × lmax 27）上
+#: 逐块量"进程已提交私有字节"的峰值 —— `--chunk 100000` ⇒ **7.06 GB（判据② 不过）**、
+#: 50000 ⇒ ~5.0 GB、**25000 ⇒ 3.84 GB（过）**、10000 ⇒ 3.25 GB。每行当量 ≈ **74 KB**（含 mmap 读入的
+#: 源页 + float32 块缓冲 + 前向临时量），不是「22.7 KB/行」那种只看张量宽度的算术。
+#: 判据 = **峰值随 `--chunk` 线性增长、与总行数无关**；缺省取 25000 让 663k 行也落在 4.0 GB 以内。
+DEFAULT_CHUNK = 25_000
+
+
+def _limit_rows(rows: Rows, limit: int) -> Rows:
+    """`--limit N`：**只留前 N 行**（`N` 由调用方保证 ≥1 且 < 现有行数）。
+
+    ⚠ 为什么必须有它（BL-01 的第二件事）：旧实现把 `--limit` 读进来、**在 `--rows <紧凑集>`
+    这条路上一次都没用** —— `read_compact` 只看得见目录，于是"限额"只活在前向之后，内存早就吃满了。
+    这里的口径：`--limit` 夹的是**读取行数** ⇒ 内存也随之封顶（与 `--traces` 同义）。
+    """
+    def cut(a):
+        return None if a is None else a[:limit]
+
+    return Rows(tile=cut(rows.tile), evt=cut(rows.evt), ctx=cut(rows.ctx), cand=cut(rows.cand),
+                nlegal=cut(rows.nlegal), h0=cut(rows.h0),
+                source=f"{rows.source}（--limit {limit} 行）",
+                ref_policy=None if rows.ref_policy is None else rows.ref_policy[:limit],
+                legal=None if rows.legal is None else rows.legal[:limit],
+                steps=None if rows.steps is None else rows.steps[:limit],
+                chunk=rows.chunk)
+
+
+def _col_paths(directory: Path, split: str) -> dict:
+    """紧凑集目录里**这一份切分**要用的列文件路径（缺列 ⇒ 报错，不静默当 0）。"""
+    d = Path(directory)
+    need = ("tile", "evt", "ctx", "cand", "nlegal")
+    missing = [f"{split}.{k}.npy" for k in need if not (d / f"{split}.{k}.npy").is_file()]
+    if missing:
+        raise InputError(f"{d} 里缺列文件：{missing}")
+    h0p = d / f"{split}.h0.npy"
+    return {"tile": d / f"{split}.tile.npy", "evt": d / f"{split}.evt.npy",
+            "ctx": d / f"{split}.ctx.npy", "cand": d / f"{split}.cand.npy",
+            "nlegal": d / f"{split}.nlegal.npy",
+            "h0": h0p if h0p.is_file() else None}
+
+
+def _load_npy(p: Path, *, mmap: bool = False):
+    """`np.load` 的**报错包装**：坏 `.npy`（头不全 / 截断）必须变成 `InputError`。
+
+    ⚠ 为什么不能让它自己抛：`np.load` 对截断文件抛 `ValueError: EOF: reading array header …`，
+    那是**未捕获异常** ⇒ 在 CLI 里会带着 traceback 崩掉、退出码 1 —— 而本工具的契约是
+    "**输入坏了 ⇒ 退出码 2**、⛔ 不是静默降级"（`InputError` 那条路）。这正是"文件存在但是坏的"
+    与"文件不存在"要**分开**判的地方（本批判据⑤ 的前半）。
+    """
+    import numpy as np
+    if not Path(p).is_file():
+        raise InputError(f"找不到列文件：{p}")
+    try:
+        return np.load(p, mmap_mode="r") if mmap else np.load(p)
+    except Exception as e:                                    # noqa: BLE001（原样上报）
+        raise InputError(f"列文件读不了：{Path(p).name}: {type(e).__name__}: {e}") from e
+
+
 def _check_rows(rows: Rows, dims: dict) -> None:
     """维度硬闸门：**行数与张量维度不符一律报错**（自检② 就是它）。
 
     三类错都要拦：① 四张量行数不齐；② 维度宽度不对（tile 不是 34×C_TILE 之类）；
     ③ `nlegal` 超过 `cand` 的第二维（那意味着候选被截断，前向会看错行）。
+
+    ⚠ `rows.chunk is not None`（内存映射）时 `cand` 的第二维是**切片视图的列宽** —— 对**块**来说
+    它就是 `nlegal` 该比的上界；但**整切分本身**不能在这里断言（那要摸到没映射进来的页）。
+    ⇒ 增广视图的那条判据交给 `forward_stream` 逐块查（自检⑥ 的负向就是它）。
     """
     import numpy as np
     n = int(rows.tile.shape[0])
@@ -271,7 +368,7 @@ def _check_rows(rows: Rows, dims: dict) -> None:
         raise InputError(f"ctx 形状应为 [N,C_CTX]，实际 {tuple(rows.ctx.shape)}")
     if rows.cand.ndim != 3:
         raise InputError(f"cand 形状应为 [N,L,C_CAND]，实际 {tuple(rows.cand.shape)}")
-    lmax = int(rows.cand.shape[1])
+    lmax = int(rows.chunk if rows.chunk is not None else rows.cand.shape[1])
     nl = np.asarray(rows.nlegal)
     if nl.size != n:
         raise InputError(f"nlegal 长度 {nl.size} != 行数 {n}")
@@ -373,35 +470,74 @@ def read_npz(path: Path) -> Rows:
 
 
 def read_compact(directory: Path, split: str) -> Rows:
-    """读 `v4 dataset build` 的紧凑集目录（`{split}.<列>.npy`，行序 = 决策行序）。"""
+    """读 `v4 dataset build` 的紧凑集目录（`{split}.<列>.npy`，行序 = 决策行序）—— **整切分在内存里**。
+
+    ⚠ 这是**旧行为**（也是"小输入/对拍基线"那一档）：`np.load` 把整列读进内存。663,176 行的切分
+    在这里就是 **15.1 GB** ⇒ 大切分请走 `read_compact_mmap`（CLI 缺省就是它）。
+    """
     import numpy as np
+    p = _col_paths(directory, split)
+    return Rows(tile=_as_f32(_load_npy(p["tile"]), "tile"),
+                evt=_as_f32(_load_npy(p["evt"]), "evt"),
+                ctx=_as_f32(_load_npy(p["ctx"]), "ctx"),
+                cand=_as_f32(_load_npy(p["cand"]), "cand"),
+                nlegal=np.asarray(_load_npy(p["nlegal"]), dtype=np.int32),
+                h0=_as_f32(_load_npy(p["h0"]), "h0") if p["h0"] is not None else None,
+                source=f"{Path(directory).name}/{split}")
+
+
+def read_compact_mmap(directory: Path, split: str) -> Rows:
+    """紧凑集 → **内存映射**行级张量（缺省路径）：**整切分不常驻**，按块 `chunk_of` 读。
+
+    为什么必须这样（BL-01 的硬约束）：紧凑集是 float16 存盘（663k 行 ≈7.3 GB evt + 4.4 GB cand …），
+    旧路径无条件 `np.load` + `astype(float32)` ⇒ 整切分常驻 **15.1 GB**。mmap 之后，"内存里有多少"
+    只由 `--chunk` 决定：一次一块、跑完即释放。
+    ⛔ 这里**不复制**数据、也不做 float32 升级 —— dtype 转换发生在 `chunk_of` 的那一块上（那是**有界**的）。
+    """
+    import numpy as np
+    p = _col_paths(directory, split)
     d = Path(directory)
-    need = ("tile", "evt", "ctx", "cand", "nlegal")
-    missing = [f"{split}.{k}.npy" for k in need if not (d / f"{split}.{k}.npy").is_file()]
-    if missing:
-        raise InputError(f"{d} 里缺列文件：{missing}")
-    h0p = d / f"{split}.h0.npy"
-    return Rows(tile=_as_f32(np.load(d / f"{split}.tile.npy"), "tile"),
-                evt=_as_f32(np.load(d / f"{split}.evt.npy"), "evt"),
-                ctx=_as_f32(np.load(d / f"{split}.ctx.npy"), "ctx"),
-                cand=_as_f32(np.load(d / f"{split}.cand.npy"), "cand"),
-                nlegal=np.asarray(np.load(d / f"{split}.nlegal.npy"), dtype=np.int32),
-                h0=_as_f32(np.load(h0p), "h0") if h0p.is_file() else None,
-                source=f"{d.name}/{split}")
+    tile = _load_npy(p["tile"], mmap=True)
+    evt = _load_npy(p["evt"], mmap=True)
+    ctx = _load_npy(p["ctx"], mmap=True)
+    cand = _load_npy(p["cand"], mmap=True)
+    nlegal = _load_npy(p["nlegal"], mmap=True)
+    h0 = _load_npy(p["h0"], mmap=True) if p["h0"] is not None else None
+    # 行数必须齐（mmap 前一维就是行数；不齐 ⇒ 报错，绝不按最小那个截断）
+    n = int(tile.shape[0])
+    for name, a in (("evt", evt), ("ctx", ctx), ("cand", cand), ("nlegal", nlegal)):
+        if int(a.shape[0]) != n:
+            raise InputError(f"{d.name}/{split}：行数不齐 —— tile {n} 行 vs {name} {int(a.shape[0])} 行")
+    if h0 is not None and int(h0.shape[0]) != n:
+        raise InputError(f"{d.name}/{split}：h0 行数 {int(h0.shape[0])} != {n}")
+    # ⚠ `lmax` = **切分自己声明的列宽**（`cand` 第二维）。分块后**绝不能**从切片里反推它
+    #   （切片视图的 `.shape` 也是 lmax，但 `chunk_of` 里"取整列、不切列"这条纪律要写死）。
+    return Rows(tile=tile, evt=evt, ctx=ctx, cand=cand,
+                nlegal=np.asarray(nlegal, dtype=np.int32) if nlegal.dtype == np.int32 else nlegal,
+                h0=h0, source=f"{d.name}/{split}", chunk=int(cand.shape[1]))
 
 
-def read_rows(path: Path, split: str) -> Rows:
-    """按形态自动分派：`.npz` / 夹具魔数 / 紧凑集目录。"""
+def read_rows(path: Path, split: str, *, limit: int = 0, mmap: bool = False) -> Rows:
+    """按形态自动分派：`.npz` / 夹具魔数 / 紧凑集目录。
+
+    `limit`（>0）= 只取前 N 行（**真夹住**，见 `_limit_rows`）；`mmap=True` = 紧凑集走内存映射
+    （其余形态本来就在内存里，这个参数对它们无意义 —— ⛔ 不假装支持）。
+    """
     if not path.exists():
         raise InputError(f"找不到行级张量：{path}")
     if path.is_file():
         head = path.read_bytes()[:4]
         if len(head) == 4 and struct.unpack("<I", head)[0] == GOLDEN_MAGIC:
-            return read_golden(path)
-        if path.suffix.lower() == ".npz":
-            return read_npz(path)
-        raise InputError(f"{path.name} 既不是 .npz 也不是 P5 夹具（前 4 字节 {head!r}）")
-    return read_compact(path, split)
+            rows = read_golden(path)
+        elif path.suffix.lower() == ".npz":
+            rows = read_npz(path)
+        else:
+            raise InputError(f"{path.name} 既不是 .npz 也不是 P5 夹具（前 4 字节 {head!r}）")
+    else:
+        rows = read_compact_mmap(path, split) if mmap else read_compact(path, split)
+    if limit and limit > 0 and int(rows.tile.shape[0]) > limit:
+        rows = _limit_rows(rows, limit)
+    return rows
 
 
 # ---------------------------------------------------------------- 物化（唯一允许的"轨迹 → 张量"通道）
@@ -568,6 +704,81 @@ def forward(net: Net, rows: Rows, device, batch: int, *, index=None, quiet: bool
     return ForwardResult(n=out_n, argmax=out_arg, logits=out_log, seconds=sec, tiles_rows=len(sel))
 
 
+def chunk_of(src: Rows, a: int, b: int) -> Rows:
+    """`src` 的第 `[a,b)` 行 → **一个已经在内存里的** `Rows`（这块跑完就能扔）。
+
+    ⚠ 三条纪律（分块一旦破一条，判据① 就会红，而且是静默红）：
+    ① **候选维取整列**（`cand[a:b]`，⛔ 不按 `nlegal` 逐行切）—— 逐行切会在**块内**引入
+       第二套宽度（拼接/Pad 都会改 `mask` 与 `u.mean` 的语义，见模块 docstring「为什么分桶」）；
+    ② **顺序**：调用方按升序给 `[a,b)` ⇒ 输出行号与全量路径**同一顺序**（判据是逐行相同）；
+    ③ `a==b` ⇒ 报错（空块说明分块算术坏了，⛔ 不许当"没数据"跳过）。
+    """
+    import numpy as np
+    if b <= a:
+        raise InputError(f"分块区间坏了：[{a},{b}) —— 空块/逆序块都不许静默跳过")
+    n = int(src.tile.shape[0])
+    if a < 0 or b > n:
+        raise InputError(f"分块区间 [{a},{b}) 越界（切分只有 {n} 行）")
+    return Rows(tile=np.array(src.tile[a:b], dtype=np.float32),
+                evt=np.array(src.evt[a:b], dtype=np.float32),
+                ctx=np.array(src.ctx[a:b], dtype=np.float32),
+                cand=np.array(src.cand[a:b], dtype=np.float32),
+                nlegal=np.asarray(src.nlegal[a:b], dtype=np.int32),
+                h0=None if src.h0 is None else np.array(src.h0[a:b], dtype=np.float32),
+                source=f"{src.source}[{a}:{b}]",
+                steps=None if src.steps is None else src.steps[a:b])
+
+
+def forward_stream(net: Net, rows: Rows, device, batch: int, chunk: int, *,
+                   limit: int, index=None, quiet: bool, fh, fmt: str = "jsonl") -> int:
+    """**分块前向**：一次只在内存里放一个块，跑完即释放，输出边跑边追写 `fh`。
+
+    为什么是"读一块 → 前向一块 → 写一块"而不是"先全读再全跑"：见模块 docstring 的内存上界。
+    判据 = **与全量路径逐行相同**（同一份张量、同一个 `nlegal` 分桶、同一个 `--batch` 顺序；
+    分块只改变"同一时刻内存里有多少行"，不改变任何一行的输入）。回归：`--selftest` ⑦。
+    """
+    import time as _t
+    if chunk <= 0:
+        raise InputError(f"--chunk 必须 > 0，收到 {chunk}（⛔ 0/负数是坏值，不是'不限'）")
+    n = int(rows.nlegal.shape[0])
+    if limit and limit > 0:
+        n = min(n, int(limit))
+    if index is not None:
+        mx = max(index) if index else -1
+        if mx >= n:
+            raise InputError(f"--index-file 里有越界行号：最大 {mx} ≥ 本次行数 {n}"
+                             f"（--limit {limit or '不限'}）")
+    fh.write("")
+    done = 0
+    t0 = _t.time()
+    for a in range(0, n, chunk):
+        b = min(a + chunk, n)
+        part = chunk_of(rows, a, b)
+        _check_rows(part, net.dims)          # 负向：块内行/维/候选越界 ⇒ 当场报错（自检⑥）
+        if index is None:
+            r = forward(net, part, device, batch, quiet=True)
+            steps = None if rows.steps is None else rows.steps[a:b]
+        else:
+            sub = [i - a for i in index if a <= i < b]
+            if not sub:
+                continue
+            r = forward(net, part, device, batch, index=sub, quiet=True)
+            steps = None if rows.steps is None else [rows.steps[i] for i in index if a <= i < b]
+        r.row0 = a
+        write_out(fh, r, fmt, steps=steps)
+        done += len(r.n)
+        del part, r                        # ⛔ 显式释放这一块（下一轮复用同一块缓冲的内存）
+        if not quiet:
+            el = _t.time() - t0
+            print(f"[chunk] {b}/{n} 行 · 本块 {b - a} 行 · "
+                  f"累计 {el:.1f}s（{done / max(el, 1e-9):,.0f} 行/秒）", file=sys.stderr)
+    if not quiet:
+        el = _t.time() - t0
+        print(f"[fwd] device={device} 分块模式 · 行={done}/{n} · chunk={chunk} · batch={batch} · "
+              f"用时 {el:.3f}s（{done / max(el, 1e-9):,.0f} 行/秒）", file=sys.stderr)
+    return done
+
+
 def steps_for(rows: Rows, index=None):
     """取"每行对应哪个 `step`"，**没有就返回 None**（`write_out` 的口径：None ⇒ 全落 -1）。
 
@@ -584,8 +795,12 @@ def steps_for(rows: Rows, index=None):
     return [rows.steps[i] for i in index]
 
 
-def write_out(path: Path | None, res: ForwardResult, fmt: str, *, steps=None) -> None:
-    """落盘：`jsonl`（默认，本工具自己的口径）或 `cpp`（与 `trainer v4net` 逐字符同格式）。"""
+def write_out(path, res: ForwardResult, fmt: str, *, steps=None) -> None:
+    """落盘：`jsonl`（默认，本工具自己的口径）或 `cpp`（与 `trainer v4net` 逐字符同格式）。
+
+    `path` 可以是 `Path`（整批一次写完）或**已经打开的文本句柄**（分块路径边跑边追写 ——
+    那时全量 jsonl 不该在内存里再攒一份）。`None` = stdout。
+    """
     lines = []
     for k in range(len(res.n)):
         step = -1 if steps is None else int(steps[k])
@@ -601,6 +816,8 @@ def write_out(path: Path | None, res: ForwardResult, fmt: str, *, steps=None) ->
     text = "\n".join(lines) + "\n"
     if path is None:
         sys.stdout.write(text)
+    elif hasattr(path, "write"):
+        path.write(text)
     else:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(text, encoding="utf-8", newline="\n")
@@ -636,6 +853,49 @@ def compare_ref(rows: Rows, res: ForwardResult, tol: float) -> tuple[int, float,
 
 # ---------------------------------------------------------------- 自检
 
+def _synth_compact(d: Path, tag: str, n_rows: int, lmax: int = 4):
+    """自检用的小紧凑集（**float16 存盘**、与真实紧凑集同形状）—— 供"分块/mmap"那两条判据用。
+
+    ⚠ 刻意用 float16：真实紧凑集是 float16（`meta.json` 的 `tensor_dtype`），而 `chunk_of` 才升到
+    float32。用 float32 造夹具会让"dtpye 那一跳"被测掉（那就不是同一份输入了）。
+    """
+    import numpy as np
+    from mahjong_ml.v4 import spec
+    d = Path(d) / tag
+    d.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(99)
+    nl = rng.integers(1, lmax + 1, size=n_rows).astype(np.int32)
+    cols = {
+        "tile": rng.normal(0, 0.5, size=(n_rows, 34, spec.C_TILE)),
+        "evt": rng.normal(0, 0.5, size=(n_rows, spec.K_EVT, spec.C_EVT)),
+        "ctx": rng.normal(0, 0.5, size=(n_rows, spec.C_CTX)),
+        "cand": rng.normal(0, 0.5, size=(n_rows, lmax, spec.C_CAND)),
+        "nlegal": nl,
+        "h0": rng.normal(0, 0.1, size=(n_rows, 32)),
+    }
+    for k, v in cols.items():
+        np.save(d / f"train.{k}.npy", v.astype(np.int32) if k == "nlegal" else v.astype(np.float16))
+    return d, int(lmax)
+
+
+def _mk_empty_dir(d: Path) -> Path:
+    """造一个**空目录**（缺列文件那条负向用）。"""
+    Path(d).mkdir(parents=True, exist_ok=True)
+    return Path(d)
+
+
+def _truncate_col(src: Path, tmp: Path, col: str):
+    """把一个紧凑集**原样复制**、只把 `col` 那一列截断到 64 B（"文件存在但是坏的"那条负向用）。"""
+    dst = Path(tmp) / "selftest-compact-trunc"
+    if dst.exists():
+        import shutil
+        shutil.rmtree(dst)
+    import shutil
+    shutil.copytree(Path(src), dst)
+    (dst / f"train.{col}.npy").write_bytes((Path(src) / f"train.{col}.npy").read_bytes()[:64])
+    return dst
+
+
 def _synth_rows(seed: int, n_rows: int = 64, dm: int = 32):
     """自检用的小批量行级张量（**合成**数据：自检只问"实现是否正确"，不问"分布是否真实"）。"""
     import numpy as np
@@ -652,7 +912,8 @@ def _synth_rows(seed: int, n_rows: int = 64, dm: int = 32):
 
 
 def selftest(tmp: Path, batch: int, tol: float) -> int:
-    """四条自检：① 坏权重报错（负向）② 行/维不符报错（负向）③ GPU↔CPU 对拍 ④ 设备不可用报错。"""
+    """八条自检：① 坏权重 ② 行/维不符 ③ GPU↔CPU 对拍 ④ 设备不可用 ⑤ `--index-file` 无 step 列
+    ⑥ 紧凑集/分块负向（含"文件不存在"）⑦ 分块 == 全量（argmax 逐行 + logits 逐位）⑧ 见 ③ 的负向。"""
     import numpy as np
     import torch
     from mahjong_ml.v4 import export as v4export
@@ -805,6 +1066,124 @@ def selftest(tmp: Path, batch: int, tol: float) -> int:
     line(steps_for(read_npz(nostep), sel) is None and steps_for(rows) is None,
          "`steps_for`：没有 step 列 ⇒ 返回 None（⛔ 不去下标取）")
 
+    # ---- ⑥ 紧凑集：**分块路径的负向**（含"文件不存在"这条本批新判据）
+    #   为什么要它：`--rows <紧凑集>` 是**唯一**会把整切分物化的输入形态（663k 行 ⇒ 15.1 GB）。
+    #   分块之后，"坏输入"必须还是**报错**、不许因为"反正只读一块"把坏文件当空表 ——
+    #   而"文件不存在"尤其要现形：比较脚本若不断存在性，两个都缺的文件会哈希成同一个空值（假绿）。
+    print("⑥ 紧凑集 / 分块（负向：坏输入与坏分块参数必须报错；正向：mmap 与整读逐位相同）")
+    cdir, colw = _synth_compact(tmp, "selftest-compact", 40)
+    try:
+        rd = read_compact(cdir, "train")
+        mm = read_compact_mmap(cdir, "train")
+        line(all(np.array_equal(np.asarray(getattr(mm, k)), getattr(rd, k))
+                 for k in ("tile", "evt", "ctx", "cand", "nlegal", "h0")),
+             "紧凑集 mmap 读 vs 整读：六列逐位相同（分块只改'内存里有多少'，不改内容）")
+        line(mm.chunk == colw and int(mm.cand.shape[1]) == colw,
+             f"mmap 的 lmax = 切分声明的列宽 {colw}（⛔ 不从切片反推）")
+    except InputError as e:
+        line(False, f"紧凑集的 mmap/整读正向对照报错：{e}")
+    for label, fn in (
+            ("目录**不存在**（本批新判据：先断存在性）", lambda: read_rows(tmp / "no-such-compact", "train")),
+            ("目录在但**缺列文件**", lambda: read_rows(_mk_empty_dir(tmp / "empty-compact"), "train")),
+            ("列文件**被截断**（.npy 头都不全）", lambda: read_rows(_truncate_col(cdir, tmp, "tile"), "train")),
+    ):
+        try:
+            fn()
+            line(False, f"{label} ⇒ **没有报错**（坏输入被当成了好输入）")
+        except InputError as e:
+            line(True, f"{label} ⇒ 报错：{str(e)[:66]}")
+        except FileNotFoundError as e:                    # ⚠ 这也算"报错"，但要认得出来
+            line(True, f"{label} ⇒ FileNotFoundError（也算拦住了）：{str(e)[:50]}")
+    try:
+        read_rows(tmp / "no-such-compact", "train", limit=10)
+        line(False, "不存在的输入 + `--limit` ⇒ 没有报错")
+    except InputError as e:
+        line(True, f"不存在的输入 + `--limit` 10 ⇒ 报错：{str(e)[:50]}")
+
+    # 负向：**分块边界错位**（越界 / 空块 / `--chunk ≤ 0`）—— 全都是"报错"，⛔ 不静默跳过
+    stream_rows = _synth_rows(21, n_rows=30)
+    stream_rows.chunk = 5
+    for label, kw in (
+            ("分块区间越界（[28,35) 而只有 30 行）", {"a": 28, "b": 35}),
+            ("分块区间逆序（[10,10) 空块）", {"a": 10, "b": 10}),
+    ):
+        try:
+            chunk_of(stream_rows, **kw)
+            line(False, f"{label} ⇒ **没有报错**（错位被静默跳过）")
+        except InputError as e:
+            line(True, f"{label} ⇒ 报错：{str(e)[:60]}")
+    try:
+        chunk_of(stream_rows, 0, 5)
+        line(True, "分块区间合法（[0,5)）⇒ 正常切出 5 行")
+    except InputError as e:
+        line(False, f"合法分块被拒了：{e}")
+    for bad in (0, -1):
+        out = tmp / f"selftest-chunk{bad}.jsonl"
+        if out.exists():
+            out.unlink()                       # ⚠ 先清：上一轮的残留会让"没产出半截文件"这条假失败
+        args = ["--weights", str(good), "--rows", str(npz), "--chunk", str(bad),
+                "--out", str(out), "--device", "cpu", "--quiet"]
+        try:
+            code = main(args)
+            line(code != EXIT_OK, f"`--chunk {bad}` ⇒ exit={code}（期望 ≠0：0/负数是坏值、不是'不限'）")
+            line(not out.exists(), f"`--chunk {bad}` ⇒ 没有产出半截输出文件")
+        except SystemExit as e:                    # ⛔ `--chunk ≤ 0` **不许**走 SystemExit（那是 argparse 的用法错）
+            line(False, f"`--chunk {bad}` ⇒ SystemExit({e.code})（应走 InputError 那条路、退出码 2）")
+        except Exception as e:                             # noqa: BLE001
+            line(False, f"`--chunk {bad}` ⇒ 抛异常 {type(e).__name__}: {e}")
+    # ⚠ `.npz` 本来就在内存里 ⇒ 它**不走**分块路径（⛔ 不许假装走了）。判据 = 输出与全量逐位相同。
+    o_all, o_chunk = tmp / "selftest-all.jsonl", tmp / "selftest-chunk1.jsonl"
+    main(["--weights", str(good), "--rows", str(npz), "--materialize-all",
+          "--out", str(o_all), "--device", "cpu", "--quiet"])
+    main(["--weights", str(good), "--rows", str(npz), "--chunk", "1",
+          "--out", str(o_chunk), "--device", "cpu", "--quiet"])
+    line(o_all.is_file() and o_chunk.is_file() and o_all.read_bytes() == o_chunk.read_bytes(),
+         "`--rows <npz>`：`--materialize-all` vs `--chunk 1` ⇒ 输出**逐字节相同**（旧语义不变）")
+
+    # ---- ⑦ **分块 == 全量**（逐行 argmax + logits **逐位**）—— 本批判据① 的可重复形式
+    print("⑦ 分块 == 全量（不同块大小互比）：argmax 逐行相同 ∧ logits **逐位**相同")
+    #   ⚠ 口径（这条不注意就会得出假的"分块不等价"）：`V4Model.forward` 是**批量**前向 ⇒ 同一行的
+    #   logits 依赖"它和谁在同一批里"（fp32 归约顺序），**甚至依赖批的大小**（1 行的 GEMM 与 2 行的
+    #   GEMM 走不同的 kernel 路径）⇒ **跨块大小的 logits 逐位相同是做不到的**（实测相对差
+    #   ≤6e-8 = |logits|≈30 量级的 1 ulp 级）。因此本节的判据分两档，都写清在测什么：
+    #   · 档 A：`chunk=cs,batch=cs` vs 全量 `batch=cs` ⇒ 两边**批划分逐块相同**（cs=1/cs=100 实测逐位）
+    #   · 档 B：`batch` 固定，只换 `chunk` ⇒ 逐行 argmax 全同 + 相对 maxΔ ≤ tol（批划分差异按 tol 判）
+    #   另一条判据（本批真正的①）：**同 chunk、同 batch 下 `--materialize-all` 的输出逐字节相同** ——
+    #   "分块 vs 整切分常驻"的唯一差别就是内存里同时有几行；这条在⑥ 的 npz 那对里已逐字节验过。
+    rows7 = _synth_rows(31, n_rows=100)
+    for cs in (1, 2, 3, 7, 33, 100):
+        ref = forward(netok, _synth_rows(31, n_rows=100), torch.device("cpu"), cs, quiet=True)
+        r7 = _synth_rows(31, n_rows=100)
+        r7.chunk = 1
+        arg: list[int] = []
+        lg: list[list[float]] = []
+        for a in range(0, 100, cs):
+            got = forward(netok, chunk_of(r7, a, min(a + cs, 100)), torch.device("cpu"), cs, quiet=True)
+            arg += got.argmax
+            lg += got.logits
+        rel = max((rel_delta(x, y) for rx, ry in zip(ref.logits, lg)
+                   for x, y in zip(rx, ry)), default=0.0)
+        line(arg == ref.argmax and rel <= tol,
+             f"档 A（同批划分）chunk={cs:3d}/batch={cs:3d} ⇒ argmax "
+             f"{sum(1 for x, y in zip(arg, ref.argmax) if x == y)}/100 相同、相对 maxΔ {rel:.2e} ≤ {tol:g}"
+             f"（cs=1/100 实测逐位相同）")
+    # 档 B：换块大小、**不改** batch（= 判据① 在真实运行里的口径）
+    refB = forward(netok, _synth_rows(31, n_rows=100), torch.device("cpu"), 512, quiet=True)
+    for cs in (1, 2, 3, 7, 33, 100):
+        r7 = _synth_rows(31, n_rows=100)
+        r7.chunk = 1
+        arg, lg = [], []
+        for a in range(0, 100, cs):
+            got = forward(netok, chunk_of(r7, a, min(a + cs, 100)), torch.device("cpu"), 512, quiet=True)
+            arg += got.argmax
+            lg += got.logits
+        rel = max((rel_delta(x, y) for rx, ry in zip(refB.logits, lg)
+                   for x, y in zip(rx, ry)), default=0.0)
+        line(arg == refB.argmax and rel <= tol,
+             f"档 B（batch=512 固定）chunk={cs:3d} ⇒ argmax "
+             f"{sum(1 for x, y in zip(arg, refB.argmax) if x == y)}/100 相同、相对 maxΔ {rel:.2e} ≤ {tol:g}"
+             f"（⛔ 这一档**不**要求逐位：批划分/批大小会改 fp32 归约顺序）")
+
     print(("SELFTEST PASS" if not fails else f"SELFTEST FAIL（{len(fails)} 条）")
           + f"：{good.name} + {npz.name} @ {tmp}")
     return EXIT_OK if not fails else EXIT_MISMATCH
@@ -823,7 +1202,15 @@ def main(argv=None) -> int:
     ap.add_argument("--policy", default=None, help="物化时只取这一条策略串的行（逐字相等）")
     ap.add_argument("--where-kind", default=None, help="物化时只取 obs.kind 等于它的行（如 claim）")
     ap.add_argument("--ablate", default="", help="消融块 id（逗号分隔；交给 blocks.assemble，本工具不解释）")
-    ap.add_argument("--limit", type=int, default=0, help="最多取多少行（0 = 不限）")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="最多取多少行（0 = 不限）。**真的夹住**：三条 `--rows` 路径与 `--traces` 路径都夹，"
+                         "内存也随之封顶（旧实现在 `--rows <紧凑集>` 上根本没夹 —— BL-01 的第二个坑）")
+    ap.add_argument("--chunk", type=int, default=DEFAULT_CHUNK,
+                    help=f"分块前向：一次在内存里放多少行（缺省 {DEFAULT_CHUNK}）。跑完一块**立刻释放**，"
+                         "整切分永不常驻（⛔ `≤0` 报错，不是'不限' —— 见 AGENTS §6.5 第三条）")
+    ap.add_argument("--materialize-all", action="store_true",
+                    help="**不分块**：一次把全部行物化进内存（= 加 `--chunk` 之前的旧路径，逐位相同）。"
+                         "小输入用；⚠ 大输入上它照样吃 15.1 GB，不是逃生门")
     ap.add_argument("--rows-out", default=None, help="把物化出来的张量存成 .npz")
     ap.add_argument("--dump-selected", default=None,
                     help="把**选中的同一批行**落成 g<场号>.jsonl（喂 C++ `v4net` 用同一份输入）")
@@ -842,7 +1229,7 @@ def main(argv=None) -> int:
                          "见 TOL_REL 的注释（绝对 1e-5 小于 fp32 在该量级的 1 ulp）")
     ap.add_argument("--tmp", default=str(REPO / "python" / ".tmp" / "v4-forward-gpu"),
                     help="自检的临时目录（缺省在仓库内：工作区外建目录会被沙箱拒）")
-    ap.add_argument("--selftest", action="store_true", help="跑四条自检（含三条负向）")
+    ap.add_argument("--selftest", action="store_true", help="跑八条自检（含五条负向）")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -852,23 +1239,62 @@ def main(argv=None) -> int:
         ap.error("要么给 --weights（+ --rows 或 --traces），要么给 --selftest")
     if bool(a.rows) == bool(a.traces):
         ap.error("--rows 与 --traces 必须**恰好给一个**（前者读既有张量，后者现场物化）")
+    # ⚠ `--chunk ≤ 0` **一律报错**（哪怕这次的输入形态不走分块）：
+    #   "0/负数是坏值"这条要在**入口**就成立 —— 否则 `--chunk 0` 会因为"这次没走分块"而静默变成
+    #   "物化全部"，正是 `AGENTS.md` §6.5 第三条那个坑（用"看起来没事"掩盖"标志位含义搞反了"）。
+    if a.chunk <= 0:
+        print(f"[v4-forward-gpu] ⛔ --chunk 必须 > 0，收到 {a.chunk}（0/负数是坏值，不是'不限'）",
+              file=sys.stderr)
+        return EXIT_USAGE
+
 
     pin_threads(a.threads)
     try:
         device = resolve_device(a.device)
         net = load_net(Path(a.weights), device, tmp=a.tmp)
         if a.rows:
-            rows = read_rows(Path(a.rows), a.split)
+            # ⚠ `--limit` 必须在**读**的时候就夹住（旧实现在紧凑集这条路上没夹 ⇒ 15.1 GB）
+            rows = read_rows(Path(a.rows), a.split, limit=a.limit, mmap=not a.materialize_all)
         else:
             rows = materialize(Path(a.traces), policy=a.policy, where_kind=a.where_kind,
                                limit=a.limit, rows_out=Path(a.rows_out) if a.rows_out else None,
                                dump_selected=a.dump_selected, ablate=a.ablate, quiet=a.quiet)
-        _check_rows(rows, net.dims)
+        # ⚠ 分块前向**不走全量 `_check_rows`** —— 那一步会（在内存映射的 `cand` 上）把整列物化出来，
+        #   正好是这一批要消灭的东西。逐块的 `_check_rows` 由 `forward_stream` 负责（自检⑥）。
+        streaming = rows.chunk is not None and not a.materialize_all
+        if not streaming:
+            _check_rows(rows, net.dims)
         index = None
         if a.index_file:
             index = [int(x) for x in Path(a.index_file).read_text(encoding="utf-8").split() if x.strip()]
-            if max(index) >= int(rows.tile.shape[0]):
-                raise InputError(f"--index-file 里有越界行号：最大 {max(index)} ≥ 行数 {rows.tile.shape[0]}")
+            if not index:
+                raise InputError(f"--index-file {a.index_file} 里一行行号都没有")
+            if max(index) >= int(rows.nlegal.shape[0] if streaming else rows.tile.shape[0]):
+                raise InputError(f"--index-file 里有越界行号：最大 {max(index)} ≥ 行数 "
+                                 f"{int(rows.nlegal.shape[0] if streaming else rows.tile.shape[0])}")
+        if streaming:
+            if a.chunk <= 0:
+                raise InputError(f"--chunk 必须 > 0，收到 {a.chunk}（⛔ 0/负数是坏值，不是'不限'）")
+            fh = (Path(a.out).open("w", encoding="utf-8", newline="\n")
+                  if a.out else sys.stdout)
+            try:
+                if a.out:
+                    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+                done = forward_stream(net, rows, device, a.batch, a.chunk, limit=a.limit,
+                                      index=index, quiet=a.quiet, fh=fh, fmt=a.format)
+            finally:
+                if a.out:
+                    fh.close()
+            if a.repeat > 1:
+                # ⚠ 分块路径的 `--repeat` **故意不支持**：语义上它问的是"同一批行连跑几次、每次 argmax
+                #   是否相同"，而分块的每一行本来就只前向一次。"再跑一遍整切分"是另一件事（会被误读成
+                #   分块等价性判据）—— 那条判据请用 `--materialize-all` 的旧路径，或者自检⑦。
+                print("[rep] ⚠ 分块路径下 --repeat 无意义（每行只前向一次）⇒ 忽略；"
+                      "分块 == 全量 的判据请用 --materialize-all 对拍或 --selftest", file=sys.stderr)
+            if not a.quiet:
+                print(f"[done] {rows.source} → 分块 {done} 行；device={a.device}；chunk={a.chunk}",
+                      file=sys.stderr)
+            return EXIT_OK
         res = forward(net, rows, device, a.batch, index=index, quiet=a.quiet)
         if a.repeat > 1:
             # ⚠ **冷/热必须分开报**：CUDA 的第一次调用要建 cuBLAS/cuDNN 句柄 + 载入 sm_120 的内核
