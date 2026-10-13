@@ -1,20 +1,29 @@
 {
- "A-collect-r1": {
+ "B-collect": {
   "exit": 0,
-  "wall_s": 164.1,
-  "commit_free_before_gb": 12.95,
-  "commit_free_min_gb": 12.32
+  "wall_s": 0.0,
+  "skipped": true
  },
- "A-features-r1": {
+ "B-features": {
   "exit": 0,
-  "wall_s": 6.0,
-  "commit_free_before_gb": 13.3,
-  "commit_free_min_gb": 13.08
+  "wall_s": 0.0,
+  "skipped": true
  },
- "A-compact-r1": {
+ "B-compact": {
   "exit": 0,
-  "wall_s": 61.0,
-  "commit_free_before_gb": 13.13,
-  "commit_free_min_gb": 6.21
+  "wall_s": 0.0,
+  "skipped": true
+ },
+ "rerun-B-s01": {
+  "exit": 0,
+  "wall_s": 236.1,
+  "commit_free_before_gb": 15.08,
+  "commit_free_min_gb": 9.54
+ },
+ "B-export": {
+  "exit": 0,
+  "wall_s": 3.0,
+  "commit_free_before_gb": 15.12,
+  "commit_free_min_gb": 14.05
  }
 }

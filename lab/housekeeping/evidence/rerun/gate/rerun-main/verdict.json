@@ -1,0 +1,59 @@
+{
+ "delta": 0.7767833333333332,
+ "lo": -0.5718112500000001,
+ "hi": 2.1459499999999996,
+ "p": 0.17927682934202002,
+ "n": 6000,
+ "sd": 53.798346192008744,
+ "win": 3051,
+ "lose": 2946,
+ "tie": 3,
+ "need_for_2": 5680,
+ "verdict": "分不出",
+ "adopt": false,
+ "seeds": [
+  52940001,
+  52940002,
+  52940003
+ ],
+ "incumbent": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r2\\net.bin",
+ "candidate": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-B-s01\\net.bin",
+ "metric": "rank_points",
+ "guards": [
+  {
+   "metric": "deals",
+   "tol": 1.0,
+   "delta": 0.017166666666666667,
+   "lo": -0.01841875,
+   "hi": 0.05191874999999997,
+   "n": 6000,
+   "ok": true
+  },
+  {
+   "metric": "wins",
+   "tol": 0.05,
+   "delta": 0.022583333333333334,
+   "lo": -0.019833333333333335,
+   "hi": 0.06500208333333331,
+   "n": 6000,
+   "ok": true
+  },
+  {
+   "metric": "win_points",
+   "tol": 300.0,
+   "delta": 128.70833333333334,
+   "lo": -244.114375,
+   "hi": 509.99645833333307,
+   "n": 6000,
+   "ok": true
+  }
+ ],
+ "adopt_primary": false,
+ "wall_deltas": [
+  1.4041,
+  -0.3105500000000001,
+  1.2368000000000001
+ ],
+ "wall_spread": 1.71465,
+ "wall_spread_over_ci": 1.2618106171025878
+}

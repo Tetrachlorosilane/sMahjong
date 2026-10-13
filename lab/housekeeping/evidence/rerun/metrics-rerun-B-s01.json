@@ -1,0 +1,89 @@
+{
+ "steps": 200,
+ "stop_reason": "",
+ "kl_last": 0.010134346016093332,
+ "kl_inv_last": 0.010626798934827092,
+ "ref_kl_last": 0.011576799200847745,
+ "stage_steps": {
+  "a": 0,
+  "b": 0,
+  "c": 200
+ },
+ "wall_seconds": 21.942428699985612,
+ "kl_min_steps_effective": null,
+ "rho": {
+  "n_rows": 12629,
+  "n_sampled": 12629,
+  "n_gt_rho_max": 1,
+  "n_gt_log_ratio_clamp": 2,
+  "rho_max": 8.053611755371094,
+  "rho_min": 0.008544358424842358,
+  "rho_worst_two_sided": 117.03630065917969,
+  "clipped_batches": 1,
+  "rho_p50": 0.9999728202819824,
+  "rho_p90": 1.053215742111206,
+  "rho_p99": 1.387911319732666
+ },
+ "behaviour_identity": {
+  "spec": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+  "policy": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "temp": 0.5,
+  "kl0": -5.6763980182950036e-08,
+  "kl_segment": null,
+  "kl_probe": NaN,
+  "probe_n": 64,
+  "table_digest": "f8f63880ceea4e067e08a8ad463806a682693012cc980e960cd8c1a230e832c0",
+  "matched_id": 2,
+  "per_id": {
+   "0": {
+    "rows": 232929,
+    "probe_rows": 4096,
+    "sha256": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482",
+    "verified": true,
+    "kl_recompute": 0.0,
+    "max_abs_logp_dev": 0.0,
+    "recompute_sha256": "8c23f752c3b8344775cdf7579cd9486914546fd92566108103972460fc588a4e",
+    "kl_stale": 0.1369144320487976,
+    "matched_init": false
+   },
+   "1": {
+    "rows": 232868,
+    "probe_rows": 4096,
+    "sha256": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796",
+    "verified": true,
+    "kl_recompute": 0.0,
+    "max_abs_logp_dev": 0.0,
+    "recompute_sha256": "d0805f1bacd09d50baff470888025f8b00d296a187bb6cc23bb4b7f214149ad3",
+    "kl_stale": 0.12383957952260971,
+    "matched_init": false
+   },
+   "2": {
+    "rows": 230720,
+    "probe_rows": 4096,
+    "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+    "verified": true,
+    "kl_recompute": 0.0,
+    "max_abs_logp_dev": 0.0,
+    "recompute_sha256": "9965aad1b6989822c14e5ab747c82a2c814734089174668da1b9d8a418f58657",
+    "kl_stale": -5.6763980182950036e-08,
+    "matched_init": true
+   },
+   "3": {
+    "rows": 232572,
+    "probe_rows": 4096,
+    "sha256": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f",
+    "verified": true,
+    "kl_recompute": 0.0,
+    "max_abs_logp_dev": 0.0,
+    "recompute_sha256": "bdc9002565df0f72e3cf706b5cfe41123473d32ec239d96e8016bab758fed0ad",
+    "kl_stale": 0.27140673995018005,
+    "matched_init": false
+   }
+  }
+ },
+ "label": "rerun-B-s01",
+ "legal_stop": true,
+ "early_stop": false,
+ "tag": "rerun-B-s01"
+}

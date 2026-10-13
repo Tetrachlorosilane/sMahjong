@@ -1,0 +1,701 @@
+{
+ "primary_metric": "rank_points",
+ "delta_sign": "A − B（正 = 臂 A 更好）",
+ "label_a": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r2\\net.bin",
+ "label_b": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-B-s01\\net.bin",
+ "families": [
+  {
+   "seed": "52940001",
+   "dir": "S:\\mahjong-training\\w-ladder\\_rerun\\gate\\rerun-main\\s52940001",
+   "n": 2000,
+   "delta": -1.4041,
+   "se": 1.2097078834068118,
+   "t": -1.1606934362085297,
+   "ci": [
+    -3.789595,
+    0.9386074999999996
+   ],
+   "mde": 2.3710274514773513,
+   "win": 972,
+   "lose": 1028,
+   "tie": 0,
+   "ci_excl_0": false
+  },
+  {
+   "seed": "52940002",
+   "dir": "S:\\mahjong-training\\w-ladder\\_rerun\\gate\\rerun-main\\s52940002",
+   "n": 2000,
+   "delta": 0.3105500000000001,
+   "se": 1.1942696457844733,
+   "t": 0.26003340292217747,
+   "ci": [
+    -2.02489375,
+    2.644122499999999
+   ],
+   "mde": 2.3407685057375676,
+   "win": 989,
+   "lose": 1009,
+   "tie": 2,
+   "ci_excl_0": false
+  },
+  {
+   "seed": "52940003",
+   "dir": "S:\\mahjong-training\\w-ladder\\_rerun\\gate\\rerun-main\\s52940003",
+   "n": 2000,
+   "delta": -1.2368000000000001,
+   "se": 1.205103157281502,
+   "t": -1.0263021821219027,
+   "ci": [
+    -3.60378,
+    1.153066249999999
+   ],
+   "mde": 2.362002188271744,
+   "win": 985,
+   "lose": 1014,
+   "tie": 1,
+   "ci_excl_0": false
+  }
+ ],
+ "guards": [
+  {
+   "metric": "deals",
+   "direction": "B(候选) − A(现任)",
+   "tol": 1.0,
+   "delta": 0.017166666666666667,
+   "ci": [
+    -0.01841875,
+    0.05191874999999997
+   ],
+   "n": 6000,
+   "mde": 0.03506710361794871,
+   "tol_over_mde": 28.51675493062852,
+   "usable_as_veto": true,
+   "ok": true
+  },
+  {
+   "metric": "wins",
+   "direction": "B(候选) − A(现任)",
+   "tol": 0.05,
+   "delta": 0.022583333333333334,
+   "ci": [
+    -0.019833333333333335,
+    0.06500208333333331
+   ],
+   "n": 6000,
+   "mde": 0.04262221097462095,
+   "tol_over_mde": 1.1730972855859614,
+   "usable_as_veto": true,
+   "ok": true
+  },
+  {
+   "metric": "win_points",
+   "direction": "B(候选) − A(现任)",
+   "tol": 300.0,
+   "delta": 128.70833333333334,
+   "ci": [
+    -244.114375,
+    509.99645833333307
+   ],
+   "n": 6000,
+   "mde": 373.21690095226734,
+   "tol_over_mde": 0.8038221185443276,
+   "usable_as_veto": false,
+   "ok": true
+  }
+ ],
+ "placebo": {
+  "what": "打乱 B 的 seed→逐场值映射后重算同一统计量（BL-13 同款定义）",
+  "delta": -0.7767833333333335,
+  "ci": [
+   -1.7586989583333332,
+   0.18481687499999971
+  ],
+  "n": 6000,
+  "mde": 0.9632278920380142,
+  "ci_excludes_zero": false
+ },
+ "pooled": {
+  "n": 6000,
+  "delta": -0.7767833333333332,
+  "se": 0.6945336628505036,
+  "t": -1.1184243109905727,
+  "ci": [
+   -2.14595,
+   0.5718112499999995
+  ],
+  "ci_excludes_zero": false,
+  "bonf_alpha": 0.016666666666666666,
+  "bonf_ci": [
+   -2.4414225279920085,
+   0.8878558613253422
+  ],
+  "bonf_excludes_zero": false,
+  "win": 2946,
+  "lose": 3051,
+  "tie": 3,
+  "p_sign": 0.17927682934202002,
+  "mde": 1.361285979186987,
+  "mde_note": "只有 ≥1.4 顺位点的效应可判（MDE=1.36）",
+  "same_sign_all_families": false,
+  "family_spread": 1.71465,
+  "ci_halfwidth": 1.3588806249999998,
+  "spread_over_halfwidth": 1.2618106171025878,
+  "verdict": "④ **测不出** —— 族间异号（判决只对本族成立，⛔ 不跨族外推）",
+  "verdict_bucket": "4",
+  "adopt": false
+ },
+ "power": {
+  "n_now": 6000,
+  "required_n_for_observed_delta": 37649,
+  "required_n_for_delta_1.4": 11591,
+  "required_n_for_delta_2.5": 3635
+ },
+ "rho_identifiability": {
+  "why": "两臂在同一族/同一桌坐**不同**席位（`--rotate-perm` 的 24 个全排列）⇒ 学生席口径；不是零和对开（零和对开下 ρ(Δ,基准) 恒为 −1，只能判可识别性）",
+  "rotate_perm": true,
+  "student_seats": 2
+ },
+ "compliance": {
+  "budget": {
+   "A_steps": 200,
+   "B_steps": 200,
+   "A_games": 1400,
+   "B_games": 1400
+  },
+  "check1_freshness": {
+   "A-r1": {
+    "tag": "A-r1",
+    "raw": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw\\rerun-A-r1",
+    "n_files": 700,
+    "want": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+    "forbidden": [],
+    "n_files_with_want": 700,
+    "n_files_missing_want": 0,
+    "n_files_with_forbidden": 0,
+    "distinct_policies": [
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+    ],
+    "examples": [
+     {
+      "file": "g0.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     },
+     {
+      "file": "g1.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     }
+    ],
+    "ok": true
+   },
+   "A-r2": {
+    "tag": "A-r2",
+    "raw": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw\\rerun-A-r2",
+    "n_files": 700,
+    "want": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+    "forbidden": [
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5"
+    ],
+    "n_files_with_want": 700,
+    "n_files_missing_want": 0,
+    "n_files_with_forbidden": 0,
+    "distinct_policies": [
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+    ],
+    "examples": [
+     {
+      "file": "g0.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     },
+     {
+      "file": "g1.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     }
+    ],
+    "ok": true
+   },
+   "B-all": {
+    "tag": "B-all",
+    "raw": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw\\rerun-B-all",
+    "n_files": 1400,
+    "want": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+    "forbidden": [],
+    "n_files_with_want": 1400,
+    "n_files_missing_want": 0,
+    "n_files_with_forbidden": 0,
+    "distinct_policies": [
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+     "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+    ],
+    "examples": [
+     {
+      "file": "g0.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     },
+     {
+      "file": "g1.jsonl",
+      "policies": [
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+       "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+      ]
+     }
+    ],
+    "ok": true
+   }
+  },
+  "check2_trust_region": {
+   "per_segment": {
+    "rerun-A-r1": {
+     "steps": 100,
+     "stop_reason": "",
+     "kl_last": 0.016004464645229744,
+     "kl_inv_last": 0.015405648390969872,
+     "ref_kl_last": 0.017530444381991403,
+     "stage_steps": {
+      "a": 0,
+      "b": 0,
+      "c": 100
+     },
+     "wall_seconds": 11.181286100007128,
+     "device": "cuda",
+     "rho": {
+      "n_rows": 6454,
+      "n_sampled": 6454,
+      "n_gt_rho_max": 0,
+      "n_gt_log_ratio_clamp": 0,
+      "rho_max": 9.928142547607422,
+      "rho_min": 0.019406720995903015,
+      "rho_worst_two_sided": 51.52853775024414,
+      "clipped_batches": 0,
+      "rho_p50": 0.9999640583992004,
+      "rho_p90": 1.1007307767868042,
+      "rho_p99": 1.4642603397369385
+     },
+     "behaviour_identity": {
+      "spec": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+      "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+      "policy": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+      "temp": 0.5,
+      "kl0": 8.271582174756986e-08,
+      "kl_segment": null,
+      "kl_probe": null,
+      "probe_n": null,
+      "table_digest": "f8f63880ceea4e067e08a8ad463806a682693012cc980e960cd8c1a230e832c0",
+      "matched_id": 2,
+      "per_id": {
+       "0": {
+        "rows": 115860,
+        "probe_rows": 4096,
+        "sha256": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "c8fbc72b8cdaaa581cb099aa672fe3684474b725360f63ad9eb5808e74696a0b",
+        "kl_stale": 0.11921407282352448,
+        "matched_init": false
+       },
+       "1": {
+        "rows": 115945,
+        "probe_rows": 4096,
+        "sha256": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "ded797a744b103df2bd2dfb94ea0b29d79fc43dda577dbbb13ec8df73bb46db2",
+        "kl_stale": 0.09796811640262604,
+        "matched_init": false
+       },
+       "2": {
+        "rows": 114763,
+        "probe_rows": 4096,
+        "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "faa4ae0bed3d10d86656b086b40be777303c5470483bdc8bc4bf3c194202e155",
+        "kl_stale": 8.271582174756986e-08,
+        "matched_init": true
+       },
+       "3": {
+        "rows": 115618,
+        "probe_rows": 4096,
+        "sha256": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "9e3bdb3b01375ddaf45ce4178cdb34d8a41d1ea8e288839b9b284751c0573591",
+        "kl_stale": 0.25208714604377747,
+        "matched_init": false
+       }
+      }
+     },
+     "early_stop": false,
+     "legal_stop": true
+    },
+    "rerun-A-r2": {
+     "steps": 100,
+     "stop_reason": "",
+     "kl_last": 0.009963069165096386,
+     "kl_inv_last": 0.01580514787223365,
+     "ref_kl_last": 0.012440082315006293,
+     "stage_steps": {
+      "a": 0,
+      "b": 0,
+      "c": 100
+     },
+     "wall_seconds": 19.188109899987467,
+     "device": "cuda",
+     "rho": {
+      "n_rows": 6340,
+      "n_sampled": 6340,
+      "n_gt_rho_max": 0,
+      "n_gt_log_ratio_clamp": 1,
+      "rho_max": 10.503704071044922,
+      "rho_min": 0.010049608536064625,
+      "rho_worst_two_sided": 99.50636291503906,
+      "clipped_batches": 0,
+      "rho_p50": 1.0,
+      "rho_p90": 1.0976109504699707,
+      "rho_p99": 1.3809760808944702
+     },
+     "behaviour_identity": {
+      "spec": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin",
+      "sha256": "3cc546cd025df00f176daebc2fe2cb63282f122d7d56cec2c8fde776e08dc298",
+      "policy": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+      "temp": 0.5,
+      "kl0": 2.0731057759348914e-08,
+      "kl_segment": null,
+      "kl_probe": null,
+      "probe_n": null,
+      "table_digest": "c6453a2314d468202a61ed98a7d62f92f6ac625c97fb76e83105bc8e4cb7dc0e",
+      "matched_id": 0,
+      "per_id": {
+       "0": {
+        "rows": 114007,
+        "probe_rows": 4096,
+        "sha256": "3cc546cd025df00f176daebc2fe2cb63282f122d7d56cec2c8fde776e08dc298",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "926caa38fff596eb2f89ed60eaa458059c6a89a0de81cc0922a6e36d7a4011c0",
+        "kl_stale": 2.0731057759348914e-08,
+        "matched_init": true
+       },
+       "1": {
+        "rows": 115427,
+        "probe_rows": 4096,
+        "sha256": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "b3106fcc044b2a7a67549e6a916f0db7ef444b8697452da81b8d27220d734f11",
+        "kl_stale": 0.14252865314483643,
+        "matched_init": false
+       },
+       "2": {
+        "rows": 115068,
+        "probe_rows": 4096,
+        "sha256": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "ca219baac7294315ee1e92525eb289c8d49da7764f1559fe712f93400f10714b",
+        "kl_stale": 0.11366519331932068,
+        "matched_init": false
+       },
+       "3": {
+        "rows": 114680,
+        "probe_rows": 4096,
+        "sha256": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "27110c883666062f2b30b45c868a222c48180f513759ab3a515423b50263f538",
+        "kl_stale": 0.2631354331970215,
+        "matched_init": false
+       }
+      }
+     },
+     "early_stop": false,
+     "legal_stop": true
+    },
+    "rerun-B-s01": {
+     "steps": 200,
+     "stop_reason": "",
+     "kl_last": 0.010134346016093332,
+     "kl_inv_last": 0.010626798934827092,
+     "ref_kl_last": 0.011576799200847745,
+     "stage_steps": {
+      "a": 0,
+      "b": 0,
+      "c": 200
+     },
+     "wall_seconds": 21.942428699985612,
+     "device": "cuda",
+     "rho": {
+      "n_rows": 12629,
+      "n_sampled": 12629,
+      "n_gt_rho_max": 1,
+      "n_gt_log_ratio_clamp": 2,
+      "rho_max": 8.053611755371094,
+      "rho_min": 0.008544358424842358,
+      "rho_worst_two_sided": 117.03630065917969,
+      "clipped_batches": 1,
+      "rho_p50": 0.9999728202819824,
+      "rho_p90": 1.053215742111206,
+      "rho_p99": 1.387911319732666
+     },
+     "behaviour_identity": {
+      "spec": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+      "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+      "policy": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+      "temp": 0.5,
+      "kl0": -5.6763980182950036e-08,
+      "kl_segment": null,
+      "kl_probe": NaN,
+      "probe_n": 64,
+      "table_digest": "f8f63880ceea4e067e08a8ad463806a682693012cc980e960cd8c1a230e832c0",
+      "matched_id": 2,
+      "per_id": {
+       "0": {
+        "rows": 232929,
+        "probe_rows": 4096,
+        "sha256": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "8c23f752c3b8344775cdf7579cd9486914546fd92566108103972460fc588a4e",
+        "kl_stale": 0.1369144320487976,
+        "matched_init": false
+       },
+       "1": {
+        "rows": 232868,
+        "probe_rows": 4096,
+        "sha256": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "d0805f1bacd09d50baff470888025f8b00d296a187bb6cc23bb4b7f214149ad3",
+        "kl_stale": 0.12383957952260971,
+        "matched_init": false
+       },
+       "2": {
+        "rows": 230720,
+        "probe_rows": 4096,
+        "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "9965aad1b6989822c14e5ab747c82a2c814734089174668da1b9d8a418f58657",
+        "kl_stale": -5.6763980182950036e-08,
+        "matched_init": true
+       },
+       "3": {
+        "rows": 232572,
+        "probe_rows": 4096,
+        "sha256": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f",
+        "verified": true,
+        "kl_recompute": 0.0,
+        "max_abs_logp_dev": 0.0,
+        "recompute_sha256": "bdc9002565df0f72e3cf706b5cfe41123473d32ec239d96e8016bab758fed0ad",
+        "kl_stale": 0.27140673995018005,
+        "matched_init": false
+       }
+      }
+     },
+     "early_stop": false,
+     "legal_stop": true
+    }
+   },
+   "A_actual_steps": 200,
+   "A_budget": 200,
+   "B_actual_steps": 200,
+   "B_budget": 200,
+   "A_full": true,
+   "B_full": true,
+   "A_no_early_stop": true,
+   "B_no_early_stop": true,
+   "A_legal_stop": true,
+   "B_legal_stop": true
+  },
+  "check3_compute": {
+   "wall_A_s": 825.4,
+   "wall_B_s": 790.3,
+   "wall_dev_pct": 4.25,
+   "wall_within_10pct": true,
+   "wall_B_including_failed_rho_attempt_s": 1027.4,
+   "wall_dev_pct_including_failed_attempt": 19.66,
+   "games_A": 1400,
+   "games_B": 1400,
+   "games_equal": true,
+   "steps_A": 200,
+   "steps_B": 200,
+   "steps_equal": true,
+   "per_phase_wall": {
+    "A-collect-r1": {
+     "exit": 0,
+     "wall_s": 164.1,
+     "line": "[18:11:57]   A-collect-r1: exit=0 wall=164.1s commit_free_min=12.32GB"
+    },
+    "A-collect-r2": {
+     "exit": 0,
+     "wall_s": 188.1,
+     "line": "[18:25:35]   A-collect-r2: exit=0 wall=188.1s commit_free_min=11.44GB"
+    },
+    "A-compact-r1": {
+     "exit": 0,
+     "wall_s": 61.0,
+     "line": "[18:13:05]   A-compact-r1: exit=0 wall=61.0s commit_free_min=6.21GB"
+    },
+    "A-compact-r2": {
+     "exit": 0,
+     "wall_s": 70.0,
+     "line": "[18:26:53]   A-compact-r2: exit=0 wall=70.0s commit_free_min=5.00GB"
+    },
+    "A-export-r1": {
+     "exit": 0,
+     "wall_s": 2.0,
+     "line": "[18:22:27]   A-export-r1: exit=0 wall=2.0s commit_free_min=11.96GB"
+    },
+    "A-export-r2": {
+     "exit": 0,
+     "wall_s": 4.0,
+     "line": "[18:30:32]   A-export-r2: exit=0 wall=4.0s commit_free_min=12.62GB"
+    },
+    "A-features-r1": {
+     "exit": 0,
+     "wall_s": 6.0,
+     "line": "[18:12:03]   A-features-r1: exit=0 wall=6.0s commit_free_min=13.08GB"
+    },
+    "A-features-r2": {
+     "exit": 0,
+     "wall_s": 8.0,
+     "line": "[18:25:43]   A-features-r2: exit=0 wall=8.0s commit_free_min=12.17GB"
+    },
+    "B-collect": {
+     "exit": 0,
+     "wall_s": 416.2,
+     "line": "[18:37:32]   B-collect: exit=0 wall=416.2s commit_free_min=12.68GB"
+    },
+    "B-compact": {
+     "exit": 0,
+     "wall_s": 124.0,
+     "line": "[18:39:47]   B-compact: exit=0 wall=124.0s commit_free_min=6.95GB"
+    },
+    "B-export": {
+     "exit": 0,
+     "wall_s": 3.0,
+     "line": "[18:50:41]   B-export: exit=0 wall=3.0s commit_free_min=14.05GB"
+    },
+    "B-features": {
+     "exit": 0,
+     "wall_s": 11.0,
+     "line": "[18:37:43]   B-features: exit=0 wall=11.0s commit_free_min=15.01GB"
+    },
+    "rerun-A-r1": {
+     "exit": 0,
+     "wall_s": 110.0,
+     "line": "[18:22:25]   rerun-A-r1: exit=0 wall=110.0s commit_free_min=7.62GB"
+    },
+    "rerun-A-r2": {
+     "exit": 0,
+     "wall_s": 212.2,
+     "line": "[18:30:28]   rerun-A-r2: exit=0 wall=212.2s commit_free_min=7.10GB"
+    },
+    "rerun-B-s01": {
+     "exit": 0,
+     "wall_s": 236.1,
+     "line": "[18:50:38]   rerun-B-s01: exit=0 wall=236.1s commit_free_min=9.54GB"
+    }
+   },
+   "phase_occurrences": {
+    "rerun-B-s01": [
+     {
+      "exit": 7,
+      "wall_s": 237.1,
+      "line": "[18:43:50]   rerun-B-s01: exit=7 wall=237.1s commit_free_min=9.85GB"
+     },
+     {
+      "exit": 0,
+      "wall_s": 236.1,
+      "line": "[18:50:38]   rerun-B-s01: exit=0 wall=236.1s commit_free_min=9.54GB"
+     }
+    ]
+   },
+   "collect_calls": [
+    {
+     "games": 700,
+     "seed": 52950101,
+     "out": "rerun-A-r1"
+    },
+    {
+     "games": 700,
+     "seed": 52950102,
+     "out": "rerun-A-r2"
+    },
+    {
+     "games": 1400,
+     "seed": 52950302,
+     "out": "rerun-B-all"
+    }
+   ],
+   "phases": [
+    "A-collect-r1",
+    "A-collect-r2",
+    "A-compact-r1",
+    "A-compact-r2",
+    "A-export-r1",
+    "A-export-r2",
+    "A-features-r1",
+    "A-features-r2",
+    "B-collect",
+    "B-compact",
+    "B-export",
+    "B-features",
+    "rerun-A-r1",
+    "rerun-A-r2",
+    "rerun-B-s01"
+   ]
+  },
+  "conclusion": {
+   "check1": true,
+   "check2": true,
+   "check3": true,
+   "verdict": "ok"
+  }
+ }
+}

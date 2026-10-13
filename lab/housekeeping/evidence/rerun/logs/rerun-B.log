@@ -1,0 +1,46 @@
+[18:46:36] ===== RERUN（阈值 0.1）：臂 B · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:46:36 =====
+[18:46:36]   preflight: {"phase": "B", "ts": "2026-10-13 18:46:36", "n_procs": 423, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 15.17}
+[18:46:36]   recipe 指纹：θ_0=167a7002a7a0 def=8349d0c0 win=01f2eacd atk=cac8381e trainer=eca79284db82
+[18:46:36] == 臂 B：**一次**采 1400 场（θ_0）+ 冻结数据上**一段** 200 步 ==
+[18:46:36]   ↩ B-collect: **已存在 ⇒ 跳过**（续跑）
+[18:46:36]   ↩ B-features: **已存在 ⇒ 跳过**（续跑）
+[18:46:36]   ↩ B-compact: **已存在 ⇒ 跳过**（续跑）
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_rerun\spec-rerun-B-s01.json --data-root C:\Users\HP\source\games\mahjong\tmp\rerun\root --compact-root C:\Users\HP\source\games\mahjong\tmp\rerun\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\rerun\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_rerun --only primary --round 11 --rounds S:\mahjong-training\w-ladder\_rerun\rounds.jsonl --out S:\mahjong-training\w-ladder\_rerun\rerun-B-s01.result.json
+=== 重叠编排器 · tag=rerun-B-s01 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:46:42 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-s01-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-B-all（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 58 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=37152 python.exe mem=24.1MB
+         pid=33956 python.exe mem=26.7MB
+  [OK  ] G7 枚举自检：枚举到 424 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 21 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=33956）
+  before: {"commit_free_gb": 15.03, "commit_limit_gb": 39.7, "committed_gb": 24.67, "free_phys_gb": 22.52}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 2 个（算竞争 0）
+  after : {"commit_free_gb": 15.11, "commit_limit_gb": 39.7, "committed_gb": 24.59, "free_phys_gb": 24.34}
+  wall=235.4s · 重叠区间=0.0s · 捕获率=0.0 · commit_free 最低=9.54 GB（n=233）
+
+[out] S:\mahjong-training\w-ladder\_rerun\rerun-B-s01.result.json
+
+[rounds] 第 11 轮已记账 → S:\mahjong-training\w-ladder\_rerun\rounds.jsonl
+[rounds] θ(init) sha256=167a7002a7a0fa60… · D(meta) sha256=5d57026c6fae4a66… · behaviour_ids=[0, 1, 2, 3] · ρ={'n_rows': 12629, 'n_sampled': 12629, 'n_gt_rho_max': 1, 'n_gt_log_ratio_clamp': 2, 'rho_max': 8.053611755371094, 'rho_min': 0.008544358424842358, 'rho_worst_two_sided': 117.03630065917969, 'clipped_batches': 1, 'rho_p50': 0.9999728202819824, 'rho_p90': 1.053215742111206, 'rho_p99': 1.387911319732666} · 陈旧度={'0': 0.1369144320487976, '1': 0.12383957952260971, '2': -5.6763980182950036e-08, '3': 0.27140673995018005}
+[18:50:38]   rerun-B-s01: 步数=200 / 预算=200 / stop_reason=(空) / KL终值=0.010134346016093332
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.export weights --ckpt C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt\rerun-B-s01\model.pt --out C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin --label rerun-B-s01
+已导出 v4 权重：C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin（5594680 字节，格式 2，1,397,992 参数，dims={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51}）
+  ↓ 服务端用法：java -jar mahjong-server.jar --selfplay 100 --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin,teacher,teacher,teacher --out <dir>
+[18:50:41]   θ_B（臂 B 候选）= C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin
+[18:50:44] ===== RERUN 臂 B 结束：rc=0 墙钟 4.1 min =====

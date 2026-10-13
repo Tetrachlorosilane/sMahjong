@@ -1,0 +1,39 @@
+{
+ "tag": "A-r2",
+ "raw": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw\\rerun-A-r2",
+ "n_files": 700,
+ "want": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+ "forbidden": [
+  "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5"
+ ],
+ "n_files_with_want": 700,
+ "n_files_missing_want": 0,
+ "n_files_with_forbidden": 0,
+ "distinct_policies": [
+  "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+  "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+  "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+  "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+ ],
+ "examples": [
+  {
+   "file": "g0.jsonl",
+   "policies": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+   ]
+  },
+  {
+   "file": "g1.jsonl",
+   "policies": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin"
+   ]
+  }
+ ],
+ "ok": true
+}

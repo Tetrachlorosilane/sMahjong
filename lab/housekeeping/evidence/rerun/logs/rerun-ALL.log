@@ -35,3 +35,219 @@ v4 数据集：C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1
     id=1 net     temp=None sha256=8349d0c0c7f5ee82 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin
     id=2 net     temp=0.5 sha256=167a7002a7a0fa60 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5
     id=3 net     temp=None sha256=01f2eacde9bc47d9 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin
+[18:18:30] ===== RERUN（阈值 0.1）：臂 ALL · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:18:30 =====
+[18:18:31]   preflight: {"phase": "ALL", "ts": "2026-10-13 18:18:31", "n_procs": 429, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 12.98}
+[18:18:31]   recipe 指纹：θ_0=167a7002a7a0 def=8349d0c0 win=01f2eacd atk=cac8381e trainer=eca79284db82
+[18:18:31] == 臂 A：预采 D_1（700 场，θ_0）==
+[18:18:31]   ↩ A-collect-r1: **已存在 ⇒ 跳过**（续跑）
+[18:18:31]   ↩ A-features-r1: **已存在 ⇒ 跳过**（续跑）
+[18:18:31]   ↩ A-compact-r1: **已存在 ⇒ 跳过**（续跑）
+[18:18:32] == 臂 A 第 1/2 轮：训 100 步（init == behaviour == 本轮 θ）==
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_rerun\spec-rerun-A-r1.json --data-root C:\Users\HP\source\games\mahjong\tmp\rerun\root --compact-root C:\Users\HP\source\games\mahjong\tmp\rerun\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\rerun\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_rerun --only primary --round 1 --rounds S:\mahjong-training\w-ladder\_rerun\rounds.jsonl --out S:\mahjong-training\w-ladder\_rerun\rerun-A-r1.result.json
+=== 重叠编排器 · tag=rerun-A-r1 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:18:32 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=29788 python.exe mem=22.6MB
+         pid=1412 python.exe mem=26.6MB
+  [OK  ] G7 枚举自检：枚举到 433 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=1412）
+  before: {"commit_free_gb": 12.73, "commit_limit_gb": 39.7, "committed_gb": 26.97, "free_phys_gb": 17.48}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+[18:20:32] ===== RERUN（阈值 0.1）：臂 ALL · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:20:32 =====
+[18:20:33]   preflight: {"phase": "ALL", "ts": "2026-10-13 18:20:33", "n_procs": 433, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 12.83}
+[18:20:33]   recipe 指纹：θ_0=167a7002a7a0 def=8349d0c0 win=01f2eacd atk=cac8381e trainer=eca79284db82
+[18:20:33] == 臂 A：预采 D_1（700 场，θ_0）==
+[18:20:33]   ↩ A-collect-r1: **已存在 ⇒ 跳过**（续跑）
+[18:20:33]   ↩ A-features-r1: **已存在 ⇒ 跳过**（续跑）
+[18:20:33]   ↩ A-compact-r1: **已存在 ⇒ 跳过**（续跑）
+[18:20:35] == 臂 A 第 1/2 轮：训 100 步（init == behaviour == 本轮 θ）==
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_rerun\spec-rerun-A-r1.json --data-root C:\Users\HP\source\games\mahjong\tmp\rerun\root --compact-root C:\Users\HP\source\games\mahjong\tmp\rerun\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\rerun\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_rerun --only primary --round 1 --rounds S:\mahjong-training\w-ladder\_rerun\rounds.jsonl --out S:\mahjong-training\w-ladder\_rerun\rerun-A-r1.result.json
+=== 重叠编排器 · tag=rerun-A-r1 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:20:35 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=22.9MB
+         pid=26548 python.exe mem=26.7MB
+  [OK  ] G7 枚举自检：枚举到 437 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=26548）
+  before: {"commit_free_gb": 12.6, "commit_limit_gb": 39.7, "committed_gb": 27.1, "free_phys_gb": 17.73}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 2 个（算竞争 0）
+  after : {"commit_free_gb": 12.98, "commit_limit_gb": 39.7, "committed_gb": 26.72, "free_phys_gb": 18.86}
+  wall=109.1s · 重叠区间=0.0s · 捕获率=0.0 · commit_free 最低=7.99 GB（n=78）
+
+[out] S:\mahjong-training\w-ladder\_rerun\rerun-A-r1.result.json
+
+[rounds] 第 1 轮已记账 → S:\mahjong-training\w-ladder\_rerun\rounds.jsonl
+[rounds] θ(init) sha256=167a7002a7a0fa60… · D(meta) sha256=6e39d3e23f06ec77… · behaviour_ids=[0, 1, 2, 3] · ρ={'n_rows': 6454, 'n_sampled': 6454, 'n_gt_rho_max': 0, 'n_gt_log_ratio_clamp': 0, 'rho_max': 9.928142547607422, 'rho_min': 0.019406720995903015, 'rho_worst_two_sided': 51.52853775024414, 'clipped_batches': 0, 'rho_p50': 0.9999640583992004, 'rho_p90': 1.1007307767868042, 'rho_p99': 1.4642603397369385} · 陈旧度={'0': 0.11921407282352448, '1': 0.09796811640262604, '2': 8.271582174756986e-08, '3': 0.25208714604377747}
+[18:22:25]   rerun-A-r1: 步数=None / 预算=100 / stop_reason=(空) / KL终值=None
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.export weights --ckpt C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt\rerun-A-r1\model.pt --out C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin --label rerun-A-r1
+已导出 v4 权重：C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin（5594680 字节，格式 2，1,397,992 参数，dims={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51}）
+  ↓ 服务端用法：java -jar mahjong-server.jar --selfplay 100 --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin,teacher,teacher,teacher --out <dir>
+[18:22:27] == 臂 A：**先用 θ_1 采** D_2（⛔ 不用 pair --overlap）==
+
+$ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52950102 --out C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2
+== 自对弈汇总：700 场 / 7922 小局 / 693 决策/场，用时 177.7s（3.94 场/秒，2730 决策/秒），workers=8
+   流局率 9.7%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin@0#0.5    700      2.816      -13.65     18.9%     19.5%       -505       7067
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin    700      2.336        6.06     24.0%     15.7%        187       7226
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin    700      2.507       -0.24     23.1%     15.4%         27       7019
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin    700      2.341        7.83     24.4%     15.5%        285       7513
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2
+
+$ S:\mahjong-training\tools\trainer\trainer.exe features C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2 --workers 8
+== 派生特征富化：700 个轨迹文件 / 485176 条决策 / 4184878 个候选，用时 7.5s（238.8 MB）
+   ObsFeatures v3 perDecision=71（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points） perCandidate=8（shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count） perSeat=102（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]） perSeatBitmap=15（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.dataset C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2 C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r2 --aux --student net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin@0#0.5 --workers 6 --behaviour-id --behaviour-root C:\Users\HP\source\games\mahjong\tools\build
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.dataset' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.dataset'; this may result in unpredictable behaviour
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+长程 carry：`h0` 列用**学生网** C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin 算（d_model=192；逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）
+  torch intra-op 线程：8 → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）
+v4 数据集：C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r2
+  训练 459182 条（665 场）/ 验证 25994 条（35 场）；lmax=27；dtype=float16
+  标签侧：有（True）；块指纹 e1f5dd0fc1e9aba8；obs v3 / derived v3
+  逐决策 reward-to-go 覆盖：train 100.0% / val 100.0%（0% = 老采集器；`--value-target rtg` 会在入口报错）
+  顺位点覆盖：train 100.0% / val 100.0%（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）
+  长程 carry：`h0[192]` 非全 0 的行 train 4.6% / val 5.4%（其余行的事件数 ≤ K=60 ⇒ 窗口之前没有事件、carry 全 0 是正确的）
+  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，训练与加这个功能之前逐位相同
+  行为策略身份：`behaviour_id` 已建，表内 **4** 个行为（未验证 0 个）；训练行按 id 分布：{'0': 114007, '1': 115427, '2': 115068, '3': 114680}；验证 {'0': 6468, '1': 6467, '2': 6531, '3': 6528}
+    id=0 net     temp=0.5 sha256=3cc546cd025df00f net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin@0#0.5
+    id=1 net     temp=None sha256=cac8381e0c61d3f7 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin
+    id=2 net     temp=None sha256=8349d0c0c7f5ee82 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin
+    id=3 net     temp=None sha256=01f2eacde9bc47d9 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin
+[18:26:56] == 臂 A 第 2/2 轮：训 100 步（init == behaviour == 本轮 θ）==
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_rerun\spec-rerun-A-r2.json --data-root C:\Users\HP\source\games\mahjong\tmp\rerun\root --compact-root C:\Users\HP\source\games\mahjong\tmp\rerun\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\rerun\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_rerun --only primary --round 2 --rounds S:\mahjong-training\w-ladder\_rerun\rounds.jsonl --out S:\mahjong-training\w-ladder\_rerun\rerun-A-r2.result.json
+=== 重叠编排器 · tag=rerun-A-r2 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:26:56 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r2（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=23.3MB
+         pid=26512 python.exe mem=26.8MB
+  [OK  ] G7 枚举自检：枚举到 439 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=26512）
+  before: {"commit_free_gb": 11.92, "commit_limit_gb": 39.7, "committed_gb": 27.79, "free_phys_gb": 18.63}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 2 个（算竞争 0）
+  after : {"commit_free_gb": 13.76, "commit_limit_gb": 39.7, "committed_gb": 25.94, "free_phys_gb": 18.92}
+  wall=210.9s · 重叠区间=0.0s · 捕获率=0.0 · commit_free 最低=7.85 GB（n=111）
+
+[out] S:\mahjong-training\w-ladder\_rerun\rerun-A-r2.result.json
+
+[rounds] 第 2 轮已记账 → S:\mahjong-training\w-ladder\_rerun\rounds.jsonl
+[rounds] θ(init) sha256=3cc546cd025df00f… · D(meta) sha256=089e746709ebfb43… · behaviour_ids=[0, 1, 2, 3] · ρ={'n_rows': 6340, 'n_sampled': 6340, 'n_gt_rho_max': 0, 'n_gt_log_ratio_clamp': 1, 'rho_max': 10.503704071044922, 'rho_min': 0.010049608536064625, 'rho_worst_two_sided': 99.50636291503906, 'clipped_batches': 0, 'rho_p50': 1.0, 'rho_p90': 1.0976109504699707, 'rho_p99': 1.3809760808944702} · 陈旧度={'0': 2.0731057759348914e-08, '1': 0.14252865314483643, '2': 0.11366519331932068, '3': 0.2631354331970215}
+[18:30:28]   rerun-A-r2: 步数=None / 预算=100 / stop_reason=(空) / KL终值=None
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.export weights --ckpt C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt\rerun-A-r2\model.pt --out C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin --label rerun-A-r2
+已导出 v4 权重：C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin（5594680 字节，格式 2，1,397,992 参数，dims={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51}）
+  ↓ 服务端用法：java -jar mahjong-server.jar --selfplay 100 --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,teacher,teacher,teacher --out <dir>
+[18:30:35]   θ_2（臂 A 候选）= C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin
+[18:30:35] == 臂 B：**一次**采 1400 场（θ_0）+ 冻结数据上**一段** 200 步 ==
+
+$ S:\mahjong-training\tools\trainer\trainer.exe selfplay 1400 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52950302 --out C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-all
+== 自对弈汇总：1400 场 / 16047 小局 / 699 决策/场，用时 405.7s（3.45 场/秒，2411 决策/秒），workers=8
+   流局率 9.4%   平均每场 11.5 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5   1400      2.766      -12.23     19.5%     18.9%       -481       6978
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin   1400      2.386        5.52     24.2%     15.7%        221       7376
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin   1400      2.469        1.10     23.1%     16.1%         36       7251
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin   1400      2.379        5.61     23.9%     16.2%        216       7603
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-all
+
+$ S:\mahjong-training\tools\trainer\trainer.exe features C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-all --workers 8
+== 派生特征富化：1400 个轨迹文件 / 978352 条决策 / 8437437 个候选，用时 10.3s（481.5 MB）
+   ObsFeatures v3 perDecision=71（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points） perCandidate=8（shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count） perSeat=102（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]） perSeatBitmap=15（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.dataset C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-all C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-B-all --aux --student net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5 --workers 6 --behaviour-id --behaviour-root C:\Users\HP\source\games\mahjong\tools\build
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.dataset' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.dataset'; this may result in unpredictable behaviour
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+长程 carry：`h0` 列用**学生网** C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 算（d_model=192；逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）
+  torch intra-op 线程：8 → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）
+v4 数据集：C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-B-all
+  训练 929089 条（1330 场）/ 验证 49263 条（70 场）；lmax=27；dtype=float16
+  标签侧：有（True）；块指纹 e1f5dd0fc1e9aba8；obs v3 / derived v3
+  逐决策 reward-to-go 覆盖：train 100.0% / val 100.0%（0% = 老采集器；`--value-target rtg` 会在入口报错）
+  顺位点覆盖：train 100.0% / val 100.0%（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）
+  长程 carry：`h0[192]` 非全 0 的行 train 4.6% / val 4.7%（其余行的事件数 ≤ K=60 ⇒ 窗口之前没有事件、carry 全 0 是正确的）
+  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，训练与加这个功能之前逐位相同
+  行为策略身份：`behaviour_id` 已建，表内 **4** 个行为（未验证 0 个）；训练行按 id 分布：{'0': 232929, '1': 232868, '2': 230720, '3': 232572}；验证 {'0': 12332, '1': 12371, '2': 12261, '3': 12299}
+    id=0 net     temp=None sha256=cac8381e0c61d3f7 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin
+    id=1 net     temp=None sha256=8349d0c0c7f5ee82 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin
+    id=2 net     temp=0.5 sha256=167a7002a7a0fa60 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5
+    id=3 net     temp=None sha256=01f2eacde9bc47d9 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_rerun\spec-rerun-B-s01.json --data-root C:\Users\HP\source\games\mahjong\tmp\rerun\root --compact-root C:\Users\HP\source\games\mahjong\tmp\rerun\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\rerun\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_rerun --only primary --round 11 --rounds S:\mahjong-training\w-ladder\_rerun\rounds.jsonl --out S:\mahjong-training\w-ladder\_rerun\rerun-B-s01.result.json
+=== 重叠编排器 · tag=rerun-B-s01 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:39:53 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-s01-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-B-all（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 58 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=17.2MB
+         pid=35772 python.exe mem=26.7MB
+  [OK  ] G7 枚举自检：枚举到 422 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 21 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=35772）
+  before: {"commit_free_gb": 15.16, "commit_limit_gb": 39.7, "committed_gb": 24.54, "free_phys_gb": 23.35}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 2 个（算竞争 0）
+  after : {"commit_free_gb": 15.62, "commit_limit_gb": 39.7, "committed_gb": 24.08, "free_phys_gb": 23.28}
+  wall=235.6s · 重叠区间=0.0s · 捕获率=0.0 · commit_free 最低=9.85 GB（n=233）
+
+⛔ **有相非 0 退出**：[['primary', 1]] ⇒ exit=7（⛔ 不许当成'跑过了'；主相/从相的产物都可能是半成品）
+
+[out] S:\mahjong-training\w-ladder\_rerun\rerun-B-s01.result.json
+
+[rounds] 第 11 轮已记账 → S:\mahjong-training\w-ladder\_rerun\rounds.jsonl
+[rounds] θ(init) sha256=167a7002a7a0fa60… · D(meta) sha256=5d57026c6fae4a66… · behaviour_ids=[0, 1, 2, 3] · ρ=None · 陈旧度={}

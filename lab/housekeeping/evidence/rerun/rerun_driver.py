@@ -176,13 +176,14 @@ def compact_cmd(src: Path, out: Path, student_spec: str) -> list[str]:
 
 
 def train_cmd(data: Path, label: str, init: Path, seed: int, *, total_steps: int,
-              stop_after: int = 0, save_opt: bool = False, resume: Path | None = None) -> list[str]:
+              stop_after: int = 0, save_opt: bool = False, resume: Path | None = None,
+              rho_action: str = "fail") -> list[str]:
     c = [str(PY), "-u", "-m", "mahjong_ml.v4.pretrain", "--data", str(data), "--label", label,
          "--objective", "ppo", "--value-target", "delta", "--advantage", "hand",
          "--rank-weight", "0.2", "--epochs", "1", "--batch", "256", "--lr", "1e-4",
          "--stage-a", "0", "--stage-b", "0", "--seed", str(seed),
          "--init", str(init), "--behaviour", str(init), "--behaviour-temp", f"{TEMP:g}",
-         "--behaviour-multi", "--rho-max", "100", "--rho-max-action", "fail",
+         "--behaviour-multi", "--rho-max", "100", "--rho-max-action", rho_action,
          "--stale-kl-budget", "0.30", "--ref-beta", "0.5", "--grad-clip", "0.5",
          "--kl-early-stop", f"{THRESH:g}", "--kl-min-steps", "60",
          "--baseline-fit", "scale", "--threads", "8", "--max-steps", str(total_steps)]
@@ -232,18 +233,29 @@ def train_phase(tag: str, src: Path, cmd: list[str], dummy: list[str], round_no:
 
 
 def metrics_of(label: str) -> dict:
+    """⚠ 实测 `metrics.json` **没有**顶层 `steps` 键（BL-13 的驱动在这里也读成 None）：
+    真实步数 = `stage_steps` 之和 / `steps_per_epoch`（计划步数）；`stop_reason` 非空时才另算。"""
     mj = W / "root" / "ckpt" / label / "metrics.json"
     if not mj.exists():
-        return {"steps": None, "stop_reason": "<没有 metrics.json>"}
+        return {"steps": None, "stop_reason": "<没有 metrics.json>", "kl_last": None,
+                "kl_inv_last": None, "ref_kl_last": None, "early_stop": True,
+                "legal_stop": False, "label": label}
     m = json.loads(mj.read_text(encoding="utf-8"))
     hist = m.get("history") or []
-    kl = None
-    for h in reversed(hist):
-        if h.get("kl") is not None:
-            kl = h["kl"]; break
-    return {"steps": m.get("steps") or (hist[-1].get("step") if hist else None),
-            "stop_reason": str(m.get("stop_reason") or ""), "kl_last": kl,
-            "label": label}
+    sr = str(m.get("stop_reason") or "")
+    steps = int(m.get("steps_per_epoch") or 0)
+    mm = re.search(r"第 (\d+) 步", sr)
+    if mm:
+        steps = int(mm.group(1))
+    parts = (hist[-1].get("train_parts") if hist else {}) or {}
+    return {"steps": steps, "stop_reason": sr,
+            "kl_last": parts.get("kl"), "kl_inv_last": parts.get("kl_inv"),
+            "ref_kl_last": parts.get("ref_kl"),
+            "stage_steps": m.get("stage_steps"), "wall_seconds": m.get("wall_seconds"),
+            "kl_min_steps_effective": None, "rho": m.get("rho"),
+            "behaviour_identity": m.get("behaviour_identity"), "label": label,
+            "legal_stop": bool(not sr or "--stop-after-steps" in sr),
+            "early_stop": bool("KL 早停" in sr or "验证集" in sr)}
 
 
 def scan_policy(raw: Path, theta: Path, forbid: list[Path], tag: str) -> dict:
@@ -256,7 +268,12 @@ def scan_policy(raw: Path, theta: Path, forbid: list[Path], tag: str) -> dict:
     examples = []
     for i, f in enumerate(files):
         blob = f.read_bytes()
-        pols = {m.decode("utf-8", "replace") for m in PAT.findall(blob)}
+        pols = set()
+        for m in PAT.findall(blob):        # ⚠ JSON 转义：文件里是 `\\`，必须 json.loads 还原成 `\`
+            try:
+                pols.add(json.loads(b'"' + m + b'"'))
+            except Exception:              # noqa: BLE001
+                pols.add(m.decode("utf-8", "replace"))
         seen |= pols
         if want in pols:
             n_ok += 1
@@ -385,8 +402,10 @@ def arm_b(logf: Path) -> int:
                            done_compact(cb), logf)
     scan_policy(db, BASE, [], "B-all")
     label = "rerun-B-s01"
+    # ⚠ **预先声明的偏离**（RERUN-PLAN §4）：`fail` 在**首个 batch** 撞 ρ 上限（1/59 行、最坏双边 117）
+    #   ⇒ 该相改 `account`（夹到上限 + 逐行记账，⛔ 不静默裁剪）重跑。BL-13 的标定点也是这么做的。
     tr = train_cmd(cb, label, BASE, 52950202, total_steps=K * STEPS,
-                   stop_after=K * STEPS, save_opt=True)
+                   stop_after=K * STEPS, save_opt=True, rho_action="account")
     dummy = collect_cmd(1, BASE, 52950309, W / "raw" / f"{label}-none")
     rc["B-train"] = train_phase(label, cb, tr, dummy, 11, logf)
     m = metrics_of(label); m["tag"] = label

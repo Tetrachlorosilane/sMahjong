@@ -114,10 +114,13 @@ def main() -> int:
         for _seed, dd in fams:
             ga.update(series_of(dd, a.a, metric))
             gb.update(series_of(dd, a.b, metric))
-        p = ml_eval.paired_test(ga, gb, "A", "B", metric)
+        # ⚠ 护栏方向 = **候选 − 现任 = B − A**（与 `v4.gate --guard-metric` 的单侧口径一致：
+        #   "候选不得比现任差超过 tol"）。若按 A−B 算会把方向反过来、凭空造出一个否决。
+        p = ml_eval.paired_test(gb, ga, "B(cand)", "A(inc)", metric)
         gmde = 1.96 * p.sd / math.sqrt(p.n)
         out["guards"].append({
-            "metric": metric, "tol": tol, "delta": p.mean, "ci": [p.ci[0], p.ci[1]], "n": p.n,
+            "metric": metric, "direction": "B(候选) − A(现任)", "tol": tol,
+            "delta": p.mean, "ci": [p.ci[0], p.ci[1]], "n": p.n,
             "mde": gmde, "tol_over_mde": (None if tol is None else tol / gmde),
             "usable_as_veto": bool(tol is not None and gmde > 0 and tol / gmde >= 1.0),
             "ok": bool(tol is None or p.ci[0] >= -tol)})

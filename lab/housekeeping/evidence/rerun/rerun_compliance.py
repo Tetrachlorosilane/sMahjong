@@ -13,9 +13,15 @@ import re
 import sys
 from pathlib import Path
 
+try:                                  # 控制台 GBK ⇒ ⭐/⇒ 会 UnicodeEncodeError（实测已崩过两次）
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                     # noqa: BLE001
+    pass
+
 EV = Path(r"S:\mahjong-training\w-ladder\_rerun")
-BUDGET_A, BUDGET_B = 100, 200
+BUDGET_A, BUDGET_B = 200, 200         # 臂**总**预算步数（A = 2 段 × 100；B = 1 段 × 200）
 GAMES_A, GAMES_B = 1400, 1400
+WLOG = re.compile(r"\[[\d:]+\]\s+([A-Za-z0-9\-]+): exit=(-?\d+) wall=([\d.]+)s")
 
 
 def main() -> int:
@@ -33,12 +39,27 @@ def main() -> int:
     out["check1_freshness"] = pol
     c1 = all(p.get("ok") for p in pol.values())
 
-    # ---- ② 信任域 ----
+    # ---- ② 信任域（⚠ 直接读**原始** metrics.json：`steps` 不在顶层）----
     steps = {}
     for tag in ("rerun-A-r1", "rerun-A-r2", "rerun-B-s01"):
-        p = EV / f"metrics-{tag}.json"
-        steps[tag] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"steps": None,
-                                                                                  "stop_reason": "缺"}
+        mj = Path(r"C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt") / tag / "metrics.json"
+        if not mj.exists():
+            steps[tag] = {"steps": None, "stop_reason": "缺 metrics.json", "early_stop": True}
+            continue
+        m = json.loads(mj.read_text(encoding="utf-8"))
+        sr = str(m.get("stop_reason") or "")
+        hist = m.get("history") or []
+        parts = (hist[-1].get("train_parts") if hist else {}) or {}
+        steps[tag] = {"steps": int(m.get("steps_per_epoch") or 0), "stop_reason": sr,
+                      "kl_last": parts.get("kl"), "kl_inv_last": parts.get("kl_inv"),
+                      "ref_kl_last": parts.get("ref_kl"), "stage_steps": m.get("stage_steps"),
+                      "wall_seconds": m.get("wall_seconds"), "device": m.get("device"),
+                      "rho": m.get("rho"), "behaviour_identity": m.get("behaviour_identity"),
+                      "early_stop": bool("KL 早停" in sr or "验证集" in sr),
+                      "legal_stop": bool(not sr or "--stop-after-steps" in sr)}
+        mm = re.search(r"第 (\d+) 步", sr)
+        if mm:
+            steps[tag]["steps"] = int(mm.group(1))
     got_a = sum(int(steps[t].get("steps") or 0) for t in ("rerun-A-r1", "rerun-A-r2"))
     got_b = int(steps["rerun-B-s01"].get("steps") or 0)
     out["check2_trust_region"] = {
@@ -46,30 +67,48 @@ def main() -> int:
         "A_actual_steps": got_a, "A_budget": BUDGET_A,
         "B_actual_steps": got_b, "B_budget": BUDGET_B,
         "A_full": got_a == BUDGET_A, "B_full": got_b == BUDGET_B,
-        "A_no_early_stop": all(not steps[t].get("stop_reason") for t in ("rerun-A-r1", "rerun-A-r2")),
-        "B_no_early_stop": not steps["rerun-B-s01"].get("stop_reason")}
+        "A_no_early_stop": all(not steps[t].get("early_stop") for t in ("rerun-A-r1", "rerun-A-r2")),
+        "B_no_early_stop": not steps["rerun-B-s01"].get("early_stop"),
+        "A_legal_stop": all(steps[t].get("legal_stop") for t in ("rerun-A-r1", "rerun-A-r2")),
+        "B_legal_stop": steps["rerun-B-s01"].get("legal_stop")}
     c2 = bool(out["check2_trust_region"]["A_full"] and out["check2_trust_region"]["B_full"]
               and out["check2_trust_region"]["A_no_early_stop"]
               and out["check2_trust_region"]["B_no_early_stop"])
 
-    # ---- ③ 算力对账（场数从采集日志的 `selfplay N ... --seed S --out D` 取，⛔ 不用计划值）----
+    # ---- ③ 算力对账（⚠ 墙钟从**驱动日志**逐相重建：`compute.json` 会被后续单臂进程覆盖）----
+    dlog = (EV / "logs" / "rerun.driver.log").read_text(encoding="utf-8", errors="replace")
+    phases: dict[str, list[dict]] = {}
+    for ln in dlog.splitlines():
+        m = WLOG.match(ln)
+        if not m:
+            continue
+        phases.setdefault(m.group(1), []).append({"exit": int(m.group(2)),
+                                                  "wall_s": float(m.group(3)),
+                                                  "line": ln.strip()})
+    last = {k: v[-1] for k, v in phases.items()}
+    wall_a = sum(v["wall_s"] for k, v in last.items()
+                 if (k.startswith("A-") or k.startswith("rerun-A-")))
+    wall_b = sum(v["wall_s"] for k, v in last.items()
+                 if (k.startswith("B-") or k.startswith("rerun-B-")))
+    wall_b_all = sum(x["wall_s"] for k, v in phases.items() if k.startswith("B-") or
+                     k.startswith("rerun-B-") for x in v)
+    dev = abs(wall_a - wall_b) / max(wall_a, wall_b) * 100 if max(wall_a, wall_b) else float("inf")
+    dev_all = abs(wall_a - wall_b_all) / max(wall_a, wall_b_all) * 100
     coll = []
     for m in re.finditer(r"selfplay (\d+) --workers 8([^\n]*)--seed (\d+) --out ([^\n]+)", log):
         coll.append({"games": int(m.group(1)), "seed": int(m.group(3)),
                      "out": Path(m.group(4).strip()).name})
-    wall_a = sum(v["wall_s"] for k, v in WALL.items()
-                 if k.startswith("A-") or k.startswith("rerun-A-"))
-    wall_b = sum(v["wall_s"] for k, v in WALL.items()
-                 if k.startswith("B-") or k.startswith("rerun-B-"))
-    dev = abs(wall_a - wall_b) / max(wall_a, wall_b) * 100 if max(wall_a, wall_b) else float("inf")
     out["check3_compute"] = {
         "wall_A_s": round(wall_a, 1), "wall_B_s": round(wall_b, 1),
         "wall_dev_pct": round(dev, 2), "wall_within_10pct": bool(dev <= 10.0),
+        "wall_B_including_failed_rho_attempt_s": round(wall_b_all, 1),
+        "wall_dev_pct_including_failed_attempt": round(dev_all, 2),
         "games_A": GAMES_A, "games_B": GAMES_B, "games_equal": bool(GAMES_A == GAMES_B),
         "steps_A": got_a, "steps_B": got_b, "steps_equal": bool(got_a == got_b),
-        "per_phase_wall": WALL,
+        "per_phase_wall": {k: last[k] for k in sorted(last)},
+        "phase_occurrences": {k: v for k, v in sorted(phases.items()) if len(v) > 1},
         "collect_calls": coll,
-        "phases": sorted(WALL)}
+        "phases": sorted(last)}
     c3 = bool(out["check3_compute"]["wall_within_10pct"] and out["check3_compute"]["games_equal"]
               and out["check3_compute"]["steps_equal"])
 
@@ -84,9 +123,11 @@ def main() -> int:
           f"B {got_b}/{BUDGET_B} 步（早停={not out['check2_trust_region']['B_no_early_stop']}）")
     for t, s in steps.items():
         print(f"   {t}: steps={s.get('steps')} stop_reason={s.get('stop_reason') or '(空)'} "
-              f"KL终值={s.get('kl_last')}")
+              f"KL终值={s.get('kl_last')} kl_inv={s.get('kl_inv_last')} ref_kl={s.get('ref_kl_last')} "
+              f"stage_steps={s.get('stage_steps')} device={s.get('device')}")
     print(f"③ 算力：{c3} —— 场数 {GAMES_A}/{GAMES_B} · 步数 {got_a}/{got_b} · "
-          f"墙钟 A={wall_a:.0f}s B={wall_b:.0f}s 偏差 {dev:.1f}%")
+          f"墙钟 A={wall_a:.0f}s B={wall_b:.0f}s 偏差 {dev:.1f}%"
+          f"（含失败的 ρ-fail 首轮则 B={wall_b_all:.0f}s、偏差 {dev_all:.1f}%）")
     print(f"⇒ 操作检查 ①②③ = {out['conclusion']['verdict']}")
     return 0
 

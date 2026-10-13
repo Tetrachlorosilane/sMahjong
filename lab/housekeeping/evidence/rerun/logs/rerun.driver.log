@@ -1,3 +1,24 @@
 [18:11:57]   A-collect-r1: exit=0 wall=164.1s commit_free_min=12.32GB
 [18:12:03]   A-features-r1: exit=0 wall=6.0s commit_free_min=13.08GB
 [18:13:05]   A-compact-r1: exit=0 wall=61.0s commit_free_min=6.21GB
+[18:18:32]   ⭐ policy-check[A-r1]：0/700 个 g*.jsonl 含 `net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5` · 缺=700 · 出现禁项=0 ⇒ ⛔FAIL
+[18:20:35]   ⭐ policy-check[A-r1]：700/700 个 g*.jsonl 含 `net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5` · 缺=0 · 出现禁项=0 ⇒ OK
+[18:22:25]   rerun-A-r1: exit=0 wall=110.0s commit_free_min=7.62GB
+[18:22:27]   A-export-r1: exit=0 wall=2.0s commit_free_min=11.96GB
+[18:25:35]   A-collect-r2: exit=0 wall=188.1s commit_free_min=11.44GB
+[18:25:43]   A-features-r2: exit=0 wall=8.0s commit_free_min=12.17GB
+[18:26:53]   A-compact-r2: exit=0 wall=70.0s commit_free_min=5.00GB
+[18:26:55]   ⭐ policy-check[A-r2]：700/700 个 g*.jsonl 含 `net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r1\net.bin@0#0.5` · 缺=0 · 出现禁项=0 ⇒ OK
+[18:26:56]   🧹 A-r1：删 ['rerun-A-r1', 'rerun-A-r1']，释放 13.14 GB
+[18:30:28]   rerun-A-r2: exit=0 wall=212.2s commit_free_min=7.10GB
+[18:30:32]   A-export-r2: exit=0 wall=4.0s commit_free_min=12.62GB
+[18:30:35]   🧹 A-r2：删 ['rerun-A-r2', 'rerun-A-r2']，释放 13.39 GB
+[18:37:32]   B-collect: exit=0 wall=416.2s commit_free_min=12.68GB
+[18:37:43]   B-features: exit=0 wall=11.0s commit_free_min=15.01GB
+[18:39:47]   B-compact: exit=0 wall=124.0s commit_free_min=6.95GB
+[18:39:52]   ⭐ policy-check[B-all]：1400/1400 个 g*.jsonl 含 `net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5` · 缺=0 · 出现禁项=0 ⇒ OK
+[18:43:50]   rerun-B-s01: exit=7 wall=237.1s commit_free_min=9.85GB
+[18:46:42]   ⭐ policy-check[B-all]：1400/1400 个 g*.jsonl 含 `net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5` · 缺=0 · 出现禁项=0 ⇒ OK
+[18:50:38]   rerun-B-s01: exit=0 wall=236.1s commit_free_min=9.54GB
+[18:50:41]   B-export: exit=0 wall=3.0s commit_free_min=14.05GB
+[18:50:44]   🧹 B：删 ['rerun-B-all', 'rerun-B-all']，释放 26.99 GB

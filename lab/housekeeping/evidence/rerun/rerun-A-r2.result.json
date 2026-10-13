@@ -1,0 +1,176 @@
+{
+ "tool": "overlap-orchestrator",
+ "version": "1",
+ "mode": "pair",
+ "tag": "rerun-A-r2",
+ "ts": "2026-10-13 18:26:56",
+ "override": {
+  "DATA_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\root",
+  "COMPACT_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\compact",
+  "RAW_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw",
+  "WORKERS": 8,
+  "CHUNK": 100000,
+  "TIMEOUT": 0.0,
+  "REPO": "C:\\Users\\HP\\source\\games\\mahjong",
+  "PY": "S:\\mahjong-training\\tools\\py312\\python.exe"
+ },
+ "allowed_rm_roots": [
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\compact",
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw",
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\root"
+ ],
+ "gates": {
+  "ok": true,
+  "checks": [
+   {
+    "id": "G1",
+    "ok": true,
+    "what": "主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']",
+    "detail": "允许『train ‖ collect』"
+   },
+   {
+    "id": "G2",
+    "ok": true,
+    "what": "主相写目录 vs 从相写目录：不相交、互不为祖先",
+    "detail": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\root\\ckpt  ⊥  C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\raw\\rerun-A-r2-none"
+   },
+   {
+    "id": "G3",
+    "ok": true,
+    "what": "主相输入分片存在且与从相写目录分开",
+    "detail": "src=C:\\Users\\HP\\source\\games\\mahjong\\tmp\\rerun\\compact\\rerun-A-r2（51 个文件）"
+   },
+   {
+    "id": "G4",
+    "ok": true,
+    "what": "采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来",
+    "detail": "pin 5 个：['C:\\\\Users\\\\HP\\\\source\\\\games\\\\mahjong\\\\tools\\\\build\\\\rerun-A-r1\\\\net.bin', 'C:\\\\Users\\\\HP\\\\source\\\\games\\\\mahjong\\\\tools\\\\build\\\\v4-expert-def7-g10\\\\net.bin', 'C:\\\\Users\\\\HP\\\\source\\\\games\\\\mahjong\\\\tools\\\\build\\\\v4-expert-win2-g10\\\\net.bin', 'C:\\\\Users\\\\HP\\\\source\\\\games\\\\mahjong\\\\tools\\\\build\\\\v4-expert-atk3-g10\\\\net.bin', 'S:\\\\mahjong-training\\\\tools\\\\trainer\\\\trainer.exe'] · 主相 55 个 token"
+   },
+   {
+    "id": "G5",
+    "ok": true,
+    "what": "采集命令行里没有引用正在被写的主相产物目录",
+    "detail": "无引用"
+   }
+  ],
+  "refusals": [],
+  "pin_paths": [
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+   "S:\\mahjong-training\\tools\\trainer\\trainer.exe"
+  ]
+ },
+ "probe": {
+  "ran": false,
+  "ok": false,
+  "how": [],
+  "fail_pids": [],
+  "stuck_pids": [],
+  "fail_closed": false
+ },
+ "enumeration_selfcheck": {
+  "ok": true,
+  "checks": [
+   {
+    "id": "self",
+    "ok": true,
+    "what": "枚举必须看得见**本探针自己**的 pid",
+    "detail": "own_pid=26512 ∈ 枚举（439 个进程）= True"
+   },
+   {
+    "id": "system",
+    "ok": true,
+    "what": "枚举必须看得见**任何正常会话都看得见**的系统进程（['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] 里至少 3 个）",
+    "detail": "看见 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] —— 只有 5/5 ⇒ 正常（枚举到 439 个进程）"
+   },
+   {
+    "id": "netstat",
+    "ok": true,
+    "what": "`netstat -ano` 里 LISTENING 的属主 pid 必须都在枚举里（TCP 表不受令牌限域 ⇒ 独立通道）",
+    "detail": "netstat 报 24 个 LISTENING pid；枚举里**看不到**的 = []"
+   }
+  ],
+  "n_rows": 439,
+  "n_netstat": 24,
+  "hidden_pids": [],
+  "system_seen": [
+   "smss.exe",
+   "csrss.exe",
+   "wininit.exe",
+   "services.exe",
+   "lsass.exe"
+  ]
+ },
+ "exit_code": 0,
+ "phase_failures": [],
+ "phases": {
+  "primary": {
+   "name": "primary",
+   "pid": 13988,
+   "code": 0,
+   "own_wall_s": 210.5,
+   "timed_out": false,
+   "committed_mb": 0.2,
+   "peak_committed_mb": 5532.1,
+   "ws_mb": 0.1,
+   "peak_ws_mb": 12624.0
+  },
+  "other": null,
+  "primary_serial_fallback": null
+ },
+ "wall_s": 210.9,
+ "overlap_interval_s": 0.0,
+ "capture_rate": 0.0,
+ "commit_free_min_gb": 7.85,
+ "commit_free_n_samples": 111,
+ "peak_committed_mb": {
+  "primary": 5532.1
+ },
+ "peak_ws_mb": {
+  "primary": 12624.0
+ },
+ "procs_committed_sum_peak_mb": 4790.2,
+ "procs_ws_sum_peak_mb": 11565.0,
+ "both_present_samples": 0,
+ "commands_run": 1,
+ "pin_changed": [],
+ "src_manifest_changed": false,
+ "contaminated": false,
+ "gate_killed": [],
+ "timing_reliable": true,
+ "raw": {
+  "primary": {
+   "name": "primary",
+   "pid": 13988,
+   "code": 0,
+   "own_wall_s": 210.5,
+   "timed_out": false,
+   "committed_mb": 0.2,
+   "peak_committed_mb": 5532.1,
+   "ws_mb": 0.1,
+   "peak_ws_mb": 12624.0
+  },
+  "phase_start_offset_s": {
+   "primary": 0.5
+  },
+  "phase_end_offset_s": {
+   "primary": 210.9
+  },
+  "overlap_interval_s": 0.0,
+  "capture_rate": 0.0,
+  "wall_s": 210.9,
+  "peak_committed_mb": {
+   "primary": 5532.1
+  },
+  "peak_ws_mb": {
+   "primary": 12624.0
+  },
+  "commit_free_min_gb": 7.85,
+  "commit_free_n_samples": 111,
+  "procs_committed_sum_peak_mb": 4790.2,
+  "procs_ws_sum_peak_mb": 11565.0,
+  "both_present_samples": 0
+ }
+}

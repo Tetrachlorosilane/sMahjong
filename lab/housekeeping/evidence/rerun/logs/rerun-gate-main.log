@@ -1,0 +1,33 @@
+闸门：现任=rerun-A-r2 vs 候选=rerun-B-s01；3 套牌山 × 每套至多 2000 场（block=2000）
+  主口径 = **rank_points**（通用强度口径，无独立护栏）
+  追加护栏（**单侧**：CI 下界须 ≥ −TOL）：deals:1 · wins:0.05 · win_points:300
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin --seed 52940001 --out S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940001
+== 自对弈汇总：2000 场 / 22663 小局 / 688 决策/场，用时 457.9s（4.37 场/秒，3003 决策/秒），workers=8
+   流局率 10.0%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin   4000      2.514       -0.70     22.4%     16.4%        -26       7189
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin   4000      2.486        0.70     22.6%     16.5%         23       7257
+轨迹目录：S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940001
+  牌山 52940001：Δ= +1.40 CI[ -0.94, +3.79] n=2000（候选 − 现任） · 护栏 deals Δ=-0.01 · 护栏 wins Δ=+0.03 · 护栏 win_points Δ=+354.12
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin --seed 52940002 --out S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940002
+== 自对弈汇总：2000 场 / 22657 小局 / 688 决策/场，用时 460.4s（4.34 场/秒，2987 决策/秒），workers=8
+   流局率 9.6%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin   4000      2.495        0.16     22.5%     16.6%          5       7259
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin   4000      2.505       -0.16     22.7%     16.6%         -9       7151
+轨迹目录：S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940002
+  牌山 52940002：Δ= -0.31 CI[ -2.64, +2.02] n=2000（候选 − 现任） · 护栏 deals Δ=-0.00 · 护栏 wins Δ=+0.03 · 护栏 win_points Δ=-89.40
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin --seed 52940003 --out S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940003
+== 自对弈汇总：2000 场 / 22646 小局 / 688 决策/场，用时 446.0s（4.48 场/秒，3083 决策/秒），workers=8
+   流局率 9.9%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-A-r2\net.bin   4000      2.516       -0.62     22.4%     16.8%        -27       7204
+net:C:\Users\HP\source\games\mahjong\tools\build\rerun-B-s01\net.bin   4000      2.484        0.62     22.6%     16.2%         23       7204
+轨迹目录：S:\mahjong-training\w-ladder\_rerun\gate\rerun-main\s52940003
+  牌山 52940003：Δ= +1.24 CI[ -1.15, +3.60] n=2000（候选 − 现任） · 护栏 deals Δ=+0.07 · 护栏 wins Δ=+0.02 · 护栏 win_points Δ=+121.40
+  护栏（deals）：Δ=+0.017 CI[-0.018,+0.052] ⇒ 不破（预注册：下界须 ≥ −1，单位 = 该口径每场每席的量）
+  护栏（wins）：Δ=+0.023 CI[-0.020,+0.065] ⇒ 不破（预注册：下界须 ≥ −0.05，单位 = 该口径每场每席的量）
+  护栏（win_points）：Δ=+128.708 CI[-244.114,+509.996] ⇒ 不破（预注册：下界须 ≥ −300，单位 = 该口径每场每席的量）
+  合并判决：主口径（rank_points）Δ=+0.78 CI[-0.57,+2.15] ✗ · deals ✓ · wins ✓ · win_points ✓ ⇒ **不采纳**
+  套间散布：极差 1.71 / 合并 CI 半宽 1.36 = 1.26×  ⚠ 套间散布已超过 CI 半宽 ⇒ **判决是条件于这几套牌山的**，别当普遍结论
+== 合并判决：Δ= +0.78 CI[ -0.57, +2.15] n=6000 ⇒ 不采纳（回滚到现任）

@@ -1,0 +1,92 @@
+=== 重叠编排器 · tag=rerun-A-r1 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:18:32 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=29788 python.exe mem=22.6MB
+         pid=1412 python.exe mem=26.6MB
+  [OK  ] G7 枚举自检：枚举到 433 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=1412）
+  before: {"commit_free_gb": 12.73, "commit_limit_gb": 39.7, "committed_gb": 26.97, "free_phys_gb": 17.48}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+[18:20:32] ===== RERUN（阈值 0.1）：臂 ALL · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:20:32 =====
+[18:20:33]   preflight: {"phase": "ALL", "ts": "2026-10-13 18:20:33", "n_procs": 433, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 12.83}
+
+=== 重叠编排器 · tag=rerun-A-r1 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:20:35 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=22.9MB
+         pid=26548 python.exe mem=26.7MB
+  [OK  ] G7 枚举自检：枚举到 437 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=26548）
+  before: {"commit_free_gb": 12.6, "commit_limit_gb": 39.7, "committed_gb": 27.1, "free_phys_gb": 17.73}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+
+=== 重叠编排器 · tag=rerun-A-r2 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:26:56 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r2-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r2（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\rerun-A-r1\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 55 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=23.3MB
+         pid=26512 python.exe mem=26.8MB
+  [OK  ] G7 枚举自检：枚举到 439 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 24 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=26512）
+  before: {"commit_free_gb": 11.92, "commit_limit_gb": 39.7, "committed_gb": 27.79, "free_phys_gb": 18.63}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+
+=== 重叠编排器 · tag=rerun-B-s01 · phase=train ‖ collect · overlap=OFF · 2026-10-13 18:39:53 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\rerun\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-B-s01-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-B-all（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 58 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=44368 python.exe mem=17.2MB
+         pid=35772 python.exe mem=26.7MB
+  [OK  ] G7 枚举自检：枚举到 422 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 21 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_rerun\overlap-orchestrator.lock（pid=35772）
+  before: {"commit_free_gb": 15.16, "commit_limit_gb": 39.7, "committed_gb": 24.54, "free_phys_gb": 23.35}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+

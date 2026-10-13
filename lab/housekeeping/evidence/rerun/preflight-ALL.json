@@ -1,7 +1,7 @@
 {
  "phase": "ALL",
- "ts": "2026-10-13 18:09:13",
- "n_procs": 435,
+ "ts": "2026-10-13 18:20:33",
+ "n_procs": 433,
  "system_seen": [
   "csrss.exe",
   "lsass.exe",
@@ -11,5 +11,5 @@
  ],
  "busy": [],
  "paddleocr": [],
- "commit_free_gb": 12.95
+ "commit_free_gb": 12.83
 }
