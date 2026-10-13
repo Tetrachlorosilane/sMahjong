@@ -1,0 +1,37 @@
+[18:09:13] ===== RERUN（阈值 0.1）：臂 ALL · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:09:13 =====
+[18:09:13]   preflight: {"phase": "ALL", "ts": "2026-10-13 18:09:13", "n_procs": 435, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 12.95}
+[18:09:13]   recipe 指纹：θ_0=167a7002a7a0 def=8349d0c0 win=01f2eacd atk=cac8381e trainer=eca79284db82
+[18:09:13] == 臂 A：预采 D_1（700 场，θ_0）==
+
+$ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52950101 --out C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1
+== 自对弈汇总：700 场 / 7959 小局 / 695 决策/场，用时 153.2s（4.57 场/秒，3177 决策/秒），workers=8
+   流局率 9.6%   平均每场 11.4 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5    700      2.789      -12.97     19.1%     19.6%       -520       7008
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin    700      2.383        4.13     23.4%     16.1%        116       7230
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin    700      2.447        3.26     23.6%     15.5%        177       7350
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin    700      2.381        5.58     24.3%     15.7%        222       7412
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1
+
+$ S:\mahjong-training\tools\trainer\trainer.exe features C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1 --workers 8
+== 派生特征富化：700 个轨迹文件 / 486644 条决策 / 4195045 个候选，用时 5.2s（239.5 MB）
+   ObsFeatures v3 perDecision=71（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points） perCandidate=8（shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count） perSeat=102（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]） perSeatBitmap=15（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.dataset C:\Users\HP\source\games\mahjong\tmp\rerun\raw\rerun-A-r1 C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1 --aux --student net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5 --workers 6 --behaviour-id --behaviour-root C:\Users\HP\source\games\mahjong\tools\build
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.dataset' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.dataset'; this may result in unpredictable behaviour
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+长程 carry：`h0` 列用**学生网** C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 算（d_model=192；逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）
+  torch intra-op 线程：8 → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）
+v4 数据集：C:\Users\HP\source\games\mahjong\tmp\rerun\compact\rerun-A-r1
+  训练 462186 条（665 场）/ 验证 24458 条（35 场）；lmax=25；dtype=float16
+  标签侧：有（True）；块指纹 e1f5dd0fc1e9aba8；obs v3 / derived v3
+  逐决策 reward-to-go 覆盖：train 100.0% / val 100.0%（0% = 老采集器；`--value-target rtg` 会在入口报错）
+  顺位点覆盖：train 100.0% / val 100.0%（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）
+  长程 carry：`h0[192]` 非全 0 的行 train 4.8% / val 4.2%（其余行的事件数 ≤ K=60 ⇒ 窗口之前没有事件、carry 全 0 是正确的）
+  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，训练与加这个功能之前逐位相同
+  行为策略身份：`behaviour_id` 已建，表内 **4** 个行为（未验证 0 个）；训练行按 id 分布：{'0': 115860, '1': 115945, '2': 114763, '3': 115618}；验证 {'0': 6155, '1': 6102, '2': 6047, '3': 6154}
+    id=0 net     temp=None sha256=cac8381e0c61d3f7 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin
+    id=1 net     temp=None sha256=8349d0c0c7f5ee82 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin
+    id=2 net     temp=0.5 sha256=167a7002a7a0fa60 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5
+    id=3 net     temp=None sha256=01f2eacde9bc47d9 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin

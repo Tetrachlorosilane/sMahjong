@@ -1,0 +1,38 @@
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\style_reward.py:2213: SyntaxWarning: invalid escape sequence '\<'
+  理由见 `AUDIT_DIR_ENV` 的注释：`run-league.ps1` 每代会把 `compact\<tag>` 删掉。
+== fold 新口径（对**至少一家**威胁家現物）口径冒烟 · 50 场 · g0.jsonl..g49.jsonl · 学生串 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5 ==
+[耗时] 奖励侧记账 3.7s · 判据侧 2.0s · 付钱路 3.9s（付钱路读了 35130 行）
+
+① 逐键相等（奖励侧记账路 · 学生席 vs 判据侧独立实现）：
+   n_used / decision_rows         奖励     8714 vs 判据     8714 ⇒ **相等**
+   threat_rows                    奖励     1585 vs 判据     1585 ⇒ **相等**
+   fold_rows                      奖励      146 vs 判据      146 ⇒ **相等**
+   push_rows                      奖励     1439 vs 判据     1439 ⇒ **相等**
+   missing_genbutsu_rows          奖励        0 vs 判据        0 ⇒ **相等**
+   action_rows                    奖励      146 vs 判据      146 ⇒ **相等**
+   paid_rows                      奖励      111 vs 判据     None ⇒ **相等**
+   blocked_rows                   奖励       35 vs 判据     None ⇒ **相等**
+   mu（奖励侧实测）= 0.01675465；判据侧 fold/decision = 0.01675465 ⇒ **相等**
+   四数自洽 `threat == fold + push + missing`：奖励 1585 == 1585 ⇒ ✓
+
+② 行集合逐行相等（三个来源：记账路 / 付钱路 `_decision_rule` / 真正付出去的 `value()`）：
+   奖励·记账路 fold 行集               146 行
+   奖励·付钱路 rule 行集               146 行
+   奖励·真正付奖行集 value()            111 行
+   判据侧 fold 行集                  146 行
+   记账路 == 付钱路（集合相等）⇒ **相等**（对称差 0 行）
+   付钱路 **付奖 + 拦下 == 规则集**（111 + 35 == 146；审计账 111 + 35）⇒ **相等**
+   奖励侧 == 判据侧（集合相等）⇒ **相等**（对称差 0 行）
+   威胁行集合：奖励 1585 vs 判据 1585 ⇒ **相等**（对称差 0）
+   缺 `step` 的行数 = 0（奖励侧记账路 0）—— 键 = **`step`**（每场计数器），⛔ 不是行内下标（两套坐标系混用 = 上一轮 1578→150 那个漏付）
+
+③ seat 口径写死（只数**别家**）的证据 —— 同一份 50 场：
+   出牌行 26565；**别家**口径的威胁行 5732；**字面**（含行动者自己）口径 6805（多 1073 行 ⇒ 与上一轮冻结账的 +4892 同类偏差）
+   奖励侧记账路的威胁行（学生席）= 1585（⛔ 必须 ≤ 四席的 5732）
+
+④ 门槛（同口径、同版代码）：
+   付奖行率 = fold_rows / 学生席决策行 = 146/8714 = 1.6755% ⇒ **过** 1%/行
+   降り率（付奖行 / 被威胁行）= 146/1585 = 9.2114%
+
+[落盘] S:\mahjong-training\w-ladder\_fold-any-smoke\smoke-50.json
+[判定] 口径冒烟 **PASS**（逐键相等 + 行集合相等 + 三格自洽）

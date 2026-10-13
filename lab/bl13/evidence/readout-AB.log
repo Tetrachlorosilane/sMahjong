@@ -1,0 +1,11 @@
+[out] S:\mahjong-training\w-ladder\_bl13\verdict-AB.json
+  合并 Δ=-1.5292 SE=0.6933 t=-2.206 CI[-2.8954,-0.1424] 实际MDE=1.3588 n=6000
+  Bonferroni(3 族, α=0.01667) CI[-3.1908,+0.1324] · 逐族同号=True · 族间极差=2.2345 CI半宽=1.3765
+  族 52940001: Δ=-1.3641 n=2000 CI[-3.748,+0.963] MDE=2.357
+  族 52940002: Δ=-2.7290 n=2000 CI[-5.074,-0.388] MDE=2.342
+  族 52940003: Δ=-0.4945 n=2000 CI[-2.847,+1.892] MDE=2.361
+  护栏 deals: Δ=-0.0172 CI[-0.053,+0.018] tol=1.0 MDE=0.0348 tol/MDE=28.71 usable_as_veto=True ok=True
+  护栏 wins: Δ=-0.0756 CI[-0.118,-0.034] tol=0.05 MDE=0.0420 tol/MDE=1.19 usable_as_veto=True ok=False
+  护栏 win_points: Δ=-436.5417 CI[-806.341,-57.671] tol=300.0 MDE=371.1728 tol/MDE=0.81 usable_as_veto=False ok=False
+  安慰剂: Δ=-1.5292 CI[-2.5035,-0.5356] 排除0=True
+  判决：**95%CI 排除 0 且指向 B，但 Bonferroni 修正后的 CI 含 0 ⇒ 预注册的严格判据**不满足** ⇒ 该分辨率下**测不出**（方向性提示 = B 数值更强）

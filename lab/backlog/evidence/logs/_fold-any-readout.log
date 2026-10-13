@@ -1,0 +1,36 @@
+== 主判据 / 辅判据 ==
+fold_rate              0.080670 -> 0.082152  d=+0.1482 SE=0.2119 t=+0.70 CI[-0.2670,+0.5635] n=1000 unit=pct
+fold_rows_per_game     2.565000 -> 2.674000  d=+0.1090 SE=0.0756 t=+1.44 CI[-0.0392,+0.2572] n=1000 unit=abs
+
+== 六伴随量（单侧护栏：越界 <=> CI 上界<0 或 点估计< -tol）==
+  deal_rate        0.1931 -> 0.1881  d=-0.5005 SE=0.4597 CI[-1.402,+0.401] tol=2.0 => OK
+  win_rate         0.1934 -> 0.1957  d=+0.2337 SE=0.4294 CI[-0.608,+1.075] tol=2.0 => OK
+  riichi_rate      0.2747 -> 0.2800  d=+0.5256 SE=0.4969 CI[-0.448,+1.500] tol=2.0 => OK
+  meld_rate        0.2765 -> 0.2650  d=-1.1413 SE=0.4810 CI[-2.084,-0.199] tol=2.0 => **越界**
+  avg_win_score    6696.6212 -> 6894.4642  d=+197.8430 SE=117.0960 CI[-31.665,+427.351] tol=150.0 => OK
+  riichi_win_rate  0.5241 -> 0.5084  d=-1.5712 SE=1.2277 CI[-3.977,+0.835] tol=2.0 => OK
+
+== 止损量 deals（次/场/席）==
+  (deals 计数不在 PAIR_AXES；见下)
+
+== 聚合 ==
+  pre : {"games": 1000, "threat_rows": 30502, "fold_rows": 2565, "push_rows": 27937, "missing_rows": 0, "decision_rows": 170092, "fold_rate": 0.08409284637072979, "paid_rows_frac": 0.015080074312724878, "fold_rows_per_game": 2.565, "paid_rows": 2110, "blocked_rows": 455}
+  post: {"games": 1000, "threat_rows": 30668, "fold_rows": 2674, "push_rows": 27994, "missing_rows": 0, "decision_rows": 172318, "fold_rate": 0.08719186122342507, "paid_rows_frac": 0.015517821701737485, "fold_rows_per_game": 2.674, "paid_rows": 2223, "blocked_rows": 451}
+
+== 对账 ==
+  pre  reconciled = True  caliber = student  audit = tools/w-ladder.py `_reward_fold_account`（当前奖励代码重算 · v4-wl-fold-any-c1-g01）
+  frozen delta_vs_recomputed = {"threat_rows": 0, "fold_rows": 0, "push_rows": 0, "action_rows": 0, "paid_rows": 0, "blocked_rows": 0}
+  pairing_check = {"pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01", "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01", "games": 1000, "seed_mismatch": 0, "student_seat_mismatch": 0, "seed_base_pre": 24620102, "seed_base_post": 24620102, "ok": true}
+
+== 其余配对量（含 seat_hands/hands） ==
+  avg_win_score          d=+197.8430 SE=117.0960 CI[-31.6652,+427.3512] n=835
+  dama_rate              d=+0.4390 SE=1.3000 CI[-2.1090,+2.9869] n=835
+  dama_wins_per_game     d=+0.0090 SE=0.0281 CI[-0.0461,+0.0641] n=1000
+  deal_rate              d=-0.5005 SE=0.4597 CI[-1.4016,+0.4005] n=1000
+  decline_rate           d=+0.8843 SE=0.7983 CI[-0.6804,+2.4491] n=929
+  decline_rows_per_game  d=+0.0590 SE=0.0518 CI[-0.0425,+0.1605] n=1000
+  meld_rate              d=-1.1413 SE=0.4810 CI[-2.0840,-0.1986] n=1000
+  riichi_rate            d=+0.5256 SE=0.4969 CI[-0.4483,+1.4995] n=1000
+  riichi_turn_mean       d=+0.1431 SE=0.0754 CI[-0.0048,+0.2909] n=919
+  riichi_win_rate        d=-1.5712 SE=1.2277 CI[-3.9775,+0.8352] n=919
+  win_rate               d=+0.2337 SE=0.4294 CI[-0.6079,+1.0753] n=1000

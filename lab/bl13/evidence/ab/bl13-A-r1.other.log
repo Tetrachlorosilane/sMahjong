@@ -1,0 +1,32 @@
+
+===== 2026-10-13 14:29:56 $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940102 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+== 自对弈汇总：700 场 / 7935 小局 / 692 决策/场，用时 153.4s（4.56 场/秒，3155 决策/秒），workers=8
+   流局率 9.7%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5    700      2.739      -10.66     19.3%     18.4%       -412       7079
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin    700      2.390        5.12     24.1%     15.7%        195       7342
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin    700      2.443        2.03     23.6%     16.2%         47       7084
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin    700      2.429        3.51     23.3%     15.9%        164       7425
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+
+===== 2026-10-13 14:36:13 $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940102 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+
+===== 2026-10-13 14:42:30 $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940102 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+== 自对弈汇总：700 场 / 7935 小局 / 692 决策/场，用时 178.5s（3.92 场/秒，2712 决策/秒），workers=8
+   流局率 9.7%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5    700      2.739      -10.66     19.3%     18.4%       -412       7079
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin    700      2.390        5.12     24.1%     15.7%        195       7342
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin    700      2.443        2.03     23.6%     16.2%         47       7084
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin    700      2.429        3.51     23.3%     15.9%        164       7425
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+
+===== 2026-10-13 14:56:13 $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940102 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2
+== 自对弈汇总：700 场 / 7935 小局 / 692 决策/场，用时 182.8s（3.83 场/秒，2649 决策/秒），workers=8
+   流局率 9.7%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5    700      2.739      -10.66     19.3%     18.4%       -412       7079
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin    700      2.390        5.12     24.1%     15.7%        195       7342
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin    700      2.443        2.03     23.6%     16.2%         47       7084
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin    700      2.429        3.51     23.3%     15.9%        164       7425
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r2

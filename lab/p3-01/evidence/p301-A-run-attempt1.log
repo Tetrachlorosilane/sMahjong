@@ -1,0 +1,51 @@
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-A-g01：12000 场 ⇒ 12 片 × ≤1000 场（seed=52921001，sha256=ba4d3c90cc3d8d77）
+  片 00：1000 场（首 [1924, 10558, 2158] … 末 [7971, 10456, 3431]）
+  片 01：1000 场（首 [8389, 11320, 7459] … 末 [7658, 9473, 3118]）
+  片 02：1000 场（首 [10687, 5044, 4639] … 末 [5004, 492, 3905]）
+  片 03：1000 场（首 [6974, 2852, 7855] … 末 [8927, 2273, 4056]）
+  片 04：1000 场（首 [7402, 4604, 1865] … 末 [9197, 3615, 6776]）
+  片 05：1000 场（首 [2101, 10372, 8969] … 末 [1192, 5917, 5009]）
+  片 06：1000 场（首 [11999, 10871, 11110] … 末 [3418, 3693, 1175]）
+  片 07：1000 场（首 [4866, 2920, 6771] … 末 [5086, 4011, 4260]）
+  片 08：1000 场（首 [6856, 7313, 5074] … 末 [4890, 11431, 3686]）
+  片 09：1000 场（首 [10239, 2217, 4780] … 末 [3683, 9478, 5831]）
+  片 10：1000 场（首 [9219, 1914, 10016] … 末 [10583, 1392, 2412]）
+  片 11：1000 场（首 [5920, 10874, 8934] … 末 [4400, 7703, 7399]）
+=== P3-01 B' · 臂 A · 2026-10-12 03:04:00 ===
+分片 1000 场/片；每片训练步数 167（预注册 2000 步 ÷ 12 片）；闸门 --target-minutes 60；compact 落 E:\mahjong-training（无 junction）
+A：12 片 × ≤1000 场（确定性顺序 seed=52921001）；复用 raw S:\mahjong-training\raw\v4-wl-p301-A-g01（reuse=True）
+  片 00：1000 场
+  片 01：1000 场
+  片 02：1000 场
+  片 03：1000 场
+  片 04：1000 场
+  片 05：1000 场
+  片 06：1000 场
+  片 07：1000 场
+  片 08：1000 场
+  片 09：1000 场
+  片 10：1000 场
+  片 11：1000 场
+
+--- v4-wl-p301-A-g01.s00：1000 场（首 [1924, 10558, 2158] … 末 [7971, 10456, 3431]）---
+[stage] shard 0: 1000 games / 0 hardlinked files -> E:\mahjong-training\raw-shard\A\v4-wl-p301-A-g01-s00 (summary per_game pruned to 1000)
+[03:04:03] v4-wl-p301-A-g01.s00.verify: 2.0s exit=0 child_peak=1.9MB commit_free=15.21GB E_free=528.4GB S_free=160.2GB
+
+--- v4-wl-p301-A-g01.s01：1000 场（首 [8389, 11320, 7459] … 末 [7658, 9473, 3118]）---
+[stage] shard 1: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\A\v4-wl-p301-A-g01-s01 (summary per_game pruned to 1000)
+[03:04:20] v4-wl-p301-A-g01.s01.verify: 2.0s exit=0 child_peak=1.9MB commit_free=14.35GB E_free=525.4GB S_free=160.2GB
+
+--- v4-wl-p301-A-g01.s02：1000 场（首 [10687, 5044, 4639] … 末 [5004, 492, 3905]）---
+[stage] shard 2: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\A\v4-wl-p301-A-g01-s02 (summary per_game pruned to 1000)
+[03:04:39] v4-wl-p301-A-g01.s02.verify: 2.0s exit=0 child_peak=1.9MB commit_free=12.39GB E_free=522.3GB S_free=160.2GB
+[03:07:53] v4-wl-p301-A-g01.s00.compact: 230.6s exit=0
+[03:07:54] v4-wl-p301-A-g01.s01.compact: 213.3s exit=0
+[03:08:01] v4-wl-p301-A-g01.s02.compact: 202.0s exit=0
+Traceback (most recent call last):
+  File "S:\mahjong-training\w-ladder\_p301-evidence\p301_run.py", line 368, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "S:\mahjong-training\w-ladder\_p301-evidence\p301_run.py", line 306, in main
+    train(scomp, net_in, f"{rnd['label']}-s{si:02d}", rnd["seed"] + si, STEPS_PER_SHARD,
+                 ^^^^^^
+UnboundLocalError: cannot access local variable 'net_in' where it is not associated with a value

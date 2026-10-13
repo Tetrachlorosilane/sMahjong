@@ -1,0 +1,5 @@
+== 轨迹侧伴随质量量：**win_rate**（逐场配对（同 seed，一条链））==
+  · v4-wl-fold-any-c1-g01        Δ=  +0.23pp  SE= 0.43  n= 1000  ← S:\mahjong-training\w-ladder\traces\v4-wl-fold-any-c1-g01 → S:\mahjong-training\w-ladder\traces-post\v4-wl-fold-any-c1-g01
+  合并：Δ=+0.234pp  CI[-0.608,+1.075]  n=1000  ⇒ 不越界（预注册：单侧，**越界 ⇔ CI 上界 < 0 或 点估计 < −2pp**；点估计为正 + CI 宽 ⇒ 不报）
+  判据行：{"metric": "win_rate", "unit": "pp", "tol": 2.0, "delta": 0.233684689063946, "lo": -0.6079341049483751, "hi": 1.075303483076267, "ok": true}
+  落盘 S:\mahjong-training\w-ladder\companion-quality-fold-any-win_rate.json

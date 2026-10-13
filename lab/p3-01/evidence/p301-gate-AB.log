@@ -1,0 +1,22 @@
+闸门：现任=v4-wl-p301-A-g01 vs 候选=v4-wl-p301-B-g06；2 套牌山 × 每套至多 6000 场（block=6000）
+  主口径 = **deals**（风格轴）；护栏 = **rank_points**，预注册：下界 ≥ −1.0
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 6000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin --seed 52930001 --out S:\mahjong-training\gate\v4-wl-p301-AB\s52930001
+== 自对弈汇总：6000 场 / 68112 小局 / 691 决策/场，用时 1422.2s（4.22 场/秒，2915 决策/秒），workers=8
+   流局率 9.9%   平均每场 11.4 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin  12000      2.510       -0.42     22.5%     16.7%        -26       7181
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin  12000      2.490        0.42     22.6%     16.4%         22       7263
+轨迹目录：S:\mahjong-training\gate\v4-wl-p301-AB\s52930001
+  牌山 52930001：Δ= +0.03 CI[ -0.01, +0.06] n=6000（候选 − 现任） · 护栏 rank_points Δ=+0.84
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 6000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin --seed 52930002 --out S:\mahjong-training\gate\v4-wl-p301-AB\s52930002
+== 自对弈汇总：6000 场 / 68034 小局 / 691 决策/场，用时 1403.4s（4.28 场/秒，2954 决策/秒），workers=8
+   流局率 9.8%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-A-g01\net.bin  12000      2.495        0.37     22.7%     16.6%         16       7263
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin  12000      2.505       -0.37     22.4%     16.6%        -20       7233
+轨迹目录：S:\mahjong-training\gate\v4-wl-p301-AB\s52930002
+  牌山 52930002：Δ= -0.00 CI[ -0.04, +0.03] n=6000（候选 − 现任） · 护栏 rank_points Δ=-0.74
+  护栏（rank_points）：Δ=+0.05 CI[-0.90,+1.03] ⇒ 不破（预注册：下界须 ≥ −1.0）
+  合并判决：主口径（deals）Δ=+0.01 CI[-0.01,+0.04] ✗ + 护栏 ✓ ⇒ **不采纳**
+  套间散布：极差 0.03 / 合并 CI 半宽 0.03 = 1.32×  ⚠ 套间散布已超过 CI 半宽 ⇒ **判决是条件于这几套牌山的**，别当普遍结论
+== 合并判决：Δ= +0.01 CI[ -0.01, +0.04] n=12000 ⇒ 不采纳（回滚到现任）

@@ -1,0 +1,9 @@
+长程 carry：`h0` 列用**学生网** C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 算（d_model=192；逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）
+  torch intra-op 线程：24 → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）
+v4 数据集：E:\mahjong-training\compact\v4-wl-p301-B-g02-s01
+  训练 651741 条（950 场）/ 验证 34584 条（50 场）；lmax=27；dtype=float16
+  标签侧：有（True）；块指纹 e1f5dd0fc1e9aba8；obs v3 / derived v3
+  逐决策 reward-to-go 覆盖：train 100.0% / val 100.0%（0% = 老采集器；`--value-target rtg` 会在入口报错）
+  顺位点覆盖：train 100.0% / val 100.0%（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）
+  长程 carry：`h0[192]` 非全 0 的行 train 4.6% / val 3.8%（其余行的事件数 ≤ K=60 ⇒ 窗口之前没有事件、carry 全 0 是正确的）
+  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，训练与加这个功能之前逐位相同

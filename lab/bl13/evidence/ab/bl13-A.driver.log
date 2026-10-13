@@ -1,0 +1,19 @@
+[14:52:17] ===== BL-13 臂 A（k=2 轮 / 每轮 700 场 / 每轮 60 步）开始 2026-10-13 14:52:17 =====
+[14:52:17] == 臂 A：预采 D_1（700 场，θ_0）==
+[14:55:08]   A-collect-r1: exit=0 wall=170.5s
+[14:55:13]   A-features-r1: exit=0 wall=5.2s
+[14:56:13]   A-compact-r1: exit=0 wall=59.7s
+[14:56:13] == 臂 A 第 1/2 轮（重叠 train ‖ collect）==
+[14:59:25]   A-pair-r1: exit=0 wall=192.7s
+[14:59:25] == 臂 A：派生 D_2（features → compact）==
+[14:59:31]   A-features-r2: exit=0 wall=5.4s
+[15:00:37]   A-compact-r2: exit=0 wall=66.8s
+[15:00:37]   bl13-A-r1: 步数=None stop_reason=KL 早停：step 17 的 KL(π_old‖π_new)=0.0596 > 0.03（kl_inv=-0.0122）
+[15:00:39]   A-export-r1: exit=0 wall=1.7s
+[15:00:39]   θ_1 = C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin（5594680 B）
+[15:00:39] == 臂 A 第 2/2 轮（末轮：只训）==
+[15:00:39]   A-pair-r2: exit=3 wall=0.1s
+[15:00:39]   bl13-A-r2: 步数=0 stop_reason=<没有 metrics.json>
+[15:00:41]   A-export-r2: exit=1 wall=1.6s
+[15:00:41]   θ_2 = C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin（MISSING B）
+[15:00:41] ===== BL-13 臂 A 结束：rc=1 墙钟 8.4 min =====

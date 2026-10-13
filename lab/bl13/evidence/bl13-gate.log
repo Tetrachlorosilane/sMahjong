@@ -1,0 +1,22 @@
+[15:29:14] $ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.gate --incumbent C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin --candidate C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin --seeds 52940001,52940002,52940003 --games 2000 --block 2000 --workers 8 --out S:\mahjong-training\w-ladder\_bl13\gate --tag bl13-main --guard-metric deals:1.0 --guard-metric wins:0.05 --guard-metric win_points:300
+[15:29:15]   bl13-gate-main: exit=1 wall=1.7s
+[15:29:15] ===== gate main 结束 rc=1 =====
+[15:29:38] $ S:\mahjong-training\tools\py312\python.exe -c import sys;sys.path[:0]=[r'C:\Users\HP\source\games\mahjong\python',r'C:\Users\HP\source\games\mahjong\python\.venv\Lib\site-packages'];from pathlib import Path;from mahjong_ml.v4 import arena;arena.run_pair(Path(r'S:\mahjong-training\w-ladder\_bl13\gate\bl13-A-vs-base\s52941001'), 'net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin', 'net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin', 1500, 52941001, workers=8, prod='cpp', rotate_perm=True)
+[15:29:38]   bl13-gate-A-vs-base: exit=1 wall=0.0s
+[15:29:38] $ S:\mahjong-training\tools\py312\python.exe -c import sys;sys.path[:0]=[r'C:\Users\HP\source\games\mahjong\python',r'C:\Users\HP\source\games\mahjong\python\.venv\Lib\site-packages'];from pathlib import Path;from mahjong_ml.v4 import arena;arena.run_pair(Path(r'S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001'), 'net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin', 'net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin', 1500, 52941001, workers=8, prod='cpp', rotate_perm=True)
+[15:29:38]   bl13-gate-B-vs-base: exit=1 wall=0.0s
+[15:29:38] $ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.gate --incumbent C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin --candidate C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin --seeds 52940001,52940002,52940003 --games 2000 --block 2000 --workers 8 --out S:\mahjong-training\w-ladder\_bl13\gate --tag bl13-main --guard-metric deals:1.0 --guard-metric wins:0.05 --guard-metric win_points:300
+[15:52:02]   bl13-gate-main: exit=0 wall=1344.6s
+[15:52:02] ===== gate all 结束 rc=1 =====
+[15:54:52] $ S:\mahjong-training\tools\py312\python.exe S:\mahjong-training\w-ladder\_bl13\bl13_pair.py S:\mahjong-training\w-ladder\_bl13\gate\bl13-A-vs-base\s52941001 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin 1500 52941001
+[15:54:52]   bl13-gate-A-vs-base: exit=2 wall=0.0s
+[15:54:52] $ S:\mahjong-training\tools\py312\python.exe S:\mahjong-training\w-ladder\_bl13\bl13_pair.py S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin 1500 52941001
+[15:54:52]   bl13-gate-B-vs-base: exit=2 wall=0.0s
+[15:54:52] ===== gate base 结束 rc=2 =====
+[15:55:03] $ S:\mahjong-training\tools\py312\python.exe S:\mahjong-training\w-ladder\_bl13\bl13_pair.py S:\mahjong-training\w-ladder\_bl13\gate\bl13-A-vs-base\s52941001 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin 1500 52941001
+[16:01:14]   bl13-gate-A-vs-base: exit=0 wall=370.9s
+[16:01:14] $ S:\mahjong-training\tools\py312\python.exe S:\mahjong-training\w-ladder\_bl13\bl13_pair.py S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin 1500 52941001
+[16:07:24]   bl13-gate-B-vs-base: exit=0 wall=370.0s
+[16:07:24]   A-vs-base 族 s52941001: Δ(bl13-A-r2 − 起点网)=+1.2771 CI[-1.4561,+3.9911] n=1500 MDE=2.7116
+[16:07:24]   B-vs-base 族 s52941001: Δ(bl13-B-s01 − 起点网)=+0.8660 CI[-1.9106,+3.5960] n=1500 MDE=2.7385
+[16:07:24] ===== gate base 结束 rc=0 =====

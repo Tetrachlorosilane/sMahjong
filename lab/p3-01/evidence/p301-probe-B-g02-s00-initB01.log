@@ -1,0 +1,18 @@
+===== S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data E:\mahjong-training\compact\v4-wl-p301-B-g02-s00 --label v4-wl-p301-B-g02-s00 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52920012 --init C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g01\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.10 --kl-min-steps 60 --baseline-fit scale --val-patience 5 --val-every 100 --max-steps 167 --threads 8
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+长程 carry：`h0[192]` 已接入前向（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+初始化：从 C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g01\net.bin 载入权重
+KL 锚（W3）：β=0.5，参考策略 C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g01\net.bin（**缺省 = `--init` 那一份现任**）；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）
+   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）：实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。
+⚠ `--kl-min-steps 60` 对167 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 33（轮长的 1/5）
+KL 锚：π_ref 的 logits 已冻结预算（657937 行 × 27 候选，67.8 MiB，用时 69.2s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+验证集早停（防过拟合）：每 100 步读一次 **policy** CE（train/val 各 1024/1024 行，**固定子集**；口径 = `evaluate().loss_policy`），连续 5 次未改善（相对最好值，容忍 0.0001）就**正常收尾**（返回 metrics + 照常导出 ckpt）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+PPO：行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin（温度 0.5）—— 重算 log π_old（657937 条）
+PPO：clip=0.2 entropy=0.01；优势在学生行上归一化、策略损失只算学生行
+PPO：grad-clip 0.5、KL 早停阈值 0.1（min_steps 33）
+PPO 口径不一致：初始化时 KL(π_old‖π_new) = 0.02978（应为 ≈0）—— 检查① `--init` 是不是与 `--behaviour` 同一份权重；② `--behaviour-temp` 是不是与数据集 `student` 串里的 `#T` 一致（`logp_new` 与 `logp_old` 必须在同一个 `softmax(logits/T)` 上算）

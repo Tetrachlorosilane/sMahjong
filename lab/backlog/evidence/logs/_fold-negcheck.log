@@ -1,0 +1,15 @@
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\style_reward.py:2143: SyntaxWarning: invalid escape sequence '\<'
+  理由见 `AUDIT_DIR_ENV` 的注释：`run-league.ps1` 每代会把 `compact\<tag>` 删掉。
+== `fold` 硬判据 ③ + 负向硬判据 ==
+  ✓ ① 四数 (被威胁, 降り, 押し, 取不到) = (3, 2, 1, 0)；动作行 2 == 降り行 2；付奖 1 + 拦下 1 == 动作行 2（切了現物照样可能放铳 ⇒ **非恒真**）
+     口径句：row_rule='`chosen` 以 `discard:` 开头 ∧ 被威胁 ∧ 打出的牌对**每一个**威胁家都是現物（⛔ 不安全那一侧一分钱不付）' / genbutsu_src='`obs.events` 里该家 `type=="riichi"` 那条事件**之后**的 `disca'…
+  ✓ ① 白化：mean=+0.00e+00 var=1.0 n=4（行级总体 = 学生席决策行）
+  ✓ ② σ=0（这一轴在本数据集上是常数）⇒ 报错：轴 'fold' 的白化 σ = 0（μ=0, n=2）—— 这一轴在本数据集上是常数，白化无从谈起（1/σ 会炸）。要么换一个在本桌上真的会变的轴，要么把它从 `--style-bonus` 里去掉（**不许**默默跳过）
+  ✓ ③ `obs.riichi` 缺字段 ⇒ 报错（⛔ 不按'没被威胁'静默处理）：被威胁时的降り（`fold` 轴）：这些行**取不到威胁状态或現物**（`obs.riichi` 缺字段 / 该威胁家在 `obs.events` 里没有 `riichi` 事件 ⇒ 現物重建不出来）。⛔ 按 False 静默跳过 = 把**付奖行率**（本轴的第一条判据）悄悄压低 ⇒ 当场报错；要
+  ✓ ④ 現物重建不出来（无 `riichi` 事件）⇒ 报错：被威胁时的降り（`fold` 轴）：这些行**取不到威胁状态或現物**（`obs.riichi` 缺字段 / 该威胁家在 `obs.events` 里没有 `riichi` 事件 ⇒ 現物重建不出来）。⛔ 按 False 静默跳过 = 把**付奖行率**（本轴的第一条判据）悄悄压低 ⇒ 当场报错；要
+  ✓ ⑤ `hand` 模式用 `fold` ⇒ 报错（不静默换轴）：这些轴只在 `decision` 模式成立：fold —— 它们的行级判据是'**能而不为**'（`legal` 里有它、这一行没选它），而 `hand` 模式付的是小局级合并量，**不是**那个行为。⛔ 不静默换轴：要么加 `--style-bonus-mode decision`，要么换一条轴
+  ✓ ⑥ 伴随量在真数据上恒真（`blocked_rows == 0`）⇒ 报错：轴 'fold' 配伴随质量轴 `no_deal` 在**真数据**上退化成恒真：动作行 1 行、**被拦下 0 行** ⇒ 质量轴形同虚设 = 对同一件事重复加权（`win=w:no_deal` 的病）。实测判据见 `ROW_PAIR_MUST_BLOCK`；⛔ 当场报错、不静默放行（要负向对照请
+  ✓ ⑦ **方向单向**：押し 2 行（`discard:1m`/`discard:2m`）付 **0 行**，只有現物降り那 2 行进付奖候选（动作行 2 == fold_rows 2；paid 1 + blocked 1）
+  ✓ ⑧ 写列路（`BonusTracker`）：4 行得 [0.0, 0.0, 1000.0, 0.0]（押し/押し/降り/降り+放铳）；金额 == w·(1−μ)/σ = 1000.0；逐轴账 {'action_rows': 2, 'paid_rows': 1, 'blocked_rows': 1}
+
+结论：PASS

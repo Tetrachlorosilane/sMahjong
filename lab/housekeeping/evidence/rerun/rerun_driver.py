@@ -43,6 +43,11 @@ PAT = re.compile(rb'"policy":"([^"]*)"')
 WALL: dict[str, dict] = {}          # 每相墙钟/退出码（算力对账）
 sys.path.insert(0, str(REPO / "python"))
 sys.path.insert(0, str(REPO / "python" / ".venv" / "Lib" / "site-packages"))
+try:                                 # 控制台是 GBK ⇒ ⭐/⚠ 会 UnicodeEncodeError（实测已崩过一次）
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                    # noqa: BLE001
+    pass
 
 
 # ------------------------------------------------------------------ 基础
@@ -208,6 +213,13 @@ def spec_single(tag: str, src: Path, cmd: list[str], dummy: list[str]) -> dict:
 
 def train_phase(tag: str, src: Path, cmd: list[str], dummy: list[str], round_no: int,
                 logf: Path) -> int:
+    if (W / "root" / "ckpt" / tag / "metrics.json").exists():
+        say(logf, f"  ↩ {tag}: 已有 metrics.json ⇒ **跳过训练**（续跑）")
+        WALL[tag] = {"exit": 0, "wall_s": 0.0, "skipped": True}
+        (EV / "compute.json").write_text(json.dumps(WALL, ensure_ascii=False, indent=1),
+                                         encoding="utf-8")
+        return 0
+    guard_phase(tag, logf)
     sp = EV / f"spec-{tag}.json"
     sp.write_text(json.dumps(spec_single(tag, src, cmd, dummy), ensure_ascii=False, indent=1),
                   encoding="utf-8")
@@ -275,15 +287,56 @@ def cleanup(dirs: list[Path], tag: str) -> None:
     say(LOGS / "rerun.driver.log", f"  🧹 {tag}：删 {[d.name for d in dirs]}，释放 {freed / 1e9:.2f} GB")
 
 
+# ------------------------------------------------------------------ 续跑标记 + 相前闸门
+def _n(d: Path, pat: str) -> int:
+    return len(list(d.glob(pat))) if d.exists() else 0
+
+
+def done_collect(d: Path, games: int) -> bool:
+    return _n(d, "g*.jsonl") >= games and _n(d, "g*.aux.npz") >= games
+
+
+def done_features(d: Path, games: int) -> bool:
+    return _n(d, "g*.feat.bin") >= games
+
+
+def done_compact(c: Path) -> bool:
+    m = c / "meta.json"
+    return m.exists() and m.stat().st_size > 0
+
+
+def guard_phase(tag: str, logf: Path) -> None:
+    """相前 fail-closed 闸门：commit_free <8 GB ⇒ 等最多 5 min，仍不够就拒跑（纪律字面）。"""
+    for _ in range(300):
+        cf = commit_free_gb()
+        if cf >= 8.0:
+            return
+        time.sleep(1.0)
+    raise SystemExit(f"⛔ {tag}: commit_free {commit_free_gb():.2f} GB < 8 GB ⇒ 按纪律拒跑")
+
+
+def step(tag: str, cmd: list[str], marker: bool, logf: Path) -> int:
+    if marker:
+        say(logf, f"  ↩ {tag}: **已存在 ⇒ 跳过**（续跑）")
+        WALL[tag] = {"exit": 0, "wall_s": 0.0, "skipped": True}
+        (EV / "compute.json").write_text(json.dumps(WALL, ensure_ascii=False, indent=1),
+                                         encoding="utf-8")
+        return 0
+    guard_phase(tag, logf)
+    return run(cmd, tag, logf)
+
+
 # ------------------------------------------------------------------ 两臂
 def arm_a(logf: Path) -> int:
     rc: dict[str, int] = {}
     theta = BASE
     d1, c1 = W / "raw" / "rerun-A-r1", W / "compact" / "rerun-A-r1"
     say(logf, "== 臂 A：预采 D_1（700 场，θ_0）==")
-    rc["A-collect-r1"] = run(collect_cmd(GAMES, theta, 52950101, d1), "A-collect-r1", logf)
-    rc["A-features-r1"] = run(features_cmd(d1), "A-features-r1", logf)
-    rc["A-compact-r1"] = run(compact_cmd(d1, c1, f"net:{theta}@0#{TEMP:g}"), "A-compact-r1", logf)
+    rc["A-collect-r1"] = step("A-collect-r1", collect_cmd(GAMES, theta, 52950101, d1),
+                              done_collect(d1, GAMES), logf)
+    rc["A-features-r1"] = step("A-features-r1", features_cmd(d1), done_features(d1, GAMES), logf)
+    rc["A-compact-r1"] = step("A-compact-r1", compact_cmd(d1, c1, f"net:{theta}@0#{TEMP:g}"),
+                              done_compact(c1), logf)
     scan_policy(d1, theta, [], "A-r1")
     for i in range(1, K + 1):
         label = f"rerun-A-r{i}"
@@ -299,17 +352,22 @@ def arm_a(logf: Path) -> int:
                   f"/ KL终值={m['kl_last']}")
         out = BUILD / label / "net.bin"
         out.parent.mkdir(parents=True, exist_ok=True)
-        rc[f"A-export-r{i}"] = run(export_cmd(W / "root" / "ckpt" / label, out, label),
-                                   f"A-export-r{i}", logf)
+        rc[f"A-export-r{i}"] = step(f"A-export-r{i}", export_cmd(W / "root" / "ckpt" / label, out, label),
+                                    out.exists() and (out.stat().st_mtime
+                                                      >= (W / "root" / "ckpt" / label / "model.pt").stat().st_mtime),
+                                    logf)
         theta = out
         if i < K:
             raw2, c2 = W / "raw" / f"rerun-A-r{i + 1}", W / "compact" / f"rerun-A-r{i + 1}"
             say(logf, f"== 臂 A：**先用 θ_{i} 采** D_{i + 1}（⛔ 不用 pair --overlap）==")
-            rc[f"A-collect-r{i + 1}"] = run(collect_cmd(GAMES, theta, 52950101 + i, raw2),
-                                            f"A-collect-r{i + 1}", logf)
-            rc[f"A-features-r{i + 1}"] = run(features_cmd(raw2), f"A-features-r{i + 1}", logf)
-            rc[f"A-compact-r{i + 1}"] = run(compact_cmd(raw2, c2, f"net:{theta}@0#{TEMP:g}"),
-                                            f"A-compact-r{i + 1}", logf)
+            rc[f"A-collect-r{i + 1}"] = step(f"A-collect-r{i + 1}",
+                                             collect_cmd(GAMES, theta, 52950101 + i, raw2),
+                                             done_collect(raw2, GAMES), logf)
+            rc[f"A-features-r{i + 1}"] = step(f"A-features-r{i + 1}", features_cmd(raw2),
+                                              done_features(raw2, GAMES), logf)
+            rc[f"A-compact-r{i + 1}"] = step(f"A-compact-r{i + 1}",
+                                             compact_cmd(raw2, c2, f"net:{theta}@0#{TEMP:g}"),
+                                             done_compact(c2), logf)
             scan_policy(raw2, theta, [BASE], f"A-r{i + 1}")
         cleanup([W / "raw" / f"rerun-A-r{i}", W / "compact" / f"rerun-A-r{i}"], f"A-r{i}")
     say(logf, f"  θ_2（臂 A 候选）= {theta}")
@@ -320,9 +378,11 @@ def arm_b(logf: Path) -> int:
     rc: dict[str, int] = {}
     db, cb = W / "raw" / "rerun-B-all", W / "compact" / "rerun-B-all"
     say(logf, f"== 臂 B：**一次**采 {K * GAMES} 场（θ_0）+ 冻结数据上**一段** {K * STEPS} 步 ==")
-    rc["B-collect"] = run(collect_cmd(K * GAMES, BASE, 52950302, db), "B-collect", logf)
-    rc["B-features"] = run(features_cmd(db), "B-features", logf)
-    rc["B-compact"] = run(compact_cmd(db, cb, f"net:{BASE}@0#{TEMP:g}"), "B-compact", logf)
+    rc["B-collect"] = step("B-collect", collect_cmd(K * GAMES, BASE, 52950302, db),
+                           done_collect(db, K * GAMES), logf)
+    rc["B-features"] = step("B-features", features_cmd(db), done_features(db, K * GAMES), logf)
+    rc["B-compact"] = step("B-compact", compact_cmd(db, cb, f"net:{BASE}@0#{TEMP:g}"),
+                           done_compact(cb), logf)
     scan_policy(db, BASE, [], "B-all")
     label = "rerun-B-s01"
     tr = train_cmd(cb, label, BASE, 52950202, total_steps=K * STEPS,
@@ -336,7 +396,8 @@ def arm_b(logf: Path) -> int:
               f"/ KL终值={m['kl_last']}")
     out = BUILD / label / "net.bin"
     out.parent.mkdir(parents=True, exist_ok=True)
-    rc["B-export"] = run(export_cmd(W / "root" / "ckpt" / label, out, label), "B-export", logf)
+    rc["B-export"] = step("B-export", export_cmd(W / "root" / "ckpt" / label, out, label),
+                          out.exists(), logf)
     say(logf, f"  θ_B（臂 B 候选）= {out}")
     cleanup([db, cb], "B")
     return 0 if all(v == 0 for v in rc.values()) else 1

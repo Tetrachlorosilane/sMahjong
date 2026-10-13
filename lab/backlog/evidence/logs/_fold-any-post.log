@@ -1,0 +1,10 @@
+[post] 补采（训练后）· 链 v4-wl-fold-any-c1 · 末代 g01 · **seed=24620102（抄 g01 的 seed_base）**
+[post] 学生串 net:C:\Users\HP\source\games\mahjong\tools\build\v4-wl-fold-any-c1-g01\net.bin@0#0.5
+[post] 落点 S:\mahjong-training\w-ladder\traces-post\v4-wl-fold-any-c1-g01
+[post] ✓ 配对通过（1000 场，seed 不一致 0、学生席不一致 0）｜立直率 27.475% → 28.001%＝ **Δ +0.53pp**（SE 0.50，t=1.06，95% CI [-0.45,+1.50]）
+[post] ⚠ `fold` 的**冻结审计账**（S:\mahjong-training\w-ladder\audit\v4-wl-fold-any-c1-g01.json）**不是** HEAD 的奖励代码算的：差 {'threat_rows': 0, 'fold_rows': 0, 'push_rows': 0, 'action_rows': 0, 'paid_rows': 0, 'blocked_rows': 0} ⇒ 对账基准已换成`_reward_fold_account`（当前奖励代码在同一份轨迹上重算）；冻结账 = 训练当时那一版 `fold_row_ok`（`threat_seats(obs)` **不带 seat** ⇒ 把行动者自己已立直也算被威胁）；逐位解释见 `_verify_fold_totals` 与`_fold-selfriichi-probe.py`（4892 / 287−191=96 / 4796）
+[post] ★ 被威胁时降り · v4-wl-fold-any-c1-g01：**被威胁的出牌行** 30502｜其中**切了对所有威胁家都安全的現物** 2565（= 付奖行候选）｜**押し** 27937｜現物取不到 0｜降り率 8.409%｜付奖 2110 / 拦下 455 ⇒ ✓ 与**当前奖励代码重算**的账逐项相等（学生席口径）
+[post] ★ 被威胁时降り · v4-wl-fold-any-c1-g01-POST：**被威胁的出牌行** 30668｜其中**切了对所有威胁家都安全的現物** 2674（= 付奖行候选）｜**押し** 27994｜現物取不到 0｜降り率 8.719%｜付奖 2223 / 拦下 451 ⇒ 口径自洽（无审计账 · 补采不挂奖励）
+[post] ★★ **主判据** `fold_rate`（逐场配对的**行级**降り率；**方向为升**）：8.4093% → 8.7192%（2565/30502 → 2674/30668）＝ **Δ +0.148pp**（SE 0.212，t=0.70，95% CI [-0.267,+0.563]，n=1000）
+[post] ★ 辅判据 `fold_rows_per_game`（每场每席付奖行数）：2.5650 → 2.6740＝ Δ +0.1090（SE 0.0756，95% CI [-0.0392,+0.2572]，n=1000）
+[post] 落盘 S:\mahjong-training\w-ladder\paired\v4-wl-fold-any-c1-g01-POST.json

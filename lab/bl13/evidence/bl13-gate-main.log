@@ -1,0 +1,39 @@
+闸门：现任=bl13-A-r2 vs 候选=bl13-B-s02；3 套牌山 × 每套至多 2000 场（block=2000）
+  主口径 = **rank_points**（通用强度口径，无独立护栏）
+  追加护栏（**单侧**：CI 下界须 ≥ −TOL）：deals:1 · wins:0.05 · win_points:300
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin --seed 52940001 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940001
+[trainer] 自对弈失败：加载神经网络权重失败：C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin —— 打不开权重文件：C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin
+自对弈失败（退出码 2）：S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s02\net.bin --seed 52940001 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940001
+闸门：现任=bl13-A-r2 vs 候选=bl13-B-s01；3 套牌山 × 每套至多 2000 场（block=2000）
+  主口径 = **rank_points**（通用强度口径，无独立护栏）
+  追加护栏（**单侧**：CI 下界须 ≥ −TOL）：deals:1 · wins:0.05 · win_points:300
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin --seed 52940001 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940001
+== 自对弈汇总：2000 场 / 22607 小局 / 686 决策/场，用时 429.4s（4.66 场/秒，3197 决策/秒），workers=8
+   流局率 9.5%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin   4000      2.516       -0.68     22.3%     16.7%        -18       7214
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin   4000      2.484        0.68     23.0%     16.8%         14       7205
+轨迹目录：S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940001
+  牌山 52940001：Δ= +1.36 CI[ -0.96, +3.75] n=2000（候选 − 现任） · 护栏 deals Δ=-0.01 · 护栏 wins Δ=+0.08 · 护栏 win_points Δ=+570.10
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin --seed 52940002 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940002
+== 自对弈汇总：2000 场 / 22760 小局 / 691 决策/场，用时 423.2s（4.73 场/秒，3266 决策/秒），workers=8
+   流局率 9.9%   平均每场 11.4 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin   4000      2.535       -1.36     22.0%     16.8%        -45       7322
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin   4000      2.465        1.36     23.0%     16.4%         41       7213
+轨迹目录：S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940002
+  牌山 52940002：Δ= +2.73 CI[ +0.39, +5.07] n=2000（候选 − 现任） · 护栏 deals Δ=+0.05 · 护栏 wins Δ=+0.11 · 护栏 win_points Δ=+547.15
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 2000 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin --seed 52940003 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940003
+== 自对弈汇总：2000 场 / 22652 小局 / 687 决策/场，用时 484.5s（4.13 场/秒，2835 决策/秒），workers=8
+   流局率 9.8%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r2\net.bin   4000      2.505       -0.25     22.4%     16.6%        -15       7257
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin   4000      2.495        0.25     22.7%     16.5%         11       7244
+轨迹目录：S:\mahjong-training\w-ladder\_bl13\gate\bl13-main\s52940003
+  牌山 52940003：Δ= +0.49 CI[ -1.89, +2.85] n=2000（候选 − 现任） · 护栏 deals Δ=+0.02 · 护栏 wins Δ=+0.03 · 护栏 win_points Δ=+192.38
+  护栏（deals）：Δ=+0.017 CI[-0.018,+0.053] ⇒ 不破（预注册：下界须 ≥ −1，单位 = 该口径每场每席的量）
+  护栏（wins）：Δ=+0.076 CI[+0.034,+0.118] ⇒ 不破（预注册：下界须 ≥ −0.05，单位 = 该口径每场每席的量）
+  护栏（win_points）：Δ=+436.542 CI[+57.671,+806.341] ⇒ 不破（预注册：下界须 ≥ −300，单位 = 该口径每场每席的量）
+  合并判决：主口径（rank_points）Δ=+1.53 CI[+0.14,+2.90] ✓ · deals ✓ · wins ✓ · win_points ✓ ⇒ **采纳**
+  套间散布：极差 2.23 / 合并 CI 半宽 1.38 = 1.62×  ⚠ 套间散布已超过 CI 半宽 ⇒ **判决是条件于这几套牌山的**，别当普遍结论
+== 合并判决：Δ= +1.53 CI[ +0.14, +2.90] n=6000 ⇒ 采纳

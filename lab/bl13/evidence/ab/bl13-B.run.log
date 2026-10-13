@@ -1,0 +1,72 @@
+[15:16:03] == 臂 B：一次采 1400 场（θ_0）+ 冻结数据连训 60 步（2 段 × 30）==
+
+$ S:\mahjong-training\tools\trainer\trainer.exe selfplay 1400 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940201 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-B-all
+== 自对弈汇总：1400 场 / 16060 小局 / 696 决策/场，用时 316.2s（4.43 场/秒，3080 决策/秒），workers=8
+   流局率 9.9%   平均每场 11.5 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5   1400      2.706       -9.36     20.0%     18.6%       -368       7046
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin   1400      2.452        2.30     23.3%     16.9%        100       7315
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin   1400      2.445        2.38     23.6%     16.6%         65       7165
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin   1400      2.397        4.69     23.3%     15.7%        196       7445
+轨迹目录：C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-B-all
+[15:21:30]   exit=0 wall=326.3s
+
+$ S:\mahjong-training\tools\trainer\trainer.exe features C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-B-all --workers 8
+== 派生特征富化：1400 个轨迹文件 / 973845 条决策 / 8401033 个候选，用时 10.3s（479.3 MB）
+   ObsFeatures v3 perDecision=71（danger_worst[34] + danger_riichi[34] + shanten, value_han, value_points） perCandidate=8（shanten, advance_types, advance_tiles, wait_types, wait_tiles, good_wait_types, good_wait_tiles, dora_count） perSeat=102（danger_per_seat[3][34] + danger_riichi_per_seat[3][34]） perSeatBitmap=15（genbutsu_per_seat[3][5] + suji_per_seat[3][5]，LSB 在前）
+[15:21:40]   exit=0 wall=10.3s
+
+$ S:\mahjong-training\tools\py312\python.exe -m mahjong_ml.v4.dataset C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-B-all C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-B-all --aux --student net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5 --workers 6 --behaviour-id --behaviour-root C:\Users\HP\source\games\mahjong\tools\build
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.dataset' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.dataset'; this may result in unpredictable behaviour
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+长程 carry：`h0` 列用**学生网** C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 算（d_model=192；逐事件重放整手、构建期冻结 —— 权重在训练中会移动，每代重建即复位）
+  torch intra-op 线程：8 → 1（逐事件小 GEMM 下线程只会更慢；数值逐位不变）
+v4 数据集：C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-B-all
+  训练 925018 条（1330 场）/ 验证 48827 条（70 场）；lmax=27；dtype=float16
+  标签侧：有（True）；块指纹 e1f5dd0fc1e9aba8；obs v3 / derived v3
+  逐决策 reward-to-go 覆盖：train 100.0% / val 100.0%（0% = 老采集器；`--value-target rtg` 会在入口报错）
+  顺位点覆盖：train 100.0% / val 100.0%（0% = 采集目录里没有 summary.json；`--rank-weight > 0` 会在入口报错）
+  长程 carry：`h0[192]` 非全 0 的行 train 4.6% / val 4.9%（其余行的事件数 ≤ K=60 ⇒ 窗口之前没有事件、carry 全 0 是正确的）
+  风格奖励塑形：**关闭**（没给 `--style-bonus`）—— 不建 `style_bonus` 列，训练与加这个功能之前逐位相同
+  行为策略身份：`behaviour_id` 已建，表内 **4** 个行为（未验证 0 个）；训练行按 id 分布：{'0': 232232, '1': 231461, '2': 229917, '3': 231408}；验证 {'0': 12213, '1': 12216, '2': 12071, '3': 12327}
+    id=0 net     temp=None sha256=cac8381e0c61d3f7 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin
+    id=1 net     temp=None sha256=8349d0c0c7f5ee82 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin
+    id=2 net     temp=0.5 sha256=167a7002a7a0fa60 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5
+    id=3 net     temp=None sha256=01f2eacde9bc47d9 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin
+[15:23:55]   exit=0 wall=134.9s
+[15:23:55] == 臂 B 第 1/2 段（--stop-after-steps 30）==
+
+$ S:\mahjong-training\tools\py312\python.exe C:\Users\HP\source\games\mahjong\tools\overlap-orchestrator.py pair --pair train:collect --driver S:\mahjong-training\w-ladder\_bl13\ab\spec-B-s01.json --data-root C:\Users\HP\source\games\mahjong\tmp\bl13\root --compact-root C:\Users\HP\source\games\mahjong\tmp\bl13\compact --raw-root C:\Users\HP\source\games\mahjong\tmp\bl13\raw --workers 8 --evidence-dir S:\mahjong-training\w-ladder\_bl13\ab --allow-busy --only primary --round 11 --rounds S:\mahjong-training\w-ladder\_bl13\ab\rounds.jsonl --out S:\mahjong-training\w-ladder\_bl13\ab\B-s01.result.json
+=== 重叠编排器 · tag=bl13-B-s01 · phase=train ‖ collect · overlap=OFF · 2026-10-13 15:23:55 ===
+  [OK  ] G1 主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']
+         允许『train ‖ collect』
+  [OK  ] G2 主相写目录 vs 从相写目录：不相交、互不为祖先
+         C:\Users\HP\source\games\mahjong\tmp\bl13\root\ckpt  ⊥  C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-B-s01-none
+  [OK  ] G3 主相输入分片存在且与从相写目录分开
+         src=C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-B-all（51 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来
+         pin 5 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe'] · 主相 58 个 token
+  [OK  ] G5 采集命令行里没有引用正在被写的主相产物目录
+         无引用
+  [OK  ] G7 静窗（含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 2 个，其中**算竞争**的 = 0 个
+         pid=32804 python.exe mem=14.8MB
+         pid=19272 python.exe mem=26.9MB
+  [OK  ] G7 枚举自检：枚举到 404 个进程 · 系统进程看见 5/5 ['smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe'] · netstat LISTENING 23 个（枚举里看不到的 []）
+        探针：已调用=False 取到过=False 途径=—
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_bl13\ab\overlap-orchestrator.lock（pid=19272）
+  before: {"commit_free_gb": 16.33, "commit_limit_gb": 39.71, "committed_gb": 23.38, "free_phys_gb": 22.62}   进程口径：committed=PagefileUsage（私有提交），ws 另报
+
+--- 单相模式：只跑 primary ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 2 个（算竞争 0）
+  after : {"commit_free_gb": 16.09, "commit_limit_gb": 39.71, "committed_gb": 23.62, "free_phys_gb": 23.77}
+  wall=230.5s · 重叠区间=0.0s · 捕获率=0.0 · commit_free 最低=10.63 GB（n=227）
+
+[out] S:\mahjong-training\w-ladder\_bl13\ab\B-s01.result.json
+
+[rounds] 第 11 轮已记账 → S:\mahjong-training\w-ladder\_bl13\ab\rounds.jsonl
+[rounds] θ(init) sha256=167a7002a7a0fa60… · D(meta) sha256=b32e82c358bf696f… · behaviour_ids=[0, 1, 2, 3] · ρ={'n_rows': 891, 'n_sampled': 891, 'n_gt_rho_max': 0, 'n_gt_log_ratio_clamp': 0, 'rho_max': 3.628525495529175, 'rho_min': 0.025849470868706703, 'rho_worst_two_sided': 38.685508728027344, 'clipped_batches': 0, 'rho_p50': 1.0, 'rho_p90': 1.0788508653640747, 'rho_p99': 1.4222822189331055} · 陈旧度={'0': 0.13066604733467102, '1': 0.11580978333950043, '2': -2.177662850044726e-08, '3': 0.27927595376968384}
+[15:27:46]   exit=0 wall=231.2s
+[15:27:46]   段 1: exit=0 stop_reason=KL 早停：step 13 的 KL(π_old‖π_new)=0.0863 > 0.03（kl_inv=0.0648）

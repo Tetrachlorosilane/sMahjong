@@ -1,0 +1,15 @@
+
+===== 2026-10-13 14:47:14 $ S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-A-r2 --label bl13-A-r2 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52940103 --init C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin --behaviour-temp 0.5 --behaviour-multi --rho-max 100 --rho-max-action fail --stale-kl-budget 0.30 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.03 --kl-min-steps 100 --baseline-fit scale --threads 8 --max-steps 100
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+长程 carry：`h0[192]` 已接入前向（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+初始化：从 C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin 载入权重
+KL 锚（W3）：β=0.5，参考策略 C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin（**缺省 = `--init` 那一份现任**）；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）；权重指纹 b8e4791449662c13…
+   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）：实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。
+⚠ `--kl-min-steps 100` 对100 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 20（轮长的 1/5）
+KL 锚：π_ref 的 logits 已冻结预算（459365 行 × 27 候选，47.3 MiB，用时 78.7s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+PPO：行为策略 C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin（温度 0.5）—— 重算 log π_old（459365 条）

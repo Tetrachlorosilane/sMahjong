@@ -1,0 +1,2 @@
+
+===== 2026-10-13 14:47:14 $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 700 --workers 8 --rotate --rotate-perm --aux --policy net:C:\Users\HP\source\games\mahjong\tools\build\bl13-A-r1\net.bin@0#0.5,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin --seed 52940103 --out C:\Users\HP\source\games\mahjong\tmp\bl13\raw\bl13-A-r3

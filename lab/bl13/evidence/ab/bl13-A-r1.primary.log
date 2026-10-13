@@ -1,0 +1,138 @@
+
+===== 2026-10-13 14:29:56 $ S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-A-r1 --label bl13-A-r1 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52940102 --init C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --behaviour-multi --rho-max 100 --rho-max-action fail --stale-kl-budget 0.30 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.03 --kl-min-steps 100 --baseline-fit scale --threads 8 --max-steps 100
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 2993, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 2988, in main
+    train(args)
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 1803, in train
+    train_data = v4ds.load_split(data_dir, "train")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\dataset.py", line 1521, in load_split
+    meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "S:\mahjong-training\tools\py312\Lib\pathlib.py", line 1027, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "S:\mahjong-training\tools\py312\Lib\pathlib.py", line 1013, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\compact\\bl13-A-r1\\meta.json'
+
+===== 2026-10-13 14:36:13 $ S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-A-r1 --label bl13-A-r1 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52940102 --init C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --behaviour-multi --rho-max 100 --rho-max-action fail --stale-kl-budget 0.30 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.03 --kl-min-steps 100 --baseline-fit scale --threads 8 --max-steps 100
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 2993, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 2988, in main
+    train(args)
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py", line 1803, in train
+    train_data = v4ds.load_split(data_dir, "train")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\dataset.py", line 1521, in load_split
+    meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "S:\mahjong-training\tools\py312\Lib\pathlib.py", line 1027, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "S:\mahjong-training\tools\py312\Lib\pathlib.py", line 1013, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\compact\\bl13-A-r1\\meta.json'
+
+===== 2026-10-13 14:42:30 $ S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-A-r1 --label bl13-A-r1 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52940102 --init C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --behaviour-multi --rho-max 100 --rho-max-action fail --stale-kl-budget 0.30 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.03 --kl-min-steps 100 --baseline-fit scale --threads 8 --max-steps 100
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+长程 carry：`h0[192]` 已接入前向（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+初始化：从 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 载入权重
+KL 锚（W3）：β=0.5，参考策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin（**缺省 = `--init` 那一份现任**）；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）；权重指纹 b840a063031bdbfe…
+   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）：实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。
+⚠ `--kl-min-steps 100` 对100 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 20（轮长的 1/5）
+KL 锚：π_ref 的 logits 已冻结预算（463889 行 × 27 候选，47.8 MiB，用时 70.8s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+PPO：行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin（温度 0.5）—— 重算 log π_old（463889 条）
+PPO：clip=0.2 entropy=0.01；优势在学生行上归一化、策略损失只算学生行
+PPO：grad-clip 0.5、KL 早停阈值 0.03（min_steps 20）
+PPO：口径自检 KL(π_old‖π_new)=+1.11e-07（≈0 = 权重与温度都对上了）
+PPO：ρ 记账已开（上限 100 / 动作 fail；逐行计数 + 分位数，⛔ 不静默夹取）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 重算 V_old（train 463889 / val 24131 条）…
+  小局 30428 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0.2 / 基线拟合 scale
+  小局奖励：mean +0.000 std 5.335 千点；V_old：mean +0.663 std 0.821
+  基线重标定：α=-1.402 β=1.3770 ⇒ std(V_used) 1.131（原 0.821）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 5.874 vs std(delta) 5.138 ⇒ **1.143×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 1.145× · 只减均值 1.162× ⇐ 含顺位点项的目标方差更大）
+  （用时 53.2s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.5812（n=5943）/ 全部行 0.5886 | **随机基线 1/平均候选数** 0.2293 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.5812
+数据：训练 463889 条（665 场）/ 验证 24131 条；lmax=27；标签侧 有；长程 carry 有（`h0` 列）；学生行占比 训练 24.8% / 验证 24.6%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cuda；threads=8；seed=52940102
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 100 步 × batch 256
+  -- 进入阶段 c（step 0/100）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py:2560: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:837.)
+  if not math.isfinite(float(loss)):
+  !! KL 早停：step 22 的 KL(π_old‖π_new)=0.0757 > 0.03（kl_inv=-0.0065）
+epoch   1 [c]: train 1.9695 | val top1(教师一致) 0.782 | 首合法基线 0.166 | policy 0.747 value 2.539 place 1.070 bh 0.581 bt 0.088 danger 0.316 effect 0.0078 ssl_acc 0.970 | **学生行 top1 0.667**(n=5943) | 学生行 policy 3.534 | **引擎一致率 0.586**(init 0.581 / 随机 0.229) | 引擎 CE(学生行) 5.7885 | KL 0.0110/0.0397 clip 0.073 |A| 0.16 gap 1.24 |g| 4.11 | ref_kl=0.0215（β=0.5，占总损失 0.5%）
+        按类型：chi=0.15(n=74)  discard=0.73(n=18259)  kan=0.91(n=46)  pass=0.98(n=4554)  pon=0.64(n=261)  riichi=0.92(n=568)  ron=1.00(n=273)  tsumo=1.00(n=96)
+        ρ（重要性比，上限 100 / 动作 fail；**双边**判据）：p50=1.0000 p90=1.0870 p99=1.4376 · min=0.044050224125385284 max=12.24 · max(ρ,1/ρ)=22.7 · 超限行 0/1452 · 超 LOG_RATIO_CLAMP 行 0 · 已夹批数 0
+
+checkpoint：C:\Users\HP\source\games\mahjong\tmp\bl13\root\ckpt\bl13-A-r1\model.pt；指标：C:\Users\HP\source\games\mahjong\tmp\bl13\root\ckpt\bl13-A-r1\metrics.json（7.4s）
+
+===== 2026-10-13 14:56:13 $ S:\mahjong-training\tools\py312\python.exe -u -m mahjong_ml.v4.pretrain --data C:\Users\HP\source\games\mahjong\tmp\bl13\compact\bl13-A-r1 --label bl13-A-r1 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52940102 --init C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --behaviour-multi --rho-max 100 --rho-max-action fail --stale-kl-budget 0.30 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.03 --kl-min-steps 60 --baseline-fit scale --threads 8 --max-steps 60
+<frozen runpy>:128: RuntimeWarning: 'mahjong_ml.v4.pretrain' found in sys.modules after import of package 'mahjong_ml.v4', but prior to execution of 'mahjong_ml.v4.pretrain'; this may result in unpredictable behaviour
+长程 carry：`h0[192]` 已接入前向（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+初始化：从 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 载入权重
+KL 锚（W3）：β=0.5，参考策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin（**缺省 = `--init` 那一份现任**）；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）；权重指纹 b840a063031bdbfe…
+   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）：实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。
+⚠ `--kl-min-steps 60` 对60 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 12（轮长的 1/5）
+KL 锚：π_ref 的 logits 已冻结预算（463889 行 × 27 候选，47.8 MiB，用时 70.2s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+PPO（多行为）：紧凑集带 `behaviour_id`，表内 4 个行为 —— 逐 id 重算 `log π_old`（总 463889 条；**每多一种行为 ≈ +59 s/轮**，如实记）
+PPO（多行为）：需要**全量** `logp_old` 的 id = [2]（= 有学生行的那些；其余只算探针行 —— 无条件算 66 万行是纯浪费）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+  [train] behaviour_id=0 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin（温度 0.5）：116256 行 · **全量已跳过**（无学生行） · 探针 4096 行 sha256 66fb578da40a7fd9… · 2.6s
+  [train] behaviour_id=1 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin（温度 0.5）：116111 行 · **全量已跳过**（无学生行） · 探针 4096 行 sha256 b9b898302394b791… · 0.7s
+  [train] behaviour_id=2 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin@0#0.5（温度 0.5）：115190 行 · logp mean -0.7556 · 探针 4096 行 sha256 f73464a8b82f2dfe… · 18.4s
+  [train] behaviour_id=3 net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin（温度 0.5）：116332 行 · **全量已跳过**（无学生行） · 探针 4096 行 sha256 08e07e1416021c05… · 0.7s
+PPO（多行为）：`--init` sha256 167a7002a7a0fa60… ⇒ 挂钩 behaviour_id=2（其余 0 个同 sha）· 温度尺子 0.5
+  id=0: KL(记录‖复算)=+0.00e+00 · max|Δlogp|=0.00e+00 · 探针=4096 行 · rows=116256 · 陈旧度 KL(π_id‖π_init)=+0.1386
+  id=1: KL(记录‖复算)=+0.00e+00 · max|Δlogp|=0.00e+00 · 探针=4096 行 · rows=116111 · 陈旧度 KL(π_id‖π_init)=+0.1065
+  id=2: KL(记录‖复算)=+0.00e+00 · max|Δlogp|=0.00e+00 · 探针=4096 行 · rows=115190 · 陈旧度 KL(π_id‖π_init)=+0.0000 ← `--init` 那一份（恒等 ⇒ 必须 ≈0）
+  id=3: KL(记录‖复算)=+0.00e+00 · max|Δlogp|=0.00e+00 · 探针=4096 行 · rows=116332 · 陈旧度 KL(π_id‖π_init)=+0.2595
+  策略损失的行掩码：排除 348699 行 —— 未验证 0 行 · 内置策略 0 行 · **全量跳过的代**（无学生行，`logp_old` 永不被读）348699 行（⛔ 三类都显式记账，不是静默裁剪）
+PPO（多行为）：clip=0.2 entropy=0.01；ρ 上限 `--rho-max`=100（动作 **fail**；0 = 关）· 数值保险 `LOG_RATIO_CLAMP`=4（ρ≤54.6）**逐行计数上报**（⛔ 不再静默夹取）
+PPO（多行为）：grad-clip 0.5、KL 早停阈值 0.03
+PPO：ρ 记账已开（上限 100 / 动作 fail；逐行计数 + 分位数，⛔ 不静默夹取）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 重算 V_old（train 463889 / val 24131 条）…
+  小局 30428 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0.2 / 基线拟合 scale
+  小局奖励：mean +0.000 std 5.335 千点；V_old：mean +0.663 std 0.821
+  基线重标定：α=-1.402 β=1.3770 ⇒ std(V_used) 1.131（原 0.821）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 5.874 vs std(delta) 5.138 ⇒ **1.143×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 1.145× · 只减均值 1.162× ⇐ 含顺位点项的目标方差更大）
+  （用时 72.0s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.5812（n=5943）/ 全部行 0.5886 | **随机基线 1/平均候选数** 0.2293 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.5812
+数据：训练 463889 条（665 场）/ 验证 24131 条；lmax=27；标签侧 有；长程 carry 有（`h0` 列）；学生行占比 训练 24.8% / 验证 24.6%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cuda；threads=8；seed=52940102
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 60 步 × batch 256
+  -- 进入阶段 c（step 0/60）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py:2560: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:837.)
+  if not math.isfinite(float(loss)):
+  !! KL 早停：step 17 的 KL(π_old‖π_new)=0.0596 > 0.03（kl_inv=-0.0122）
+epoch   1 [c]: train 2.0187 | val top1(教师一致) 0.783 | 首合法基线 0.166 | policy 0.729 value 2.541 place 1.070 bh 0.581 bt 0.087 danger 0.317 effect 0.0078 ssl_acc 0.970 | **学生行 top1 0.666**(n=5943) | 学生行 policy 3.502 | **引擎一致率 0.591**(init 0.581 / 随机 0.229) | 引擎 CE(学生行) 5.8077 | KL 0.0110/0.0434 clip 0.061 |A| 0.16 gap 1.29 |g| 4.27 | ref_kl=0.0200（β=0.5，占总损失 0.5%）
+        按类型：chi=0.15(n=74)  discard=0.73(n=18259)  kan=0.91(n=46)  pass=0.98(n=4554)  pon=0.64(n=261)  riichi=0.92(n=568)  ron=1.00(n=273)  tsumo=1.00(n=96)
+        ρ（重要性比，上限 100 / 动作 fail；**双边**判据）：p50=1.0000 p90=1.0790 p99=1.4246 · min=0.06929978728294373 max=12.24 · max(ρ,1/ρ)=14.43 · 超限行 0/1180 · 超 LOG_RATIO_CLAMP 行 0 · 已夹批数 0
+
+checkpoint：C:\Users\HP\source\games\mahjong\tmp\bl13\root\ckpt\bl13-A-r1\model.pt；指标：C:\Users\HP\source\games\mahjong\tmp\bl13\root\ckpt\bl13-A-r1\metrics.json（5.9s）

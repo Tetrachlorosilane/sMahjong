@@ -1,0 +1,35 @@
+===== S:\mahjong-training\tools\py312\python.exe -u S:\mahjong-training\w-ladder\_p301-evidence\p301_train.py --data E:\mahjong-training\compact\p301-diag-300step --label p301-diag-300step --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52920016 --init C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 100 --kl-min-steps 300 --baseline-fit scale --val-patience 5 --val-every 0 --max-steps 300 --threads 8
+长程 carry：`h0[192]` 已接入前向（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+初始化：从 C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin 载入权重
+KL 锚（W3）：β=0.5，参考策略 C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin（**缺省 = `--init` 那一份现任**）；π_ref **冻结**（requires_grad=False + eval + no_grad 算 logits）
+   ⚠ 锚**只保证「别乱动」，不提供目标**（不补打点、不补押し引き）：实测 β=0.5 把 `--il-weight` 的增益**砍半**（KL(π‖init) 0.377→0.168）⇒ 要「能动」必须同时有**别的**信号源，别指望锚本身。
+⚠ `--kl-min-steps 300` 对300 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 60（轮长的 1/5）
+KL 锚：π_ref 的 logits 已冻结预算（656709 行 × 27 候选，67.6 MiB，用时 67.7s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+PPO：行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin（温度 0.5）—— 重算 log π_old（656709 条）
+PPO：clip=0.2 entropy=0.01；优势在学生行上归一化、策略损失只算学生行
+PPO：grad-clip 0.5、KL 早停阈值 100（min_steps 60）
+PPO：口径自检 KL(π_old‖π_new)=+6.86e-03（≈0 = 权重与温度都对上了）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin 重算 V_old（train 656709 / val 33633 条）…
+  小局 42968 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0.2 / 基线拟合 scale
+  小局奖励：mean -0.001 std 5.271 千点；V_old：mean +0.664 std 0.817
+  基线重标定：α=-1.576 β=1.3202 ⇒ std(V_used) 1.079（原 0.817）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 5.899 vs std(delta) 5.092 ⇒ **1.158×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 1.159× · 只减均值 1.176× ⇐ 含顺位点项的目标方差更大）
+  （用时 48.0s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.5800（n=8357）/ 全部行 0.5921 | **随机基线 1/平均候选数** 0.2300 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.5800
+数据：训练 656709 条（950 场）/ 验证 33633 条；lmax=27；标签侧 有；长程 carry 有（`h0` 列）；学生行占比 训练 24.8% / 验证 24.8%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cuda；threads=8；seed=52920016
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 300 步 × batch 256
+  -- 进入阶段 c（step 0/300）
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\pretrain.py:1616: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:837.)
+  if not math.isfinite(float(loss)):
+epoch   1 [c]: train 1.8614 | val top1(教师一致) 0.792 | 首合法基线 0.166 | policy 0.751 value 2.545 place 1.062 bh 0.580 bt 0.094 danger 0.311 effect 0.0067 ssl_acc 0.970 | **学生行 top1 0.694**(n=8357) | 学生行 policy 3.421 | **引擎一致率 0.582**(init 0.580 / 随机 0.230) | 引擎 CE(学生行) 5.7807 | KL 0.0287/0.0201 clip 0.108 |A| 0.16 gap 1.45 |g| 3.38 | ref_kl=0.0120（β=0.5，占总损失 0.3%）
+        按类型：chi=0.09(n=106)  discard=0.74(n=25428)  kan=0.85(n=55)  pass=0.99(n=6387)  pon=0.67(n=395)  riichi=0.91(n=756)  ron=1.00(n=368)  tsumo=1.00(n=138)
+
+checkpoint：E:\mahjong-training\ckpt\p301-diag-300step\model.pt；指标：E:\mahjong-training\ckpt\p301-diag-300step\metrics.json（23.8s）

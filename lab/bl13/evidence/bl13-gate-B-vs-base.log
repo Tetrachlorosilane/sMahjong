@@ -1,0 +1,12 @@
+  File "<string>", line 1
+    import sys;sys.path[:0]=[r'C:\Users\HP\source\games\mahjong\python',r'C:\Users\HP\source\games\mahjong\python\.venv\Lib\site-packages'];from pathlib import Path;from mahjong_ml.v4 import arena;arena.run_pair(Path(r'S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001'), 'net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin', 'net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin', 1500, 52941001, workers=8, prod='cpp', rotate_perm=True)
+                                                                                                                                                                                                                                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: (unicode error) 'unicodeescape' codec can't decode bytes in position 6-7: truncated \UXXXXXXXX escape
+S:\mahjong-training\tools\py312\python.exe: can't open file 'S:\\mahjong-training\\w-ladder\\_bl13\\bl13_pair.py': [Errno 2] No such file or directory
+  $ S:\mahjong-training\tools\trainer\trainer.exe selfplay 1500 --workers 8 --rotate --rotate-perm --policy net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin,net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin --seed 52941001 --out S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001
+== 自对弈汇总：1500 场 / 16934 小局 / 687 决策/场，用时 367.5s（4.08 场/秒，2804 决策/秒），workers=8
+   流局率 9.6%   平均每场 11.3 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin   3000      2.506       -0.43     22.5%     16.7%        -17       7279
+net:C:\Users\HP\source\games\mahjong\tools\build\bl13-B-s01\net.bin   3000      2.494        0.43     22.7%     16.5%         13       7243
+轨迹目录：S:\mahjong-training\w-ladder\_bl13\gate\bl13-B-vs-base\s52941001

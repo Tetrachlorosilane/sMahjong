@@ -1,0 +1,8 @@
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\p301-diag-300step (summary per_game pruned to 1000)
+compact exit=0
+train exit=0
+PPO：grad-clip 0.5、KL 早停阈值 100（min_steps 60）
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 300 步 × batch 256
+epoch   1 [c]: train 1.8614 | val top1(教师一致) 0.792 | 首合法基线 0.166 | policy 0.751 value 2.545 place 1.062 bh 0.580 bt 0.094 danger 0.311 effect 0.0067 ssl_acc 0.970 | **学生行 top1 0.694**(n=8357) | 学生行 policy 3.421 | **引擎一致率 0.582**(init 0.580 / 随机 0.230) | 引擎 CE(学生行) 5.7807 | KL 0.0287/0.0201 clip 0.108 |A| 0.16 gap 1.45 |g| 3.38 | ref_kl=0.0120（β=0.5，占总损失 0.3%）
+checkpoint：E:\mahjong-training\ckpt\p301-diag-300step\model.pt；指标：E:\mahjong-training\ckpt\p301-diag-300step\metrics.json（23.8s）
+cleaned: compact=False sraw=False ckpt=False

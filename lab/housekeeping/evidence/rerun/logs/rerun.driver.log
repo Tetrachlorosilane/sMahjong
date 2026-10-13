@@ -1,0 +1,3 @@
+[18:11:57]   A-collect-r1: exit=0 wall=164.1s commit_free_min=12.32GB
+[18:12:03]   A-features-r1: exit=0 wall=6.0s commit_free_min=13.08GB
+[18:13:05]   A-compact-r1: exit=0 wall=61.0s commit_free_min=6.21GB

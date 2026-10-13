@@ -1,0 +1,5 @@
+[18:08:59] ===== RERUN（阈值 0.1）：臂 P · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:08:59 =====
+[18:09:05] ===== RERUN（阈值 0.1）：臂 P · k=2 · 每轮 700 场 · M=100 步 · 开始 2026-10-13 18:09:05 =====
+[18:09:06]   preflight: {"phase": "P", "ts": "2026-10-13 18:09:06", "n_procs": 435, "system_seen": ["csrss.exe", "lsass.exe", "services.exe", "smss.exe", "wininit.exe"], "busy": [], "paddleocr": [], "commit_free_gb": 13.09}
+[18:09:06]   recipe 指纹：θ_0=167a7002a7a0 def=8349d0c0 win=01f2eacd atk=cac8381e trainer=eca79284db82
+[18:09:06] ===== RERUN 臂 P 结束：rc=0 墙钟 0.0 min =====

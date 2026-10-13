@@ -1,0 +1,41 @@
+== 判据侧重算 · S:\mahjong-training\w-ladder\traces\v4-wl-fold-any-c1-g01（1000 个 g*.jsonl）==
+[耗时] `_student_per_game`（1000 场全量、含逐行重建現物）= 75.7s；场数 1000
+[四席口径·另出的一份] {'f4_decision_rows': 685727, 'f4_threat_rows': 115244, 'f4_fold_rows': 9988, 'f4_push_rows': 105256, 'f4_missing_rows': 0}
+[基准] 用**当前奖励代码**在同一份轨迹上重算 `fold` 的账（spec='fold=3818:no_deal'）…
+
+[✓ 对账通过] 判据侧（学生席，独立实现）== **当前奖励代码重算**的账：
+   f_decision_rows        = 170092
+   f_threat_rows          = 30502
+   f_fold_rows            = 2565
+   f_push_rows            = 27937
+   f_missing_rows         = 0
+   fold_paid_rows         = 2110
+   fold_blocked_rows      = 455
+   口径句 row_rule = `chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）
+   口径句 genbutsu_src = `obs.events` 里该家 `type=="riichi"` 那条事件**之后**的 `discard` 牌 **＋ 宣言牌本身**（`sideways`；麻将标准口径：进过河不与荣）；仅公开信息
+   四席交叉核对 = {"judge_fold_rows_all_seats": 9988, "audit_action_rows_all_seats": 9988, "judge_threat_rows_all_seats": 115244, "judge_push_rows_all_seats": 105256}
+
+[⚠ 冻结审计账] S:\mahjong-training\w-ladder\audit\v4-wl-fold-any-c1-g01.json（训练当时那一版代码的产物，**不作为对账基准**）：
+   f_threat_rows          判据侧   30502 vs 冻结账   30502（差 +0）
+   f_fold_rows            判据侧    2565 vs 冻结账    2565（差 +0）
+   f_push_rows            判据侧   27937 vs 冻结账   27937（差 +0）
+   fold_paid_rows         判据侧    2110 vs 冻结账    2110（差 +0）
+   fold_blocked_rows      判据侧     455 vs 冻结账     455（差 +0）
+
+[聚合读数 · 这一侧] {
+  "games": 1000,
+  "threat_rows": 30502,
+  "fold_rows": 2565,
+  "push_rows": 27937,
+  "missing_rows": 0,
+  "decision_rows": 170092,
+  "fold_rate": 0.08409284637072979,
+  "paid_rows_frac": 0.015080074312724878,
+  "fold_rows_per_game": 2.565,
+  "paid_rows": 2110,
+  "blocked_rows": 455
+}
+   门槛（付奖行率/学生席决策行 = 1.508007%）⇒ 过 1%/行
+   降り率 = 2565/30502 = 8.4093%
+
+[落盘] S:\mahjong-training\w-ladder\_fold-verify\v4-wl-fold-any-c1-g01.json

@@ -1,0 +1,12 @@
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\p301-diag-250step (summary per_game pruned to 1000)
+[verify] 片 0：PASS —— 1000 场
+compact exit=0
+train exit=0
+===== S:\mahjong-training\tools\py312\python.exe -u S:\mahjong-training\w-ladder\_p301-evidence\p301_train.py --data E:\mahjong-training\compact\p301-diag-250step --label p301-diag-250step --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52920016 --init C:\Users\HP\source\games\mahjong\tools\build\v4-wl-p301-B-g06\net.bin --behaviour C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.10 --kl-min-steps 60 --baseline-fit scale --val-patience 5 --val-every 100 --max-steps 250 --threads 8
+KL 锚：π_ref 的 logits 已冻结预算（656709 行 × 27 候选，67.6 MiB，用时 68.3s）—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）
+PPO：grad-clip 0.5、KL 早停阈值 0.1（min_steps 50）
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 250 步 × batch 256
+  !! KL 早停：step 61 的 KL(π_old‖π_new)=0.1529 > 0.1（kl_inv=0.0117）
+epoch   1 [c]: train 1.8794 | val top1(教师一致) 0.797 | 首合法基线 0.166 | policy 0.737 value 2.552 place 1.063 bh 0.580 bt 0.098 danger 0.312 effect 0.0077 ssl_acc 0.970 | **学生行 top1 0.691**(n=8357) | 学生行 policy 3.419 | **引擎一致率 0.587**(init 0.580 / 随机 0.230) | 引擎 CE(学生行) 5.8411 | KL 0.0448/0.0164 clip 0.137 |A| 0.16 gap 1.82 |g| 3.37 | ref_kl=0.0127（β=0.5，占总损失 0.3%）
+checkpoint：E:\mahjong-training\ckpt\p301-diag-250step\model.pt；指标：E:\mahjong-training\ckpt\p301-diag-250step\metrics.json（9.8s）
+cleaned: compact=False sraw=False ckpt=False

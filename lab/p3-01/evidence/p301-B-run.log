@@ -1,0 +1,156 @@
+=== P3-01 B' · 臂 B · 2026-10-12 05:59:04 ===
+分片 1000 场/片；每片训练步数 167（预注册 2000 步 ÷ 12 片）；闸门 --target-minutes 60；compact 落 E:\mahjong-training（无 junction）
+
+--- B 第 2 轮（v4-wl-p301-B-g02）：复用已采好的 raw（seed 52920012）---
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-B-g02：2000 场 ⇒ 2 片 × ≤1000 场（seed=52920012，sha256=59fb3902893c266b）
+  片 00：1000 场（首 [1302, 818, 725] … 末 [452, 139, 1391]）
+  片 01：1000 场（首 [1691, 1370, 1830] … 末 [1995, 1629, 1366]）
+
+--- v4-wl-p301-B-g02.s00：1000 场（首 [0, 1, 2] … 末 [997, 998, 999]）---
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g02-s00 (summary per_game pruned to 1000)
+[05:59:20] v4-wl-p301-B-g02.s00.verify: 2.0s exit=0 child_peak=1.6MB commit_free=19.96GB E_free=528.5GB S_free=123.5GB
+
+--- v4-wl-p301-B-g02.s01：1000 场（首 [1000, 1001, 1002] … 末 [1997, 1998, 1999]）---
+  （复用已建好的 compact：v4-wl-p301-B-g02-s01）
+[06:01:25] v4-wl-p301-B-g02.s00.compact: 124.9s exit=0
+  片 00：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+[06:03:34] v4-wl-p301-B-g02.s00.train: 128.0s exit=1 child_peak=15737.5MB commit_free=19.82GB E_free=516.9GB S_free=123.5GB
+⚠ v4-wl-p301-B-g02.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:05:18] v4-wl-p301-B-g02.s00.train-retry: 104.0s exit=1 child_peak=15738.3MB commit_free=20.05GB E_free=516.9GB S_free=123.5GB
+⚠ v4-wl-p301-B-g02.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:07:04] v4-wl-p301-B-g02.s00.train-retry2: 106.0s exit=1 child_peak=15737.9MB commit_free=19.37GB E_free=516.9GB S_free=123.5GB
+[06:07:06] v4-wl-p301-B-g02.s00.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.34GB E_free=516.9GB S_free=123.5GB
+  片 00 训完即删 compact（释放 14.67 GB）
+[06:09:28] v4-wl-p301-B-g02.s01.train: 140.0s exit=1 child_peak=15602.2MB commit_free=19.88GB E_free=531.5GB S_free=123.5GB
+⚠ v4-wl-p301-B-g02.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:11:10] v4-wl-p301-B-g02.s01.train-retry: 102.0s exit=1 child_peak=15601.9MB commit_free=19.42GB E_free=531.5GB S_free=123.5GB
+⚠ v4-wl-p301-B-g02.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:12:52] v4-wl-p301-B-g02.s01.train-retry2: 102.0s exit=1 child_peak=15602.8MB commit_free=19.75GB E_free=531.5GB S_free=123.5GB
+[06:12:54] v4-wl-p301-B-g02.s01.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.71GB E_free=531.5GB S_free=123.5GB
+  片 01 训完即删 compact（释放 14.63 GB）
+
+--- B 第 3 轮（v4-wl-p301-B-g03）：复用已采好的 raw（seed 52920013）---
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-B-g03：2000 场 ⇒ 2 片 × ≤1000 场（seed=52920013，sha256=663c984e69d9802e）
+  片 00：1000 场（首 [1606, 1155, 1315] … 末 [597, 807, 1807]）
+  片 01：1000 场（首 [1292, 472, 568] … 末 [1149, 394, 1967]）
+
+--- v4-wl-p301-B-g03.s00：1000 场（首 [0, 1, 2] … 末 [997, 998, 999]）---
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g03-s00 (summary per_game pruned to 1000)
+[06:13:12] v4-wl-p301-B-g03.s00.verify: 2.0s exit=0 child_peak=1.6MB commit_free=19.44GB E_free=543.1GB S_free=123.5GB
+
+--- v4-wl-p301-B-g03.s01：1000 场（首 [1000, 1001, 1002] … 末 [1997, 1998, 1999]）---
+[stage] shard 1: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g03-s01 (summary per_game pruned to 1000)
+[06:13:27] v4-wl-p301-B-g03.s01.verify: 2.0s exit=0 child_peak=1.6MB commit_free=18.56GB E_free=540.1GB S_free=123.5GB
+[06:15:56] v4-wl-p301-B-g03.s00.compact: 163.9s exit=0
+[06:16:07] v4-wl-p301-B-g03.s01.compact: 160.1s exit=0
+  片 00：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+  片 01：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+[06:16:12] v4-wl-p301-B-g03.s00.train: 2.0s exit=1 child_peak=1.6MB commit_free=19.49GB E_free=516.7GB S_free=123.5GB
+⚠ v4-wl-p301-B-g03.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:16:14] v4-wl-p301-B-g03.s00.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=19.47GB E_free=516.7GB S_free=123.5GB
+⚠ v4-wl-p301-B-g03.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:16:16] v4-wl-p301-B-g03.s00.train-retry2: 2.1s exit=1 child_peak=1.6MB commit_free=19.44GB E_free=516.7GB S_free=123.5GB
+[06:16:18] v4-wl-p301-B-g03.s00.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.41GB E_free=516.7GB S_free=123.5GB
+  片 00 训完即删 compact（释放 14.76 GB）
+[06:16:21] v4-wl-p301-B-g03.s01.train: 2.0s exit=1 child_peak=1.6MB commit_free=19.38GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g03.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:16:23] v4-wl-p301-B-g03.s01.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=19.35GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g03.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:16:25] v4-wl-p301-B-g03.s01.train-retry2: 2.0s exit=1 child_peak=1.6MB commit_free=20.11GB E_free=531.4GB S_free=123.5GB
+[06:16:27] v4-wl-p301-B-g03.s01.export: 2.0s exit=1 child_peak=1.6MB commit_free=20.27GB E_free=531.4GB S_free=123.5GB
+  片 01 训完即删 compact（释放 14.75 GB）
+
+--- B 第 4 轮（v4-wl-p301-B-g04）：复用已采好的 raw（seed 52920014）---
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-B-g04：2000 场 ⇒ 2 片 × ≤1000 场（seed=52920014，sha256=b6095da159acda7c）
+  片 00：1000 场（首 [1460, 504, 675] … 末 [528, 1857, 1924]）
+  片 01：1000 场（首 [977, 707, 1665] … 末 [1878, 520, 98]）
+
+--- v4-wl-p301-B-g04.s00：1000 场（首 [0, 1, 2] … 末 [997, 998, 999]）---
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g04-s00 (summary per_game pruned to 1000)
+[06:16:45] v4-wl-p301-B-g04.s00.verify: 2.0s exit=0 child_peak=1.6MB commit_free=20.0GB E_free=543.1GB S_free=123.5GB
+
+--- v4-wl-p301-B-g04.s01：1000 场（首 [1000, 1001, 1002] … 末 [1997, 1998, 1999]）---
+[stage] shard 1: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g04-s01 (summary per_game pruned to 1000)
+[06:17:01] v4-wl-p301-B-g04.s01.verify: 2.0s exit=0 child_peak=1.6MB commit_free=18.1GB E_free=540.0GB S_free=123.5GB
+[06:19:19] v4-wl-p301-B-g04.s00.compact: 153.5s exit=0
+[06:19:32] v4-wl-p301-B-g04.s01.compact: 151.5s exit=0
+  片 00：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+  片 01：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+[06:19:37] v4-wl-p301-B-g04.s00.train: 2.0s exit=1 child_peak=1.6MB commit_free=20.13GB E_free=516.9GB S_free=123.5GB
+⚠ v4-wl-p301-B-g04.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:19:39] v4-wl-p301-B-g04.s00.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=20.1GB E_free=516.9GB S_free=123.5GB
+⚠ v4-wl-p301-B-g04.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:19:41] v4-wl-p301-B-g04.s00.train-retry2: 2.0s exit=1 child_peak=1.6MB commit_free=20.06GB E_free=516.9GB S_free=123.5GB
+[06:19:43] v4-wl-p301-B-g04.s00.export: 2.0s exit=1 child_peak=1.6MB commit_free=20.04GB E_free=516.9GB S_free=123.5GB
+  片 00 训完即删 compact（释放 14.46 GB）
+[06:19:45] v4-wl-p301-B-g04.s01.train: 2.0s exit=1 child_peak=1.6MB commit_free=20.03GB E_free=531.3GB S_free=123.5GB
+⚠ v4-wl-p301-B-g04.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:19:47] v4-wl-p301-B-g04.s01.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=20.0GB E_free=531.3GB S_free=123.5GB
+⚠ v4-wl-p301-B-g04.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:19:49] v4-wl-p301-B-g04.s01.train-retry2: 2.0s exit=1 child_peak=1.6MB commit_free=19.97GB E_free=531.3GB S_free=123.5GB
+[06:19:51] v4-wl-p301-B-g04.s01.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.95GB E_free=531.3GB S_free=123.5GB
+  片 01 训完即删 compact（释放 14.85 GB）
+
+--- B 第 5 轮（v4-wl-p301-B-g05）：复用已采好的 raw（seed 52920015）---
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-B-g05：2000 场 ⇒ 2 片 × ≤1000 场（seed=52920015，sha256=a1ed016ca374616e）
+  片 00：1000 场（首 [1080, 1486, 1762] … 末 [1097, 1232, 1068]）
+  片 01：1000 场（首 [1367, 158, 958] … 末 [535, 1470, 191]）
+
+--- v4-wl-p301-B-g05.s00：1000 场（首 [0, 1, 2] … 末 [997, 998, 999]）---
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g05-s00 (summary per_game pruned to 1000)
+[06:20:10] v4-wl-p301-B-g05.s00.verify: 2.0s exit=0 child_peak=1.6MB commit_free=19.66GB E_free=543.1GB S_free=123.5GB
+
+--- v4-wl-p301-B-g05.s01：1000 场（首 [1000, 1001, 1002] … 末 [1997, 1998, 1999]）---
+[stage] shard 1: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g05-s01 (summary per_game pruned to 1000)
+[06:20:25] v4-wl-p301-B-g05.s01.verify: 2.0s exit=0 child_peak=1.6MB commit_free=17.78GB E_free=540.1GB S_free=123.5GB
+[06:22:45] v4-wl-p301-B-g05.s00.compact: 155.5s exit=0
+[06:22:59] v4-wl-p301-B-g05.s01.compact: 153.8s exit=0
+  片 00：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+  片 01：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+[06:23:04] v4-wl-p301-B-g05.s00.train: 2.0s exit=1 child_peak=1.6MB commit_free=19.78GB E_free=517.0GB S_free=123.5GB
+⚠ v4-wl-p301-B-g05.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:23:06] v4-wl-p301-B-g05.s00.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=19.76GB E_free=517.0GB S_free=123.5GB
+⚠ v4-wl-p301-B-g05.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:23:08] v4-wl-p301-B-g05.s00.train-retry2: 2.0s exit=1 child_peak=1.6MB commit_free=19.73GB E_free=517.0GB S_free=123.5GB
+[06:23:10] v4-wl-p301-B-g05.s00.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.7GB E_free=517.0GB S_free=123.5GB
+  片 00 训完即删 compact（释放 14.40 GB）
+[06:23:13] v4-wl-p301-B-g05.s01.train: 2.0s exit=1 child_peak=1.6MB commit_free=19.68GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g05.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:23:15] v4-wl-p301-B-g05.s01.train-retry: 2.0s exit=1 child_peak=1.6MB commit_free=19.64GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g05.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:23:17] v4-wl-p301-B-g05.s01.train-retry2: 2.0s exit=1 child_peak=1.6MB commit_free=19.61GB E_free=531.4GB S_free=123.5GB
+[06:23:19] v4-wl-p301-B-g05.s01.export: 2.0s exit=1 child_peak=1.6MB commit_free=19.58GB E_free=531.4GB S_free=123.5GB
+  片 01 训完即删 compact（释放 14.77 GB）
+
+--- B 第 6 轮（v4-wl-p301-B-g06）：复用已采好的 raw（seed 52920016）---
+[roster] 源 S:\mahjong-training\raw\v4-wl-p301-B-g06：2000 场 ⇒ 2 片 × ≤1000 场（seed=52920016，sha256=f6afce2114d00a75）
+  片 00：1000 场（首 [5, 542, 791] … 末 [430, 154, 743]）
+  片 01：1000 场（首 [1813, 1979, 52] … 末 [612, 1119, 1188]）
+
+--- v4-wl-p301-B-g06.s00：1000 场（首 [0, 1, 2] … 末 [997, 998, 999]）---
+[stage] shard 0: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g06-s00 (summary per_game pruned to 1000)
+[06:23:37] v4-wl-p301-B-g06.s00.verify: 2.0s exit=0 child_peak=1.6MB commit_free=19.3GB E_free=543.1GB S_free=123.5GB
+
+--- v4-wl-p301-B-g06.s01：1000 场（首 [1000, 1001, 1002] … 末 [1997, 1998, 1999]）---
+[stage] shard 1: 1000 games / 3000 hardlinked files -> E:\mahjong-training\raw-shard\B\v4-wl-p301-B-g06-s01 (summary per_game pruned to 1000)
+[06:23:53] v4-wl-p301-B-g06.s01.verify: 2.0s exit=0 child_peak=1.6MB commit_free=18.42GB E_free=540.1GB S_free=123.5GB
+[06:26:16] v4-wl-p301-B-g06.s00.compact: 159.2s exit=0
+[06:26:25] v4-wl-p301-B-g06.s01.compact: 152.1s exit=0
+  片 00：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+  片 01：compact 建好，删 staged raw 字节（腾 ~1.1 GB 提交）
+[06:26:29] v4-wl-p301-B-g06.s00.train: 2.0s exit=1 child_peak=1.5MB commit_free=19.55GB E_free=516.7GB S_free=123.5GB
+⚠ v4-wl-p301-B-g06.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:26:31] v4-wl-p301-B-g06.s00.train-retry: 2.0s exit=1 child_peak=1.5MB commit_free=19.51GB E_free=516.7GB S_free=123.5GB
+⚠ v4-wl-p301-B-g06.s00：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:26:33] v4-wl-p301-B-g06.s00.train-retry2: 2.0s exit=1 child_peak=1.5MB commit_free=19.49GB E_free=516.7GB S_free=123.5GB
+[06:26:35] v4-wl-p301-B-g06.s00.export: 2.0s exit=1 child_peak=1.5MB commit_free=19.47GB E_free=516.7GB S_free=123.5GB
+  片 00 训完即删 compact（释放 14.65 GB）
+[06:26:38] v4-wl-p301-B-g06.s01.train: 2.0s exit=1 child_peak=1.5MB commit_free=19.43GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g06.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 256 -> 128）
+[06:26:40] v4-wl-p301-B-g06.s01.train-retry: 2.0s exit=1 child_peak=1.5MB commit_free=19.39GB E_free=531.4GB S_free=123.5GB
+⚠ v4-wl-p301-B-g06.s01：训练 exit=1（无 traceback）⇒ 降载重跑（batch 128 -> 64）
+[06:26:42] v4-wl-p301-B-g06.s01.train-retry2: 2.0s exit=1 child_peak=1.5MB commit_free=19.36GB E_free=531.4GB S_free=123.5GB
+[06:26:44] v4-wl-p301-B-g06.s01.export: 2.0s exit=1 child_peak=1.5MB commit_free=19.33GB E_free=531.4GB S_free=123.5GB
+  片 01 训完即删 compact（释放 14.82 GB）
+
+=== 臂 B 结束：T_arm = 27.7 min；分相 {'verify': 18.0, 'compact': 1374.5, 'train': 284.0, 'train-retry': 222.0, 'train-retry2': 224.1, 'export': 20.0}；落盘 S:\mahjong-training\w-ladder\_p301-evidence\p301-timings-B.json
