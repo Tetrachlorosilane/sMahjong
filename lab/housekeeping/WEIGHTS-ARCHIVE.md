@@ -32,3 +32,10 @@
 ## 复现
 - 打包方式：**照抄** `tools/make-zip.mjs` 的手写中央目录（`versionMadeBy = Unix(3)` + `externalAttrs` 高位 `0644`、UTF-8 名、`deflateRaw` level 9、条目 mtime 取源文件 mtime ⇒ 同输入同字节）；它不适用之处 = 只吃单一 `srcDir`，而本次来源跨 50 个同级目录，故脚本按**显式文件清单**打包（zip 内为 `MANIFEST.md` / `MANIFEST.json` / `weights/<名字>/{net.bin,net.json}`）。
 - 清单/打包脚本与成品（**仓库外**，⛔ 不入 git）：`S:\mahjong-training\weights-archive\{MANIFEST.md, MANIFEST.json, v4-weights-20261013.zip, work\*.mjs}`。
+
+## 续记（2026-10-13 · 第八十五轮）
+
+- ⚠ **坑 ①（首版真踩到）**：`tools/build/_rejected/<name>/net.bin` 与 `tools/build/<name>/net.bin` **同名 18 组** —— 按**目录名**建索引会被 `_rejected` 那份**后写覆盖** ⇒ 首版**取错 4 条**（`v4-league10-g01` · `v4-league12-g01` · `v4-league13-g01` · `v4-expert-def6-r1-g02`）**并丢 `net.json`**。修法 = **优先取非 `_rejected`** + **断言入档条目 `sourcePath` 里 `_rejected` 计数 = 0**（本档 50 条已断言全 0）；⛔ **不许按目录名定位**，只按**解析后真实路径 + sha256**。
+- ⚠ **坑 ②（同名 ≠ 同模型）**：`bot-ai/<pkg>/net.bin` 与 `tools/build/<同名>/net.bin` **可能是两份不同模型**（4 包实测 **params 1360168 vs 1360936、字节差 3.25%**）⇒ **已发布权重以包内副本为权威**并逐包 sha256 反查（命中 5 / 未中 5）；⛔ 反查不中**不许**按目录名顶替。
+- ✅ **裁定：不重打包**。未中反查的 5 份（`ppo-v3-g01-g01` · `v4-bc-004` · `v4-p3-001` · `v4-ppo-001` · `v4-league-g08`）**不必补进本 zip** —— 它们**已发布**的权重本身已在 `v1.10.6` / `v1.13.0` / `v1.14.1` 的资产里 ⇒ **保持已验证 digest 不变**：asset `637292839` 仍 **254,863,741 B** / sha256 `7458d486…4fa1`，⛔ 未重传、⛔ 未动既有 release。
+- 判据行见 `AGENTS.md` §6.5（第八十五轮）；实测数字、反查清单与三组核对见 `NOTES.md` §6.5 第八十五轮 + 附录 F。
