@@ -1,6 +1,6 @@
 # BL-12 筛查结果 —— 便宜前置探针（零训练 · 零采集）｜2026-10-13
 
-> 预注册：`S:\mahjong-training\w-ladder\BL12-PLAN.md`（跑前冻写；本文件只记读数与判决，偏离见 §5）。
+> 预注册：`S:\mahjong-training\w-ladder\BL12-PLAN.md`（跑前冻写，随本结果**同一提交** `4bbb367` 冻存；偏离见 §5）。
 > 探针：`tools/lab/bl12-probe.py`（参数化 · fail-closed）· 原始件：`lab/bl12/evidence/**` + `tmp/bl12/*.log`。
 > 数据：`E:\mahjong-training\compact\ov-A-s00`（**只读**）· `val` 33,615 行 / 50 场 / 563 手。
 
