@@ -1,0 +1,39 @@
+{
+ "tag": "bl14-serial",
+ "evidence_dir": "S:\\\\mahjong-training\\\\w-ladder\\\\_bl14\\\\ab",
+ "compact": {
+  "phase": "train",
+  "src": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl14\\compact\\dk-b",
+  "out": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl14\\root\\ckpt",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin#0.5",
+  "workers": 8,
+  "cwd": "C:\\Users\\HP\\source\\games\\mahjong\\python",
+  "cmd": [
+   "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe",
+   "-u", "-m", "mahjong_ml.v4.pretrain",
+   "--data", "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl14\\compact\\dk-b",
+   "--label", "bl14-r1-serial",
+   "--objective", "ppo", "--value-target", "delta", "--advantage", "hand",
+   "--rank-weight", "0.2", "--epochs", "1", "--batch", "256", "--lr", "1e-4",
+   "--stage-a", "0", "--stage-b", "0", "--seed", "61420001",
+   "--init", "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+   "--behaviour", "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+   "--behaviour-temp", "0.5", "--behaviour-multi", "--rho-max", "100",
+   "--ref-beta", "0.5", "--grad-clip", "0.5", "--kl-early-stop", "0.03",
+   "--baseline-fit", "scale", "--max-steps", "167", "--threads", "8",
+   "--val-patience", "5"
+  ]
+ },
+ "other": {
+  "kind": "collect",
+  "out_dir": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl14\\raw\\dk-next",
+  "cmd": [
+   "S:\\mahjong-training\\tools\\trainer\\trainer.exe",
+   "selfplay", "1000", "--workers", "8", "--rotate", "--rotate-perm", "--aux",
+   "--policy", "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+   "--seed", "61420002",
+   "--out", "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl14\\raw\\dk-next"
+  ]
+ },
+ "gate": {"min_commit_free_gb": 8.0, "poll_sec": 1.0, "fallback": "abort"}
+}

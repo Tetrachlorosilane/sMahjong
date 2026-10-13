@@ -1,0 +1,171 @@
+{
+ "arm": "A",
+ "finished": "2026-10-12T04:51:36",
+ "T_arm_seconds": 546.6,
+ "T_arm_minutes": 9.1,
+ "phase_seconds": {
+  "verify": 2.0,
+  "compact": 124.6,
+  "train": 394.0,
+  "export": 4.0
+ },
+ "last_completed_shard_index": 1,
+ "ledger": [
+  {
+   "ts": "2026-10-12T04:42:50",
+   "step": "v4-wl-p301-A-g01.s10.verify",
+   "seconds": 2.0,
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe S:\\mahjong-training\\w-ladder\\_p301-evidence\\p301_shard.py verify --source S:\\mahjong-training\\raw\\v4-wl-p301-A-g01 --roster S:\\mahjong-training\\w-ladder\\_p301-evidence\\p301-roster-A.json --shard 10 --dest E:\\mahjong-training\\raw-shard\\A\\v4-wl-p301-A-g01-s10",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 24.05,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.96,
+    "free_C_gb": 131.1,
+    "free_E_gb": 528.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 24.13,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.9,
+    "free_C_gb": 131.1,
+    "free_E_gb": 528.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": 1.6
+  },
+  {
+   "ts": "2026-10-12T04:42:50",
+   "step": "v4-wl-p301-A-g01.s10.compact",
+   "seconds": 124.6,
+   "cmd": "(并行) compact E:\\mahjong-training\\compact\\v4-wl-p301-A-g01-s10",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 24.13,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.9,
+    "free_C_gb": 131.1,
+    "free_E_gb": 528.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 24.09,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 20.01,
+    "free_C_gb": 131.1,
+    "free_E_gb": 514.0,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": null
+  },
+  {
+   "ts": "2026-10-12T04:48:12",
+   "step": "v4-wl-p301-A-g01.s10.train",
+   "seconds": 196.0,
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -m mahjong_ml.v4.pretrain --data E:\\mahjong-training\\compact\\v4-wl-p301-A-g01-s10 --label v4-wl-p301-A-g01-s10 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52920012 --init C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.10 --kl-min-steps 60 --baseline-fit scale --val-patience 5 --val-every 100 --max-steps 167 --threads 8",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 24.07,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.99,
+    "free_C_gb": 131.1,
+    "free_E_gb": 517.0,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 23.89,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.8,
+    "free_C_gb": 131.1,
+    "free_E_gb": 517.0,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": 16986.4
+  },
+  {
+   "ts": "2026-10-12T04:48:14",
+   "step": "v4-wl-p301-A-g01.s10.export",
+   "seconds": 2.0,
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -m mahjong_ml.v4.export weights --ckpt E:\\mahjong-training\\ckpt\\v4-wl-p301-A-g01-s10\\model.pt --out C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-A-g01\\net.bin --label v4-wl-p301-A-g01-s10",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 23.89,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.8,
+    "free_C_gb": 131.1,
+    "free_E_gb": 517.0,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 23.84,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.76,
+    "free_C_gb": 131.1,
+    "free_E_gb": 517.0,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": 1.6
+  },
+  {
+   "ts": "2026-10-12T04:51:33",
+   "step": "v4-wl-p301-A-g01.s11.train",
+   "seconds": 198.0,
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -m mahjong_ml.v4.pretrain --data E:\\mahjong-training\\compact\\v4-wl-p301-A-g01-s11 --label v4-wl-p301-A-g01-s11 --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 52920013 --init C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.10 --kl-min-steps 60 --baseline-fit scale --val-patience 5 --val-every 100 --max-steps 167 --threads 8",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 23.86,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.78,
+    "free_C_gb": 131.1,
+    "free_E_gb": 531.7,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 23.99,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.54,
+    "free_C_gb": 131.1,
+    "free_E_gb": 531.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": 16940.1
+  },
+  {
+   "ts": "2026-10-12T04:51:35",
+   "step": "v4-wl-p301-A-g01.s11.export",
+   "seconds": 2.0,
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -m mahjong_ml.v4.export weights --ckpt E:\\mahjong-training\\ckpt\\v4-wl-p301-A-g01-s11\\model.pt --out C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-A-g01\\net.bin --label v4-wl-p301-A-g01-s11",
+   "exit": 0,
+   "before": {
+    "free_phys_gb": 23.99,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.54,
+    "free_C_gb": 131.1,
+    "free_E_gb": 531.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "after": {
+    "free_phys_gb": 23.95,
+    "commit_limit_gb": 39.71,
+    "commit_free_gb": 19.5,
+    "free_C_gb": 131.1,
+    "free_E_gb": 531.6,
+    "free_S_gb": 154.0,
+    "proc_peak_ws_mb": 0.0
+   },
+   "child_peak_ws_mb": 1.6
+  }
+ ]
+}

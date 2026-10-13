@@ -1,0 +1,39 @@
+{
+  "chain": {
+    "arm": "w0",
+    "w": 0,
+    "bonus": "",
+    "chain": 2,
+    "label": "v4-wl-w0-c2",
+    "seed": 24310012
+  },
+  "returncode": 0,
+  "seconds": 1347.0,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-w0-c2.log",
+  "staged": [
+    {
+      "tag": "v4-wl-w0-c2-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2849691300,
+      "at": "2026-10-10 01:52:43",
+      "copy_matches": true
+    },
+    {
+      "tag": "v4-wl-w0-c2-g02",
+      "generation": 2,
+      "files": 1000,
+      "bytes": 2836182275,
+      "at": "2026-10-10 02:03:32",
+      "copy_matches": true
+    }
+  ],
+  "generations": 2,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-w0-c2-g01-from-release.log",
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-w0-c2-g02-from-release.log"
+  ]
+}

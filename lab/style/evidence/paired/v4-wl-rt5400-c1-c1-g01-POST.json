@@ -1,0 +1,285 @@
+{
+  "tool": "tools/w-ladder.py post",
+  "label": "v4-wl-rt5400-c1-c1",
+  "generations": 1,
+  "final_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-rt5400-c1-c1-g01\\net.bin",
+  "student_spec": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-rt5400-c1-c1-g01\\net.bin@0#0.5",
+  "policy": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-rt5400-c1-c1-g01\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin"
+  ],
+  "games": 1000,
+  "seed": 24620082,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\post-v4-wl-rt5400-c1-c1-g01-POST.log",
+  "pre_tag": "v4-wl-rt5400-c1-c1-g01",
+  "post_tag": "v4-wl-rt5400-c1-c1-g01-POST",
+  "pre_dir": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-rt5400-c1-c1-g01",
+  "post_dir": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-rt5400-c1-c1-g01",
+  "style_vector": "S:\\mahjong-training\\w-ladder\\style-vector-per-gen\\v4-wl-rt5400-c1-c1-g01-POST.json",
+  "pairing_check": {
+    "pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-rt5400-c1-c1-g01",
+    "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-rt5400-c1-c1-g01",
+    "games": 1000,
+    "seed_mismatch": 0,
+    "student_seat_mismatch": 0,
+    "seed_base_pre": 24620082,
+    "seed_base_post": 24620082,
+    "ok": true
+  },
+  "totals_check": {
+    "seat_hands": 11376,
+    "riichi_hands": 3264,
+    "meld_hands": 2927,
+    "wins": 2240,
+    "deals": 2125,
+    "win_points": 15552300,
+    "riichi_wins": 1718,
+    "dama_wins": 522,
+    "games": 1000,
+    "riichi_turn_sum": 30281,
+    "riichi_turn_known": 3264,
+    "riichi_turn_missing": 0
+  },
+  "decline": {
+    "pre": {
+      "tag": "v4-wl-rt5400-c1-c1-g01",
+      "totals": {
+        "decision_rows": 171424,
+        "legal_rows": 3842,
+        "decline_rows": 620,
+        "decline_paid_rows": 523,
+        "decline_blocked_rows": 97,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "audit": null,
+      "reconciled": false,
+      "note": "这条链没有 `dama` 轴 ⇒ 奖励侧审计账里没有那组键；这里只留判据侧的原始计数"
+    },
+    "post": {
+      "tag": "v4-wl-rt5400-c1-c1-g01-POST",
+      "totals": {
+        "decision_rows": 172026,
+        "legal_rows": 3802,
+        "decline_rows": 538,
+        "decline_paid_rows": 467,
+        "decline_blocked_rows": 71,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "audit": null,
+      "reconciled": false,
+      "note": "`post` 补采不挂风格奖励 ⇒ 奖励侧没有账；这一侧只做口径自洽（付奖+拦下 == 能而不为、结构检查 0、`legal` 全取到）"
+    },
+    "aggregate": {
+      "pre": {
+        "games": 1000,
+        "decline_rows": 620,
+        "legal_rows": 3842,
+        "decline_rate": 0.16137428422696512,
+        "decline_rows_per_game": 0.62
+      },
+      "post": {
+        "games": 1000,
+        "decline_rows": 538,
+        "legal_rows": 3802,
+        "decline_rate": 0.14150447133087848,
+        "decline_rows_per_game": 0.538
+      }
+    },
+    "note": "行级「能立而不立」：分子 = 该席该行 `legal` 含 `riichi:*` 且 `chosen` 不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 `riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"
+  },
+  "riichi_turn": {
+    "pre": {
+      "tag": "v4-wl-rt5400-c1-c1-g01",
+      "audit": "S:\\mahjong-training\\w-ladder\\audit\\v4-wl-rt5400-c1-c1-g01.json",
+      "spec": "riichi_turn=5400:no_deal",
+      "axis": "riichi_turn",
+      "row_rule": "chosen 以 riichi:* 开头 且 obs.player_draws ≤ 8（⛔ 越晚越不付：> T 的一侧付 0）",
+      "turn_limit": 8,
+      "totals": {
+        "decl_rows": 3222,
+        "decl_turn_rows": 1359,
+        "decl_late_rows": 1863,
+        "decl_missing_turn_rows": 0,
+        "riichi_turn_paid_rows": 1244,
+        "riichi_turn_blocked_rows": 115
+      },
+      "reconciled": true
+    },
+    "post": {
+      "tag": "v4-wl-rt5400-c1-c1-g01-POST",
+      "totals": {
+        "decl_rows": 3264,
+        "decl_turn_rows": 1415,
+        "decl_late_rows": 1849,
+        "decl_missing_turn_rows": 0,
+        "riichi_turn_paid_rows": 1278,
+        "riichi_turn_blocked_rows": 137
+      },
+      "audit": null,
+      "reconciled": false
+    },
+    "aggregate": {
+      "pre": {
+        "games": 1000,
+        "decl_rows": 3222,
+        "decl_turn_rows": 1359,
+        "decl_late_rows": 1863,
+        "paid_rows": 1244,
+        "blocked_rows": 115,
+        "turn_limit": 8,
+        "paid_rows_per_game": 1.359
+      },
+      "post": {
+        "games": 1000,
+        "decl_rows": 3264,
+        "decl_turn_rows": 1415,
+        "decl_late_rows": 1849,
+        "paid_rows": 1278,
+        "blocked_rows": 137,
+        "turn_limit": 8,
+        "paid_rows_per_game": 1.415
+      }
+    },
+    "note": "行级「早立直」：付奖行 = **宣言立直的那一行** ∧ 该行 `obs.player_draws` ≤ T（= 奖励侧 `ROW_ACTION_TURN` 的**同一集合**）；⛔ 晚立直（> T）那一侧一行都不付。"
+  },
+  "paired_delta": {
+    "riichi_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2859539322734369,
+      "post": 0.28976545747424226,
+      "delta_pp": 0.38115252008053874,
+      "se_pp": 0.5137603854999452,
+      "t": 0.7418877181619123,
+      "lo_pp": -0.6258178354993538,
+      "hi_pp": 1.3881228756604314,
+      "n_games": 1000
+    },
+    "meld_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2690378891275563,
+      "post": 0.2565673404897476,
+      "delta_pp": -1.24705486378087,
+      "se_pp": 0.47698199110209827,
+      "t": -2.614469491603798,
+      "lo_pp": -2.1819395663409824,
+      "hi_pp": -0.31217016122075736,
+      "n_games": 1000
+    },
+    "win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2017847839381121,
+      "post": 0.1987674284221111,
+      "delta_pp": -0.3017355516001026,
+      "se_pp": 0.44287576237821336,
+      "t": -0.6813096972835063,
+      "lo_pp": -1.1697720458614007,
+      "hi_pp": 0.5663009426611956,
+      "n_games": 1000
+    },
+    "deal_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.1977152126210563,
+      "post": 0.1868752697981413,
+      "delta_pp": -1.0839942822914959,
+      "se_pp": 0.44766379812012475,
+      "t": -2.421447271017926,
+      "lo_pp": -1.9614153266069405,
+      "hi_pp": -0.20657323797605137,
+      "n_games": 1000
+    },
+    "riichi_win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.5386313608144594,
+      "post": 0.5168437978297133,
+      "delta_pp": -2.1787562984746085,
+      "se_pp": 1.2153759113617526,
+      "t": -1.7926604255579235,
+      "lo_pp": -4.560893084743643,
+      "hi_pp": 0.2033804877944266,
+      "n_games": 923
+    },
+    "avg_win_score": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 6873.072925663615,
+      "post": 6787.23210686935,
+      "delta_pp": -85.84081879426499,
+      "se_pp": 125.24600118441475,
+      "t": -0.6853777205059922,
+      "lo_pp": -331.3229811157179,
+      "hi_pp": 159.64134352718793,
+      "n_games": 827
+    },
+    "dama_wins_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.507,
+      "post": 0.522,
+      "delta_pp": 0.015,
+      "se_pp": 0.027340858116059973,
+      "t": 0.5486294518016253,
+      "lo_pp": -0.03858808190747755,
+      "hi_pp": 0.06858808190747755,
+      "n_games": 1000
+    },
+    "dama_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.23397967409454715,
+      "post": 0.24450106523867104,
+      "delta_pp": 1.0521391144123913,
+      "se_pp": 1.3534031464833214,
+      "t": 0.7774025922329694,
+      "lo_pp": -1.6005310526949188,
+      "hi_pp": 3.7048092815197013,
+      "n_games": 827
+    },
+    "decline_rows_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.62,
+      "post": 0.538,
+      "delta_pp": -0.082,
+      "se_pp": 0.05242159883124535,
+      "t": -1.5642407295506744,
+      "lo_pp": -0.18474633370924087,
+      "hi_pp": 0.02074633370924088,
+      "n_games": 1000
+    },
+    "decline_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.10525682008459188,
+      "post": 0.08938271664875223,
+      "delta_pp": -1.5874103435839646,
+      "se_pp": 0.7453997235464094,
+      "t": -2.1296095147869085,
+      "lo_pp": -3.048393801734927,
+      "hi_pp": -0.12642688543300223,
+      "n_games": 929
+    },
+    "riichi_turn_mean": {
+      "unit": "turn",
+      "unit_cn": "巡目",
+      "pre": 9.235026397702454,
+      "post": 9.301611377667715,
+      "delta_pp": 0.06658497996526162,
+      "se_pp": 0.07323361192464205,
+      "t": 0.9092133818795949,
+      "lo_pp": -0.0769528994070368,
+      "hi_pp": 0.21012285933756003,
+      "n_games": 923
+    }
+  }
+}

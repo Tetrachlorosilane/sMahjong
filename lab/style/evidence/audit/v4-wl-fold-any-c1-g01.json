@@ -1,0 +1,91 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "fold=3818:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 11298,
+  "hands_eligible": 11298,
+  "axes": [
+    {
+      "axis": "fold",
+      "kind": "bernoulli",
+      "mu": 0.015080074312724878,
+      "sd": 0.1218715129611821,
+      "n_used": 170092,
+      "n_seen": 170092,
+      "weight": 3818.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 9121,
+      "paid_hands": 1560,
+      "paid_sum": 44562766.900458,
+      "raw_sum": 1560.0,
+      "granularity": "row",
+      "row_self_seat": null,
+      "action_rows": 2565,
+      "paid_rows": 2110,
+      "blocked_rows": 455,
+      "hands_indicator": 1911,
+      "threat_rows": 30502,
+      "fold_rows": 2565,
+      "push_rows": 27937,
+      "missing_genbutsu_rows": 0,
+      "threat_src": "该行 `obs.riichi` 里**别家**（`s != 这一行的行动者`）为真（当行公开快照；⛔ 不是'本小局曾经有人立直'，⛔ 也不含行动者自己 —— seat 口径写死：立直后只能摸切）",
+      "genbutsu_src": "`obs.events` 里该家 `type==\"riichi\"` 那条事件**之后**的 `discard` 牌 **＋ 宣言牌本身**（`sideways`；麻将标准口径：进过河不与荣）；仅公开信息",
+      "row_rule": "`chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）",
+      "paid_hands_all_seats": 1647,
+      "paid_sum_all_seats": 129223445.95862499,
+      "raw_sum_all_seats": 1647.0
+    }
+  ],
+  "whitening_check": {
+    "fold": {
+      "n": 170092,
+      "mean": 7.87783037412528e-18,
+      "var": 1.0,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 11298,
+      "hands_counted": 11298,
+      "paid_hands_total": 1647,
+      "paid_sum_total": 129223445.95862499,
+      "mode": "decision",
+      "per_axis": {
+        "fold": {
+          "paid_hands": 1647,
+          "paid_sum": 129223445.95862499,
+          "raw_sum": 1647.0,
+          "action_rows": 9988,
+          "paid_rows": 4188,
+          "blocked_rows": 5800
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 2016,
+        "rows": 652056,
+        "nonzero_frac": 0.0030917589900253967,
+        "hands": 10734,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 94,
+        "rows": 33671,
+        "nonzero_frac": 0.0027917198776395116,
+        "hands": 564,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {},
+    "serial_tracker_val": {}
+  }
+}

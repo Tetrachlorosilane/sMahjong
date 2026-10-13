@@ -1,0 +1,16 @@
+{
+  "spec": "pon=5400:no_deal",
+  "bad": 0,
+  "positive": {
+    "meld_rows": 3,
+    "pon_rows": 2,
+    "chi_rows": 1,
+    "kan_rows": 0,
+    "action_rows": 2,
+    "paid_rows": 1,
+    "blocked_rows": 1,
+    "n_used（= 范围内的**行**数）": 6,
+    "mu": 0.333333
+  },
+  "pass": true
+}

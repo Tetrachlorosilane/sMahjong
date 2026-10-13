@@ -1,0 +1,69 @@
+{
+ "tool": "overlap-orchestrator",
+ "version": "1",
+ "mode": "pair",
+ "tag": "bl13-A-r3",
+ "ts": "2026-10-13 14:32:53",
+ "override": {
+  "DATA_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\root",
+  "COMPACT_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\compact",
+  "RAW_ROOT": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\raw",
+  "WORKERS": 8,
+  "CHUNK": 100000,
+  "TIMEOUT": 0.0,
+  "REPO": "C:\\Users\\HP\\source\\games\\mahjong",
+  "PY": "S:\\mahjong-training\\tools\\py312\\python.exe"
+ },
+ "allowed_rm_roots": [
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\compact",
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\raw",
+  "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\root"
+ ],
+ "gates": {
+  "ok": false,
+  "checks": [
+   {
+    "id": "G1",
+    "ok": true,
+    "what": "主相 phase='train' ∈ ['compact', 'readings', 'train'] 且 从相 kind='collect' ∈ ['collect']",
+    "detail": "允许『train ‖ collect』"
+   },
+   {
+    "id": "G2",
+    "ok": true,
+    "what": "主相写目录 vs 从相写目录：不相交、互不为祖先",
+    "detail": "C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\root\\ckpt  ⊥  C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\raw\\bl13-A-r3-none"
+   },
+   {
+    "id": "G3",
+    "ok": true,
+    "what": "主相输入分片存在且与从相写目录分开",
+    "detail": "src=C:\\Users\\HP\\source\\games\\mahjong\\tmp\\bl13\\compact\\bl13-A-r3（0 个文件）"
+   },
+   {
+    "id": "G4",
+    "ok": false,
+    "what": "采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来",
+    "detail": "⛔ 命令行里没有任何可 pin 的权重/可执行文件"
+   },
+   {
+    "id": "G5",
+    "ok": true,
+    "what": "采集命令行里没有引用正在被写的主相产物目录",
+    "detail": "无引用"
+   }
+  ],
+  "refusals": [
+   {
+    "id": "G4",
+    "ok": false,
+    "what": "采集的策略权重 / 可执行文件都已落盘（可 pin sha256），且主相命令行拼得出来",
+    "detail": "⛔ 命令行里没有任何可 pin 的权重/可执行文件"
+   }
+  ],
+  "pin_paths": []
+ },
+ "exit_code": 3,
+ "commands_run": 0,
+ "note": "闸门未过 ⇒ 一条命令都没打"
+}

@@ -1,0 +1,612 @@
+[
+ {
+  "data": "v4-wl-p301-A-g01-s00",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=+1.97e-07（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s01",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s02",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s01",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=-2.10e-08（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s02",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s02",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s03",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s03",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s04",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=+7.78e-03（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s05",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=-4.81e-03（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s06",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=-5.73e-03（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s07",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s07",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s08",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s08",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s09",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s07",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=-1.83e-07（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s08",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s08",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s09",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s09",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s10",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s10",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s11",
+  "init": "v4-wl-p301-A-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s10",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=-3.56e-07（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-A-g01-s11",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=+7.70e-08（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-B-g01-s00",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=+3.06e-09（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-B-g01-s01",
+  "init": "v4-expert-defrep-g10",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": true,
+  "ckpt": true,
+  "kl": "new)=+2.42e-07（≈0 = 权重与温度都对上了）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s00",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s00",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s01",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s00",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s00",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s00",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s01",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s01",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g02-s01",
+  "init": "v4-wl-p301-B-g01",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": true,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": "logp_old` 必须在同一个 `softmax(logits/T)` 上算）"
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s00",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s00",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s00",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s01",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s01",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g03-s01",
+  "init": "v4-wl-p301-B-g02",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s00",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s00",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s00",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s01",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s01",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g04-s01",
+  "init": "v4-wl-p301-B-g03",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s00",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s00",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s00",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s01",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s01",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g05-s01",
+  "init": "v4-wl-p301-B-g04",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s00",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s00",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s00",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s01",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "256",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s01",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "128",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ },
+ {
+  "data": "v4-wl-p301-B-g06-s01",
+  "init": "v4-wl-p301-B-g05",
+  "behav": "v4-expert-defrep-g10",
+  "batch": "64",
+  "GATE": false,
+  "SELFTEST": false,
+  "ckpt": false,
+  "kl": ""
+ }
+]

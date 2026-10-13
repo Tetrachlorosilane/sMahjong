@@ -1,0 +1,8 @@
+== 自对弈汇总：40 场 / 472 小局 / 724 决策/场，用时 25.7s（1.56 场/秒，1129 决策/秒），workers=4
+   流局率 11.0%   平均每场 11.8 小局
+策略     场数 平均顺位 平均顺位点 和了率 放铳率 平均收支 平均打点
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin     40      2.550       -3.83     21.8%     16.7%        -74       7425
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-def7-g10\net.bin     40      2.375        5.99     21.6%     15.0%        209       7847
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-win2-g10\net.bin     40      2.575       -7.94     20.6%     19.7%       -550       7213
+net:C:\Users\HP\source\games\mahjong\tools\build\v4-expert-atk3-g10\net.bin     40      2.500        5.78     25.0%     14.4%        405       7641
+轨迹目录：S:\mahjong-training\w-ladder\_profile-work\out-P

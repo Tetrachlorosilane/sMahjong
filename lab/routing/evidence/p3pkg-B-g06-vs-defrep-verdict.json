@@ -1,0 +1,369 @@
+{
+  "schema": "ceiling-gate/1",
+  "generated_at": "2026-10-12T21:45:13",
+  "mode": "gate-dir",
+  "caliber": {
+    "统计量来源": "全部借既有实现：`mahjong_ml.eval`（逐场取值 / 配对 / 自助 CI / 符号检验 / 合并 / 随机效应 / required_n）· `mahjong_ml.v4.gate`（pooled_diffs / guard_row / decide）· `mahjong_ml.v4.arena`（judge_pair / judge_series）⇒ ⛔ 本工具不自算第二套统计量",
+    "方向": "`eval.seat_values` 已把各指标折成「正 = 更好」（deals 取负）⇒ 护栏走 `gate.guard_row` 的单侧规则 ok ⇔ CI 下界 ≥ −tol，⛔ 不另立方向表",
+    "主口径": "rank_points（顺位点/场/席（正 = 更好））· 逐场配对（同一副牌山）· 多族按 `gate.pooled_diffs` 加键偏移后合并",
+    "判决规则": "过 ⇔ 主口径 CI 下界>0 ∧ 可用护栏未越界 ∧ 安慰剂不显著 ∧ 族数≥min-walls ∧ 各族逐族为正 ∧ |ρ|<0.9 ∧ 墙钟≤预算；不过 ⇔ CI 上界<0；测不出 ⇔ 其余；ERROR ⇔ 任何必需探针取不到",
+    "护栏可用性": "容忍带 ≥ 实际 MDE 才可作否决依据；tol/MDE <1 ⇒ 天生必破 = 假警报，只记录不否决（AGENTS §6.5 第七十一轮）",
+    "口径边界": "本判决**条件于这几族牌山**；族数 <2 时套间散布未测 ⇒ 不许判「过」（跨族不自洽的不外推，AGENTS §6.5）",
+    "零训练": "只有自对弈采集（`style-vector.py` → `trainer.exe selfplay`），⛔ 无 PPO / 无 pretrain / 无 v4 loop"
+  },
+  "wall_clock_s": 58.34,
+  "wall_clock_budget_s": 1800.0,
+  "wall_clock_ok": true,
+  "arms": {
+    "label_sub_incumbent": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+    "label_sub_candidate": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin",
+    "tag_dir": "S:\\mahjong-training\\gate\\p3pkg-B-g06-vs-defrep",
+    "policies": {
+      "incumbent": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+      "candidate": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin",
+      "incumbent_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+      "candidate_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin",
+      "games": 6000,
+      "weight_sha256": {
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin": "25cf7c6be7ab539fc7c7f1e43bbcd1292ac19ab5590da27285d40255783864a1"
+      }
+    }
+  },
+  "no_training_proof": {
+    "scanned_at": "2026-10-12T21:45:13",
+    "n_procs": 349,
+    "scan_error": "",
+    "training_hits": [],
+    "patterns": [
+      "mahjong_ml.v4.loop",
+      "mahjong_ml.pretrain",
+      "pretrain.py",
+      "p301_train",
+      "train.py",
+      "--grad-clip",
+      "--kl-early-stop",
+      "--rwr-beta",
+      "--target-minutes",
+      "--ppo"
+    ],
+    "skipped_pids": [
+      15256,
+      37904,
+      38112
+    ],
+    "skipped_chain": [
+      {
+        "pid": 15256,
+        "name": "DeepSeek Harness.exe",
+        "cmdline": "\"D:\\Users\\HP\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe\" \"D:\\Users\\HP\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modu"
+      },
+      {
+        "pid": 37904,
+        "name": "pwsh.exe",
+        "cmdline": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoProfile -NonInteractive -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $Outp"
+      },
+      {
+        "pid": 38112,
+        "name": "python.exe",
+        "cmdline": "\"S:\\mahjong-training\\tools\\py312\\python.exe\" tools\\ceiling-gate.py --tag p3pkg-B-g06-vs-defrep --metric rank_points"
+      }
+    ],
+    "end_scan": null
+  },
+  "resource_gate": {
+    "commit_free_gb_start": 17.38894271850586,
+    "quiet_window_ok": true,
+    "foreign_load": [],
+    "workers_requested": 8,
+    "workers_max": 8
+  },
+  "probes": [
+    {
+      "id": "proc_scan",
+      "ok": true,
+      "detail": "349 个进程"
+    },
+    {
+      "id": "no_training",
+      "ok": true,
+      "detail": "0 个训练进程（已排除我自己这条启动链：['DeepSeek Harness.exe', 'pwsh.exe', 'python.exe']）"
+    },
+    {
+      "id": "quiet_window",
+      "ok": true,
+      "detail": "静窗（无别人的 trainer / 重 python / 重 java）"
+    },
+    {
+      "id": "commit_free",
+      "ok": true,
+      "detail": "commit_free=17.39 GB（闸门 8 GB）"
+    },
+    {
+      "id": "gate_dir",
+      "ok": true,
+      "detail": "S:\\mahjong-training\\gate\\p3pkg-B-g06-vs-defrep"
+    },
+    {
+      "id": "arms_from_verdict",
+      "ok": true,
+      "detail": "从 verdict.json 抄到两臂子串"
+    },
+    {
+      "id": "families",
+      "ok": true,
+      "detail": "S:\\mahjong-training\\gate\\p3pkg-B-g06-vs-defrep 下 2 个带 summary.json 的族目录：['s53060001', 's53060002']"
+    },
+    {
+      "id": "family:s53060001:pairing",
+      "ok": true,
+      "detail": "逐场 seed 对齐 6000/6000（候选）/ 6000（基准）"
+    },
+    {
+      "id": "family:s53060002:pairing",
+      "ok": true,
+      "detail": "逐场 seed 对齐 6000/6000（候选）/ 6000（基准）"
+    },
+    {
+      "id": "weights_exist",
+      "ok": true,
+      "detail": "2 个权重全部在盘上（已 pin sha256）",
+      "sha256": {
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin": "25cf7c6be7ab539fc7c7f1e43bbcd1292ac19ab5590da27285d40255783864a1"
+      }
+    },
+    {
+      "id": "crosscheck",
+      "ok": true,
+      "detail": "（对 verdict.json 主口径）Δ +2.544658333 vs +2.544658333 · n 12000 vs 12000 ⇒ 逐位一致"
+    },
+    {
+      "id": "crosscheck:wall_deltas",
+      "ok": true,
+      "detail": "逐族 Δ vs 旧 verdict 的 wall_deltas：逐位一致"
+    }
+  ],
+  "primary": {
+    "metric": "rank_points",
+    "delta": 2.544658333333333,
+    "se": 0.4966784164647052,
+    "t": 5.123351949629486,
+    "ci": [
+      1.5649239583333332,
+      3.5091824999999996
+    ],
+    "n": 12000,
+    "sd": 54.40839450473287,
+    "win": 6214,
+    "lose": 5775,
+    "tie": 11,
+    "verdict": "更好"
+  },
+  "walls": {
+    "n_walls": 2,
+    "deltas": [
+      2.427016666666667,
+      2.6622999999999997
+    ],
+    "spread": 0.23528333333333284,
+    "ci_half_width": 0.9721292708333332,
+    "spread_over_ci_half": 0.24202885397293114,
+    "all_same_sign": true,
+    "positive_every_wall": true,
+    "random_effects": {
+      "mu": 2.5464452858525974,
+      "se": 0.49664064844580547,
+      "ci": [
+        1.5730296148988188,
+        3.519860956806376
+      ],
+      "tau": 0.0,
+      "q": 0.05609673652212084,
+      "df": 1
+    },
+    "arm_pair_consistent": true,
+    "arm_pairs": [
+      [
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin"
+      ]
+    ]
+  },
+  "mde": {
+    "value": 1.391486909965173,
+    "unit": "rank_points",
+    "alpha": 0.05,
+    "power": 0.8,
+    "method": "反解既有 eval.required_n（α=0.05、功效 80%）",
+    "n": 12000,
+    "sd": 54.40839450473287
+  },
+  "guards": [
+    {
+      "metric": "wins",
+      "tol": 0.1,
+      "delta": 0.07375,
+      "lo": 0.04337395833333333,
+      "hi": 0.10441770833333332,
+      "n": 12000,
+      "ok": true,
+      "se": 0.015346587899613675,
+      "mde": 0.0429947738155033,
+      "tol_over_mde": 2.3258640789486242,
+      "usable_as_veto": true
+    },
+    {
+      "metric": "deals",
+      "tol": 0.1,
+      "delta": 0.023916666666666666,
+      "lo": -0.0010833333333333333,
+      "hi": 0.048751041666666654,
+      "n": 12000,
+      "ok": true,
+      "se": 0.012827003390433144,
+      "mde": 0.03593594309756958,
+      "tol_over_mde": 2.7827292504468373,
+      "usable_as_veto": true
+    },
+    {
+      "metric": "win_points",
+      "tol": 150.0,
+      "delta": 712.65,
+      "lo": 442.6448958333333,
+      "hi": 981.8763541666666,
+      "n": 12000,
+      "ok": true,
+      "se": 136.10385219446772,
+      "mde": 381.30654050254,
+      "tol_over_mde": 0.39338428289823896,
+      "usable_as_veto": false
+    }
+  ],
+  "placebo": {
+    "kind": "假臂对照：候选臂与基准臂**各自内部两席互比之差**（同权重 ⇒ 真值恒 0；座位偏置在互补对上精确抵消）",
+    "delta": 0.23045000000000004,
+    "se": 0.9870410300260707,
+    "ci": [
+      -1.6636899999999997,
+      2.1472479166666663
+    ],
+    "n": 12000,
+    "verdict": "分不出",
+    "significant": false,
+    "per_row": [
+      {
+        "label": "candidate",
+        "delta": -1.0518583333333333,
+        "n": 12000,
+        "ci": [
+          -2.407969375,
+          0.3067433333333324
+        ],
+        "significant": false
+      },
+      {
+        "label": "incumbent",
+        "delta": -1.2823083333333332,
+        "n": 12000,
+        "ci": [
+          -2.6568389583333336,
+          0.08940854166666573
+        ],
+        "significant": false
+      }
+    ]
+  },
+  "mean_reversion": {
+    "rho": -1.0,
+    "n": 12000,
+    "identified": false,
+    "unidentified_why": "**不可识别**：两臂逐场合计恒定（零和指标 + 2+2 对开 ⇒ 互为补集） ⇒ ρ 是设计恒等式，本条不作判据",
+    "sd_of_sum": 2.8190292289038006e-15,
+    "mode": "gate-dir",
+    "metric": "rank_points",
+    "method": "Pearson(Δ, 基准臂自身读数) · numpy.corrcoef（仓内无既有 ρ）",
+    "trimmed": {
+      "drop_base_worst_0pct": {
+        "n": 12000,
+        "delta": 2.5446583333333335,
+        "ci": [
+          1.556558125,
+          3.5366114583333323
+        ]
+      },
+      "drop_base_worst_5pct": {
+        "n": 11400,
+        "delta": -2.52180701754386,
+        "ci": [
+          -3.4549627192982455,
+          -1.5843508771929826
+        ]
+      },
+      "drop_base_worst_10pct": {
+        "n": 10800,
+        "delta": -7.095111111111111,
+        "ci": [
+          -8.003181481481482,
+          -6.176770370370371
+        ]
+      },
+      "drop_base_worst_20pct": {
+        "n": 9600,
+        "delta": -16.252572916666665,
+        "ci": [
+          -17.113231770833334,
+          -15.374447135416668
+        ]
+      },
+      "drop_base_worst_30pct": {
+        "n": 8400,
+        "delta": -25.33815476190476,
+        "ci": [
+          -26.17208779761905,
+          -24.507742857142855
+        ]
+      },
+      "drop_base_worst_50pct": {
+        "n": 6000,
+        "delta": -43.16291666666667,
+        "ci": [
+          -43.93104,
+          -42.412429583333335
+        ]
+      }
+    },
+    "trim_note": "剔基准最差 X% 在 2+2 零和对开口径下**也是机械的**（基准最差 ⇔ 候选最好）⇒ 只作读数、不作判据"
+  },
+  "crosscheck": {
+    "available": true,
+    "path": "S:\\mahjong-training\\gate\\p3pkg-B-g06-vs-defrep\\verdict.json",
+    "against": "verdict.json 主口径",
+    "theirs": {
+      "delta": 2.544658333333333,
+      "ci": [
+        1.5649239583333332,
+        3.5091824999999996
+      ],
+      "n": 12000
+    },
+    "ours": {
+      "delta": 2.544658333333333,
+      "ci": [
+        1.5649239583333332,
+        3.5091824999999996
+      ],
+      "n": 12000
+    },
+    "wall_deltas_match": true,
+    "match": true
+  },
+  "reasons": [
+    "实际 MDE（主口径）= 1.391 · n=12000 · sd=54.41 · SE=0.4967",
+    "均值回归 ρ=-1.000 —— **不可识别**：两臂逐场合计恒定（零和指标 + 2+2 对开 ⇒ 互为补集） ⇒ ρ 是设计恒等式，本条不作判据",
+    "主口径 CI 下界 > 0 ∧ 各族逐族为正 ∧ 护栏/安慰剂/均值回归全部未报警"
+  ],
+  "errors": [],
+  "verdict": "过",
+  "exit_code": 0
+}

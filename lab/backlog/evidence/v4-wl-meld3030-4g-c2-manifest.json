@@ -1,0 +1,58 @@
+{
+  "chain": {
+    "arm": "probe-meld-w3030",
+    "w": 3030.0,
+    "bonus": "meld=3030:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-meld3030-4g-c2",
+    "seed": 24620031
+  },
+  "returncode": 0,
+  "seconds": 2959.7,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld3030-4g-c2.log",
+  "staged": [
+    {
+      "tag": "v4-wl-meld3030-4g-c2-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2802795917,
+      "at": "2026-10-10 12:45:42",
+      "copy_matches": true
+    },
+    {
+      "tag": "v4-wl-meld3030-4g-c2-g02",
+      "generation": 2,
+      "files": 1000,
+      "bytes": 2828494288,
+      "at": "2026-10-10 12:57:36",
+      "copy_matches": true
+    },
+    {
+      "tag": "v4-wl-meld3030-4g-c2-g03",
+      "generation": 3,
+      "files": 1000,
+      "bytes": 2824589487,
+      "at": "2026-10-10 13:09:45",
+      "copy_matches": true
+    },
+    {
+      "tag": "v4-wl-meld3030-4g-c2-g04",
+      "generation": 4,
+      "files": 1000,
+      "bytes": 2832631382,
+      "at": "2026-10-10 13:22:25",
+      "copy_matches": true
+    }
+  ],
+  "generations": 4,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld3030-4g-c2-g01-from-release.log",
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld3030-4g-c2-g02-from-release.log",
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld3030-4g-c2-g03-from-release.log",
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld3030-4g-c2-g04-from-release.log"
+  ]
+}

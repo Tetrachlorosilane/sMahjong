@@ -1,0 +1,31 @@
+{
+  "chain": {
+    "arm": "probe-fold-w3818",
+    "w": 3818.0,
+    "bonus": "fold=3818:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-fold-any-c1",
+    "seed": 24620101
+  },
+  "returncode": 0,
+  "seconds": 797.1,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-fold-any-c1.log",
+  "staged": [
+    {
+      "tag": "v4-wl-fold-any-c1-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2793410926,
+      "at": "2026-10-10 18:39:34",
+      "copy_matches": true
+    }
+  ],
+  "generations": 1,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-fold-any-c1-g01-from-release.log"
+  ]
+}

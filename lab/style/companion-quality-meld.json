@@ -1,0 +1,34 @@
+{
+  "metric": "win_rate",
+  "unit": "pp",
+  "tol": 2.0,
+  "side": "one-sided",
+  "delta": -0.3357330508304039,
+  "lo": -1.0095412771182213,
+  "hi": 0.33807517545741345,
+  "se": 0.34377970728970275,
+  "n_games": 2000,
+  "ok": true,
+  "combine": "逆方差加权固定效应（多份配对账）",
+  "sources": [
+    "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-meld-4g-c1-g04-POST.json",
+    "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-meld-4g-c2-g04-POST.json"
+  ],
+  "rows": [
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-meld-4g-c1-g04-POST.json",
+      "label": "v4-wl-meld-4g-c1",
+      "delta": -1.9062750209886434,
+      "se": 0.49741422683324493,
+      "n_games": 1000
+    },
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-meld-4g-c2-g04-POST.json",
+      "label": "v4-wl-meld-4g-c2",
+      "delta": 1.1005005495020974,
+      "se": 0.4756702287359417,
+      "n_games": 1000
+    }
+  ],
+  "warning": "⛔ 这不是闸门：主判据仍只看 `mahjong_ml/v4/gate.py`（多套牌山 + 逐场配对 CI）。本行是**测量路径**上的伴随质量量检查 —— 它回答「稀释越界了吗」，不回答「这一代要不要采纳」。"
+}

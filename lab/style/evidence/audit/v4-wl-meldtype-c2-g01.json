@@ -1,0 +1,91 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "pon=5400:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 11474,
+  "hands_eligible": 11474,
+  "axes": [
+    {
+      "axis": "pon",
+      "kind": "bernoulli",
+      "mu": 0.012751199199383433,
+      "sd": 0.1121989577418662,
+      "n_used": 173866,
+      "n_seen": 173866,
+      "weight": 5400.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 9300,
+      "paid_hands": 1652,
+      "paid_sum": 73801352.01663448,
+      "raw_sum": 1652.0,
+      "granularity": "row",
+      "row_self_seat": null,
+      "action_rows": 2217,
+      "paid_rows": 1782,
+      "blocked_rows": 435,
+      "hands_indicator": 2053,
+      "meld_rows": 3697,
+      "pon_rows": 2217,
+      "chi_rows": 1171,
+      "kan_rows": 309,
+      "type_prefix": "pon:",
+      "row_rule": "`chosen` 以 pon: 开头（= 这一手是**碰**；⛔ `chi:`/`kan:` 那一侧一分钱不付 —— 方向单向）",
+      "type_src": "动作键前缀直接区分（`docs/PROTOCOL.md` §8.3）；分母 `meld_rows` = `chi:`/`pon:`/`kan:` 的**全部**鸣牌行（判据侧独立实现同一把尺子）",
+      "paid_hands_all_seats": 1956,
+      "paid_sum_all_seats": 127292924.89971977,
+      "raw_sum_all_seats": 1956.0
+    }
+  ],
+  "whitening_check": {
+    "pon": {
+      "n": 173866,
+      "mean": 2.2527838666065413e-17,
+      "var": 1.0000000000000004,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 11474,
+      "hands_counted": 11474,
+      "paid_hands_total": 1956,
+      "paid_sum_total": 127292924.89971977,
+      "mode": "decision",
+      "per_axis": {
+        "pon": {
+          "paid_hands": 1956,
+          "paid_sum": 127292924.89971977,
+          "raw_sum": 1956.0,
+          "action_rows": 7806,
+          "paid_rows": 2679,
+          "blocked_rows": 5127
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 1685,
+        "rows": 663256,
+        "nonzero_frac": 0.002540497183591253,
+        "hands": 10884,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 97,
+        "rows": 35495,
+        "nonzero_frac": 0.002732779264685167,
+        "hands": 590,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {},
+    "serial_tracker_val": {}
+  }
+}

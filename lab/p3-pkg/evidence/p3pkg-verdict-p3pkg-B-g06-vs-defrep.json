@@ -1,0 +1,57 @@
+{
+ "delta": 2.544658333333333,
+ "lo": 1.5649239583333332,
+ "hi": 3.5091824999999996,
+ "p": 6.317518133320316e-05,
+ "n": 12000,
+ "sd": 54.40839450473287,
+ "win": 6214,
+ "lose": 5775,
+ "tie": 11,
+ "need_for_2": 5809,
+ "verdict": "更好",
+ "adopt": true,
+ "seeds": [
+  53060001,
+  53060002
+ ],
+ "incumbent": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+ "candidate": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-p301-B-g06\\net.bin",
+ "metric": "rank_points",
+ "guards": [
+  {
+   "metric": "wins",
+   "tol": 0.1,
+   "delta": 0.07375,
+   "lo": 0.04337395833333333,
+   "hi": 0.10441770833333332,
+   "n": 12000,
+   "ok": true
+  },
+  {
+   "metric": "deals",
+   "tol": 0.1,
+   "delta": 0.023916666666666666,
+   "lo": -0.0010833333333333333,
+   "hi": 0.048751041666666654,
+   "n": 12000,
+   "ok": true
+  },
+  {
+   "metric": "score",
+   "tol": 150.0,
+   "delta": 1085.4916666666666,
+   "lo": 684.8320833333333,
+   "hi": 1484.9252083333333,
+   "n": 12000,
+   "ok": true
+  }
+ ],
+ "adopt_primary": true,
+ "wall_deltas": [
+  2.427016666666667,
+  2.6622999999999997
+ ],
+ "wall_spread": 0.23528333333333284,
+ "wall_spread_over_ci": 0.24202885397293114
+}

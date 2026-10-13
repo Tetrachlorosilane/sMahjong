@@ -1,0 +1,89 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "dama=5400:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 11331,
+  "hands_eligible": 11331,
+  "axes": [
+    {
+      "axis": "dama",
+      "kind": "bernoulli",
+      "mu": 0.00388644812436634,
+      "sd": 0.06222012251147493,
+      "n_used": 171622,
+      "n_seen": 171622,
+      "weight": 5400.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 9109,
+      "paid_hands": 6256,
+      "paid_sum": 539877288.920393,
+      "raw_sum": 6256.0,
+      "granularity": "row",
+      "row_self_seat": null,
+      "action_rows": 667,
+      "paid_rows": 579,
+      "blocked_rows": 88,
+      "hands_indicator": 8135,
+      "legal_rows": 3863,
+      "legal_chosen_rows": 3196,
+      "declined_rows": 667,
+      "missing_legal_rows": 0,
+      "row_rule": "legal 含 riichi:* 且 chosen 不是它",
+      "paid_hands_all_seats": 3681,
+      "paid_sum_all_seats": 46597274.114246815,
+      "raw_sum_all_seats": 3681.0
+    }
+  ],
+  "whitening_check": {
+    "dama": {
+      "n": 171622,
+      "mean": -5.9152956649563985e-18,
+      "var": 1.0,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 11331,
+      "hands_counted": 11331,
+      "paid_hands_total": 250,
+      "paid_sum_total": 47548238.89208858,
+      "mode": "decision",
+      "per_axis": {
+        "dama": {
+          "paid_hands": 3681,
+          "paid_sum": 46597274.114246815,
+          "raw_sum": 3681.0,
+          "action_rows": 1283,
+          "paid_rows": 550,
+          "blocked_rows": 733
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 529,
+        "rows": 655661,
+        "nonzero_frac": 0.0008068193776967061,
+        "hands": 10765,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 50,
+        "rows": 35090,
+        "nonzero_frac": 0.0014249073810202336,
+        "hands": 566,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {},
+    "serial_tracker_val": {}
+  }
+}

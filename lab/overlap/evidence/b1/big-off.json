@@ -1,0 +1,37 @@
+{
+ "tag": "b1L-off",
+ "evidence_dir": "S:\\mahjong-training\\w-ladder\\_overlap\\b1",
+ "compact": {
+  "py": "S:\\mahjong-training\\tools\\py312\\python.exe",
+  "src": "S:\\mahjong-training\\raw-shard\\ov-A-s00",
+  "out": "E:\\mahjong-training\\compact\\b1L-off",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "workers": 4,
+  "cwd": "C:\\Users\\HP\\source\\games\\mahjong\\python"
+ },
+ "other": {
+  "kind": "collect",
+  "out_dir": "S:\\mahjong-training\\raw\\b1L-off",
+  "cmd": [
+   "S:\\mahjong-training\\tools\\trainer\\trainer.exe",
+   "selfplay",
+   "200",
+   "--workers",
+   "8",
+   "--rotate",
+   "--rotate-perm",
+   "--aux",
+   "--policy",
+   "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+   "--seed",
+   "53110021",
+   "--out",
+   "S:\\mahjong-training\\raw\\b1L-off"
+  ]
+ },
+ "gate": {
+  "min_commit_free_gb": 8.0,
+  "poll_sec": 1.0,
+  "fallback": "serial"
+ }
+}

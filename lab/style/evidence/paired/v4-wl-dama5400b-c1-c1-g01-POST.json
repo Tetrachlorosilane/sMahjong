@@ -1,0 +1,218 @@
+{
+  "tool": "tools/w-ladder.py post",
+  "label": "v4-wl-dama5400b-c1-c1",
+  "generations": 1,
+  "final_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-dama5400b-c1-c1-g01\\net.bin",
+  "student_spec": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-dama5400b-c1-c1-g01\\net.bin@0#0.5",
+  "policy": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-dama5400b-c1-c1-g01\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin"
+  ],
+  "games": 1000,
+  "seed": 24620062,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\post-v4-wl-dama5400b-c1-c1-g01-POST.log",
+  "pre_tag": "v4-wl-dama5400b-c1-c1-g01",
+  "post_tag": "v4-wl-dama5400b-c1-c1-g01-POST",
+  "pre_dir": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-dama5400b-c1-c1-g01",
+  "post_dir": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-dama5400b-c1-c1-g01",
+  "style_vector": "S:\\mahjong-training\\w-ladder\\style-vector-per-gen\\v4-wl-dama5400b-c1-c1-g01-POST.json",
+  "pairing_check": {
+    "pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-dama5400b-c1-c1-g01",
+    "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-dama5400b-c1-c1-g01",
+    "games": 1000,
+    "seed_mismatch": 0,
+    "student_seat_mismatch": 0,
+    "seed_base_pre": 24620062,
+    "seed_base_post": 24620062,
+    "ok": true
+  },
+  "totals_check": {
+    "seat_hands": 11410,
+    "riichi_hands": 3325,
+    "meld_hands": 3053,
+    "wins": 2349,
+    "deals": 2234,
+    "win_points": 16489300,
+    "riichi_wins": 1793,
+    "dama_wins": 556,
+    "games": 1000
+  },
+  "decline": {
+    "pre": {
+      "tag": "v4-wl-dama5400b-c1-c1-g01",
+      "audit": "S:\\mahjong-training\\w-ladder\\audit\\v4-wl-dama5400b-c1-c1-g01.json",
+      "spec": "dama=5400:no_deal",
+      "axis": "dama",
+      "row_rule": "legal 含 riichi:* 且 chosen 不是它",
+      "totals": {
+        "decision_rows": 171622,
+        "legal_rows": 3863,
+        "decline_rows": 667,
+        "decline_paid_rows": 579,
+        "decline_blocked_rows": 88,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "mu": 0.00388644812436634,
+      "reconciled": true
+    },
+    "post": {
+      "tag": "v4-wl-dama5400b-c1-c1-g01-POST",
+      "totals": {
+        "decision_rows": 173026,
+        "legal_rows": 4148,
+        "decline_rows": 823,
+        "decline_paid_rows": 713,
+        "decline_blocked_rows": 110,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "audit": null,
+      "reconciled": false,
+      "note": "`post` 补采不挂风格奖励 ⇒ 奖励侧没有账；这一侧只做口径自洽（付奖+拦下 == 能而不为、结构检查 0、`legal` 全取到）"
+    },
+    "aggregate": {
+      "pre": {
+        "games": 1000,
+        "decline_rows": 667,
+        "legal_rows": 3863,
+        "decline_rate": 0.1726637328501165,
+        "decline_rows_per_game": 0.667
+      },
+      "post": {
+        "games": 1000,
+        "decline_rows": 823,
+        "legal_rows": 4148,
+        "decline_rate": 0.1984088717454195,
+        "decline_rows_per_game": 0.823
+      }
+    },
+    "note": "行级「能立而不立」：分子 = 该席该行 `legal` 含 `riichi:*` 且 `chosen` 不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 `riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"
+  },
+  "paired_delta": {
+    "riichi_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.28461524002743044,
+      "post": 0.29304169497942717,
+      "delta_pp": 0.8426454951996747,
+      "se_pp": 0.5102722142706408,
+      "t": 1.6513646474051356,
+      "lo_pp": -0.15748804477078143,
+      "hi_pp": 1.8427790351701305,
+      "n_games": 1000
+    },
+    "meld_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2678424734636422,
+      "post": 0.265937858834492,
+      "delta_pp": -0.19046146291502322,
+      "se_pp": 0.4754492019937522,
+      "t": -0.40059266503412083,
+      "lo_pp": -1.1223418988227776,
+      "hi_pp": 0.7414189729927311,
+      "n_games": 1000
+    },
+    "win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19759424049033184,
+      "post": 0.20738193731792803,
+      "delta_pp": 0.9787696827596208,
+      "se_pp": 0.43500787076697345,
+      "t": 2.2500045367775234,
+      "lo_pp": 0.1261542560563529,
+      "hi_pp": 1.8313851094628888,
+      "n_games": 1000
+    },
+    "deal_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19633576135623348,
+      "post": 0.19675342454672948,
+      "delta_pp": 0.04176631904960082,
+      "se_pp": 0.44571330826099165,
+      "t": 0.0937066905463459,
+      "lo_pp": -0.8318317651419428,
+      "hi_pp": 0.9153644032411444,
+      "n_games": 1000
+    },
+    "riichi_win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.516588472004694,
+      "post": 0.5218529247344615,
+      "delta_pp": 0.5264452729767566,
+      "se_pp": 1.1946434754170343,
+      "t": 0.44067145036135696,
+      "lo_pp": -1.8150559388406307,
+      "hi_pp": 2.867946484794144,
+      "n_games": 937
+    },
+    "avg_win_score": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 6927.577131451383,
+      "post": 6933.647276874821,
+      "delta_pp": 6.070145423438835,
+      "se_pp": 123.44946219915332,
+      "t": 0.049171096538648734,
+      "lo_pp": -235.89080048690164,
+      "hi_pp": 248.03109133377933,
+      "n_games": 835
+    },
+    "dama_wins_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.506,
+      "post": 0.556,
+      "delta_pp": 0.05,
+      "se_pp": 0.02545875386086578,
+      "t": 1.9639610121239315,
+      "lo_pp": 0.00010084243270307852,
+      "hi_pp": 0.09989915756729692,
+      "n_games": 1000
+    },
+    "dama_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2553321927573425,
+      "post": 0.2513059595095523,
+      "delta_pp": -0.4026233247790133,
+      "se_pp": 1.3002400167671115,
+      "t": -0.3096530791138756,
+      "lo_pp": -2.951093757642552,
+      "hi_pp": 2.145847108084525,
+      "n_games": 835
+    },
+    "decline_rows_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.667,
+      "post": 0.823,
+      "delta_pp": 0.156,
+      "se_pp": 0.054650257553378934,
+      "t": 2.8545153670617016,
+      "lo_pp": 0.048885495195377285,
+      "hi_pp": 0.26311450480462273,
+      "n_games": 1000
+    },
+    "decline_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.1126890741980594,
+      "post": 0.13612499785861307,
+      "delta_pp": 2.3435923660553684,
+      "se_pp": 0.8232042655560295,
+      "t": 2.8469147502198613,
+      "lo_pp": 0.7301120055655502,
+      "hi_pp": 3.9570727265451864,
+      "n_games": 946
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "rows": [
+    [
+      "缺省（无 --style-bonus）",
+      "49 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "riichi + hand",
+      "52 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "meld + decision",
+      "52 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "dama + decision",
+      "52 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "riichi_turn + decision",
+      "52 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "fold + decision",
+      "52 个产物",
+      "✓ 逐位相同"
+    ],
+    [
+      "pon + decision（**新轴**：影子包必然不认识）",
+      "shadow rc=1 / new rc=0",
+      "✓ 预期（新轴只在改后可用）"
+    ]
+  ],
+  "bad": 0,
+  "games": 30,
+  "raw": "S:\\mahjong-training\\raw\\_meldtype-inv-g01",
+  "shadow_selfcheck": "False True True"
+}

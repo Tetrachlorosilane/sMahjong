@@ -1,0 +1,62 @@
+{
+ "tag": "b2o-collect",
+ "evidence_dir": "S:\\mahjong-training\\w-ladder\\_overlap\\b2",
+ "readout": {
+  "cmd": [
+   "S:\\mahjong-training\\tools\\py312\\python.exe",
+   "-u",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\v4-forward-gpu.py",
+   "--weights",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+   "--rows",
+   "E:\\mahjong-training\\compact\\ov-A-s00",
+   "--split",
+   "train",
+   "--limit",
+   "400000",
+   "--chunk",
+   "25000",
+   "--batch",
+   "512",
+   "--device",
+   "cuda",
+   "--threads",
+   "8",
+   "--out",
+   "S:\\mahjong-training\\w-ladder\\_overlap\\b2\\b2o-collect.readout.jsonl"
+  ],
+  "cwd": "C:\\Users\\HP\\source\\games\\mahjong"
+ },
+ "compact": {
+  "src": "E:\\mahjong-training\\compact\\ov-A-s00",
+  "out": "S:\\mahjong-training\\w-ladder\\_overlap\\b2\\b2o-collect.readout.jsonl",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "workers": 4,
+  "cwd": "C:\\Users\\HP\\source\\games\\mahjong"
+ },
+ "other": {
+  "kind": "collect",
+  "out_dir": "S:\\mahjong-training\\raw\\b2P-collect",
+  "cmd": [
+   "S:\\mahjong-training\\tools\\trainer\\trainer.exe",
+   "selfplay",
+   "1000",
+   "--workers",
+   "8",
+   "--rotate",
+   "--rotate-perm",
+   "--aux",
+   "--policy",
+   "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+   "--seed",
+   "53210001",
+   "--out",
+   "S:\\mahjong-training\\raw\\b2P-collect"
+  ]
+ },
+ "gate": {
+  "min_commit_free_gb": 8.0,
+  "poll_sec": 1.0,
+  "fallback": "serial"
+ }
+}

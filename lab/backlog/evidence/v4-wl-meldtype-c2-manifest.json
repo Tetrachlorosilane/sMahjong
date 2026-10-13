@@ -1,0 +1,31 @@
+{
+  "chain": {
+    "arm": "probe-pon-w5400",
+    "w": 5400.0,
+    "bonus": "pon=5400:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-meldtype-c2",
+    "seed": 24620211
+  },
+  "returncode": 0,
+  "seconds": 754.6,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meldtype-c2.log",
+  "staged": [
+    {
+      "tag": "v4-wl-meldtype-c2-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2850469398,
+      "at": "2026-10-10 19:40:31",
+      "copy_matches": true
+    }
+  ],
+  "generations": 1,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meldtype-c2-g01-from-release.log"
+  ]
+}

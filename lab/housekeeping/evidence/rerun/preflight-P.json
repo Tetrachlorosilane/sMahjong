@@ -1,0 +1,15 @@
+{
+ "phase": "P",
+ "ts": "2026-10-13 18:09:06",
+ "n_procs": 435,
+ "system_seen": [
+  "csrss.exe",
+  "lsass.exe",
+  "services.exe",
+  "smss.exe",
+  "wininit.exe"
+ ],
+ "busy": [],
+ "paddleocr": [],
+ "commit_free_gb": 13.09
+}

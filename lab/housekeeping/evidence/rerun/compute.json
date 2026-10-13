@@ -1,0 +1,20 @@
+{
+ "A-collect-r1": {
+  "exit": 0,
+  "wall_s": 164.1,
+  "commit_free_before_gb": 12.95,
+  "commit_free_min_gb": 12.32
+ },
+ "A-features-r1": {
+  "exit": 0,
+  "wall_s": 6.0,
+  "commit_free_before_gb": 13.3,
+  "commit_free_min_gb": 13.08
+ },
+ "A-compact-r1": {
+  "exit": 0,
+  "wall_s": 61.0,
+  "commit_free_before_gb": 13.13,
+  "commit_free_min_gb": 6.21
+ }
+}

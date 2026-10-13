@@ -1,0 +1,52 @@
+{
+  "tag": "v4-wl-meldtype-c2-g01",
+  "games": 50,
+  "spec": "pon=5400:no_deal",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "judge": {
+    "decision_rows": 8204,
+    "meld_rows": 173,
+    "pon_rows": 98,
+    "chi_rows": 62,
+    "kan_rows": 13
+  },
+  "reward_audit": {
+    "n_used": 8204,
+    "meld_rows": 173,
+    "pon_rows": 98,
+    "chi_rows": 62,
+    "kan_rows": 13,
+    "action_rows": 98,
+    "paid_rows": 79,
+    "blocked_rows": 19,
+    "mu": 0.011945392491467578,
+    "sd": 0.10864023237131062
+  },
+  "sets": {
+    "reward_pon": 98,
+    "reward_rule": 98,
+    "reward_paid": 79,
+    "judge_pon": 98,
+    "reward_meld": 173,
+    "judge_meld": 173
+  },
+  "set_equal": {
+    "accounting_vs_rule": true,
+    "rule_vs_paid": true,
+    "reward_vs_judge": true,
+    "meld_equal": true
+  },
+  "symmetric_diff": {
+    "accounting_vs_rule": 0,
+    "reward_vs_judge": 0
+  },
+  "step_mismatch": 0,
+  "no_step_accounting": 0,
+  "one_way_nonpon_paid": 0,
+  "rate_pon_over_meld": 0.5664739884393064,
+  "rate_pon_over_decision": 0.011945392491467578,
+  "dose_k_row": 0.9880546075085325,
+  "w_star_row_parity": 5254.163039723661,
+  "pass_threshold_1pct": true,
+  "key_equal": true
+}

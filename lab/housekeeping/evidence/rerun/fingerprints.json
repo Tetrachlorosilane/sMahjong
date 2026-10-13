@@ -1,0 +1,23 @@
+{
+ "theta0": {
+  "path": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "sha256": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+  "bytes": 5594680
+ },
+ "trainer": {
+  "path": "S:\\mahjong-training\\tools\\trainer\\trainer.exe",
+  "sha256": "eca79284db82b9ff65c41c89a9c222949cae49c4dbb16174db8b17b76ed3081e"
+ },
+ "def": {
+  "path": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+  "sha256": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796"
+ },
+ "win": {
+  "path": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+  "sha256": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f"
+ },
+ "atk": {
+  "path": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+  "sha256": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482"
+ }
+}

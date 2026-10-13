@@ -1,0 +1,378 @@
+{
+  "tool": "tools/w-ladder.py post",
+  "label": "v4-wl-fold-any-c1",
+  "generations": 1,
+  "final_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-fold-any-c1-g01\\net.bin",
+  "student_spec": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-fold-any-c1-g01\\net.bin@0#0.5",
+  "policy": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-fold-any-c1-g01\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin"
+  ],
+  "games": 1000,
+  "seed": 24620102,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\post-v4-wl-fold-any-c1-g01-POST.log",
+  "pre_tag": "v4-wl-fold-any-c1-g01",
+  "post_tag": "v4-wl-fold-any-c1-g01-POST",
+  "pre_dir": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01",
+  "post_dir": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01",
+  "style_vector": "S:\\mahjong-training\\w-ladder\\style-vector-per-gen\\v4-wl-fold-any-c1-g01-POST.json",
+  "pairing_check": {
+    "pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01",
+    "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01",
+    "games": 1000,
+    "seed_mismatch": 0,
+    "student_seat_mismatch": 0,
+    "seed_base_pre": 24620102,
+    "seed_base_post": 24620102,
+    "ok": true
+  },
+  "totals_check": {
+    "seat_hands": 11387,
+    "riichi_hands": 3176,
+    "meld_hands": 3023,
+    "wins": 2206,
+    "deals": 2137,
+    "win_points": 15559200,
+    "riichi_wins": 1658,
+    "dama_wins": 548,
+    "games": 1000,
+    "riichi_turn_sum": 30047,
+    "riichi_turn_known": 3176,
+    "riichi_turn_missing": 0
+  },
+  "decline": {
+    "pre": {
+      "tag": "v4-wl-fold-any-c1-g01",
+      "totals": {
+        "decision_rows": 170092,
+        "legal_rows": 3646,
+        "decline_rows": 570,
+        "decline_paid_rows": 509,
+        "decline_blocked_rows": 61,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "audit": null,
+      "reconciled": false,
+      "note": "这条链没有 `dama` 轴 ⇒ 奖励侧审计账里没有那组键；这里只留判据侧的原始计数"
+    },
+    "post": {
+      "tag": "v4-wl-fold-any-c1-g01-POST",
+      "totals": {
+        "decision_rows": 172318,
+        "legal_rows": 3805,
+        "decline_rows": 629,
+        "decline_paid_rows": 540,
+        "decline_blocked_rows": 89,
+        "decline_missing_legal_rows": 0,
+        "decline_viol_state": 0,
+        "decline_viol_after_decl": 0
+      },
+      "audit": null,
+      "reconciled": false,
+      "note": "`post` 补采不挂风格奖励 ⇒ 奖励侧没有账；这一侧只做口径自洽（付奖+拦下 == 能而不为、结构检查 0、`legal` 全取到）"
+    },
+    "aggregate": {
+      "pre": {
+        "games": 1000,
+        "decline_rows": 570,
+        "legal_rows": 3646,
+        "decline_rate": 0.15633571036752605,
+        "decline_rows_per_game": 0.57
+      },
+      "post": {
+        "games": 1000,
+        "decline_rows": 629,
+        "legal_rows": 3805,
+        "decline_rate": 0.16530880420499344,
+        "decline_rows_per_game": 0.629
+      }
+    },
+    "note": "行级「能立而不立」：分子 = 该席该行 `legal` 含 `riichi:*` 且 `chosen` 不是它（= 奖励侧付奖行的**同一集合**）；分母 = 该席该行 `legal` 含 `riichi:*`。⛔ 与手级 `dama_wins`/`dama_rate` **刻意不同源**（那是副读数）。"
+  },
+  "riichi_turn": null,
+  "fold": {
+    "pre": {
+      "tag": "v4-wl-fold-any-c1-g01",
+      "audit": "tools/w-ladder.py `_reward_fold_account`（当前奖励代码重算 · v4-wl-fold-any-c1-g01）",
+      "spec": "fold=3818:no_deal",
+      "axis": "fold",
+      "row_rule": "`chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）",
+      "genbutsu_src": "`obs.events` 里该家 `type==\"riichi\"` 那条事件**之后**的 `discard` 牌 **＋ 宣言牌本身**（`sideways`；麻将标准口径：进过河不与荣）；仅公开信息",
+      "totals": {
+        "f_decision_rows": 170092,
+        "f_threat_rows": 30502,
+        "f_fold_rows": 2565,
+        "f_push_rows": 27937,
+        "f_missing_rows": 0,
+        "fold_paid_rows": 2110,
+        "fold_blocked_rows": 455
+      },
+      "reconciled": true,
+      "caliber": "student",
+      "all_seats": {
+        "f4_decision_rows": 685727,
+        "f4_threat_rows": 115244,
+        "f4_fold_rows": 9988,
+        "f4_push_rows": 105256,
+        "f4_missing_rows": 0
+      },
+      "all_seats_check": {
+        "judge_fold_rows_all_seats": 9988,
+        "audit_action_rows_all_seats": 9988,
+        "judge_threat_rows_all_seats": 115244,
+        "judge_push_rows_all_seats": 105256
+      },
+      "audit_is_recomputed": true
+    },
+    "frozen_audit": {
+      "path": "S:\\mahjong-training\\w-ladder\\audit\\v4-wl-fold-any-c1-g01.json",
+      "spec": "fold=3818:no_deal",
+      "axis": {
+        "axis": "fold",
+        "kind": "bernoulli",
+        "mu": 0.015080074312724878,
+        "sd": 0.1218715129611821,
+        "n_used": 170092,
+        "n_seen": 170092,
+        "weight": 3818.0,
+        "pair": "no_deal",
+        "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+        "paid_cells": 9121,
+        "paid_hands": 1560,
+        "paid_sum": 44562766.900458,
+        "raw_sum": 1560.0,
+        "granularity": "row",
+        "row_self_seat": null,
+        "action_rows": 2565,
+        "paid_rows": 2110,
+        "blocked_rows": 455,
+        "hands_indicator": 1911,
+        "threat_rows": 30502,
+        "fold_rows": 2565,
+        "push_rows": 27937,
+        "missing_genbutsu_rows": 0,
+        "threat_src": "该行 `obs.riichi` 里**别家**（`s != 这一行的行动者`）为真（当行公开快照；⛔ 不是'本小局曾经有人立直'，⛔ 也不含行动者自己 —— seat 口径写死：立直后只能摸切）",
+        "genbutsu_src": "`obs.events` 里该家 `type==\"riichi\"` 那条事件**之后**的 `discard` 牌 **＋ 宣言牌本身**（`sideways`；麻将标准口径：进过河不与荣）；仅公开信息",
+        "row_rule": "`chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）∧ 打出的牌对**至少一家**威胁家是現物（⛔ 不安全那一侧一分钱不付）",
+        "paid_hands_all_seats": 1647,
+        "paid_sum_all_seats": 129223445.95862499,
+        "raw_sum_all_seats": 1647.0
+      },
+      "delta_vs_recomputed": {
+        "threat_rows": 0,
+        "fold_rows": 0,
+        "push_rows": 0,
+        "action_rows": 0,
+        "paid_rows": 0,
+        "blocked_rows": 0
+      },
+      "explained": "冻结账 = 训练当时那一版 `fold_row_ok`（`threat_seats(obs)` **不带 seat** ⇒ 把行动者自己已立直也算被威胁）；逐位解释见 `_verify_fold_totals` 与`_fold-selfriichi-probe.py`（4892 / 287−191=96 / 4796）",
+      "used_for_reconciliation": false
+    },
+    "post": {
+      "tag": "v4-wl-fold-any-c1-g01-POST",
+      "totals": {
+        "f_decision_rows": 172318,
+        "f_threat_rows": 30668,
+        "f_fold_rows": 2674,
+        "f_push_rows": 27994,
+        "f_missing_rows": 0,
+        "fold_paid_rows": 2223,
+        "fold_blocked_rows": 451
+      },
+      "audit": null,
+      "reconciled": false
+    },
+    "aggregate": {
+      "pre": {
+        "games": 1000,
+        "threat_rows": 30502,
+        "fold_rows": 2565,
+        "push_rows": 27937,
+        "missing_rows": 0,
+        "decision_rows": 170092,
+        "fold_rate": 0.08409284637072979,
+        "paid_rows_frac": 0.015080074312724878,
+        "fold_rows_per_game": 2.565,
+        "paid_rows": 2110,
+        "blocked_rows": 455
+      },
+      "post": {
+        "games": 1000,
+        "threat_rows": 30668,
+        "fold_rows": 2674,
+        "push_rows": 27994,
+        "missing_rows": 0,
+        "decision_rows": 172318,
+        "fold_rate": 0.08719186122342507,
+        "paid_rows_frac": 0.015517821701737485,
+        "fold_rows_per_game": 2.674,
+        "paid_rows": 2223,
+        "blocked_rows": 451
+      }
+    },
+    "note": "行级「被威胁时降り」：付奖行 = **出牌 ∧ 被威胁（别家立直）∧ 打出的牌对**至少一家**威胁家是現物**（= 奖励侧 `fold_row_ok(obs, chosen, seat)` 的**同一集合**；⚠ 2026-10-11 第三轮由 `all` 放宽为 `any`）；⛔ 对谁都不安全的「押し」那一侧一行都不付。"
+  },
+  "paired_delta": {
+    "riichi_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2747490782952857,
+      "post": 0.28000523983670267,
+      "delta_pp": 0.5256161541416958,
+      "se_pp": 0.49688358560876594,
+      "t": 1.0578255538422097,
+      "lo_pp": -0.44827567365148535,
+      "hi_pp": 1.499507981934877,
+      "n_games": 1000
+    },
+    "meld_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.27646074042486585,
+      "post": 0.2650477088056422,
+      "delta_pp": -1.1413031619223568,
+      "se_pp": 0.48097691905988504,
+      "t": -2.372885510084646,
+      "lo_pp": -2.0840179232797316,
+      "hi_pp": -0.19858840056498228,
+      "n_games": 1000
+    },
+    "win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19337455245562832,
+      "post": 0.19571139934626777,
+      "delta_pp": 0.23368468906394602,
+      "se_pp": 0.4293973438838373,
+      "t": 0.5442154973533407,
+      "lo_pp": -0.6079341049483751,
+      "hi_pp": 1.075303483076267,
+      "n_games": 1000
+    },
+    "deal_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19305921787620706,
+      "post": 0.18805375700151242,
+      "delta_pp": -0.5005460874694622,
+      "se_pp": 0.45973265646306616,
+      "t": -1.0887764452505775,
+      "lo_pp": -1.4016220941370716,
+      "hi_pp": 0.4005299191981475,
+      "n_games": 1000
+    },
+    "riichi_win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.524063854776586,
+      "post": 0.5083523325906351,
+      "delta_pp": -1.5711522185950912,
+      "se_pp": 1.2277160250472656,
+      "t": -1.2797358562902228,
+      "lo_pp": -3.977475627687732,
+      "hi_pp": 0.8351711904975495,
+      "n_games": 919
+    },
+    "avg_win_score": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 6696.6211861990305,
+      "post": 6894.464214428287,
+      "delta_pp": 197.8430282292558,
+      "se_pp": 117.09601505380407,
+      "t": 1.6895795141990917,
+      "lo_pp": -31.665161276200166,
+      "hi_pp": 427.3512177347118,
+      "n_games": 835
+    },
+    "dama_wins_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.539,
+      "post": 0.548,
+      "delta_pp": 0.009,
+      "se_pp": 0.02813735436587297,
+      "t": 0.3198594964889753,
+      "lo_pp": -0.04614921455711102,
+      "hi_pp": 0.06414921455711102,
+      "n_games": 1000
+    },
+    "dama_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.25008554319931564,
+      "post": 0.25447533504419734,
+      "delta_pp": 0.43897918448816653,
+      "se_pp": 1.2999748341689916,
+      "t": 0.33768283273636124,
+      "lo_pp": -2.108971490483057,
+      "hi_pp": 2.9869298594593903,
+      "n_games": 835
+    },
+    "decline_rows_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 0.57,
+      "post": 0.629,
+      "delta_pp": 0.059,
+      "se_pp": 0.05177064032054461,
+      "t": 1.1396420757922612,
+      "lo_pp": -0.042470455028267434,
+      "hi_pp": 0.16047045502826743,
+      "n_games": 1000
+    },
+    "decline_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.10361532977248801,
+      "post": 0.11245878568268235,
+      "delta_pp": 0.8843455910194339,
+      "se_pp": 0.7983412098756933,
+      "t": 1.1077288508720875,
+      "lo_pp": -0.680403180336925,
+      "hi_pp": 2.449094362375793,
+      "n_games": 929
+    },
+    "riichi_turn_mean": {
+      "unit": "turn",
+      "unit_cn": "巡目",
+      "pre": 9.291337202273002,
+      "post": 9.434420177211255,
+      "delta_pp": 0.1430829749382524,
+      "se_pp": 0.07543025383186919,
+      "t": 1.896891070487158,
+      "lo_pp": -0.004760322572211206,
+      "hi_pp": 0.290926272448716,
+      "n_games": 919
+    },
+    "fold_rows_per_game": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 2.565,
+      "post": 2.674,
+      "delta_pp": 0.109,
+      "se_pp": 0.07562299807490998,
+      "t": 1.4413604693644613,
+      "lo_pp": -0.03922107622682357,
+      "hi_pp": 0.25722107622682355,
+      "n_games": 1000
+    },
+    "fold_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.08066981570965417,
+      "post": 0.08215205354588986,
+      "delta_pp": 0.14822378362357005,
+      "se_pp": 0.21186893427366932,
+      "t": 0.6996013083829962,
+      "lo_pp": -0.26703932755282184,
+      "hi_pp": 0.563486894799962,
+      "n_games": 1000
+    }
+  }
+}

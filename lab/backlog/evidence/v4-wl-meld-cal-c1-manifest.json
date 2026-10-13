@@ -1,0 +1,31 @@
+{
+  "chain": {
+    "arm": "probe-meld-w1000",
+    "w": 1000.0,
+    "bonus": "meld=1000:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-meld-cal-c1",
+    "seed": 24610001
+  },
+  "returncode": 0,
+  "seconds": 653.8,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld-cal-c1.log",
+  "staged": [
+    {
+      "tag": "v4-wl-meld-cal-c1-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2813436367,
+      "at": "2026-10-10 09:33:59",
+      "copy_matches": true
+    }
+  ],
+  "generations": 1,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-meld-cal-c1-g01-from-release.log"
+  ]
+}

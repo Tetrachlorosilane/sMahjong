@@ -1,0 +1,15 @@
+{
+  "free_phys_min_gb": 20.03,
+  "exit_code": 0,
+  "samples": 9,
+  "min_commit_free_gb": 0.5,
+  "tag": "probe-calib2",
+  "peak_ws_mb": 6.9,
+  "commit_free_before_gb": 21.14,
+  "gate_tripped": false,
+  "wall_s": 4.7,
+  "commit_free_min_gb": 19.12,
+  "commit_free_after_gb": 21.04,
+  "cmd": "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe -c import numpy as np, time; a=np.ones((160_000_000,), dtype=np.float64); print(\"touched\", a.nbytes/1e9); time.sleep(4)",
+  "peak_commit_mb": 1.3
+}

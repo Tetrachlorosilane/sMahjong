@@ -1,0 +1,15 @@
+{
+  "free_phys_min_gb": 20.83,
+  "commit_free_before_gb": 21.38,
+  "peak_ws_mb": 6.9,
+  "gate_tripped": false,
+  "tag": "chunk100k-250k",
+  "peak_commit_mb": 1.3,
+  "wall_s": 2.1,
+  "cmd": "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe -u tools\\v4-forward-gpu.py --weights tools\\build\\v4-expert-defrep-g10\\net.bin --rows E:\\mahjong-training\\compact\\ov-A-s00 --split train --limit 250000 --chunk 100000 --batch 512 --device cuda --threads 8 --out S:\\mahjong-training\\w-ladder\\_overlap\\b2\\chunk100k-250k.jsonl",
+  "commit_free_after_gb": 21.31,
+  "samples": 4,
+  "exit_code": 1,
+  "min_commit_free_gb": 8.0,
+  "commit_free_min_gb": 19.45
+}

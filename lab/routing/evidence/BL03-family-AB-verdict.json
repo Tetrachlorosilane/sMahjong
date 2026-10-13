@@ -1,0 +1,397 @@
+{
+  "schema": "ceiling-gate/1",
+  "generated_at": "2026-10-12T21:43:53",
+  "mode": "family",
+  "caliber": {
+    "统计量来源": "全部借既有实现：`mahjong_ml.eval`（逐场取值 / 配对 / 自助 CI / 符号检验 / 合并 / 随机效应 / required_n）· `mahjong_ml.v4.gate`（pooled_diffs / guard_row / decide）· `mahjong_ml.v4.arena`（judge_pair / judge_series）⇒ ⛔ 本工具不自算第二套统计量",
+    "方向": "`eval.seat_values` 已把各指标折成「正 = 更好」（deals 取负）⇒ 护栏走 `gate.guard_row` 的单侧规则 ok ⇔ CI 下界 ≥ −tol，⛔ 不另立方向表",
+    "主口径": "rank_points（顺位点/场/席（正 = 更好））· 逐场配对（同一副牌山）· 多族按 `gate.pooled_diffs` 加键偏移后合并",
+    "判决规则": "过 ⇔ 主口径 CI 下界>0 ∧ 可用护栏未越界 ∧ 安慰剂不显著 ∧ 族数≥min-walls ∧ 各族逐族为正 ∧ |ρ|<0.9 ∧ 墙钟≤预算；不过 ⇔ CI 上界<0；测不出 ⇔ 其余；ERROR ⇔ 任何必需探针取不到",
+    "护栏可用性": "容忍带 ≥ 实际 MDE 才可作否决依据；tol/MDE <1 ⇒ 天生必破 = 假警报，只记录不否决（AGENTS §6.5 第七十一轮）",
+    "口径边界": "本判决**条件于这几族牌山**；族数 <2 时套间散布未测 ⇒ 不许判「过」（跨族不自洽的不外推，AGENTS §6.5）",
+    "零训练": "只有自对弈采集（`style-vector.py` → `trainer.exe selfplay`），⛔ 无 PPO / 无 pretrain / 无 v4 loop"
+  },
+  "wall_clock_s": 3.95,
+  "wall_clock_budget_s": 1800.0,
+  "wall_clock_ok": true,
+  "arms": {
+    "policies": {
+      "base": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+      "cand": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin@0#0.5",
+      "base_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+      "cand_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin",
+      "games": 1000,
+      "weight_sha256": {
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin": "20ec5d22d85184e54b8317ca56a31d06367287f518297e6310d8b4012dc849cb",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g01\\net.bin": "6ae1c693d7743d4e1b7001a8273001872317136c899583072f9b250bf447f034",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g02\\net.bin": "dc38479deaed5d0fa43427f33b8a9b2f8744e7894e3962f4c33e89dbfb8df3be",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g02\\net.bin": "807b4daa3ac50f1da4afde963a5ba9fe305417b14ced018f620c66b787293c94",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g03\\net.bin": "9f1e80c2095f0cb523ad0e2033e326609667cc3d8855a95945983b1de3c5770b"
+      }
+    }
+  },
+  "no_training_proof": {
+    "scanned_at": "2026-10-12T21:43:53",
+    "n_procs": 331,
+    "scan_error": "",
+    "training_hits": [],
+    "patterns": [
+      "mahjong_ml.v4.loop",
+      "mahjong_ml.pretrain",
+      "pretrain.py",
+      "p301_train",
+      "train.py",
+      "--grad-clip",
+      "--kl-early-stop",
+      "--rwr-beta",
+      "--target-minutes",
+      "--ppo"
+    ],
+    "skipped_pids": [
+      28812,
+      29596,
+      32928
+    ],
+    "skipped_chain": [
+      {
+        "pid": 29596,
+        "name": "DeepSeek Harness.exe",
+        "cmdline": "\"D:\\Users\\HP\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe\" \"D:\\Users\\HP\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modu"
+      },
+      {
+        "pid": 28812,
+        "name": "pwsh.exe",
+        "cmdline": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoProfile -NonInteractive -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $Outp"
+      },
+      {
+        "pid": 32928,
+        "name": "python.exe",
+        "cmdline": "\"S:\\mahjong-training\\tools\\py312\\python.exe\" tools\\ceiling-gate.py --family f1=S:\\mahjong-training\\style-reward\\traces\\v4-sty-b-g01;S:\\mahjong-training\\style-re"
+      }
+    ],
+    "end_scan": null
+  },
+  "resource_gate": {
+    "commit_free_gb_start": 18.86281967163086,
+    "quiet_window_ok": true,
+    "foreign_load": [],
+    "workers_requested": 8,
+    "workers_max": 8
+  },
+  "probes": [
+    {
+      "id": "proc_scan",
+      "ok": true,
+      "detail": "331 个进程"
+    },
+    {
+      "id": "no_training",
+      "ok": true,
+      "detail": "0 个训练进程（已排除我自己这条启动链：['DeepSeek Harness.exe', 'pwsh.exe', 'python.exe']）"
+    },
+    {
+      "id": "quiet_window",
+      "ok": true,
+      "detail": "静窗（无别人的 trainer / 重 python / 重 java）"
+    },
+    {
+      "id": "commit_free",
+      "ok": true,
+      "detail": "commit_free=18.86 GB（闸门 8 GB）"
+    },
+    {
+      "id": "family:f1",
+      "ok": true,
+      "detail": "base=S:\\mahjong-training\\style-reward\\traces\\v4-sty-b-g01 cand=S:\\mahjong-training\\style-reward\\traces\\v4-sty-a-g02"
+    },
+    {
+      "id": "student:f1/base",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5"
+    },
+    {
+      "id": "student:f1/cand",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin@0#0.5"
+    },
+    {
+      "id": "family:f1:pairing",
+      "ok": true,
+      "detail": "公共场 1000（候选 1000 / 基准 1000）"
+    },
+    {
+      "id": "family:f2",
+      "ok": true,
+      "detail": "base=S:\\mahjong-training\\style-reward\\traces\\v4-sty-b-g02 cand=S:\\mahjong-training\\style-reward\\traces\\v4-sty-a-g03"
+    },
+    {
+      "id": "student:f2/base",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g01\\net.bin@0#0.5"
+    },
+    {
+      "id": "student:f2/cand",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g02\\net.bin@0#0.5"
+    },
+    {
+      "id": "family:f2:pairing",
+      "ok": true,
+      "detail": "公共场 1000（候选 1000 / 基准 1000）"
+    },
+    {
+      "id": "family:f3",
+      "ok": true,
+      "detail": "base=S:\\mahjong-training\\style-reward\\traces\\v4-sty-b-g03 cand=S:\\mahjong-training\\style-reward\\traces\\v4-sty-a-g04"
+    },
+    {
+      "id": "student:f3/base",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g02\\net.bin@0#0.5"
+    },
+    {
+      "id": "student:f3/cand",
+      "ok": true,
+      "detail": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g03\\net.bin@0#0.5"
+    },
+    {
+      "id": "family:f3:pairing",
+      "ok": true,
+      "detail": "公共场 1000（候选 1000 / 基准 1000）"
+    },
+    {
+      "id": "weights_exist",
+      "ok": true,
+      "detail": "6 个权重全部在盘上（已 pin sha256）",
+      "sha256": {
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin": "167a7002a7a0fa60ccee9344553afce78d6080ada50ef4623d92257127ab87df",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin": "20ec5d22d85184e54b8317ca56a31d06367287f518297e6310d8b4012dc849cb",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g01\\net.bin": "6ae1c693d7743d4e1b7001a8273001872317136c899583072f9b250bf447f034",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g02\\net.bin": "dc38479deaed5d0fa43427f33b8a9b2f8744e7894e3962f4c33e89dbfb8df3be",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g02\\net.bin": "807b4daa3ac50f1da4afde963a5ba9fe305417b14ced018f620c66b787293c94",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g03\\net.bin": "9f1e80c2095f0cb523ad0e2033e326609667cc3d8855a95945983b1de3c5770b"
+      }
+    }
+  ],
+  "primary": {
+    "metric": "rank_points",
+    "delta": -1.4123999999999997,
+    "se": 1.1468590447016214,
+    "t": -1.2315375690893768,
+    "ci": [
+      -3.6606783333333333,
+      0.8142441666666661
+    ],
+    "n": 3000,
+    "sd": 62.81605690619037,
+    "win": 1475,
+    "lose": 1522,
+    "tie": 3,
+    "verdict": "分不出"
+  },
+  "walls": {
+    "n_walls": 3,
+    "deltas": [
+      2.924,
+      -4.223599999999999,
+      -2.9375999999999998
+    ],
+    "spread": 7.147599999999999,
+    "ci_half_width": 2.2374612499999995,
+    "spread_over_ci_half": 3.194513424534168,
+    "all_same_sign": false,
+    "positive_every_wall": false,
+    "random_effects": {
+      "mu": -1.4129223600915837,
+      "se": 2.185542864217598,
+      "ci": [
+        -5.696586373958075,
+        2.870741653774908
+      ],
+      "tau": 3.2237359381663477,
+      "q": 7.280574961100702,
+      "df": 2
+    },
+    "arm_pair_consistent": false,
+    "arm_pairs": [
+      [
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g01\\net.bin"
+      ],
+      [
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g01\\net.bin",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g02\\net.bin"
+      ],
+      [
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-b-g02\\net.bin",
+        "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-sty-a-g03\\net.bin"
+      ]
+    ]
+  },
+  "mde": {
+    "value": 3.213023347453779,
+    "unit": "rank_points",
+    "alpha": 0.05,
+    "power": 0.8,
+    "method": "反解既有 eval.required_n（α=0.05、功效 80%）",
+    "n": 3000,
+    "sd": 62.81605690619037
+  },
+  "guards": [
+    {
+      "metric": "wins",
+      "tol": 0.1,
+      "delta": -0.07533333333333334,
+      "lo": -0.14633333333333334,
+      "hi": -0.005666666666666667,
+      "n": 3000,
+      "ok": false,
+      "se": 0.03551018255508936,
+      "mde": 0.09948480255612592,
+      "tol_over_mde": 1.0051786547355654,
+      "usable_as_veto": true
+    },
+    {
+      "metric": "deals",
+      "tol": 0.1,
+      "delta": 0.017666666666666667,
+      "lo": -0.05134166666666666,
+      "hi": 0.08833333333333333,
+      "n": 3000,
+      "ok": true,
+      "se": 0.035489970853687436,
+      "mde": 0.09942817775223553,
+      "tol_over_mde": 1.0057511085960902,
+      "usable_as_veto": true
+    },
+    {
+      "metric": "win_points",
+      "tol": 150.0,
+      "delta": -336.56666666666666,
+      "lo": -948.935,
+      "hi": 269.1791666666665,
+      "n": 3000,
+      "ok": false,
+      "se": 309.3695358064207,
+      "mde": 866.7251186004116,
+      "tol_over_mde": 0.1730652507708789,
+      "usable_as_veto": false
+    }
+  ],
+  "placebo": {
+    "kind": "非学生席同策略对照（两边同一批对手网 ⇒ 真值 ≈ 0；取更不利的那条：net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin）",
+    "delta": 0.7884666666666665,
+    "se": 1.2166258859186256,
+    "ci": [
+      -1.5574333333333334,
+      3.1179916666666636
+    ],
+    "n": 3000,
+    "verdict": "分不出",
+    "significant": false,
+    "per_row": [
+      {
+        "label": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin",
+        "delta": 0.3392333333333332,
+        "n": 3000,
+        "ci": [
+          -2.0185074999999997,
+          2.7304033333333337
+        ],
+        "significant": false
+      },
+      {
+        "label": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+        "delta": 0.28470000000000006,
+        "n": 3000,
+        "ci": [
+          -2.1273999999999997,
+          2.6955099999999996
+        ],
+        "significant": false
+      },
+      {
+        "label": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+        "delta": 0.7884666666666665,
+        "n": 3000,
+        "ci": [
+          -1.5574333333333334,
+          3.1179916666666636
+        ],
+        "significant": false
+      }
+    ]
+  },
+  "mean_reversion": {
+    "rho": -0.6926325568456786,
+    "n": 3000,
+    "identified": true,
+    "unidentified_why": "可识别（同一座位、同一副牌山、只换权重）",
+    "sd_of_sum": 66.76941932271264,
+    "mode": "family",
+    "metric": "rank_points",
+    "method": "Pearson(Δ, 基准臂自身读数) · numpy.corrcoef（仓内无既有 ρ）",
+    "trimmed": {
+      "drop_base_worst_0pct": {
+        "n": 3000,
+        "delta": -1.4123999999999997,
+        "ci": [
+          -3.6600575000000006,
+          0.8089725000000001
+        ]
+      },
+      "drop_base_worst_5pct": {
+        "n": 2850,
+        "delta": -4.812561403508773,
+        "ci": [
+          -7.067507894736842,
+          -2.5274798245614036
+        ]
+      },
+      "drop_base_worst_10pct": {
+        "n": 2700,
+        "delta": -7.645851851851852,
+        "ci": [
+          -10.006936111111113,
+          -5.373437962962963
+        ]
+      },
+      "drop_base_worst_20pct": {
+        "n": 2400,
+        "delta": -13.658541666666666,
+        "ci": [
+          -16.07985416666667,
+          -11.190052083333336
+        ]
+      },
+      "drop_base_worst_30pct": {
+        "n": 2100,
+        "delta": -21.07138095238095,
+        "ci": [
+          -23.591588095238098,
+          -18.52100119047619
+        ]
+      },
+      "drop_base_worst_50pct": {
+        "n": 1500,
+        "delta": -37.47153333333333,
+        "ci": [
+          -40.27562833333333,
+          -34.723126666666666
+        ]
+      }
+    },
+    "trim_note": "剔尾读数（照 ROUTING §5 手法）"
+  },
+  "crosscheck": null,
+  "reasons": [
+    "实际 MDE（主口径）= 3.213 · n=3000 · sd=62.82 · SE=1.147",
+    "族间不是同一对权重 ⇒ 套间散布混了臂差（读作上界）⇒ 不许判「过」",
+    "护栏 wins 越界（Δ=-0.075 CI[-0.15,-0.01] tol=0.1 ≥ MDE 0.0995 ⇒ 可用作否决）",
+    "可用护栏在坏方向确凿越界 ⇒ 这笔账不该投（不是「测不出」）"
+  ],
+  "errors": [],
+  "verdict": "不过",
+  "exit_code": 3
+}

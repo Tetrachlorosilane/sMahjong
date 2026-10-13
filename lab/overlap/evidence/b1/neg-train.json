@@ -1,0 +1,34 @@
+{
+ "tag": "b1-neg-train",
+ "evidence_dir": "S:\\mahjong-training\\w-ladder\\_overlap\\b1",
+ "compact": {
+  "py": "S:\\mahjong-training\\tools\\py312\\python.exe",
+  "src": "S:\\mahjong-training\\raw-shard\\ov-A-s00",
+  "out": "E:\\mahjong-training\\compact\\b1-neg-train",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "workers": 4,
+  "cwd": "C:\\Users\\HP\\source\\games\\mahjong\\python"
+ },
+ "other": {
+  "kind": "train",
+  "out_dir": "E:/mahjong-training/ckpt/b1-neg-train",
+  "cmd": [
+   "S:\\mahjong-training\\tools\\py312\\python.exe",
+   "-m",
+   "mahjong_ml.v4.pretrain",
+   "--data",
+   "E:\\mahjong-training\\compact\\ov-A-s00",
+   "--label",
+   "b1-neg-train",
+   "--objective",
+   "ppo",
+   "--init",
+   "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin"
+  ]
+ },
+ "gate": {
+  "min_commit_free_gb": 8.0,
+  "poll_sec": 1.0,
+  "fallback": "serial"
+ }
+}

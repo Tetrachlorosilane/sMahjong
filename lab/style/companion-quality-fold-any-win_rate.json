@@ -1,0 +1,36 @@
+{
+  "metric": "win_rate",
+  "unit": "pp",
+  "tol": 2.0,
+  "side": "one-sided",
+  "delta": 0.233684689063946,
+  "lo": -0.6079341049483751,
+  "hi": 1.075303483076267,
+  "se": 0.4293973438838373,
+  "n_games": 1000,
+  "ok": true,
+  "combine": "逐场配对（同 seed，一条链）",
+  "sources": [
+    "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01 → S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01"
+  ],
+  "rows": [
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01 → S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01",
+      "label": "v4-wl-fold-any-c1-g01",
+      "delta": 0.23368468906394602,
+      "se": 0.4293973438838373,
+      "n_games": 1000,
+      "pairing_check": {
+        "pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-fold-any-c1-g01",
+        "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-fold-any-c1-g01",
+        "games": 1000,
+        "seed_mismatch": 0,
+        "student_seat_mismatch": 0,
+        "seed_base_pre": 24620102,
+        "seed_base_post": 24620102,
+        "ok": true
+      }
+    }
+  ],
+  "warning": "⛔ 这不是闸门：主判据仍只看 `mahjong_ml/v4/gate.py`（多套牌山 + 逐场配对 CI）。本行是**测量路径**上的伴随质量量检查 —— 它回答「稀释越界了吗」，不回答「这一代要不要采纳」。"
+}

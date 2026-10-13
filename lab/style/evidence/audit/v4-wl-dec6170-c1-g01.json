@@ -1,0 +1,83 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "riichi=6170:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 11404,
+  "hands_eligible": 11403,
+  "axes": [
+    {
+      "axis": "riichi",
+      "kind": "bernoulli",
+      "mu": 0.01878598415387392,
+      "sd": 0.13576844608834673,
+      "n_used": 171777,
+      "n_seen": 171777,
+      "weight": 6170.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 9202,
+      "paid_hands": 2872,
+      "paid_sum": 122662084.27846517,
+      "raw_sum": 2872.0,
+      "granularity": "row",
+      "action_rows": 3227,
+      "paid_rows": 2872,
+      "blocked_rows": 355,
+      "hands_indicator": 3227,
+      "paid_hands_all_seats": 3210,
+      "paid_sum_all_seats": 217070411.3871119,
+      "raw_sum_all_seats": 3210.0
+    }
+  ],
+  "whitening_check": {
+    "riichi": {
+      "n": 171777,
+      "mean": 6.566575228459916e-19,
+      "var": 1.0000000000000002,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 11404,
+      "hands_counted": 11404,
+      "paid_hands_total": 3210,
+      "paid_sum_total": 217070411.3871119,
+      "mode": "decision",
+      "per_axis": {
+        "riichi": {
+          "paid_hands": 3210,
+          "paid_sum": 217070411.3871119,
+          "raw_sum": 3210.0,
+          "action_rows": 15414,
+          "paid_rows": 4868,
+          "blocked_rows": 10546
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 2702,
+        "rows": 654313,
+        "nonzero_frac": 0.004129522109449148,
+        "hands": 10807,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 170,
+        "rows": 36663,
+        "nonzero_frac": 0.004636827319095546,
+        "hands": 597,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {},
+    "serial_tracker_val": {}
+  }
+}

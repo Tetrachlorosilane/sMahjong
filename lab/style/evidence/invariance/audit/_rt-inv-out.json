@@ -1,0 +1,123 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "dama=1000:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 331,
+  "hands_eligible": 331,
+  "axes": [
+    {
+      "axis": "dama",
+      "kind": "bernoulli",
+      "mu": 0.002581413820492454,
+      "sd": 0.05074199565625917,
+      "n_used": 5036,
+      "n_seen": 5036,
+      "weight": 1000.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 277,
+      "paid_hands": 187,
+      "paid_sum": 3671218.4052371783,
+      "raw_sum": 187.0,
+      "granularity": "row",
+      "row_self_seat": null,
+      "action_rows": 13,
+      "paid_rows": 9,
+      "blocked_rows": 4,
+      "hands_indicator": 233,
+      "legal_rows": 111,
+      "legal_chosen_rows": 98,
+      "declined_rows": 13,
+      "missing_legal_rows": 0,
+      "row_rule": "legal 含 riichi:* 且 chosen 不是它",
+      "paid_hands_all_seats": 127,
+      "paid_sum_all_seats": 235880.0216537734,
+      "raw_sum_all_seats": 127.0
+    }
+  ],
+  "whitening_check": {
+    "dama": {
+      "n": 5036,
+      "mean": -2.127413063469571e-18,
+      "var": 1.0,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 331,
+      "hands_counted": 331,
+      "paid_hands_total": 8,
+      "paid_sum_total": 235880.0216537734,
+      "mode": "decision",
+      "per_axis": {
+        "dama": {
+          "paid_hands": 127,
+          "paid_sum": 235880.0216537734,
+          "raw_sum": 127.0,
+          "action_rows": 25,
+          "paid_rows": 12,
+          "blocked_rows": 13
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 6,
+        "rows": 9813,
+        "nonzero_frac": 0.0006114338122898196,
+        "hands": 163,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 3,
+        "rows": 10483,
+        "nonzero_frac": 0.0002861776209100448,
+        "hands": 168,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {
+      "hands": 163,
+      "paid_hands": 0,
+      "paid_rows": 6,
+      "paid_sum": 0.0,
+      "rows": 9813,
+      "cache_hits": 9813,
+      "hands_no_cells": 0,
+      "prebuilt_files": 15,
+      "mode": "decision",
+      "per_axis": {
+        "dama": {
+          "action_rows": 10,
+          "paid_rows": 6,
+          "blocked_rows": 4
+        }
+      }
+    },
+    "serial_tracker_val": {
+      "hands": 168,
+      "paid_hands": 0,
+      "paid_rows": 3,
+      "paid_sum": 0.0,
+      "rows": 10483,
+      "cache_hits": 10483,
+      "hands_no_cells": 0,
+      "prebuilt_files": 15,
+      "mode": "decision",
+      "per_axis": {
+        "dama": {
+          "action_rows": 3,
+          "paid_rows": 3,
+          "blocked_rows": 0
+        }
+      }
+    }
+  }
+}

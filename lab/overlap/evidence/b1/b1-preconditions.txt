@@ -1,0 +1,25 @@
+=== B1 前置快照 2026-10-12 18:07:24 ===
+--- 竞争进程 (trainer/python/node/java) ---
+  （无）
+--- 内存: FreePhysical=21.65 GB / Total=31.64 GB; LastBoot=2026/10/11 16:19:11
+--- commit (GlobalMemoryStatusEx 口径 = AvailPageFile) ---
+  commit_free=21.78 GB  commit_limit=39.71 GB  free_phys=21.58 GB
+--- 盘 ---
+  C:\ free=130.3 GB / total=451.6 GB
+  D:\ free=192.2 GB / total=500.0 GB
+  E:\ free=536.1 GB / total=700.0 GB
+  S:\ free=160.9 GB / total=231.5 GB
+--- 页面文件（只读，⛔ 未改）---
+  C:\pagefile.sys Allocated=8262 MB CurrentUsage=793 MB
+  AutomaticManagedPagefile=True
+--- 电源方案（只读，⛔ 未改）---
+  电源方案 GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (高性能)
+--- WHEA（本窗口基线）---
+  2026/10/12 6:23:00 id=19 警告
+  2026/10/11 16:01:09 id=19 警告
+  2026/10/11 16:01:09 id=19 警告
+  2026/10/11 16:01:09 id=19 警告
+  2026/10/11 15:27:20 id=3 信息
+--- trainer.exe / net.bin 指纹 ---
+  S:\mahjong-training\tools\trainer\trainer.exe  size=1493504  mtime=2026/10/11 21:53:58  sha256=46A245A7E2AA6AE4
+  C:\Users\HP\source\games\mahjong\tools\build\v4-expert-defrep-g10\net.bin  size=5594680  mtime=2026/10/6 13:45:01  sha256=167A7002A7A0FA60

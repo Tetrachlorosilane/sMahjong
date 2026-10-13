@@ -1,0 +1,56 @@
+=== P3-01 资源预检（B' 方案重启；只读，不改任何配置）===
+时间 = 2026-10-12T02:50:34
+
+--- ① 盘符存在性 + 可用空间（MEMORY-CACHE-PLAN §4①）---
+Name DriveType VolumeLabel   FreeGB TotalGB
+---- --------- -----------   ------ -------
+C:\      Fixed Windows       134.70  451.60
+E:\      Fixed Silicon_SSD   550.90  700.00
+S:\      Fixed Silicon_files 160.20  231.50
+--- ② 提交 / 物理内存（§4②）---
+CommitLimitGB  : 36.4
+CommitFreeGB   : 15
+FreePhysicalGB : 20.87
+TotalVisibleGB : 31.6
+--- ③ 页面文件现状（只读；本批不改）---
+AutomaticManagedPagefile : True
+Name            AllocMB PeakMB
+----            ------- ------
+C:\pagefile.sys    4847   4668
+--- ④ 估算（§4③④）：A 臂 12,000 场 ---
+A raw+compact 合计需要 208.0 GB（raw 3.25 + compact 15.36 MB/场）
+（B' 分块口径：任一时刻只留 1 个分片的 compact（<=1000 场 = 15.36 GB），且**复用已有 raw** ⇒ raw 不重采）
+单片 compact = 14.3 GB
+--- ⑤ 硬闸门（不够就停）---
+E: 可用 550.9 GB；单片(15.4) + 余量20 需要 35.4 GB => PASS
+A 臂单片 raw 硬链接（0 额外字节）+ compact 15.4 GB ⇒ 峰值 ~16 GB <= E: 可用
+
+--- ⑥ trainer.exe 是数据根那份（§4 清单：'trainer.exe 是数据根那份'）---
+S:\...\tools\trainer\trainer.exe  sha256=46A245A7E2AA6AE48F2B190FA19BE5F36065F03F6D5221B6E936555A4FE79F7F
+repo\trainer\build\trainer.exe       sha256=46A245A7E2AA6AE48F2B190FA19BE5F36065F03F6D5221B6E936555A4FE79F7F
+逐字节相同 => PASS（用 MAHJONG_TRAINER 指 S: 那份，与仓库同一份）
+--- ⑦ WHEA（近 24h 基线，起跑前采一次；只读）---
+近 24h WHEA 事件数 = 7
+（历史累计）29
+--- ⑧ 现存重负载进程（一次一个重负载的前提）---
+
+（空 = 没有 python/trainer/java 在跑）
+FreePhysicalGB : 20.89
+CommitFreeGB   : 15.06
+--- g0.aux.npz 形状 ---
+own_shanten_after (761,) int8 761 B
+own_tenpai (761,) uint8 761 B
+opp_tenpai (761, 3) uint8 2283 B
+opp_hand (761, 3, 34) uint8 77622 B
+opp_dealin (761, 3) uint8 2283 B
+win_flag (761,) uint8 761 B
+hand_delta (761,) int32 3044 B
+placement (761,) uint8 761 B
+meta (518,) uint8 518 B
+total 88794 B
+
+--- ⑨ 页面文件（口径追加 2026-10-12：用户已授权"只扩 S:、不动 C: 的限制"）---
+现状：AutomaticManagedPagefile=True；C:\pagefile.sys 已分配 4847 MB / 峰值 4668 MB；提交上限 36.4 GB。
+用户侧已配置：**C: 保持现状大小、S: 新增 16/32 GB** —— 但**重启后才生效**。
+⇒ 本轮 P3-01 运行的**提交上限仍然是 36.4 GB**（内存硬闸门与"顶到就降档"纪律照旧）。
+⛔ 本会话未改页面文件、未改 powercfg、**未重启机器**（重启会把正在跑的 P3-01 打断；留给本轮结束后）。

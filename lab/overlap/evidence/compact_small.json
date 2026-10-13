@@ -1,0 +1,221 @@
+{
+ "case": "compact_small",
+ "wall_s": 18.5,
+ "aborted": false,
+ "before": {
+  "commit_free_gb": 18.08,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.84,
+  "free_C_gb": 130.7,
+  "free_E_gb": 536.1,
+  "free_S_gb": 160.3
+ },
+ "after": {
+  "commit_free_gb": 17.84,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.55,
+  "free_C_gb": 130.7,
+  "free_E_gb": 534.6,
+  "free_S_gb": 160.3
+ },
+ "tracks": [
+  "compact"
+ ],
+ "cmds": [
+  {
+   "track": "compact",
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -m mahjong_ml.v4.dataset S:\\mahjong-training\\raw-shard\\ov-A-s100 E:\\mahjong-training\\compact\\ov-A-s100 --aux --student net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5 --workers 4",
+   "exit": 0
+  }
+ ],
+ "child_peak_ws_mb": {
+  "compact#39312": 591.8
+ },
+ "child_peak_gpu_mib": 1517,
+ "sys": {
+  "cpu_total_pct": {
+   "mean": 9.58,
+   "peak": 17.0,
+   "p50": 10.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "proc_cores": {
+   "mean": 0.25,
+   "peak": 0.67,
+   "p50": 0.25,
+   "min": 0.0,
+   "n": 19
+  },
+  "gpu_util_pct": {
+   "mean": 2.42,
+   "peak": 3.0,
+   "p50": 2.0,
+   "min": 2.0,
+   "n": 19
+  },
+  "gpu_mem_mib": {
+   "mean": 1520.47,
+   "peak": 1523.0,
+   "p50": 1521.0,
+   "min": 1515.0,
+   "n": 19
+  },
+  "S_read_mbs": {
+   "mean": 14.76,
+   "peak": 115.4,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "S_write_mbs": {
+   "mean": 0.04,
+   "peak": 0.2,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "E_read_mbs": {
+   "mean": 0.04,
+   "peak": 0.7,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "E_write_mbs": {
+   "mean": 118.21,
+   "peak": 755.9,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "C_read_mbs": {
+   "mean": 1.21,
+   "peak": 13.0,
+   "p50": 0.2,
+   "min": 0.0,
+   "n": 19
+  },
+  "C_write_mbs": {
+   "mean": 0.11,
+   "peak": 0.9,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "disk_pct_busiest": {
+   "mean": 35.16,
+   "peak": 182.0,
+   "p50": 6.0,
+   "min": 0.0,
+   "n": 19
+  },
+  "commit_free_gb": {
+   "mean": 25.08,
+   "peak": 26.64,
+   "p50": 26.23,
+   "min": 21.75,
+   "n": 19
+  },
+  "free_phys_gb": {
+   "mean": 22.78,
+   "peak": 24.71,
+   "p50": 22.8,
+   "min": 21.16,
+   "n": 19
+  }
+ },
+ "proc": {
+  "java#37348": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "node#8772": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#2148": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#22816": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.01,
+   "n": 19
+  },
+  "pwsh#27112": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#31316": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#33544": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#35228": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "pwsh#38808": {
+   "mean_cores": 0.05,
+   "peak_cores": 0.45,
+   "n": 19
+  },
+  "python#12876": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 19
+  },
+  "python#39312": {
+   "mean_cores": 0.06,
+   "peak_cores": 0.48,
+   "n": 17
+  },
+  "python#788": {
+   "mean_cores": 0.07,
+   "peak_cores": 0.15,
+   "n": 10
+  },
+  "python#30648": {
+   "mean_cores": 0.07,
+   "peak_cores": 0.14,
+   "n": 10
+  },
+  "python#37980": {
+   "mean_cores": 0.07,
+   "peak_cores": 0.15,
+   "n": 10
+  },
+  "python#39572": {
+   "mean_cores": 0.07,
+   "peak_cores": 0.14,
+   "n": 10
+  },
+  "python#25708": {
+   "mean_cores": 0.03,
+   "peak_cores": 0.05,
+   "n": 2
+  },
+  "python#26748": {
+   "mean_cores": 0.03,
+   "peak_cores": 0.05,
+   "n": 2
+  },
+  "python#36928": {
+   "mean_cores": 0.03,
+   "peak_cores": 0.05,
+   "n": 2
+  }
+ },
+ "n_samples": 19
+}

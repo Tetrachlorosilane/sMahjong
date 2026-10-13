@@ -1,0 +1,21 @@
+=== B2 重叠编排（复用 b1 的 G1–G7）· tag=b2o-ov · overlap=ON · 2026-10-12 20:25:35 ===
+  [OK  ] G1 other.kind=collect 在白名单内
+         允许与 compact 并发
+  [OK  ] G2 compact 写目录 vs 采集写目录：不相交、互不为祖先
+         S:\mahjong-training\w-ladder\_overlap\b2\b2o-ov.readout.jsonl  ⊥  S:\mahjong-training\raw\b2P-ov
+  [OK  ] G3 compact 的输入分片存在且与采集写目录分开
+         src=E:\mahjong-training\compact\ov-A-s00（49 个文件）
+  [OK  ] G4 采集的策略权重 / 可执行文件都已落盘（可 pin sha256）
+         pin 6 个：['C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin', 'S:\\mahjong-training\\tools\\trainer\\trainer.exe', 'C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin']
+  [OK  ] G5 采集命令行里没有引用正在被写的 compact 目录
+         无引用
+  [OK  ] G7 静窗（名单含 `java -jar mahjong-server.jar`）：别人的 trainer/python/java = 1 个，其中**算竞争**的 = 0 个
+         pid=27092 python.exe mem=21.6MB
+  [OK  ] G6 拿到独占锁 S:\mahjong-training\w-ladder\_overlap\b2\b1-overlap.lock（pid=27092）
+  before: {"commit_free_gb": 21.8, "commit_limit_gb": 39.71, "free_phys_gb": 25.06}
+
+--- 重叠：读数(compact 槽) ‖ 采集(other) ---
+
+  pin 变化：无 · 冻结输入变化：False
+  跑后静窗：别人的 trainer/python/java = 1 个（算竞争 0）
+  after : {"commit_free_gb": 20.99, "commit_limit_gb": 39.71, "free_phys_gb": 24.19}

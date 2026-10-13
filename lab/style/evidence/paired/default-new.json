@@ -1,0 +1,42 @@
+{
+  "metric": "riichi_win_rate",
+  "unit": "pp",
+  "tol": 2.0,
+  "side": "one-sided",
+  "delta": -1.494063753734909,
+  "lo": -2.893204132405528,
+  "hi": -0.09492337506428994,
+  "se": 0.7138471319748056,
+  "n_games": 2788,
+  "ok": false,
+  "combine": "逆方差加权固定效应（多份配对账）",
+  "sources": [
+    "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c1-g04-POST.json",
+    "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c2-g04-POST.json",
+    "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c3-g04-POST.json"
+  ],
+  "rows": [
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c1-g04-POST.json",
+      "label": "v4-wl-dec6170-4g-c1",
+      "delta": -1.144295344295344,
+      "se": 1.2963166659407686,
+      "n_games": 925
+    },
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c2-g04-POST.json",
+      "label": "v4-wl-dec6170-4g-c2",
+      "delta": -2.141304448584963,
+      "se": 1.2344043043406945,
+      "n_games": 934
+    },
+    {
+      "source": "S:\\mahjong-training\\w-ladder\\paired\\v4-wl-dec6170-4g-c3-g04-POST.json",
+      "label": "v4-wl-dec6170-4g-c3",
+      "delta": -1.1894083072769832,
+      "se": 1.1859034953336913,
+      "n_games": 929
+    }
+  ],
+  "warning": "⛔ 这不是闸门：主判据仍只看 `mahjong_ml/v4/gate.py`（多套牌山 + 逐场配对 CI）。本行是**测量路径**上的伴随质量量检查 —— 它回答「稀释越界了吗」，不回答「这一代要不要采纳」。"
+}

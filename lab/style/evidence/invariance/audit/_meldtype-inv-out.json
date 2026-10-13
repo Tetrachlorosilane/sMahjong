@@ -1,0 +1,125 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "pon=1000:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 352,
+  "hands_eligible": 352,
+  "axes": [
+    {
+      "axis": "pon",
+      "kind": "bernoulli",
+      "mu": 0.01384936444697401,
+      "sd": 0.11686556187084757,
+      "n_used": 5271,
+      "n_seen": 5271,
+      "weight": 1000.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 279,
+      "paid_hands": 54,
+      "paid_sum": 429006.00071303657,
+      "raw_sum": 54.0,
+      "granularity": "row",
+      "row_self_seat": null,
+      "action_rows": 73,
+      "paid_rows": 55,
+      "blocked_rows": 18,
+      "hands_indicator": 70,
+      "meld_rows": 135,
+      "pon_rows": 73,
+      "chi_rows": 49,
+      "kan_rows": 13,
+      "type_prefix": "pon:",
+      "row_rule": "`chosen` 以 pon: 开头（= 这一手是**碰**；⛔ `chi:`/`kan:` 那一侧一分钱不付 —— 方向单向）",
+      "type_src": "动作键前缀直接区分（`docs/PROTOCOL.md` §8.3）；分母 `meld_rows` = `chi:`/`pon:`/`kan:` 的**全部**鸣牌行（判据侧独立实现同一把尺子）",
+      "paid_hands_all_seats": 50,
+      "paid_sum_all_seats": 573806.7069896463,
+      "raw_sum_all_seats": 50.0
+    }
+  ],
+  "whitening_check": {
+    "pon": {
+      "n": 5271,
+      "mean": -1.6055160321011678e-17,
+      "var": 1.0,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 352,
+      "hands_counted": 352,
+      "paid_hands_total": 50,
+      "paid_sum_total": 573806.7069896463,
+      "mode": "decision",
+      "per_axis": {
+        "pon": {
+          "paid_hands": 50,
+          "paid_sum": 573806.7069896463,
+          "raw_sum": 50.0,
+          "action_rows": 237,
+          "paid_rows": 68,
+          "blocked_rows": 169
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 19,
+        "rows": 10160,
+        "nonzero_frac": 0.0018700787401574803,
+        "hands": 171,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      },
+      "val": {
+        "nonzero_rows": 36,
+        "rows": 11014,
+        "nonzero_frac": 0.0032685672780098057,
+        "hands": 181,
+        "same_value_within_hand": false,
+        "mode": "decision"
+      }
+    },
+    "serial_tracker_train": {
+      "hands": 171,
+      "paid_hands": 0,
+      "paid_rows": 19,
+      "paid_sum": 0.0,
+      "rows": 10160,
+      "cache_hits": 10160,
+      "hands_no_cells": 0,
+      "prebuilt_files": 15,
+      "mode": "decision",
+      "per_axis": {
+        "pon": {
+          "action_rows": 31,
+          "paid_rows": 19,
+          "blocked_rows": 12
+        }
+      }
+    },
+    "serial_tracker_val": {
+      "hands": 181,
+      "paid_hands": 0,
+      "paid_rows": 36,
+      "paid_sum": 0.0,
+      "rows": 11014,
+      "cache_hits": 11014,
+      "hands_no_cells": 0,
+      "prebuilt_files": 15,
+      "mode": "decision",
+      "per_axis": {
+        "pon": {
+          "action_rows": 42,
+          "paid_rows": 36,
+          "blocked_rows": 6
+        }
+      }
+    }
+  }
+}

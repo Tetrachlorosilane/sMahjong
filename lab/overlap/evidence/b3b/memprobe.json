@@ -1,0 +1,56 @@
+[
+ {
+  "kind": "idle",
+  "gb": 0.0,
+  "commit_free_gb": 21.13,
+  "commit_limit_gb": 39.71,
+  "committed_gb": 18.58,
+  "free_phys_gb": 24.13,
+  "committed_mb": 10.8,
+  "peak_committed_mb": 10.8,
+  "ws_mb": 18.2,
+  "peak_ws_mb": 18.2
+ },
+ {
+  "kind": "anon",
+  "gb": 2.0,
+  "pid": 26016,
+  "commit_free_gb": 19.07,
+  "commit_limit_gb": 39.71,
+  "committed_gb": 20.64,
+  "free_phys_gb": 22.07,
+  "committed_mb": 2058.8,
+  "peak_committed_mb": 2058.8,
+  "ws_mb": 2062.4,
+  "peak_ws_mb": 2062.4,
+  "settle_s": 2.1,
+  "after_exit": {
+   "pid_alive": false,
+   "commit_free_gb": 21.05,
+   "commit_limit_gb": 39.71,
+   "committed_gb": 18.66,
+   "free_phys_gb": 24.04
+  }
+ },
+ {
+  "kind": "file",
+  "gb": 1.0,
+  "pid": 30072,
+  "commit_free_gb": 20.99,
+  "commit_limit_gb": 39.71,
+  "committed_gb": 18.72,
+  "free_phys_gb": 22.97,
+  "committed_mb": 8.8,
+  "peak_committed_mb": 8.8,
+  "ws_mb": 1038.4,
+  "peak_ws_mb": 1038.5,
+  "settle_s": 3.1,
+  "after_exit": {
+   "pid_alive": false,
+   "commit_free_gb": 20.97,
+   "commit_limit_gb": 39.71,
+   "committed_gb": 18.74,
+   "free_phys_gb": 23.0
+  }
+ }
+]

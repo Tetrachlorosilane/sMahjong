@@ -1,0 +1,59 @@
+{
+ "delta": 1.5292166666666664,
+ "lo": 0.14236499999999996,
+ "hi": 2.8953595833333314,
+ "p": 0.12749956765285445,
+ "n": 6000,
+ "sd": 53.699198554298285,
+ "win": 3057,
+ "lose": 2938,
+ "tie": 5,
+ "need_for_2": 5659,
+ "verdict": "更好",
+ "adopt": true,
+ "seeds": [
+  52940001,
+  52940002,
+  52940003
+ ],
+ "incumbent": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\bl13-A-r2\\net.bin",
+ "candidate": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\bl13-B-s01\\net.bin",
+ "metric": "rank_points",
+ "guards": [
+  {
+   "metric": "deals",
+   "tol": 1.0,
+   "delta": 0.017166666666666667,
+   "lo": -0.0175,
+   "hi": 0.05341666666666667,
+   "n": 6000,
+   "ok": true
+  },
+  {
+   "metric": "wins",
+   "tol": 0.05,
+   "delta": 0.07558333333333334,
+   "lo": 0.03383333333333333,
+   "hi": 0.11808749999999994,
+   "n": 6000,
+   "ok": true
+  },
+  {
+   "metric": "win_points",
+   "tol": 300.0,
+   "delta": 436.5416666666667,
+   "lo": 57.671458333333334,
+   "hi": 806.3408333333332,
+   "n": 6000,
+   "ok": true
+  }
+ ],
+ "adopt_primary": true,
+ "wall_deltas": [
+  1.3640999999999999,
+  2.7290000000000005,
+  0.4945499999999999
+ ],
+ "wall_spread": 2.2344500000000007,
+ "wall_spread_over_ci": 1.6232868844184387
+}

@@ -1,0 +1,1101 @@
+== 统计口径 ==
+  [ok  ] 符号检验：10 个全正 → 2×0.5^10 —— got=0.001953125 want=0.001953125±1e-12
+  [ok  ] 符号检验：全为 0 → p=1（无信息） —— got=1.0 want=1.0
+  [ok  ] 符号检验：正负各半 → p=1 —— got=1.0 want=1.0±1e-12
+  [ok  ] 自助法置信区间可复现（同输入 → 同结果） —— (2.875, 6.125) == (2.875, 6.125)
+  [ok  ] 置信区间包含样本均值 —— (2.875, 6.125) ∋ 4.5
+  [ok  ] 样本量反推：sd=32、Δ=2 → 2010 场（α=0.05、功效 80%） —— got=2010
+  [ok  ] 同一输入按 **50% 功效** 才是 984 场（旧口径 —— 就是它把所需场次低估了一半） —— got=984
+  [ok  ] Δ 越大 → 需要的场次越少
+  [ok  ] Δ=0 时不给出场次（避免除零） —— got=0 want=0
+== 配对评测 ==
+  [ok  ] 读入场数 —— got=4 want=4
+  [ok  ] 按 seed 配对的样本量 —— got=4 want=4
+  [ok  ] 配对差值 = A−B —— got=20.0 want=20.0±1e-09
+  [ok  ] 4 场全胜 → p 很小但不为 0 —— p=0.125
+  [ok  ] 按座位配对的键是 (seed, 座位) —— got=(1000, 0) want=(1000, 0)
+  [ok  ] 座位系列条数 = 场数 × 该策略座位数 —— got=8 want=8
+  [ok  ] 报告里含顺位点与置信区间
+  [ok  ] 缺 rank_points 时报错（提示重跑） —— per_game 缺 rank_points（前几场：[0]）—— 那是顺位点指标，用带它的服务
+== guard（CPU/GPU 纪律）==
+  [ok  ] 核预算 = floor(核数 × 0.75) —— got=24 want=24
+  [ok  ] 训练线程封顶生效 —— got=4 want=4
+  [ok  ] 采集 workers 不越界 —— 24 ≤ 24
+  [ok  ] 超限 → 加 sleep —— sleep=0.050s
+  [ok  ] 余量充足 → sleep 收回 0 —— got=0.0 want=0.0±1e-12
+  [ok  ] sleep 有上限（不会把训练卡死） —— sleep=0.050s
+  [ok  ] verify_env 复用 guard 的实现（不另写一份节流）
+== paths（数据根与配额）==
+  [ok  ] 配额：S 盘总配额 = 200 GB（2026-09-26 用户指定） —— got=200.0 want=200.0
+  [ok  ] 配额：compact = 116 GB（10→50→100→116，防止世代循环挤掉数据集） —— got=116.0 want=116.0
+  [ok  ] 配额：raw = 80 GB（30→80；P4 每代 raw ~1.8 GB ⇒ 约 44 代） —— got=80.0 want=80.0
+  [ok  ] 配额：分项之和 == 总配额（否则「总量 200」是句空话） —— got=200.0 want=200.0
+  [ok  ] 配额：五个带配额的子目录齐全（probe 故意无分项配额：用完即删，但**仍受总配额约束**） —— ['ckpt', 'compact', 'league', 'logs', 'raw']
+  [ok  ] 六个子目录建齐 —— got=6 want=6
+[paths] raw 回收 1 项：old
+  [ok  ] 超配额时**从最旧的开始删** —— old 还在？False
+  [ok  ] 配额内正常分配
+  [ok  ] report() 给出各子目录占用 —— C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\paths
+  [ok  ] report() 给出**总量/总配额**（2026-09-26 加的 200 GB 那条闸门） —— /1GB probe=0.00GB | total=0.00GB/200GB | free=135.02GB | 下一个回收 raw:new
+[paths] compact 回收 3 项：raw/new, raw/ok, raw/big
+  [ok  ] 超**总配额**时也从最旧的（raw/compact）开始删 —— big 还在？False
+  [ok  ] 坏数据根抛 DataRootError（不静默降级）
+  [ok  ] 回收：v3 的 BC 基座在保护名单里（它的 raw 已被淘汰 ⇒ 不可重建） —— ['bc-v3-001']
+  [ok  ] 回收：只给「每代一份」的两类设保留名额 —— {'raw': 2, 'compact': 4}
+  [ok  ] 回收：`KEEP_NAMES` / `.keep` 的条目**永不删**，非保护条目先被淘汰；腾不出来就**报错**（不静默） —— raw 占用 0.18 GB + 本次预计 0.00 GB 超过配额 0 GB，且非保护条目已删完（受保护：bc
+  [ok  ] 回收：报错里说明「受保护」与「抬配额/手工清理」 —— raw 占用 0.18 GB + 本次预计 0.00 GB 超过配额 0 GB，且非保护条目已删完（受保护：bc-v3-
+  [ok  ] （同一条断言覆盖「必须报错」）
+  [ok  ] 回收：淘汰顺序 = **超出保留名额的旧代**（最旧在前） —— got=['ppo-g01', 'ppo-g02', 'ppo-g03'] want=['ppo-g01', 'ppo-g02', 'ppo-g03']
+  [ok  ] 回收：评测小目录排在最后（KEEP_LAST 只数「每代一份」的条目） —— ['ppo-g01', 'ppo-g02', 'ppo-g03', 'ppo-g04', 'ppo-g05', 'ppo-ladder-ppo-g05']
+[paths] raw 回收 3 项：ppo-g01, ppo-g02, ppo-g03
+  [ok  ] 回收：`need_bytes`**预扣** ⇒ 写之前就把不够的空间腾出来（旧代先走） —— g01=False g02=False
+  [ok  ] 回收：预扣淘汰也只挑旧代，评测小目录仍留着
+  [ok  ] 回收：每代保留名额**按 label 分组**（a 有 3 代 ⇒ 只淘汰最旧的 a-g01；b 只有 1 代 ⇒ 不动） —— ['a-g01', 'ppo-g04']
+  [ok  ] 回收：`report()` 会预告「下一个回收谁」 —— GB | total=0.04GB/1000GB | free=134.97GB | 下一个回收 raw:ppo-g04
+  [ok  ] 回收：`reclaimable_bytes` 只统计能腾出的（保护条目不计入可用空间） —— reclaimable=21504 KB, 保留名额内的代保留 3 个
+  [ok  ] 回收：规划端的配额闸门**把可回收空间算进去**（否则永远卡在「余量只剩一点」） —— 闸门=25 场 vs 只看余量=11 场
+== 特征（唯一规格）==
+  [ok  ] 牌码 → kind：5m —— got=4 want=4
+  [ok  ] 牌码 → kind：0m 也是 5m 的 kind —— got=4 want=4
+  [ok  ] 牌码 → kind：1z —— got=27 want=27
+  [ok  ] 牌码 → slot：5m —— got=4 want=4
+  [ok  ] 牌码 → slot：0m 独占 34 —— got=34 want=34
+  [ok  ] 牌码 → slot：0s 独占 36 —— got=36 want=36
+  [ok  ] 坏码 → -1 —— got=-1 want=-1
+  [ok  ] 场风：字母 'E'（真实轨迹里的写法） —— got=0.0 want=0.0
+  [ok  ] 场风：字母 'S'/'W'/'N' —— got=(1.0, 2.0, 3.0) want=(1.0, 2.0, 3.0)
+  [ok  ] 场风：数字写法也容忍 —— got=2.0 want=2.0
+  [ok  ] state_dim 固定（改了要同步 Java） —— got=615 want=615
+  [ok  ] cand_dim 固定 —— got=96 want=96
+  [ok  ] 派生段长与 Java ObsFeatures 一致 —— got=(71, 8) want=(71, 8)
+  [ok  ] 派生段逐维分母与 Java 一致（前 68 维危险度 /100，后 3 维向听/打点） —— got=((100.0, 100.0, 100.0, 100.0, 100.0), (8.0, 13.0, 32000.0)) want=((100.0, 100.0, 100.0, 100.0, 100.0), (8.0, 13.0, 32000.0))
+  [ok  ] 状态向量长度 = state_dim() —— got=615 want=615
+  [ok  ] 状态向量没有 NaN/Inf
+  [ok  ] 同一个 obs → 同一个向量（纯函数）
+  [ok  ] 候选矩阵形状 [legal, cand_dim] —— got=(4, 96) want=(4, 96)
+  [ok  ] 候选数 = legal 数（顺序一致） —— got=4 want=4
+  [ok  ] discard 的 tile one-hot 落在 5m 槽位（1m=0、5m=4） —— got=0 want=0
+  [ok  ] 赤五/摸切标志位对普通打牌为 0 —— got=0.0 want=0.0
+  [ok  ] 候选向量的基础段是纯函数（与单点定义一致）
+  [ok  ] 派生段第 1 维（危险度）按 /100 归一化 —— got=0.5
+  [ok  ] 派生段后两维（打点番数/点数）按各自的量纲归一化，而不是统一 /100 —— han=3.846153736114502 points=0.0015625000232830644
+  [ok  ] 不传派生量时末尾填 0
+  [ok  ] 派生候选量按 DERIVED_SCALE_CAND 归一化（向听 8→1.0、dora 4→1.0） —— shanten=1.0 dora=1.0
+  [ok  ] 大明杠 action_parts：拆**整个键**（kind 在 p[1]、取法在 p[2]） —— got=('kan', '3s', ['3s', '3s', '3s'], 'daiminkan') want=('kan', '3s', ['3s', '3s', '3s'], 'daiminkan')
+  [ok  ] 暗杠/加杠仍走「单张主牌」那条（不填取法） —— got=(('kan', '5z', [], 'ankan'), ('kan', '5z', [], 'kakan')) want=(('kan', '5z', [], 'ankan'), ('kan', '5z', [], 'kakan'))
+  [ok  ] 大明杠主牌是**牌种**码：赤五被抹掉（Java `Tiles.kindToStr`，⛔ 不是 aka 槽） —— got=('kan', '5m', ['0m', '5m', '5m'], 'daiminkan') want=('kan', '5m', ['0m', '5m', '5m'], 'daiminkan')
+  [ok  ] 大明杠「主牌」one-hot 落在 kind(3s)=20 槽 —— got=20 want=20
+  [ok  ] 大明杠「主牌」块只有一个 1（赤五没落到 aka 槽） —— got=1.0 want=1.0
+  [ok  ] 大明杠「取法」块是**计数**（3 张同种 = 3.0，落在同一 kind 槽） —— got=3.0 want=3.0
+  [ok  ] 大明杠 kan_kind 标志落在 KAN_KINDS[2] —— got=2 want=2
+  [ok  ] 暗杠不填「取法」块 —— got=0.0 want=0.0
+== 数据集（按整场切分 + 紧凑落盘 + 派生特征 sidecar）==
+  [ok  ] 特征版本写进 meta —— got=3 want=3
+  [ok  ] 派生特征版本写进 meta —— got=3 want=3
+  [ok  ] meta 标记「已带派生特征」
+  [ok  ] 按场切分：2 场 → 1 训 1 验 —— got=(1, 1) want=(1, 1)
+  [ok  ] P3 列 is_student：显式 `--student <spec>` 时**对手网不算学生**（跨代对局的关键判据） —— got=1 want=1
+  [ok  ] P3 列 is_student：缺省 `net:` 时**对手网也算学生**（老口径；跨代对局会污染策略损失） —— got=3 want=3
+  [ok  ] 训练条数 —— got=2 want=2
+  [ok  ] 读回的 state 形状 —— got=(2, 615) want=(2, 615)
+  [ok  ] 读回的 cand 形状 —— got=(2, 2, 96) want=(2, 2, 96)
+  [ok  ] n_legal 记对了
+  [ok  ] state 末尾 71 维 = 派生量 / 逐维分母
+  [ok  ] cand 末尾 8 维 = 派生量的原始整数（归一化留给 _batch）
+  [ok  ] sidecar：条数 —— got=2 want=2
+  [ok  ] sidecar：逐决策派生块形状 —— got=(2, 71) want=(2, 71)
+  [ok  ] sidecar：候选块形状 —— got=(4, 8) want=(4, 8)
+  [ok  ] sidecar v3：逐家危险度段形状 —— got=(2, 3, 34) want=(2, 3, 34)
+  [ok  ] sidecar v3：逐家立直口径段形状 —— got=(2, 3, 34) want=(2, 3, 34)
+  [ok  ] sidecar v3：现物位图段形状 —— got=(2, 3, 5) want=(2, 3, 5)
+  [ok  ] sidecar v3：筋壁位图段形状 —— got=(2, 3, 5) want=(2, 3, 5)
+  [ok  ] sidecar v3：逐家危险度原样读回（int8） —— got=30 want=30
+  [ok  ] sidecar v3：位图按**字节内 LSB 在前**读回（现物=3 号牌种、筋壁=4 号牌种）
+  [ok  ] sidecar v3：位图末字节高位为 0（34 位占 5 字节）
+  [ok  ] 缺 v3 逐家段时按长度自洽性报错 —— g0.feat.bin 长度不自洽：文件 372 字节，按头部推算应为 840（老版 sidecar 请重新 --fea
+  [ok  ] sidecar 版本不符时报错（提示重新 --features） —— g0.feat.bin 派生特征版本 2 != Python 侧 3 —— 重新 --features 或同步两边
+  [ok  ] 缺 sidecar 时报错并提示怎么生成 —— 缺派生特征 sidecar：g1.feat.bin
+  先跑：java -jar server/build/mahjon
+  [ok  ] sidecar 行数/N 与 jsonl 不符时报错 —— g0.jsonl:1 sidecar nLegal=3 与 jsonl legal=2 不一致 —— sidecar 是
+  [ok  ] aux：读回条数 —— got=2 want=2
+  [ok  ] aux：opp_hand 形状（n,3,34） —— got=(2, 3, 34) want=(2, 3, 34)
+  [ok  ] aux：元数据里的 obs 版本 —— got=1 want=1
+  [ok  ] aux：check_dir 通过的文件数 —— got=1 want=1
+  [ok  ] aux：check_dir 无问题 —— got=[] want=[]
+  [ok  ] aux：行数与决策数不符时报错 —— ['g0.jsonl: 标签 1 行 != 决策 2 行（错位）']
+  [ok  ] aux：缺 g*.aux.npz 时报错 —— ['g0.jsonl: 缺 g0.aux.npz（采集时要加 --aux）']
+  [ok  ] aux：标签 obs 版本与轨迹不符时报错 —— ['g0.jsonl: 标签记的 obs v2 与轨迹的 v1 不一致（新旧混用）']
+  [ok  ] aux：格式版本不符时报错 —— g1.aux.npz 标签格式版本 99 != Python 侧 1 —— 重新采集（两边一起改并 +版本）
+  [ok  ] aux：meta 标记 has_aux 与版本
+  [ok  ] aux：紧凑集里 6 个标签列都在
+  [ok  ] aux：opp_hand 列形状 —— got=(2, 3, 34) want=(2, 3, 34)
+  [ok  ] aux：开不开 --aux 的**输入列逐字节相同**（标签绝不进输入）
+  [ok  ] aux：紧凑集 meta 记下 has_aux 与标签列清单
+  [ok  ] aux：缺标签文件时报错并提示怎么生成 —— 缺标签侧文件：g0.aux.npz（采集时要加 `--aux`）
+  [ok  ] aux：cpp 生产者的采集命令里带 --aux（标签侧已移植） —— S:\mahjong-training\tools\trainer\trainer.exe selfplay 2 --workers 1 --rotate --aux --policy teacher --seed 1 --out x
+  [ok  ] aux：java 生产者仍然可用（对照不变）
+  [ok  ] 切分可复现（同种子同结果） —— got=['g1.jsonl'] want=['g1.jsonl']
+  [ok  ] 训练/验证没有交集
+  [ok  ] 并行紧凑集与串行**逐字节相同**（workers=4 vs 1）
+  [ok  ] 并行产物的条数也对（3 场 × 2 条 = 6，实际 6）
+  [ok  ] 并行=串行（--max-decisions 截断路径，含边界文件的 lmax 口径）
+== DAgger 标签源与多来源合并 ==
+  [ok  ] auto：有 teacher_index 就用它（第 2 条应为 1） —— got=1 want=1
+  [ok  ] auto：没有标注重音的行仍用 chosen_index（第 1 条应为 0） —— got=0 want=0
+  [ok  ] meta 记录用了老师标注的条数 —— got=1 want=1
+  [ok  ] meta 记录标签源 —— got='auto' want='auto'
+  [ok  ] label_source=chosen：一律用 chosen_index —— got=[np.int16(0), np.int16(0)] want=[0, 0]
+  [ok  ] label_source=teacher 缺标注时报错 —— label_source=teacher 但这条决策没有 teacher_index（采集时要用 -
+  [ok  ] 多来源：两个目录都被读到 —— got=2 want=2
+  [ok  ] 多来源：条数是两者之和 —— got=4 want=4
+  [ok  ] 多来源：meta 记下两个来源 —— got=2 want=2
+  [ok  ] 全路径清单的长度与文件名清单一致 —— got=(1, 1) want=(1, 1)
+  [ok  ] 训练场与验证场的**全路径**不相交（跨来源也不重叠）
+  [ok  ] 两份清单覆盖全部场次 —— got=2 want=2
+  [ok  ] 同一个文件也能当来源（受控切分要用） —— got=1 want=1
+  [ok  ] 单个文件不是 jsonl 时报错 —— C:\Users\HP\source\games\mahjong\python\
+  [ok  ] val_frac=1.0 → 全部当验证集（评测集里一条训练样本都不留） —— got=(0, 4, 0) want=(0, 4, 0)
+  [ok  ] 全 val 的紧凑集能读回（dagger 的无泄漏对比就建在它上面）
+  [ok  ] meta 声明带了哪些 P3 列 —— got=['file', 'hand_no', 'is_student', 'placement', 'seat'] want=['file', 'hand_no', 'is_student', 'placement', 'seat']
+  [ok  ] P3 列 placement = 该座位的顺位（seat=0 → placement[0]=3） —— got=[3, 3] want=[3, 3]
+  [ok  ] P3 列 placement 缺字段 = -1（**不是 0** —— 0 会被当成「第 0 名」） —— got=[-1, -1] want=[-1, -1]
+  [ok  ] P3 列 is_student：只有 net: 开头的行算学生（teacher 行不算） —— got=1 want=1
+  [ok  ] P3 列 hand_no / seat 落盘 —— got=([1], [0]) want=([1], [0])
+  [ok  ] P3 列 file：**切分内**独立编号 0..n-1（每个切分都从 0 开始，不与别的切分共用编号） —— got=[0, 1] want=[0, 1]
+  [ok  ] P3 列 file 覆盖该切分的全部文件（2 场 → 2 个编号，各 2 条） —— got=[2, 2] want=[2, 2]
+== 网络（候选打分头）==
+  [ok  ] logits 形状 [B, L] —— got=(2, 4) want=(2, 4)
+  [ok  ] 合法位置 logits 有限
+  [ok  ] 非法位置被填成 -inf（掩码生效）
+  [ok  ] 参数量与小网络预期一致（0.02M 级） —— got=True want=True
+  [ok  ] 导出权重含结构超参（Java 侧要）
+== 行为克隆（只验跑得通 + 指标形状，不做效果承诺）==
+  [ok  ] evaluate 给出 top-1 与样本数 —— top1=0.50 n=2
+  [ok  ] 给出**同粒度**基线（多数类型 / 总是选第一个合法动作） —— 多数类型=0.50 首合法=0.50
+  [ok  ] 同时给出类型准确率与均匀猜测的 NLL（免得拿不同粒度比）
+== bc eval 子命令（用任意 checkpoint 评任意数据集 —— DAgger 对比就靠它）==
+  [ok  ] eval 与 evaluate 同一把尺子（同 split 同指标） —— 0.5 vs 0.5
+  [ok  ] eval 结果带上 checkpoint 路径与特征版本（写进报告才可追溯）
+  [ok  ] eval 也给同粒度基线（不是只丢一个孤零零的 top-1）
+  [ok  ] 逐行预测（聚类检验的原料）与聚合 top-1 同源 —— 免得两套口径各说各话
+  [ok  ] 逐行预测带上场号（按场聚类要用）
+  [ok  ] checkpoint 维度与代码不符时报错 —— checkpoint 的特征维度 (1,1) != 代码 (615,96)
+== DAgger 对比：按场聚类的配对 bootstrap ==
+  [ok  ] 全赢：Δ = 1 且 P(涨) = 1 —— got=(1.0, 1.0) want=(1.0, 1.0)
+  [ok  ] 全赢：CI 上界 = 1，场数记对 —— got=(1.0, 4) want=(1.0, 4)
+  [ok  ] 打平：Δ = 0 且 P(涨) = 0 —— got=(0.0, 0.0) want=(0.0, 0.0)
+  [ok  ] 单场差异：点估计 Δ = 0.1 —— got=0.1 want=0.1
+  [ok  ] 单场差异：按场聚类的 CI 下界 = 0（不许假显著） —— lo=0.0
+  [ok  ] 单场差异：P(涨) < 1（整场可能被漏掉） —— P=0.662
+  [ok  ] 同一份数据在**逐行**口径下 CI 下界 > 0 —— 所以必须按场聚类 —— 逐行 lo=0.0500 vs 按场 lo=0.0000
+  [ok  ] 只有一场时不给假 CI（iters=0，调用方看得出来）
+  [ok  ] 策略串：学生坐 0/2 号位（配 --rotate 逐场轮转） —— net:C:\x\net.bin,teacher,net:C:\x\net.bin,teacher
+== DAgger 多臂对比（基线 / 新模型 / 对照臂）==
+  [ok  ] 多臂：三条臂都评了
+  [ok  ] 多臂：每臂都给 top-1 / 类型 / nll / 显示名
+  [ok  ] 多臂：两个配对差都算了（差 = 后者 − 前者） —— got=['dagger − baseline', 'dagger − control'] want=['dagger − baseline', 'dagger − control']
+  [ok  ] 多臂：配对差带聚类 CI
+  [ok  ] 多臂：同权重两臂的差恰好为 0（'对照 vs 基线'那种无变化必须报 0） —— got=0.0 want=0.0
+  [ok  ] 多臂结果可以直接写进报告（没有 numpy 数组漏出去）
+== 旧格式数据集的全路径回退（重算并逐名核对）==
+  [ok  ] 旧 meta：用 src+seed+val_frac 重算出的验证场与 meta 记的一致 —— got=['g0.jsonl'] want=['g0.jsonl']
+  [ok  ] 旧 meta 重算对不上时报错（不拿它当裁判） —— C:\Users\HP\source\games\mahjong\python\.tmp\selfc
+== P5b 混合（teacher 先验）的 α 曲线 ==
+  [ok  ] margin：label 那条自己不算对手（取「除它以外」的最大 logit） —— got=[4.0, 8.0] want=[4.0, 8.0]
+  [ok  ] margin：学生本来就对且很自信 → 负 margin（α 小根本翻不动） —— got=-8.0 want=-8.0
+  [ok  ] 只有一个合法候选时 margin = -inf（没有对手可翻）
+  [ok  ] 该行在任何 α>0 下都算「让位」（老师就是唯一合法动作） —— got=1.0 want=1.0
+  [ok  ] α ≤ 0 时不让位（纯网络不动） —— got=0.0 want=0.0
+  [ok  ] 让位曲线：P(margin < α) —— got=[0.333333, 0.666667, 1.0] want=[0.333333, 0.666667, 1.0]
+  [ok  ] 让位曲线单调不减
+  [ok  ] 推荐 α = 让位首次达标的最小 α —— got=3.0 want=3.0
+  [ok  ] 目标只有大 α 能满足时，推荐那个大 α（margin=2.5 → α=3 才翻身） —— got=3.0 want=3.0
+  [ok  ] 标签越界时报错（不是拿别的列当老师） —— 标签越界（不是候选下标）—— 数据集的 label 列应为 chosen/tea
+== P3 离线 RL：转移组装与价值校准 ==
+  [ok  ] 转移：同家同小局的链（第 0 条 → 第 2 条；第 3 条是另一场 → 不连） —— got=[2, -1, -1, -1] want=[2, -1, -1, -1]
+  [ok  ] 转移：done = 本小局该家最后一条 —— got=[False, True, True, True] want=[False, True, True, True]
+  [ok  ] 转移：奖励只在末决策（千点）—— 座位 0 赢 8、座位 1 输 8 —— got=[0.0, -8.0, 8.0, 8.0] want=[0.0, -8.0, 8.0, 8.0]
+  [ok  ] 转移：return-to-go 与末决策奖励同值（γ=1 且只有一个非零奖励） —— got=[8.0, -8.0, 8.0, 8.0] want=[8.0, -8.0, 8.0, 8.0]
+  [ok  ] 转移：奖励读的是**行动那一家**的收支（座位 1 → delta[1]） —— got=-8.0 want=-8.0
+  [ok  ] 转移：episode 数（三组：f0h0s0 / f0h0s1 / f1h0s0） —— got=3 want=3
+  [ok  ] 转移：学生行占比、赢/输占比 —— got=(0.0, 0.75, 0.25) want=(0.0, 0.75, 0.25)
+  [ok  ] 转移：is_student 从行里读（net: 打的才算） —— got=1.0 want=1.0
+  [ok  ] 缺 P3 列时报错并告诉你要重建 —— 这份紧凑集缺 P3 需要的列 ['file', 'hand_no', 'seat', 'placement', 'is_
+  [ok  ] seat 越界时报错（不读错别家的收支） —— seat 越界：min=7 max=7
+  [ok  ] 校准：完美预测 → MAE 0 且赢过两个基线 —— got=(0.0, True, True) want=(0.0, True, True)
+  [ok  ] 校准：完美预测的小局级 MAE = 0 —— got=0.0 want=0.0
+  [ok  ] 校准：恒预测 0 的 MAE 正好等于 mae_zero（基线不是摆设） —— got=(3.0, 3.0) want=(3.0, 3.0)
+  [ok  ] 恒预测 0 不能号称赢过恒预测 0
+C:\Users\HP\source\games\mahjong\python\selfcheck.py:1171: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:837.)
+  eq("PPO：logp 的指数在合法候选上求和 = 1", round(float(_lp[0][:2].exp().sum()), 6), 1.0)
+  [ok  ] 校准：恒预测均值 → mae == mae_const 且不算赢 —— got=(1.0, 1.0, False) want=(1.0, 1.0, False)
+  [ok  ] 校准：完全反向预测 → 相关系数 -1（不是「看起来还行」的 MAE） —— pearson=-1.0
+  [ok  ] 校准：分箱可靠性曲线的箱数 ≤ bins 且 pred/actual 都在 —— got=True want=True
+  [ok  ] 秩相关：单调非线性 → Spearman 恰好 1（Pearson < 1）
+== P3 判据②：AWR 的权重与有效样本量 ==
+  [ok  ] 权重 = exp(β·A)：两两比值精确（整体尺度不影响归一化后的梯度） —— [ 1.         20.08553692  0.04978707]
+  [ok  ] 权重上限被 clip 住（先夹指数再 exp ⇒ w_max 真的绑得上；靠浮点相等会假红）
+  [ok  ] 极端优势不会溢出成 inf/nan —— got=True want=True
+  [ok  ] ESS：等权时 = 样本数 —— got=100.0 want=100.0
+  [ok  ] ESS：全权重集中在一个样本上 = 1 —— got=1.0 want=1.0
+  [ok  ] β 越大 ESS 越小（这是选 β 的护栏：ESS 塌了就说明只有极少数决策在说话） —— ESS(β=1)=331 > ESS(β=5)=67
+== P3 整场顺位点终局项 ==
+  [ok  ] 整场奖励记在末小局里**每家各自**的最后一次决策上（行序：第 2 条是座位 1、第 3 条是座位 0） —— [False, False, True, True]
+  [ok  ] 每个文件各自算自己那场的末小局（file=0 的末小局是 0、file=1 的是 2）
+  [ok  ] 顺位点按 (file → run 目录 → 场序号 → seat) 对到行上：seat=0 的场 0 = 61.6 —— got=[61.6, 61.6] want=[61.6, 61.6]
+  [ok  ] 顺位点进 return-to-go（千点量纲，不再除以 1000） —— got=[61.7, 61.7] want=[61.7, 61.7]
+  [ok  ] 整场项只落在末决策那条转移上（小局收支 + 顺位点） —— got=[0.0, 61.7] want=[0.0, 61.7]
+  [ok  ] λ=0 时回到第一轮的口径（只有小局收支） —— got=[0.1, 0.1] want=[0.1, 0.1]
+  [ok  ] 轨迹在但缺 summary.json 时报错 —— C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\rank-
+  [ok  ] 轨迹不在时报错（不悄悄当成 0） —— C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\rank-
+  [ok  ] 迁盘前的紧凑集（meta 里是旧根 T:）按当前数据根重映射后照样读得到顺位点 —— got=[61.6, 61.6] want=[61.6, 61.6]
+  [ok  ] 无法重映射时报错（不悄悄当成 0） —— Z:\nowhere\g0.jsonl 不在，且路径里没有 `raw/` 段，无法按数据根重映射
+== P0 评测：合并多次独立 run（把效应钉到显著）==
+  [ok  ] 合并：样本量 = 各 run 之和 —— got=5 want=5
+  [ok  ] 合并：逐 run 摘要（n 与 Δ） —— got=[(2, 15.0), (3, 5.0)] want=[(2, 15.0), (3, 5.0)]
+  [ok  ] 合并：均值 = 全部逐场差的均值 —— got=9.0 want=9.0
+  [ok  ] 合并：CI 由同一套自助法给出（不是另写一套统计） —— got=(5, 4, 1) want=(5, 4, 1)
+  [ok  ] 单个 run 的配对检验还是原来那条路（合并模式不改变它） —— got=2 want=2
+  [ok  ] 两次 run 共用一个 seed 时报错（不许把同一副牌重复计入） —— run-c 与 run-a 有 2 场牌山重叠（seed 相同，例如 1000）—— 合并会把同一副牌数两遍
+  [ok  ] 标签子串能解析成完整标签 —— got='net:A' want='net:A'
+  [ok  ] 标签子串命中不唯一时报错（不猜） —— run-a 里 'net:' 命中 2 个策略标签：['net:A', 'net:B']
+  [ok  ] required_n 默认按 **80% 功效**（(1.96+0.84)²/1.96² ≈ 2.04 倍于 50% 功效的场次） —— 50% → 2698 场，80% → 5512 场
+  [ok  ] 随机效应：三批完全相同 → τ=0 且点估计不变 —— τ=0.0 μ=1.0
+  [ok  ] 随机效应：批间散度大 → τ>0 且 CI 明显宽于逐场口径（不许把不确定性说窄） —— τ=1.20 逐场半宽=0.57 RE半宽=1.47
+  [ok  ] 随机效应：SE 不等时 τ² 会改写权重 ⇒ 点估计与逐场口径不同 —— RE=1.995 vs 逐场=1.273
+  [ok  ] 随机效应：只有一批时不给假 CI（df=0） —— got=True want=True
+  [ok  ] required_n：Δ 越大所需场次越少（单调） —— got=True want=True
+  [ok  ] PPO：合法候选的 log 概率有限
+  [ok  ] PPO：掩码位置 = -inf（softmax 后概率恒 0）
+  [ok  ] PPO：logp 的指数在合法候选上求和 = 1 —— got=1.0 want=1.0
+  [ok  ] PPO：chosen_logprob 取的就是数据里那个动作（不是 argmax）
+  [ok  ] PPO：熵对 logits 可导（会被加进损失）
+  [ok  ] PPO：熵的反向梯度有限（掩码位置的 0·(-inf) 不许变成 NaN）
+  [ok  ] PPO：同分 n 个候选的熵 = ln n（2 个 → ln2；1 个 → 0） —— ent=0.693147/-0.000000
+  [ok  ] PPO：γ=1 + 末决策单点奖励 + λ=1 ⇒ GAE 塌成 R − V（逐条） —— got=[2.5, 3.2, 2.0, -3.0, -1.0, -0.5] want=[2.5, 3.2, 2.0, -3.0, -1.0, -0.5]
+  [ok  ] PPO：value_target = advantage + V（TD(λ) 回报估计） —— got=[3.0, 3.0, 3.0, -1.0, -1.0, -1.0] want=[3.0, 3.0, 3.0, -1.0, -1.0, -1.0]
+  [ok  ] PPO：λ<1 时**不再**等于 R − V（所以默认值只能是 1；这条防「λ 被悄悄改回 0.95」） —— A0(λ=.5)=+0.4000（手算 δ0+0.5·(δ1+0.5·δ2) = −0.7+0.5·2.2） vs A0(λ=1)=+2.5000
+  [ok  ] PPO：γ<1 时按 (γ·V_next − V) + γλ·A_next 递推（手算 A0 = δ0 + 0.5·A1 = −0.6 + 0.85） —— A0=+0.2500 期望 +0.2500
+  [ok  ] PPO：优势归一化只按学生行（学生行均值 0 / std 1）
+  [ok  ] PPO：优势归一化是同一个线性变换（对手之间的次序不许被改）
+  [ok  ] PPO：正优势 + ratio 越过上界 ⇒ 代理目标被夹在 (1+ε)·A（梯度为 0） —— got=2.4 want=2.4
+  [ok  ] PPO：负优势 + ratio 越过下界 ⇒ 同样被夹住（两个方向都要防） —— got=-1.6 want=-1.6
+  [ok  ] PPO：clip_fraction 数的是 |ratio−1|>ε 的比例 —— got=0.6666666666666666 want=0.6666666666666666
+  [ok  ] PPO：approx_kl 同号同量纲（ratio=1 时恒 0） —— got=0.0 want=0.0
+  [ok  ] 联赛：short_name 认五种文法 —— got=['teacher', 'first', 'awr-002', 'awr-002@2', 'awr-002@2#1.5'] want=['teacher', 'first', 'awr-002', 'awr-002@2', 'awr-002@2#1.5']
+  [ok  ] 联赛：PL 解析梯度 == 数值差分（简写那版在这里会差 0.5） —— 最大偏差 9.65e-10
+  [ok  ] 联赛：600 场合成数据恢复出真值排序 —— a:+0.83 / b:+0.24 / c:-0.25 / d:-0.82
+  [ok  ] 联赛：四个真值都落在 95%CI 内 —— {'a': (0.77, 0.92), 'b': (0.17, 0.3), 'c': (-0.33, -0.18), 'd': (-0.91, -0.74)}
+  [ok  ] 联赛红证：等 θ 时四个 CI **全部跨 0**（SE 没有被人为压小） —— {'a': 0.02, 'b': -0.01, 'c': 0.02, 'd': -0.04}
+  [ok  ] 联赛：θ 越高的对手采样权重越大（「谁克我就多跟它打」） —— {'a': 0.457, 'b': 0.263, 'c': 0.172, 'd': 0.108}
+  [ok  ] 联赛：采样权重归一（Σ=1） —— got=1.0 want=1.0
+  [ok  ] 联赛：floor 抬底生效（最弱的对手也有 ≥ floor/N 的份额） —— min=0.1076
+  [ok  ] 联赛：不放回抽样同 seed 逐元素可复现 —— got=['c', 'b', 'a'] want=['c', 'b', 'a']
+  [ok  ] 联赛：不放回、且 exclude 的对手抽不到 —— ['c', 'b', 'a']
+  [ok  ] 联赛：权重为 0 的对手抽不到（即使它排在后面对手池里）
+  [ok  ] 联赛：对手不足 k 个时能抽几个给几个（不报错、不重复）
+  [ok  ] 联赛：真差 +0.35 的配对 θ CI 排除 0 —— Δ=+0.436 CI=[+0.330,+0.525] p=0.000
+  [ok  ] 联赛：配对自助法区间比 Hessian 口径**宽**（Hessian 的 SE 是渐近口径、小样本会低估） —— 自助半宽 0.098 > Hessian 半宽 0.086
+  [ok  ] 联赛红证：真值全 0 时实测 Δ̂ 散度与报告 SE **同量级**（SE 不是被压小一个数量级） —— 实测 SD≈0.1102 vs 报告 SE≈0.0441
+  [ok  ] 联赛：`boot_thetas` 一次重抽供多对比较复用，且与 `pl_ci_diff` 同源（不是两套统计） —— 抽样矩阵 (60, 3)，中位差 +0.439 vs 点估计 +0.436
+  [ok  ] 2+2 的两种座位配置（相邻 A,A,B,B / 对家 A,B,A,B） —— got=[('相邻', 'A,A,B,B', 'pair'), ('对家', 'A,B,A,B', 'pairX')] want=[('相邻', 'A,A,B,B', 'pair'), ('对家', 'A,B,A,B', 'pairX')]
+  [ok  ] 位移：对角线恒 1 且矩阵对称 —— got=(True, True) want=(True, True)
+  [ok  ] 位移：完全错开（循环移位）一致率 = 0 —— got=0.0 want=0.0
+  [ok  ] 位移：改了 10/100 的两条 → 一致率 = 0.90 —— got=0.9 want=0.9
+  [ok  ] 位移：改了 25/100 → 一致率 = 0.75（「看着差不多」在数字上就是 25% 的决策不同） —— got=0.75 want=0.75
+  [ok  ] 解析：内置名原样返回 —— got=['teacher', 'first'] want=['teacher', 'first']
+  [ok  ] 解析：找不到的策略报错并指出路径 —— 找不到策略 'definitely-not-a-net'：既不是内置名，也没有 C:\Users\HP\source\g
+== 时间预算（每轮多少场由目标时长反推）==
+  [ok  ] 预算：默认秒/场 = (288 s − 50 s 固定) / 2000 场（2026-09-27 冒烟实测） —— got=0.1184 want=0.1184
+  [ok  ] 预算：默认固定开销 = 50 s/轮（两处独立实测都是 ~50 s；**别并进 per_game**） —— got=50.0 want=50.0
+  [ok  ] 预算：分相占比之和 == 1（它只用来把预测时长拆开显示） —— got=1.0 want=1.0
+  [ok  ] 预算：分相名单与 `online.cmd_run` 的落账字段一一对应 —— ('collect', 'features', 'compact', 'ppo', 'export')
+  [ok  ] 预算：整盘余量只按 90% 排计划（配额类闸门**不打折** —— 它们是策略上限） —— 0.9
+  [ok  ] 预算：取整只对 ≥100 场生效（冒烟/自检要用小数字） —— got=[20200, 99, 100, 0] want=[20200, 99, 100, 0]
+  [ok  ] 预算：边际秒/场 = 相邻实测点的弦斜率（(280−100)/(3000−1000) = 0.09） —— got=0.09 want=0.09
+  [ok  ] 预算：标定轮数如实报出（`source()` 要能说出这是实测还是默认值） —— got=2 want=2
+  [ok  ] 预算：分相占比也从台账来（collect = 100/380） —— got=0.263158 want=0.263158
+  [ok  ] 预算：实测点上**逐点复现** —— got=(100.0, 280.0) want=(100.0, 280.0)
+  [ok  ] 预算：两实测点之间走弦（t(2000) = 190 s） —— got=190.0 want=190.0
+  [ok  ] 预算：比最大实测点还大 → 按**末段斜率**外推（保守：宁可排短） —— got=460.0 want=460.0
+  [ok  ] 预算：比最小实测点还小 → 按**比例缩**（`fixed + (t_min−fixed)·g/g_min`），绝不为负 —— got=(75.0, 50.0) want=(75.0, 50.0)
+  [ok  ] 预算：预测**处处非负**（⚠ 别用第一段斜率往下推：数据超内存那侧的斜率很陡，往下推会算出负时长 ⇒ 小目标被排成大轮）
+  [ok  ] 预算：预测**单调不减**（场次多不能更省时间）
+  [ok  ] 预算：`games_for` 与 `predict` 互逆（往返误差 ≤ 100 场，取整粒度） —— got=True want=True
+  [ok  ] 预算：`source()` 写明「实测点分段线性」与边际秒/场 —— 实测点**分段线性**（2 轮：1000→1.7min · 3000→4.7min）——点外按端点斜率外推，边际 0.0900s/场
+  [ok  ] 预算：单点台账 → rate = (288 − 50) / 2000 —— got=0.119 want=0.119
+  [ok  ] 预算：单点台账**逐字复现**那一轮的实测总时长 —— got=288.0 want=288.0
+  [ok  ] 预算：单点也能看出「这是实测」（不是默认值） —— got=1 want=1
+  [ok  ] 预算：单点台账按 `fixed + rate·场次` 外推 —— t(4000)=526s
+  [ok  ] 预算：只有 collect_seconds 的老台账**不参与标定**（单相时长会低估整轮） —— got=0 want=0
+  [ok  ] 预算：没有可标定轮次就用默认值 —— got=(0.1184, 50.0) want=(0.1184, 50.0)
+  [ok  ] 预算：坏值（负/NaN/非数）一律忽略，不许把模型带偏 —— got=0 want=0
+  [ok  ] 预算：磁盘模型也实测回填（1.3 MB/场 raw） —— got=1300000.0 want=1300000.0
+  [ok  ] 预算：磁盘模型（2.8 MB/场 compact） —— got=2800000.0 want=2800000.0
+  [ok  ] 预算：磁盘模型没有台账 → 默认值 —— got=0 want=0
+  [ok  ] 预算：磁盘默认值与实测一致（raw 1.52 / compact 15.36 MB/场 —— 2026-10-12 P3-01 A 臂 12,000 场实测） —— got=(1.52, 15.36) want=(1.52, 15.36)
+  [ok  ] 预算：compact 默认值 ≥ 实测下界 15.0 MB/场（v3 旧值 3.06 已证伪） —— 15.36 MB/场
+  [ok  ] 预算：30 分钟 → 场次由**分段线性**反解并取整到百 —— got=19800 want=19800
+  [ok  ] 预算：取自弦的场次，预计时长 ≈ 目标（差 ≤ 取整粒度 100 场 × 斜率） —— got=True want=True
+  [ok  ] 预算：没有闸门时 `clamped_by` 为空（说明是时间预算自己在定） —— got=None want=None
+  [ok  ] 预算：计划报告带轮次与预计时长
+  [ok  ] 预算：闸门更紧时取闸门值 —— got=1100 want=1100
+  [ok  ] 预算：报告写明**是谁**限制了这一轮 —— got='compact 配额余量' want='compact 配额余量'
+  [ok  ] 预算：计划文本里能读到限制原因
+  [ok  ] 预算：预计时长 = 模型在**实际场次**上的取值（被夹住时就不是目标时长） —— got=109.0 want=109.0
+  [ok  ] 预算：`--max-games` 也是一条会露脸的闸门 —— got='--max-games' want='--max-games'
+  [ok  ] 预算：`--max-games` 生效时场次 = 它 —— got=1000 want=1000
+  [ok  ] 预算：资源不够的报错里带闸门明细 —— 时间预算 30.0 分钟最紧只允许 10 场（< --min-games 400）：时间预算 → 19800 场；--max-games →
+  [ok  ] 预算：五道闸门齐全（**缓存档** + raw/compact 配额 + 总配额 + 盘余量） —— got=['缓存档上限', 'raw 配额余量', 'compact 配额余量', '总配额余量', '盘余量'] want=['缓存档上限', 'raw 配额余量', 'compact 配额余量', '总配额余量', '盘余量']
+  [ok  ] 预算：闸门场次非负 —— [('缓存档上限', 1700), ('raw 配额余量', 56500), ('compact 配额余量', 8100), ('总配额余量', 12700), ('盘余量', 7100)]
+  [ok  ] 预算：配额已超 → 该闸门给 0 场（不是负数） —— got=0 want=0
+  [ok  ] 预算：配额满时 `plan_round` 报 ResourceError（要人先清理，不静默降级）
+  [ok  ] 预算：`--target-minutes 0` → 场次就是 `--gen-games`（老命令行行为不变） —— got=(2000, None) want=(2000, None)
+  [ok  ] 大轮次：`np.shape(列)[0]` 走 `.shape`（不物化 13.6 GB 的 state） —— got=1234 want=1234
+  [ok  ] 大轮次：探针能抓到「物化内存映射」的写法（`np.asarray(col).shape[0]`）
+  [ok  ] 大轮次：`rewards.transitions` 只读 `state` 的行数、不把它读进 RAM（探针没炸） —— idx=1234
+  [ok  ] 缓存档：比例 = 0.8 × 物理内存（实测 27.2 GB 走通、41.8 GB 落磁盘档 ⇒ 压在已验证那一档） —— got=0.8 want=0.8
+  [ok  ] 缓存档：物理内存探测（ctypes GlobalMemoryStatusEx） —— 31.6 GB
+  [ok  ] 缓存档：缺省 = 0.8 × 32 GB = 25.6 GB —— got=25.6 want=25.6
+  [ok  ] 缓存档：显式值优先 —— got=24.0 want=24.0
+  [ok  ] 缓存档：`-1` = 关掉这道闸门（故意跑磁盘档时才用） —— got=-1.0 want=-1.0
+  [ok  ] 缓存档：闸门 = 缓存预算 / 实测 compact 字节每场（25.6 GiB ÷ 2.56 MB = 10700 场） —— got=10700 want=10700
+  [ok  ] 缓存档：比时间预算更紧时，场次 = 缓存档上限（**夹住**，不是「少排一点」） —— got=2600 want=2600
+  [ok  ] 缓存档：报告**点名**是它在限制 —— got='缓存档上限' want='缓存档上限'
+  [ok  ] 缓存档：计划文本里能读到这道闸门 ——    资源闸门 → --max-games 24000 场 · 缓存档上限 2600 场 · raw 配额余量 8580
+  [ok  ] 缓存档：`--cache-gb -1` 时这道闸门**不在**闸门表里 —— ['compact 配额余量', 'raw 配额余量', '总配额余量', '盘余量']
+  [ok  ] 筛选：`eval` 支持 `score` 指标（`final_scores − 起点`） —— ('rank_points', 'place', 'score', 'wins', 'deals', 'win_points')
+  [ok  ] 筛选：`score` = `final_scores − 25000`（同标签多座位取平均） —— got=[5000.0, 2000.0] want=[5000.0, 2000.0]
+  [ok  ] 筛选：`rank_points` 口径不变 —— got=[-40.0, -30.0] want=[-40.0, -30.0]
+  [ok  ] 筛选：按**平均得点**降序（A 代 +1150 千点 > B 代 −1150） —— got=['A代', 'B代'] want=['A代', 'B代']
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+C:\Users\HP\source\games\mahjong\python\mahjong_ml\v4\model.py:108: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.tr = nn.TransformerEncoder(layer, num_layers=1)
+  [ok  ] 筛选：引擎账（每小局）× 每场小局数 == 逐场得点（交叉核对） —— got=1150.0 want=1150.0
+  [ok  ] 筛选：顺位点列读的是 `avg_rank_points`（**不是** `rank_points` —— 写错会静默变 0） —— got=(3.0, -3.0) want=(3.0, -3.0)
+  [ok  ] 筛选：引擎账与逐场得点差 >5% 时报错（口径变了要被抓住）
+  [ok  ] v4：块宽度**铺满**四个张量（少一块=有通道没人负责）
+  [ok  ] v4：块清单指纹稳定（写进 net.bin 格式 2，加载时逐块核对） —— got='e1f5dd0fc1e9aba8' want='e1f5dd0fc1e9aba8'
+  [ok  ] v4：指纹对块清单敏感（改宽度必须换指纹） —— got=16 want=16
+  [ok  ] v4：obs 版本契约（v4 要求 v3） —— got=3 want=3
+  [ok  ] v4：张量布局版本（与 v3 不同） —— got=4 want=4
+  [ok  ] v4：tile 形状 —— got=(34, 48) want=(34, 48)
+  [ok  ] v4：evt 形状（K=60 窗口） —— got=(60, 96) want=(60, 96)
+  [ok  ] v4：ctx 形状 —— got=(64,) want=(64,)
+  [ok  ] v4：cand 形状（与 legal 同序） —— got=(5, 128) want=(5, 128)
+  [ok  ] v4：四个张量全为有限数
+  [ok  ] v4：obs v3 下 **obs 侧**的块都不降级（事件流/立直巡数/逐张属性齐全）
+  [ok  ] v4：缺 sidecar v3 时 **sidecar 侧**的块逐块记名降级（不猜、不填假值）
+  [ok  ] v4：缺 events 报错 ✓
+  [ok  ] v4：obs v2 未降级 报错 ✓
+  [ok  ] v4：未知块 id 报错 ✓
+  [ok  ] v4：obs v2 降级路径**逐块记名**（['cand.derived', 'ctx.seats', 'evt.stream', 'tile.danger', 'tile.per_opp', 'tile.safety']）
+  [ok  ] v4：v3 数据不会被误标降级
+  [ok  ] v4 数据集层：obs v2 被硬拒绝 ✓
+  [ok  ] v4 数据集层：obs v3 放行 —— got=3 want=3
+  [ok  ] v4 数据集层：位图展开按**字节内 LSB 在前**（第 3 位 / 第 33 位）
+  [ok  ] v4 数据集层：sidecar_dict 带上 derived_version —— got=3 want=3
+  [ok  ] v4 数据集层：位图展开成 34 宽 —— got=(3, 34) want=(3, 34)
+  [ok  ] v4 数据集层：sidecar_dict **带逐候选段**（少了它 cand[88:128] 会静默全 0） —— got=(2, 8) want=(2, 8)
+  [ok  ] v4 数据集层：逐候选段按 offsets 切片（第二条 == 文件里的第二条）
+  [ok  ] v4 数据集层：逐候选段与 nLegal 错位被硬拒 ✓ —— sidecar 第 0 条：逐候选段 2 行 != nLegal 3 —— sidecar 坏了
+  [ok  ] v4 数据集层：有 sidecar v3 时 tile.danger / tile.safety 不降级（正向对照）
+  [ok  ] v4 数据集层：现物位图按牌种落到 safety_genbutsu 三个对手通道
+  [ok  ] v4 数据集层：逐候选派生段进了 cand[88:96]（不是全 0） —— max=4.000
+  [ok  ] v4 数据集层：sidecar 缺逐候选段 ⇒ 记为降级（`Tensors.degraded`，dataset 据此硬拒）
+  [ok  ] v4 数据集层：iter_decisions 在 v2 那一行报错（并指出是哪一行） —— g0.jsonl:2: obs v2 < v3 —— v4 数据集**不接受**没有事件流的老轨迹（`events` 缺失会让 evt 张量
+  [ok  ] v4 数据集：训练条数 —— got=3 want=3
+  [ok  ] v4 数据集：张量形状写进 meta —— got=[34, 48] want=[34, 48]
+  [ok  ] v4 数据集：obs/derived 版本 —— got=(3, 3) want=(3, 3)
+  [ok  ] v4 数据集：tile 列形状 —— got=(3, 34, 48) want=(3, 34, 48)
+  [ok  ] v4 数据集：evt 列形状 —— got=(3, 60, 96) want=(3, 60, 96)
+  [ok  ] v4 数据集：cand 宽度 = lmax
+  [ok  ] v4 数据集：标签列齐（教师动作 + 值 + 顺位 + aux 真值）
+  [ok  ] v4 数据集：缺标签侧时报错 —— 缺标签侧文件：g0.aux.npz（采集时要加 `--aux`）
+  [ok  ] v4 数据集：obs v2 轨迹被硬拒绝 ✓
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=3）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 3 条（1 场）/ 验证 3 条；lmax=2；标签侧 有；长程 carry **无**（窗口冷启动）；学生行占比 训练 100.0% / 验证 100.0%（无掩码：全部行都算学生）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=7
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（35%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/1）
+epoch   1 [a]: train 0.6949 | val top1(教师一致) 0.333 | 首合法基线 0.667 | policy 0.693 value 3.952 place 1.375 bh 0.693 bt 0.757 danger 0.739 effect 0.0296 ssl_acc nan
+        按类型：discard=0.33(n=3)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-a\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-a\metrics.json（0.1s）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=3）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 3 条（1 场）/ 验证 3 条；lmax=2；标签侧 有；长程 carry **无**（窗口冷启动）；学生行占比 训练 100.0% / 验证 100.0%（无掩码：全部行都算学生）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=7
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（35%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/1）
+epoch   1 [a]: train 0.6949 | val top1(教师一致) 0.333 | 首合法基线 0.667 | policy 0.693 value 3.952 place 1.375 bh 0.693 bt 0.757 danger 0.739 effect 0.0296 ssl_acc nan
+        按类型：discard=0.33(n=3)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-b\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-b\metrics.json（0.0s）
+  [ok  ] v4 预训练：同种子两次的 history 逐字段相同 —— got='[{"epoch": 1, "il_init_engine_top1_student": 0.0, "stage_at_end": "a", "train_loss": 0.6949116587638855, "train_parts": {"belief_hand": 0.692365825176239, "belief_tenpai": 0.730137050151825, "danger": 0.7112064957618713, "effect": 0.005874027032405138, "grad_norm": 0.04508058354258537, "il_ce": 0.693150520324707, "placement": 1.3888349533081055, "policy": 0.6931494474411011, "value": 3.9179749488830566}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.3333333333333333}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 1.0, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 3.6020095348358154, "val_loss_belief_hand": 0.6929034988085429, "val_loss_belief_tenpai": 0.7570781906445821, "val_loss_danger": 0.7385493715604147, "val_loss_effect": 0.029579706490039825, "val_loss_il_ce": 0.693136731783549, "val_loss_placement": 1.375105619430542, "val_loss_policy": 0.6931520899136862, "val_loss_value": 3.9517812728881836, "val_n": 3, "val_student_frac": 1.0, "val_top1": 0.3333333333333333, "val_top1_student": null, "val_top1_student_n": null}]' want='[{"epoch": 1, "il_init_engine_top1_student": 0.0, "stage_at_end": "a", "train_loss": 0.6949116587638855, "train_parts": {"belief_hand": 0.692365825176239, "belief_tenpai": 0.730137050151825, "danger": 0.7112064957618713, "effect": 0.005874027032405138, "grad_norm": 0.04508058354258537, "il_ce": 0.693150520324707, "placement": 1.3888349533081055, "policy": 0.6931494474411011, "value": 3.9179749488830566}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.3333333333333333}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 1.0, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 3.6020095348358154, "val_loss_belief_hand": 0.6929034988085429, "val_loss_belief_tenpai": 0.7570781906445821, "val_loss_danger": 0.7385493715604147, "val_loss_effect": 0.029579706490039825, "val_loss_il_ce": 0.693136731783549, "val_loss_placement": 1.375105619430542, "val_loss_policy": 0.6931520899136862, "val_loss_value": 3.9517812728881836, "val_n": 3, "val_student_frac": 1.0, "val_top1": 0.3333333333333333, "val_top1_student": null, "val_top1_student_n": null}]'
+  [ok  ] v4 预训练：指标含教师一致率与逐头损失
+  [ok  ] v4 预训练：参数量 1,397,992 ≤ 3M
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.6667（n=3）/ 全部行 0.6667 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.6667
+数据：训练 3 条（1 场）/ 验证 3 条；lmax=2；标签侧 有；长程 carry **无**（窗口冷启动）；学生行占比 训练 100.0% / 验证 100.0%（无掩码：全部行都算学生）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=11
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（50%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/2）
+epoch   1 [a]: train 2.8065 | val top1(教师一致) 0.333 | 首合法基线 0.667 | policy 0.693 value 3.927 place 1.416 bh 0.696 bt 0.672 danger 0.687 effect 0.0067 ssl_acc 0.286
+        按类型：discard=0.33(n=3)
+  -- 进入阶段 b（step 1/2）
+epoch   2 [b]: train 3.5440 | val top1(教师一致) 0.667 | 首合法基线 0.667 | policy 0.693 value 3.891 place 1.407 bh 0.690 bt 0.662 danger 0.676 effect 0.0044 ssl_acc 0.286
+        按类型：discard=0.67(n=3)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-s\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-s\metrics.json（0.1s）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.6667（n=3）/ 全部行 0.6667 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.6667
+数据：训练 3 条（1 场）/ 验证 3 条；lmax=2；标签侧 有；长程 carry **无**（窗口冷启动）；学生行占比 训练 100.0% / 验证 100.0%（无掩码：全部行都算学生）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=11
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（50%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/2）
+epoch   1 [a]: train 2.8065 | val top1(教师一致) 0.333 | 首合法基线 0.667 | policy 0.693 value 3.927 place 1.416 bh 0.696 bt 0.672 danger 0.687 effect 0.0067 ssl_acc 0.286
+        按类型：discard=0.33(n=3)
+  -- 进入阶段 b（step 1/2）
+epoch   2 [b]: train 3.5440 | val top1(教师一致) 0.667 | 首合法基线 0.667 | policy 0.693 value 3.891 place 1.407 bh 0.690 bt 0.662 danger 0.676 effect 0.0044 ssl_acc 0.286
+        按类型：discard=0.67(n=3)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-t\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-t\metrics.json（0.1s）
+  [ok  ] v4 预训练（分阶段+SSL）：同种子两次 history 逐字段相同 —— got='[{"epoch": 1, "il_init_engine_top1_student": 0.6666666666666666, "stage_at_end": "a", "train_loss": 2.8064844608306885, "train_parts": {"belief_hand": 0.6972309350967407, "belief_tenpai": 0.6665318608283997, "danger": 0.6912636756896973, "effect": 0.004499159753322601, "grad_norm": 8.299409866333008, "il_ce": 0.6931477785110474, "placement": 1.3734028339385986, "policy": 0.6931455135345459, "ssl": 2.1119892597198486, "value": 3.9292144775390625}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.3333333333333333}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 0.3333333333333333, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 4.907652219136556, "val_loss_belief_hand": 0.6962960759798685, "val_loss_belief_tenpai": 0.6724475622177124, "val_loss_danger": 0.6870203018188477, "val_loss_effect": 0.006731194133559863, "val_loss_il_ce": 0.6931489507357279, "val_loss_placement": 1.4157415231068928, "val_loss_policy": 0.6931454936663309, "val_loss_ssl": 1.3446191946665447, "val_loss_value": 3.926581382751465, "val_n": 3, "val_ssl_acc": 0.2857142857142857, "val_ssl_n": 7, "val_student_frac": 1.0, "val_top1": 0.3333333333333333, "val_top1_student": null, "val_top1_student_n": null}, {"epoch": 2, "il_init_engine_top1_student": 0.6666666666666666, "stage_at_end": "b", "train_loss": 3.5440008640289307, "train_parts": {"belief_hand": 0.6963038444519043, "belief_tenpai": 0.6695829033851624, "danger": 0.6875025033950806, "effect": 0.0077986340038478374, "grad_norm": 0.572273850440979, "il_ce": 0.6931501626968384, "placement": 1.3767662048339844, "policy": 0.693144679069519, "value": 3.9121170043945312}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.6666666666666666}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 0.6666666666666666, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 4.880112965901692, "val_loss_belief_hand": 0.689974049727122, "val_loss_belief_tenpai": 0.6620071530342102, "val_loss_danger": 0.6764223575592041, "val_loss_effect": 0.00442065220947067, "val_loss_il_ce": 0.6931490103403727, "val_loss_placement": 1.4070674975713093, "val_loss_policy": 0.6931442419687907, "val_loss_ssl": 1.3446191946665447, "val_loss_value": 3.891160170237223, "val_n": 3, "val_ssl_acc": 0.2857142857142857, "val_ssl_n": 7, "val_student_frac": 1.0, "val_top1": 0.6666666666666666, "val_top1_student": null, "val_top1_student_n": null}]' want='[{"epoch": 1, "il_init_engine_top1_student": 0.6666666666666666, "stage_at_end": "a", "train_loss": 2.8064844608306885, "train_parts": {"belief_hand": 0.6972309350967407, "belief_tenpai": 0.6665318608283997, "danger": 0.6912636756896973, "effect": 0.004499159753322601, "grad_norm": 8.299409866333008, "il_ce": 0.6931477785110474, "placement": 1.3734028339385986, "policy": 0.6931455135345459, "ssl": 2.1119892597198486, "value": 3.9292144775390625}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.3333333333333333}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 0.3333333333333333, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 4.907652219136556, "val_loss_belief_hand": 0.6962960759798685, "val_loss_belief_tenpai": 0.6724475622177124, "val_loss_danger": 0.6870203018188477, "val_loss_effect": 0.006731194133559863, "val_loss_il_ce": 0.6931489507357279, "val_loss_placement": 1.4157415231068928, "val_loss_policy": 0.6931454936663309, "val_loss_ssl": 1.3446191946665447, "val_loss_value": 3.926581382751465, "val_n": 3, "val_ssl_acc": 0.2857142857142857, "val_ssl_n": 7, "val_student_frac": 1.0, "val_top1": 0.3333333333333333, "val_top1_student": null, "val_top1_student_n": null}, {"epoch": 2, "il_init_engine_top1_student": 0.6666666666666666, "stage_at_end": "b", "train_loss": 3.5440008640289307, "train_parts": {"belief_hand": 0.6963038444519043, "belief_tenpai": 0.6695829033851624, "danger": 0.6875025033950806, "effect": 0.0077986340038478374, "grad_norm": 0.572273850440979, "il_ce": 0.6931501626968384, "placement": 1.3767662048339844, "policy": 0.693144679069519, "value": 3.9121170043945312}, "train_student_frac": 1.0, "val_by_type": {"discard": {"n": 3, "top1": 0.6666666666666666}}, "val_engine_n": 3, "val_engine_random": 0.5, "val_engine_top1": 0.6666666666666666, "val_engine_top1_student": null, "val_first_legal_acc": 0.6666666666666666, "val_loss": 4.880112965901692, "val_loss_belief_hand": 0.689974049727122, "val_loss_belief_tenpai": 0.6620071530342102, "val_loss_danger": 0.6764223575592041, "val_loss_effect": 0.00442065220947067, "val_loss_il_ce": 0.6931490103403727, "val_loss_placement": 1.4070674975713093, "val_loss_policy": 0.6931442419687907, "val_loss_ssl": 1.3446191946665447, "val_loss_value": 3.891160170237223, "val_n": 3, "val_ssl_acc": 0.2857142857142857, "val_ssl_n": 7, "val_student_frac": 1.0, "val_top1": 0.6666666666666666, "val_top1_student": null, "val_top1_student_n": null}]'
+  [ok  ] v4 预训练（分阶段）：三个阶段的步数都 > 0 —— got=['a', 'b', 'c'] want=['a', 'b', 'c']
+  [ok  ] v4 预训练（P1）：val 里带掩码事件重建的准确率
+  [ok  ] v4 预训练（P1）：掩码只落在**真实事件**上（padding 不动）
+  [ok  ] v4 预训练（P1）：被掩码的 token 真的置 0，且不改原张量
+  [ok  ] v4 预训练（P1）：掩码目标 = 原事件的类型下标 —— got=1 want=1
+  [ok  ] v4：e_tokens 既不进契约头、也不进推理头清单
+  [ok  ] v4 预训练：SSL 头只做事件类型分类（D_MODEL → 类型数）
+  [ok  ] v4 数据集：并行（3 进程）与串行**逐字节相同**（46 列）
+  [ok  ] v4：消融 tile.safety → 该块归零
+  [ok  ] v4：消融只动那一块（其它通道还在）
+  [ok  ] v4：消融 evt.stream → 事件流整块归零
+  [ok  ] v4：牌河增量 == 全量（Δ=0.0e+00）
+  [ok  ] v4：GRU 增量 == 从头重放（Δ=0.0e+00）
+  [ok  ] v4：同一条事件流逐条喂 == 一次性重算（逐元素相等）
+  [ok  ] v4：RiverState 增量与基准路径**逐元素相同**
+  [ok  ] v4：obs v2（无事件流）下增量路径也不炸
+  [ok  ] v4：`kan` 事件也要累加 meld_count（增量路径不许漏杠） —— got=4.0 want=4.0
+  [ok  ] v4：`meld`（碰）事件累加 meld_count —— got=3.0 want=3.0
+  [ok  ] v4：无关事件（dora_flip）不改张量且返回 False（增量缓存可以整条跳过）
+  [ok  ] v4 红证①：挂上隐藏真值标签后 logits 逐位不变（标签不进输入）
+  [ok  ] v4 红证③：奖励路径不含过程隐藏量 
+  [ok  ] v4 红证③负向对照：注入 opp_tenpai 必须被抓出来
+  [ok  ] v4 红证③不误伤：墙钟计时 `wall` 不算隐藏量
+  [ok  ] v4 判据⑥：推理路径不碰 aux 标签 
+  [ok  ] v4：参数量 1,397,992 ≤ 3M（上限来自 §0.1.3）
+  [ok  ] v4：上线必需头（策略 + 分布价值 + 对手听牌 + 危险） —— got=('policy', 'value', 'belief_tenpai', 'danger') want=('policy', 'value', 'belief_tenpai', 'danger')
+  [ok  ] v4：头清单权重（策略头 = 1.0，teacher 模仿头**不在**这里） —— got=1.0 want=1.0
+  [ok  ] v4：多头里没有 teacher 通道（teacher 只是起点/对手/基准）
+  [ok  ] v4：策略 logits 形状 —— got=(1, 5) want=(1, 5)
+  [ok  ] v4：分布价值分箱数 —— got=(1, 51) want=(1, 51)
+  [ok  ] v4：对手手牌信念形状 —— got=(1, 3, 34) want=(1, 3, 34)
+  [ok  ] v4：危险头形状（候选 × 4 家） —— got=(1, 5, 4) want=(1, 5, 4)
+  [ok  ] v4：值头的软标签每行和为 1（HL-Gauss 正确）
+  [ok  ] v4：值头软标签非负（不会造出负概率）
+  [ok  ] v4：前向是确定性的（无 dropout）—— 红证①与判据④都依赖这条
+  [ok  ] P3 数据集：`--student` 写出 `is_student`，且 `delta`（回报）列在
+  [ok  ] P3 数据集：meta 记下学生策略串 —— got='net:tools/build/x/net.bin#1.0' want='net:tools/build/x/net.bin#1.0'
+  [ok  ] P3 数据集：学生掩码不全是 1 也不全是 0（真遮罩） —— 学生 2/4
+  [ok  ] P3 数据集：`delta` 读了轨迹的 `hand_delta`（非全 0） —— max|delta|=2000
+  [ok  ] P3 数据集：不给 `--student` 时全部算学生（老行为） —— got=4 want=4
+  [ok  ] P3 训练：`_row_weights` 同时给出掩码与权重
+  [ok  ] P3 训练：RWR 权重夹在 exp(±2) 内（β=8 千点） —— min=0.779 max=1.133
+  [ok  ] P3 训练：RWR 权重随本小局收支单调不降
+  [ok  ] P3 训练：β<=0 时不加权（权重为 None ⇒ 损失里就是 mean） —— got=None want=None
+  [ok  ] P3 数据集：对不上的 `--student` ⇒ `is_student` 全 0 —— got=0 want=0
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+  [ok  ] P3 训练：学生行占比 0 被硬拒 ✓ —— 学生行占比 0 —— `dataset build --student` 的策略串与轨迹里的 `policy` 字段没对上（这是静默失真的源
+  [ok  ] PPO：优势在学生行上归一化（均值 0 / 标准差 1）
+  [ok  ] PPO：非学生行的优势被置 0（不参与策略梯度）
+  [ok  ] PPO：ρ≡1 时替代项 ≈ 0（优势已中心化 ⇒ 判据有解析解） —— loss=0.00e+00
+  [ok  ] PPO：KL / 截断比例诊断在合理范围 —— kl=0.00e+00 clip=0.000
+  [ok  ] PPO：行为策略一偏移，替代项就变（判据不是空转） —— loss=2.161e-01
+  [ok  ] PPO：`--behaviour` 能从 net.bin 载回同一份权重（log π_old 才可信）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+  [ok  ] PPO：缺 `--behaviour` 被硬拒 ✓ —— --objective ppo 需要 --behaviour <采集用的 ckpt/net.bin>（要重算 log π
+  [ok  ] PPO：温度口径一致（π_new 也按 T=0.5 算）时 ρ≡1 ⇒ 替代项 ≈ 0 —— loss=0.00e+00
+  [ok  ] PPO：口径一致时 `logp_gap` 诊断 ≈ 0（它就是「温度没对上」的探针） —— gap=0.00e+00
+  [ok  ] PPO 红证（有量级的 logits）：口径一致时仍 ρ≡1 ⇒ 替代项 ≈ 0（说明上一条不是夹具巧合） —— loss=0.00e+00
+  [ok  ] PPO 红证（有量级的 logits）：口径不一致 ⇒ 替代项被 `LOG_RATIO_CLAMP` 界住但**仍远比一致时大**、logp_gap ~20（= 实际 NaN 事故的签名） —— loss=26.7 gap=20.00
+  [ok  ] PPO 数值红证：非学生行的 inf×0 确实会算出 NaN（机制成立） —— manual=nan
+  [ok  ] PPO 数值保险：`LOG_RATIO_CLAMP` + 未选中行置 0 ⇒ 同一批 loss 有限（NaN 被堵住） —— loss=26.69（⚠ `logp_gap` 只看学生行，所以它不会报出那一行的 1e4）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+  [ok  ] PPO：`--behaviour-temp` 与 meta `#T` 冲突被硬拒 ✓ —— --behaviour-temp 0.5 与数据集 student 串里的 `#T` 1 不一致（net:tools/build/x/net
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+初始化：从 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-ppo-init\a.bin 载入权重
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+PPO：行为策略 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-ppo-init\a.bin（温度 1）—— 重算 log π_old（4 条）
+PPO：clip=0.2 entropy=0.01；优势在学生行上归一化、策略损失只算学生行
+PPO：grad-clip 0.5、KL 早停阈值 0.03（min_steps 1）
+PPO：口径自检 KL(π_old‖π_new)=+0.00e+00（≈0 = 权重与温度都对上了）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=2）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 4 条（1 场）/ 验证 4 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 50.0% / 验证 50.0%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=7
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（35%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/1）
+epoch   1 [a]: train 0.0000 | val top1(教师一致) 0.500 | 首合法基线 0.500 | policy 0.693 value 3.975 place 1.403 bh 0.696 bt 0.686 danger 0.679 effect 0.0032 ssl_acc nan | **学生行 top1 1.000**(n=2) | 学生行 policy 1.386 | **引擎一致率 0.000**(init 0.000 / 随机 0.500) | 引擎 CE(学生行) 1.3863
+        按类型：discard=0.50(n=4)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-ppo-ok\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-ppo-ok\metrics.json（0.1s）
+  [ok  ] PPO：`--init` == `--behaviour` + 温度一致 ⇒ 口径自检通过并真的跑完一步 —— top1=0.5
+  [ok  ] PPO 口径闸门：同一份权重 + 同一温度 ⇒ KL ≈ 0（放行） —— kl=+0.00e+00
+  [ok  ] PPO 口径闸门：分布不一致被硬拒 ✓ —— PPO 口径不一致：初始化时 KL(π_old‖π_new) = 5（应为 ≈0）—— 检查① `--init` 是不是与 `--behav
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+初始化：从 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-ppo-init\a.bin 载入权重
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：整场结果（value = final_scores − 起点；旧口径）
+PPO：行为策略 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-ppo-init\a.bin（温度 1）—— 重算 log π_old（4 条）
+PPO：clip=0.2 entropy=0.01；优势在学生行上归一化、策略损失只算学生行
+PPO：grad-clip 0.5、KL 早停阈值 0.03（min_steps 1）
+PPO：口径自检 KL(π_old‖π_new)=+0.00e+00（≈0 = 权重与温度都对上了）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=2）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 4 条（1 场）/ 验证 4 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 50.0% / 验证 50.0%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=7
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（35%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 a（step 0/1）
+  [ok  ] PPO：loss 非有限时当场报错、不落盘 ✓ —— 训练发散：第 0 步 loss=nan（epoch 1）—— 诊断看 train_parts 的 kl / clip_frac / logp
+  [ok  ] 第六轮：`rtg` 列从轨迹的 `reward_to_go` 读进来（点 → 千点） —— n=4
+  [ok  ] 第六轮：`rtg` = reward_to_go/1000（夹具 4 个值） —— got=[1.0, 2.0, 3.0, 4.0] want=[1.0, 2.0, 3.0, 4.0]
+  [ok  ] 第六轮：meta 记 reward-to-go 覆盖率（100%）
+  [ok  ] 第六轮：**老轨迹**的 `rtg` 是 NaN（显式缺席；填 0 会把优势变成 `0 − V(s)`，静默失真）
+  [ok  ] 第六轮：`_batch` 带出 `rtg`（缺列时为 None，不炸老数据集）
+  [ok  ] 第六轮：优势回报换源（value → rtg）确实改变 A（判据不是空转）
+  [ok  ] 第六轮：优势对回报的整体平移不变（学生行归一化的后果；夹具必须避开这一点）
+  [ok  ] 第六轮：rtg 口径的优势同样只在学生行上归一化（均值 0 / 标准差 1）
+  [ok  ] 第六轮：rtg 口径下非学生行优势仍为 0
+  [ok  ] 第六轮：`value_key=rtg` 真的换了值头目标（critic 与优势同源） —— value 3.9033 vs rtg 3.9102
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+  [ok  ] 第六轮：`--value-target rtg` 在 NaN 数据上被硬拒 ✓ —— --value-target rtg 但数据集里没有可用的 `reward_to_go`（rtg 列是 NaN）—— 那是**老轨迹**（采
+  [ok  ] v4 均衡：逐座位轮转的一轮判为均衡（座位偏差 0.00%，CV 0.0%）
+  [ok  ] v4 均衡：小局计数（8 局） —— got=8 want=8
+  [ok  ] v4 均衡：决策行按**真形状**（`type=decision`）读到了 —— got=32 want=32
+  [ok  ] v4 均衡：配席统计非空（读到 (策略, 座位) 了）
+  [ok  ] v4 均衡：结局分类（自摸） —— got=8 want=8
+  [ok  ] v4 均衡：报告字段齐全（写 league/<label>/balance.json）
+  [ok  ] v4 均衡负向对照：只有小局行、没有决策行 ⇒ 判不均衡（['一条决策行都没有（轨迹形状不对：决策行读不出来）', '没有任何 (策略, 座位) 记录 —— 座位/对手配额无从审计']）
+  [ok  ] v4 均衡负向对照：配席与 `--expect` 不符 ⇒ 判不均衡（['与 --expect 的配席不符（座位场）：pa: 8 != 999；pb: 8（清单里没写）；pc: 8（清单里没写）；pd: 8（清单里没写）']）
+  [ok  ] v4 均衡：四策略等分时 CV 判据下的场次数 —— got=[8, 8, 8, 8] want=[8, 8, 8, 8]
+  [ok  ] v4 均衡负向对照：座位偏斜必须判不均衡（['座位偏差 25.000% > 1%']）
+  [ok  ] v4 均衡：偏斜偏差 25.00% > 阈值 1%
+  [ok  ] v4 均衡：阈值口径（离散 1% / 对手 CV 5%） —— got=(0.01, 0.05) want=(0.01, 0.05)
+  [ok  ] v4 均衡：write_balance 落盘且结论一致
+  [ok  ] P5 导出：期望张量表条数（78 个张量 = 74 + 逐候选门控 2 + 长程门控 2） —— got=78 want=78
+  [ok  ] P5 导出：逐张量名不重复 —— got=78 want=78
+  [ok  ] P5 导出：从权重形状反推的维度 —— got={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51} want={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51}
+  [ok  ] P5 导出：同权重两次导出**逐字节相同**（固定顺序 + 无压缩） —— 5594680 B
+  [ok  ] P5 导出：读回的格式号 —— got=2 want=2
+  [ok  ] P5 导出：读回的维度 —— got={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51} want={'d_model': 192, 'tile_d': 64, 'n_heads': 4, 'value_bins': 51}
+  [ok  ] P5 导出：读回的张量数 —— got=78 want=78
+  [ok  ] P5 导出：读回的块数 —— got=16 want=16
+  [ok  ] P5 导出：块指纹 == 注册表指纹 —— got='e1f5dd0fc1e9aba8' want='e1f5dd0fc1e9aba8'
+  [ok  ] P5 导出：读回的每个张量形状与契约一致
+  [ok  ] P5 导出：导出→读回→载入后的 logits 与原始模型逐位相同
+  [ok  ] P5 导出：缺张量被形状审计抓住 ✓ —— net_blob：张量表与 v4 契约不符（1 条）：缺 heads.policy.bias(1,)
+  [ok  ] P5 夹具：python/tests/golden/forward-v4.bin 在仓库里
+  [ok  ] P5 夹具：格式号 —— got=2 want=2
+  [ok  ] P5 夹具：块指纹 == 注册表指纹 —— got='e1f5dd0fc1e9aba8' want='e1f5dd0fc1e9aba8'
+  [ok  ] P5 夹具：用小网络（能进仓库） —— got={'d_model': 32, 'tile_d': 16, 'n_heads': 2, 'value_bins': 5} want={'d_model': 32, 'tile_d': 16, 'n_heads': 2, 'value_bins': 5}
+  [ok  ] P5 夹具：覆盖闸门里的标签全都覆盖到了 —— coverage=['aka_evt', 'aka_hand', 'claim', 'evt_meld', 'evt_short', 'ippatsu', 'legal_kan', 'own_meld', 'riichi_any', 'self_riichi', 'tedashi', 'tsumogiri', 'turn']
+  [ok  ] P5 夹具：覆盖面带立直/一发（Java 把布尔数组读成 0 的那条漂移就是它抓的）
+  [ok  ] P5 夹具：魔数（MJ4G） —— got=1296708679 want=1296708679
+  [ok  ] P5 夹具：用例数与 meta 一致 —— got=11 want=11
+  [ok  ] P5 夹具：内嵌权重长度与总长度都与 meta 对得上
+  [ok  ] W1：夹具里有事件流长于窗口的用例（否则每个用例的 `h0` 都是全 0 ⇒ 忽略 h0 也能全绿） —— cases_with_long_carry=1
+  [ok  ] W1 红证①：归零 `fusion.mem.weight` 会改变策略头（门控真的被消费） —— maxΔ=0.023003578186035156
+  [ok  ] W1 红证②：扰动 `h0` 会改变策略头（窗口没把初始状态吞掉 ⇒ 夹具能测到 h0 路线） —— maxΔ=0.15334594249725342
+  [ok  ] W1：策略头真的在区分候选（组内极差过小 ⇒ argmax 判据是噪声、候选路径没被测到） —— min=0.00018656253814697266
+  [ok  ] W1：夹具把零初始化的 `fusion.mem.*` 显式扰动了（铁律①：零初始化路径必须被扰动） —— perturbed=['tile.attn.in_proj_bias', 'tile.attn.out_proj.bias', 'tile.norm.bias', 'event.tr.layers.0.self_attn.in_proj_bias', 'event.tr.layers.0.self_attn.out_proj.bias', 'event.tr.layers.0.norm1.bias', 'event.tr.layers.0.norm2.bias', 'fusion.q_tile.in_proj_bias', 'fusion.q_tile.out_proj.bias', 'fusion.q_evt.in_proj_bias', 'fusion.q_evt.out_proj.bias', 'fusion.mem.weight', 'fusion.mem.bias', 'heads.policy_gate.weight', 'heads.policy_gate.bias']
+  [ok  ] P5 夹具：格式号 == 2（W1 起每用例带 h0/h_evt） —— got=2 want=2
+  [ok  ] W1：**前缀 carry + 窗口 == 整手重放**（逐位判据，差 ≤1e-6） —— maxΔ=0.000e+00
+  [ok  ] W1：窗口前部的零 padding **不喂** GRU（整窗前向 == 只喂真实行） —— maxΔ=0.000e+00（行数 5/60）
+  [ok  ] 价值头审计：完美点预测 MAE = 0 —— got=0.0 want=0.0±1e-12
+  [ok  ] 价值头审计：完美点预测 CRPS = 0 —— got=0.0 want=0.0±1e-12
+  [ok  ] 价值头审计：完美点预测 EV = 1 —— got=1.0 want=1.0±1e-09
+  [ok  ] 价值头审计：完美点预测 0.5 覆盖率 = 1 —— got=1.0 want=1.0
+  [ok  ] 价值头审计：完美点预测 0.8 覆盖率 = 1 —— got=1.0 want=1.0
+  [ok  ] 价值头审计：完美点预测 0.95 覆盖率 = 1 —— got=1.0 want=1.0
+  [ok  ] 价值头审计：退化在均值上的 CRPS == mae_const —— got=15.68627451 want=15.68627451
+  [ok  ] 价值头审计：常数预测（无状态信号）EV = 0 —— EV=0.00e+00
+  [ok  ] 价值头审计：对称加宽后均值不变 ⇒ EV 仍 = 1 —— got=1.0 want=1.0±1e-09
+  [ok  ] 价值头审计：对称加宽分布的 CRPS == 解析值 0.08·d（离散 CRPS 公式逐项对得上） —— got=0.376470588 want=0.376470588
+  [ok  ] 价值头审计：**均值满分而 CRPS > 0** ⇒ 两条判据互不替代（分布形状被单独度量） —— EV=1.000 CRPS=0.3765
+  [ok  ] 价值头审计：过窄区间 **欠覆盖**（红证方向对） —— cov95=0.33
+  [ok  ] 价值头审计：覆盖率判据容差 = 3pp —— got=0.03 want=0.03
+  [ok  ] 价值头审计：`hl_gauss_ce(边缘分布, 标签)` == `marginal_ce(标签)` —— got=1.198849313 want=1.198849313
+  [ok  ] 价值头审计：**条件**预测的 CE 低于边缘基线（否则这个指标分不出好坏） —— cond=0.5623 < marg=1.1988
+  [ok  ] 价值头审计：`rtg` 在 (game,hand,seat) 内是常量（极差 = 0） —— got=0.0 want=0.0
+  [ok  ] 价值头审计：`rtg_known_var_share` = Var(value−rtg)/Var(rtg)（定义自洽） —— got=1.25 want=1.25
+  [ok  ] 价值头审计：组内不再是常量时必须报出来（红证：这条检查不是恒 0） —— spread=1.0
+  [ok  ] 价值头审计：按 (game, hand_no) 聚合出 3 个小局 —— got=3 want=3
+  [ok  ] 价值头审计：小局内预测正确 ⇒ round_mae = 0 —— got=0.0 want=0.0
+  [ok  ] 价值头审计：小局级 ρ = 1（3 个互不相同的小局） —— got=1.0 want=1.0
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+只训头：['value']（其余头的损失权重置 0；阶段权重被绕过）
+冻结主干：整轮只更新头参数（trunk.requires_grad=False）
+⚠ `--kl-min-steps 100` 对2 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：**逐决策 reward-to-go**（rtg，千点；λ=1 的 GAE 目标）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 1.0000（n=4）/ 全部行 1.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 1.0000
+数据：训练 4 条（1 场）/ 验证 4 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 100.0% / 验证 100.0%（无掩码：全部行都算学生）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=21
+分阶段：a 策略+牌效（25%）→ b 冻主干只训头（50%）→ c 联合微调（其余）；每 epoch 2 步 × batch 2
+  -- 进入阶段 a（step 0/2）
+  -- 进入阶段 b（step 1/2）
+epoch   1 [b]: train 1.9475 | val top1(教师一致) 0.500 | 首合法基线 0.500 | policy 0.693 value 3.724 place 1.378 bh 0.689 bt 0.720 danger 0.683 effect 0.0044 ssl_acc nan
+        按类型：discard=0.50(n=4)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-value-only\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-selfcheck-value-only\metrics.json（0.0s）
+  [ok  ] 只训头：主干逐位不变（`--freeze-trunk` 全程有效） —— 变了 0 个张量
+  [ok  ] 只训头：`heads.value.*` **真的被更新**了（阶段 a 的 0 权重没有把它吃掉）
+  [ok  ] 只训头：其余头（policy/belief/danger/effect…）逐位不变
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+  [ok  ] 只训头：未知头名当场报错（不静默训成 0 权重） —— --only-heads 里有未知的头 ['bogus']；可选 ['belief_hand', 'belief_ten
+  [ok  ] 价值头审计：线性可解释的目标 ⇒ 岭回归 EV ≈ 1（train/val 分开） —— EV=1.0000
+  [ok  ] 价值头审计：与特征无关的目标 ⇒ EV ≈ 0（参照不是空转） —— EV=-0.0381
+  [ok  ] 价值头审计：真值特征矩阵 = 1（自家向听）+ 3（自家听牌）+ 1（截距），**不含**别家手牌 —— got=5 want=5
+  [ok  ] 价值头审计：`state` 参照里没有别家真手牌（那是作弊参照，另算一栏）
+  [ok  ] v4 回路：默认命令里没有 JVM（脱离 Java 的判据） —— ['trainer.exe', 'trainer.exe', 'node', 'python.exe', 'python.exe', 'python.exe', 'python.exe', 'trainer.exe']
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：采集命令里必须有 `--policy`（四席策略串的载体）
+  [ok  ] 风格桌：恒 4 席 —— [4, 4, 4, 4, 4, 4]
+  [ok  ] 风格桌：学生**恰好 1 席**（旧口径是 2 席 —— 这条就是本次修正的判据） —— got=1 want=1
+  [ok  ] 风格桌：**每个风格恰好 1 席**（每代桌上都有全部三代风格） —— ['def', 'win', 'atk']
+  [ok  ] 风格桌：对手取**最新模型**（latest）—— 三席各自是本风格池里最新的一代 —— got=['atk', 'def', 'win'] want=['atk', 'def', 'win']
+  [ok  ] 风格桌：`style_pick=rotate` 仍可用（旧口径留存，便于复现） —— ['def-g01', 'win-g03', 'atk-g02']
+  [ok  ] 风格桌：本线风格的对手 ≠ 学生自己的网（`--rotate` 要求四席策略互异）
+  [ok  ] 风格桌：跨代看每种风格在每个席序位上等频（生成级轮转；游戏级靠下面那条 --rotate-perm）
+  [ok  ] 风格桌：采集命令必须带 `--rotate`（C++ 侧每场把策略串循环移位 ⇒ 每 4 场每席轮到每种风格一次）
+  [ok  ] 风格桌：采集命令必须带 `--rotate-perm`（4! = 24 排列；只 `--rotate` 会漏掉相对方位）
+  [ok  ] 风格桌：**评测**桌也必须带 `--rotate-perm`（2026-10-08 用户裁决：训练与闸门同一套座次口径）
+  [ok  ] 风格桌：`rotate_full=False` 能强制关掉 24 排列（复现旧口径 / 与历季对齐时用）
+  [ok  ] 风格桌红证：旧口径确实是**学生 2 席**（因此风格线不许用它） —— got=2 want=2
+  [ok  ] True
+  [ok  ] v4 回路：采集与紧凑集都带 `--aux`（信念/危险头的监督不能因为换生产者就没了）
+  [ok  ] v4 回路：学生策略串逐字一致（`is_student` 靠字符串相等判定） —— got='net:X:\\net.bin@0#0.5' want='net:X:\\net.bin@0#0.5'
+  [ok  ] v4 回路：默认 2+2 配席（2 学生 + 2 teacher） —— got=2 want=2
+  [ok  ] v4 回路：PPO 轮带 `--behaviour`/`--behaviour-temp`（π_old 的来源，训练端还会与 meta 核对）
+  [ok  ] v4 回路：`--target-minutes=0` ⇒ 场次就是 `--games` —— got=400 want=400
+  [ok  ] v4 回路：`--value-target delta` 能进训练命令（P1b 的小局口径） —— got='delta' want='delta'
+  [ok  ] v4 回路：`--advantage hand` 与 `--rank-weight` 都转发 —— got=('hand', '0.2') want=('hand', '0.2')
+  [ok  ] v4 回路：`--max-steps` 就是「每轮短」那条杠杆 —— got='100' want='100'
+  [ok  ] v4 回路：数值口径（grad-clip / KL 早停 / 基线对齐）**显式进命令**（台账自解释）
+  [ok  ] v4 回路：默认不限步数（`--max-steps 0` ⇒ 命令里不出现它，保持旧行为） —— got=None want=None
+  [ok  ] v4 回路：加了这些开关之后**仍然没有 JVM**（`--no-java` 的判据不因新开关失效）
+  [ok  ] v4 回路：值头目标 → 审计主口径的映射（final→value / rtg→rtg / delta→delta） —— got=('value', 'rtg', 'delta') want=('value', 'rtg', 'delta')
+  [ok  ] v4 回路：`audit` 是这条回路的相之一（每轮出口都跑） —— ['collect', 'features', 'compact', 'train', 'export', 'audit', 'eval']
+  [ok  ] v4 回路：审计相带 `--strict --ev-ref legit`（**合法天花板×0.7**，不是废掉的绝对门槛 0.4）
+  [ok  ] v4 回路：审计相的主口径跟着 `--value-target`（不是写死 value） —— got='delta' want='delta'
+  [ok  ] v4 回路：审计相读的是**这一轮的紧凑集与 checkpoint** —— got=(True, True) want=(True, True)
+  [ok  ] v4 回路：`critic` 相排在 `train` **之后**（值头在**最终表示**上练：先练会被 PPO 推动主干而失效） —— ['collect', 'features', 'compact', 'train', 'critic', 'export', 'audit', 'eval']
+  [ok  ] v4 回路：值头相 = `--only-heads value --freeze-trunk --objective bc`（主干与**策略头都不动** ⇒ KL 恒 0、不占 KL 预算）
+  [ok  ] v4 回路：值头相用 `--max-steps`（不是 epochs），且步数来自 `--critic-steps` —— got='400' want='400'
+  [ok  ] v4 回路：值头相的 `--init` 是 **PPO 那一步的 ckpt 目录**（目录按 `<dir>/model.pt` 解） —— got='C:\\Users\\HP\\source\\games\\mahjong\\python\\.tmp\\scroot\\ckpt\\v4-sc3-g01' want='C:\\Users\\HP\\source\\games\\mahjong\\python\\.tmp\\scroot\\ckpt\\v4-sc3-g01'
+  [ok  ] v4 回路：PPO 的 `--init` 仍是**采集那份权重**（不再链到 critic） —— got='X:\\net.bin' want='X:\\net.bin'
+  [ok  ] v4 回路：PPO 的 `--behaviour` 是采集那份权重（`log π_old` 与采集同源） —— got='X:\\net.bin' want='X:\\net.bin'
+  [ok  ] v4 回路：开了值头相 ⇒ **导出 critic 那份权重**（最终 net.bin 里带新练的值头） —— got=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/scroot/ckpt/v4-sc3-g01-critic') want=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/scroot/ckpt/v4-sc3-g01-critic')
+  [ok  ] v4 回路：`--critic-steps 0`（缺省）**不加**这个相 —— 旧行为逐位不变
+  [ok  ] v4 回路：执行顺序只有一处真相（`phase_order` = `PHASES` + `check` 紧跟 features） —— got=['collect', 'features', 'check', 'compact', 'train', 'critic', 'export', 'audit', 'eval'] want=['collect', 'features', 'check', 'compact', 'train', 'critic', 'export', 'audit', 'eval']
+  [ok  ] v4 回路：**执行顺序**里 critic 也在 train 之后（不只 `phases()` 显示的顺序）
+  [ok  ] v4 回路：每个相都有人话标签（漏一个就会打印裸 id，不好读） —— ['audit', 'collect', 'compact', 'critic', 'eval', 'export', 'features', 'train']
+  [ok  ] 竞技场：配对计划 = 全部两两组合（顺序稳定，便于比对台账） —— got=[('t', 'a'), ('t', 'b'), ('a', 'b')] want=[('t', 'a'), ('t', 'b'), ('a', 'b')]
+  [ok  ] 竞技场：结论只看 CI（排除 0 才算更好/更差，否则分不出） —— got=('更好', '更差', '分不出') want=('更好', '更差', '分不出')
+  [ok  ] 竞技场：序贯判决（未满一块不停 / 满了且 CI 排除 0 就停 / 跑满目标给「分不出」） —— got=('continue', 'stop_better', 'stop_worse', 'stop_null') want=('continue', 'stop_better', 'stop_worse', 'stop_null')
+  [ok  ] 竞技场：换标签后假阳率 ≈α（**红证**：不换标签时这一对必判「更好」） —— 假阳率 0.075（k=120）
+  [ok  ] 竞技场：同一对**不换标签**时 CI 排除 0（Δ=a−b=+8）⇒ 上面那条假阳率不是「检验恒不显著」 —— Δ=+8.00 CI[+8.00,+8.00]
+  [ok  ] v4 回路：判据与产物**指同一份权重**（开了值头相 ⇒ audit/export 都看 `<tag>-critic`） —— got=('v4-sc3-g01-critic', 'v4-sc3-g01-critic', 'v4-sc3-g01-critic') want=('v4-sc3-g01-critic', 'v4-sc3-g01-critic', 'v4-sc3-g01-critic')
+  [ok  ] v4 回路：没开值头相时两者都看 `<tag>`（旧行为逐位不变） —— got=('v4-sc2-g03', 'v4-sc2-g03') want=('v4-sc2-g03', 'v4-sc2-g03')
+  [ok  ] v4 回路：值头闸门的可读场次阈值 = 1000（实测 1000 场那轮通过过） —— got=1000 want=1000
+  [ok  ] v4 回路：可读步数阈值 = 3000（1000 场/1200 步只到 0.44×；1000 场/5144 步才通过） —— got=3000 want=3000
+  [ok  ] v4 回路：四个实测点的可读性判定（120/~100 ❌ · 400/1200 ❌ · 1000/1200 ❌ · 1000/5144 ✅） —— got=[False, False, False, True] want=[False, False, False, True]
+  [ok  ] v4 回路：不可读时**说清是哪一轴不够**（1000 场/1200 步只提步数；400 场/1200 步两轴都提） —— 场次不够（400 < 1000；实测 400 场 ≈0.26× 天花板、120 场 EV ≤ 0）；步数
+  [ok  ] v4 回路：规划期步数估算 = min(max_steps, 行数/batch) × epochs（行数 ≈ 场次×650） —— got=(1200, 608) want=(1200, 608)
+  [ok  ] v4 回路：`--eval-vs prev` 把上一轮放对面（标签 a=本轮 / b=上一轮） —— got=(True, 'net:X:\\prev.bin') want=(True, 'net:X:\\prev.bin')
+  [ok  ] v4 回路：`prev` 模式的评测策略串是 2+2 对**上一轮**（同牌山 ⇒ 配对可比） —— -sc4-g02\net.bin,net:X:\prev.bin,net:X:\prev.bin
+  [ok  ] v4 回路：第 1 代（没有上一轮）自动退回 teacher —— got='teacher' want='teacher'
+  [ok  ] v4 回路：`--gen-offset` 让「一次一代」的跑法拿到**唯一的绝对代号** —— got=('v4-sc5-g03', 'v4-sc5-g03', 'v4-sc5-g03') want=('v4-sc5-g03', 'v4-sc5-g03', 'v4-sc5-g03')
+  [ok  ] v4 回路：偏移作用于**所有**按代号派生出来的路径（标签/ckpt/raw/compact/评测目录/台账） —— ild\v4-sc5-g03\net.bin
+  [ok  ] v4 回路：审计结果落 `league/<label>-audit.json`（与台账同一目录，便于回溯）
+  [ok  ] v4 回路：闸门正反两面（都过 → ok；EV 不够 → 不过；某档覆盖率差 >3pp → 不过） —— pass=True ev=False cov=False
+  [ok  ] v4 回路：审计文件缺失/读不到 ⇒ **按未过处理**（不默认放行）
+  [ok  ] MAHJONG_NO_JAVA=1 时选 java 生产者**当场报错** ✓ —— MAHJONG_NO_JAVA=1 但当前生产者是 java —— 改成 `MAHJONG_PRODUCER=cpp`，
+  [ok  ] 生产者：C++ 侧不再缺 `--aux`（标签侧 npz 已移植；对拍 = tools/trainer-aux-parity.mjs）
+  [ok  ] 消融：块偏移表覆盖全部块 —— got=16 want=16
+  [ok  ] 消融：`tile.own` = tile 的 0..3 通道 —— got=('tile', 0, 3) want=('tile', 0, 3)
+  [ok  ] 消融：`cand.derived` 从 88 起 11 列 —— got=('cand', 88, 11) want=('cand', 88, 11)
+  [ok  ] 消融：`evt.stream` 铺满 evt —— got=('evt', 0, 96) want=('evt', 0, 96)
+  [ok  ] 消融：`cand.derived` 那 11 列被整段置 0
+  [ok  ] 消融：**只**动那一段（其余通道原样）
+  [ok  ] 手级链：6 个小局（2 场 × 2 小局 × 2 座里出现过的组合） —— got=6 want=6
+  [ok  ] 手级链：小局 0 的下一小局 = 1（同场同座） —— got=1 want=1
+  [ok  ] 手级链：小局 1 是链末尾（bootstrap 0） —— got=-1 want=-1
+  [ok  ] 手级链：同一小局的行映射到同一个 hand id（且与邻行不同）
+  [ok  ] 手级奖励：小局收支 /1000（千点） —— got=[1.0, 2.0, -1.0, 0.5, -3.0, 3.0] want=[1.0, 2.0, -1.0, 0.5, -3.0, 3.0]
+  [ok  ] 手级奖励：rank 项**只加在链末尾**那一小局（加在每个小局上等于乘了小局数）
+  [ok  ] 手级奖励：链末尾那一小局真的加上了 `rank_weight · 顺位点`
+  [ok  ] 手级 GAE：λ=1 且末端 bootstrap 0 时，值目标 = 链上实际回报（1+2） —— vt=3.000
+  [ok  ] 手级 GAE：A = 值目标 − V（定义自洽）
+  [ok  ] 手级 GAE：λ=0 = 1 步 TD（A_h = r_h + γV_{h+1} − V_h） —— got=[2.0, 0.0, 0.5, 0.0, -6.0, 5.0] want=[2.0, 0.0, 0.5, 0.0, -6.0, 5.0]
+  [ok  ] 手级 GAE：λ=1 的 A_0 = 链上回报 − V_0（λ<1 只是少吸收一部分后继 δ） —— λ=1 A_0=2.000 / λ=0 A_0=2.000
+  [ok  ] 手级 GAE：逐决策展开后同一小局共享同一个优势（与 rtg 的小局内常量口径一致）
+  [ok  ] 温度缩放：欠覆盖（过窄）的分布应拟合出 T > 1（摊平） —— T=3.19
+  [ok  ] 温度缩放：80% 覆盖率被修好（前 → 后） —— 0.00 → 1.00
+  [ok  ] 温度缩放：T=1 时恒等（不改变任何一格） —— got=0.0 want=0.0
+  [ok  ] loc-scale：平移 0、温度 1 时恒等 —— got=0.0 want=0.0
+  [ok  ] loc-scale：平移后每一行仍然归一（概率守恒）
+  [ok  ] loc-scale：系统性偏低时拟合出**正的平移**（把分布往上挪） —— shift=+2.15
+  [ok  ] loc-scale：位置偏差被修掉后 CRPS 大幅下降（温度单用的对照见上一条） —— 1.911 → 0.381
+  [ok  ] 小局级 baseline：值头目标 = 本小局收支（千点，逐行） —— got=[1.0, -0.5, 0.2, 3.0, -1.5, 0.7] want=[1.0, -0.5, 0.2, 3.0, -1.5, 0.7]
+  [ok  ] 小局级 baseline：方差参照是**本小局收支**（不是 rtg） —— base=delta
+  [ok  ] 小局级 baseline：顺位点项只加在链末尾小局（hand_no=1） —— got=[30.0, 10.0, -40.0] want=[30.0, 10.0, -40.0]
+  [ok  ] 小局级 baseline：顺位点项**只进优势**，值头目标仍是本小局收支 —— got=[1.0, -0.5, 0.2, 3.0, -1.5, 0.7] want=[1.0, -0.5, 0.2, 3.0, -1.5, 0.7]
+  [ok  ] 基线重标定：`V = 3·r` ⇒ β=1/3、α=0（把尺度对齐，而不是照抄） —— α=1.11e-16 β=0.3333
+  [ok  ] 基线重标定：`none` 模式必须原样返回（β=1、α=0） —— got=[0.0, 1.0] want=[0.0, 1.0]
+  [ok  ] 基线重标定：`mean` 模式只减均值（β=0、α=mean(r)） —— got=0.0 want=0.0
+  [ok  ] 基线重标定：拟合出的斜率 = 该特征上的最优线性系数（不是 1，也不是 0） —— β=+0.0800（理论 0.0827）
+  [ok  ] 基线重标定：未对齐时优势 std 被放大 >2×，对齐后 <1×（这就是 P1b 那个 2.671× 的复现与修复） —— 未对齐 2.465× → 对齐 0.980×
+  [ok  ] 基线重标定：对齐后的 std 比 ≈ √(1−ρ²)（最优线性基线的理论值，不是拍脑袋） —— 实测 0.9805 vs √(1−ρ²) 0.9805
+  [ok  ] 基线重标定：`_hand_advantage` 走 scale 路径后方差**必不劣于**未对齐（红证守卫同时成立） —— scale 0.998× ≤ none 2.574×
+  [ok  ] 基线重标定：全零奖励（Var=0）不炸、退化成只有截距
+  [ok  ] 天花板分组：`legit*` 里没有任何结局列/别家隐藏真值（0.632 那个数是作弊上界，不是天花板） —— legit 列 = ['aux_own_shanten_after', 'aux_own_tenpai', 'cand_agg', 'ctx', 'effect']
+  [ok  ] 天花板分组：结局列与隐藏真值都归到 `label_*`（另算一栏，标注作弊）
+  [ok  ] 天花板分组：判据参照组 `CEIL_REF_KEY` 真的存在于 `CEIL_GROUPS`（改组名别忘了改常量） —— legit_full(全部合法)
+  [ok  ] 天花板分组：逐候选列按 `label` 取行 ⇒ train(L=29)/val(L=21) 拼出**同一宽度** —— got=(4, 4) want=(4, 4)
+  [ok  ] 天花板分组：取的是 `label` 下标那一行（不是第 0 行） —— got=[7.0, 8.0, 9.0] want=[7.0, 8.0, 9.0]
+  [ok  ] 天花板分组：逐候选聚合按合法候选掩码（填充槽 999 不进 mean/max） —— got=[5.0, 5.0] want=[5.0, 5.0]
+  [ok  ] 读出头探针：池化有真差别时仪器能分辨（目标 = 合法候选的最大值时，max 池化 ≫ mean 池化） —— mean_all +0.386  mean +0.386  max +1.000  std +0.442
+  [ok  ] 读出头探针：`mean_all` 里混进的填充项 = ((L−n)/L)·(b−a)（现行读法为什么随候选数漂移） —— got=2.666667 want=2.666667
+  [ok  ] 读出头探针：非线性探针能在同一份特征上跑完并给出 EV（不是空转） —— EV=+0.387
+  [ok  ] 逐决策链：同小局内 next_row 指下一条决策（跨小局/跨座位断开） —— got=[2, -1, -1, -1, 5, -1] want=[2, -1, -1, -1, 5, -1]
+  [ok  ] 逐决策链：首/末决策行号按 (game,hand_no,seat) 回填 —— got=([0, 1, 0, 3, 4, 4], [2, 1, 2, 3, 5, 5]) want=([0, 1, 0, 3, 4, 4], [2, 1, 2, 3, 5, 5])
+  [ok  ] PBRS：θ=0 时精确退化成原始回报 —— got=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0] want=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  [ok  ] PBRS：逐决策 shaping 之和 = θ·(Φ_末 − Φ_首)（**望远镜相消**，所以最优策略不变） —— Σ=-10.000000 vs θ(Φ_end−Φ_start)=-10.000000
+  [ok  ] PBRS：shaping 项对 θ 严格线性（θ=2 的项是 θ=1 的两倍；γ<1 时也成立） —— 比值=2.000000
+  [ok  ] PBRS 优势不变性（Ng 1999）：Q′−V′ == Q−V ⇒ **shaping 不改变优势，也就不能降它的方差** —— max|ΔA|=7.11e-15
+  [ok  ] PBRS：Q′ == Q − Φ(s)（值函数按势函数平移，这就是「状态已知成分可被 critic 精确减掉」的来源） —— max|Q′−Q+Φ|=6.30e-13
+  [ok  ] shaping 探针：势函数恒 0 时 θ 再大也不改变回报（θ 轴不是凭空造差别）
+  [ok  ] shaping 探针：势函数的**末值**是查不到的未来量 ⇒ |θ| 越大回报方差越大（实测方向一致） —— θ=0 std=1.001 → θ=4 std=4.913
+  [ok  ] 判据参照：合法天花板比例 = 0.7 —— got=0.7 want=0.7
+  [ok  ] 判据参照：`floor` 口径下 EV 0.055 < 0.1 ⇒ EV 判据 FAIL（老口径）
+  [ok  ] 判据参照：`legit` 口径下 EV 0.055 ≥ 0.7×0.0693 ⇒ EV 判据 PASS（同一条数、换了参照）
+  [ok  ] 判据参照：天花板高时同一条数必须 FAIL（参照真的在起作用，不是恒真）
+  [ok  ] 判据参照：**塌成均值**的值头（EV 0.02 ≈ 0.3 × 天花板）必须 FAIL —— 这才是这条闸门要抓的
+  [ok  ] 判据参照：天花板为 0（该口径没有可学的合法信息）时退回绝对门槛 ⇒ **判 FAIL**，不放过
+  [ok  ] 基线重标定：`--rank-weight>0` 时 raw ≤ min(只减均值, 未重标定)（最小二乘最优性重新成立） —— rw=0.2 raw 1.1945× · flat 1.1964× · unfit 2.8361×
+  [ok  ] 基线重标定：顺位点项让**目标本身**方差 > `delta` ⇒ 旧守卫的参照 `min(1, 未重标定)` **过严**（它会把合法配置判死 —— 采集战役就是这么被拦下的） —— 只减均值 rw=0 1.0000× → rw=0.2 1.1964×
+  [ok  ] 基线重标定：红证 —— 拿 `delta` 拟合与按**含顺位点的目标**拟合给出不同的斜率（拟合对象真的变了） —— β 新 +0.0252 vs 旧 +0.0229；残差 新 1.1945× vs 旧 1.1946×（二阶）
+  [ok  ] PPO 数值口径：grad-clip 把总范数裁到 ε 之内，且**返回裁剪前的范数**（日志要看得出砍没砍） —— 裁剪前 223.61 → 裁剪后 0.500000
+  [ok  ] PPO 数值口径：`--grad-clip 0` 关闭裁剪（返回 NaN 而不是 0 —— 0 会被读成「范数真的是 0」）
+  [ok  ] PPO 数值口径：KL 早停四条边界（min_steps 之前 / 越阈值 / 阈值内 / NaN 都不误停）
+  [ok  ] PPO 数值口径：`--kl-early-stop 0` 关闭早停
+  [ok  ] PPO 数值口径：`--kl-min-steps` 被钳到轮长的 1/5（否则早停够不着） —— got=(20, 5, 100, 1) want=(20, 5, 100, 1)
+  [ok  ] PPO 数值口径：钳过之后 100 步一轮里早停**真的能触发**（修前是永假）
+  [ok  ] 权重来源：ckpt **目录**按其 `model.pt` 解（`--init` 的 help 一直是这么承诺的） —— got=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/selfcheck/v4-weight-src/ckpt-a/model.pt') want=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/selfcheck/v4-weight-src/ckpt-a/model.pt')
+  [ok  ] 权重来源：`net.bin` 文件原样返回 —— got=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/selfcheck/v4-weight-src/net.bin') want=WindowsPath('C:/Users/HP/source/games/mahjong/python/.tmp/selfcheck/v4-weight-src/net.bin')
+  [ok  ] 权重来源：不存在的路径 当场报错 ✓ —— 权重来源找不到：C:\Users\HP\source\games\mahjong\python\
+  [ok  ] 权重来源：没有 model.pt 的目录 当场报错 ✓ —— 权重目录里没有 model.pt：C:\Users\HP\source\games\mahjon
+  [ok  ] PPO 数值口径：PPO + RWR 当场报错（不做二次加权） —— --objective ppo 与 --rwr-beta 8 不能同时用：优势已经是回报加权的，
+  [ok  ] PPO 数值口径：`--rwr-beta 0` 与 `--objective rwr` 都放行（只挡组合）
+  [ok  ] PPO 数值口径：`norm="none"` 原样（手级路径已全局归一化过）、`norm="batch"` 才钉成 std≈1 —— none std=1.118 · batch std=1.000
+  [ok  ] rank_points 回填：两个切分覆盖率都是 100% —— {'train': {'decisions': 4, 'rank_frac': 1.0, 'per_game': 1}, 'val': {'decisions': 4, 'rank_frac': 1.0, 'per_game': 1}}
+  [ok  ] rank_points 回填：每一行都等于 summary.json 里那一场的对应座位值
+  [ok  ] rank_points 回填：val 切分同样补上（两半都要补，漏一半就等于验证集没有目标）
+  [ok  ] rank_points 回填：非零和当场报错（不静默写坏数据） —— val：顺位点四家之和不为 0（最大 |Σ| = 14）—— 座位错位了
+== 风格奖励塑形（`--style-bonus`）==
+  [ok  ] 风格奖励：`riichi=1.0:no_deal` 解析出权重与质量轴 —— got=('riichi', 1.0, 'no_deal') want=('riichi', 1.0, 'no_deal')
+  [ok  ] 风格奖励：空串 = **关闭**（缺省路径） —— got=False want=False
+  [ok  ] 风格奖励：`riichi`（没写质量轴）被硬拒 ✓
+  [ok  ] 风格奖励：`riichi=1.0`（没写质量轴）被硬拒 ✓
+  [ok  ] 风格奖励：`zzz=1:no_deal`（未登记的轴）被硬拒 ✓
+  [ok  ] 风格奖励：`riichi=nan:no_deal`（权重不是有限数）被硬拒 ✓
+  [ok  ] 风格奖励：`riichi=1:no_deal,riichi=2:win`（同一个轴出现两次）被硬拒 ✓
+  [ok  ] 风格奖励：`riichi=1:nope`（质量轴不认识）被硬拒 ✓
+  [ok  ] 风格奖励：成对质量轴的候选表里有 `no_deal` / `win` —— ['deal', 'no_deal', 'win']
+  [ok  ] 风格奖励：**默认关闭**时紧凑集命令行里没有 `style` 字面量（逐字不变） —— ['--student', 'net:X:\\net.bin@0#0.5', '--workers', '12']
+  [ok  ] 风格奖励：开启时只多出两个开关（不多不少） —— got=['--style-bonus', 'riichi=1.0:no_deal', '--style-bonus-whiten', 'student'] want=['--style-bonus', 'riichi=1.0:no_deal', '--style-bonus-whiten', 'student']
+  [ok  ] 风格奖励：合成轨迹 2 个小局 —— got=2 want=2
+  [ok  ] 风格奖励：指示量按 (小局 × 座位) 展开 = 4 席 —— got=8 want=8
+  [ok  ] 风格奖励：小局 0 的立直席（偶数席） —— got=[0, 2] want=[0, 2]
+  [ok  ] 风格奖励：小局 0 没有任何放铳（布局=立直且无人放铳） —— got=[] want=[]
+  [ok  ] 风格奖励：小局 1 的放铳只落在 hand_loser 那一席 —— got=[2] want=[2]
+  [ok  ] 风格奖励：`no_deal` 是 `deal` 的补（流局与无人放铳都算未放铳） —— got=[0, 1, 3] want=[0, 1, 3]
+  [ok  ] 风格奖励：小局级合并里 `no_deal` = 0（只要这一小局有人放铳） —— got=0.0 want=0.0
+  [ok  ] 风格奖励：小局级合并里 `riichi` = 1（小局 0：任何一家立直都算） —— got=1.0 want=1.0
+  [ok  ] 风格奖励：Bernoulli 的白化参数 = p、√(p(1−p))（与样本均值/标准差逐位一致） —— μ=0.5 σ=0.5（数据 p=0.5）
+  [ok  ] 风格奖励：合成数据的 p 不退化（否则白化参数会撞上 σ=0 的负向闸门） —— p=0.5
+  [ok  ] 风格奖励：白化自检通过（均值 ≈ 0、方差 ≈ 1） —— mean=+0.00e+00 var=1.000000000000
+  [ok  ] 风格奖励：白化后方差**真的**是 1（不是 ≈1 的摆设） —— 1.0
+  [ok  ] 风格奖励：常数轴 σ=0 被硬拒（不静默跳过那一轴）✓ —— 轴 'riichi' 的白化 σ = 0（μ=0, n=1）—— 这一轴在本数据集上是常数，白化无从谈起（1/σ 会炸）。要么换一个在本桌上
+  [ok  ] 风格奖励红证：合成小局的立直指示量 = 1（它确实立直了） —— got=1.0 want=1.0
+  [ok  ] 风格奖励红证：伴随质量轴 `no_deal` = 0（它放铳了） —— got=0.0 want=0.0
+  [ok  ] 风格奖励红证：**立直但放铳 ⇒ 付奖指示量为 0**（⛔ 不许只按立直付奖） —— got=0.0 want=0.0
+  [ok  ] 风格奖励红证：这一小局拿到的塑形 = **0 − μ/σ 的负偏移**（不是 +1/σ 的正奖励） —— got=-1.0 want=-1.0
+  [ok  ] 风格奖励：对照小局的合并后 `no_deal` = 1（无人放铳） —— got=1.0 want=1.0
+  [ok  ] 风格奖励对照：同样立直、**没放铳** ⇒ 付奖（(1−μ)/σ） —— got=1.0 want=1.0
+  [ok  ] 风格奖励：放铳那一小局的塑形**严格低于**没放铳那一小局（质量轴在起作用） —— 放铳 -1.000 < 没放铳 +1.000
+  [ok  ] 风格奖励：四席取或下「立直的就是放铳的那个」同样拿不到奖励 —— got=-1.0 want=-1.0
+  [ok  ] 风格奖励：谁立直谁放铳不影响判定（`no_deal` 按「本小局有没有人放铳」归一，不被 max 洗掉）
+风格奖励：白化统计（**本数据集实测**，范围 = student；8 个小局，其中 8 个进入统计（= 该小局在统计范围里有决策行））
+  轴 riichi     w=1  成对质量轴=no_deal  μ=0.500000  σ=0.500000  付奖小局 2  付奖总额 +0.0
+  [ok  ] 风格奖励：数据集写出 `style_bonus` 列 —— style_bonus
+  [ok  ] 风格奖励：meta 记下「开了」+ 白化参数（μ/σ 可审计）
+  [ok  ] 风格奖励：meta 的白化范围 = student（缺省口径） —— got='student' want='student'
+  [ok  ] 风格奖励：奖励账落盘（`style-reward.json`）且逐轴有 w/μ/σ/付奖小局数/付奖总额
+  [ok  ] 风格奖励：账里每一轴的字段齐（w / μ / σ / 付奖小局数 / 付奖总额） —— ['action_rows', 'axis', 'blocked_rows', 'granularity', 'hands_indicator', 'kind', 'mu', 'n
+  [ok  ] 风格奖励：train 切分里同一个**小局**的每一行**同值**（含不同席位的那几行）
+  [ok  ] 风格奖励：val 切分里同一个**小局**的每一行**同值**（含不同席位的那几行）
+  [ok  ] 风格奖励：`style_bonus` 不是全局常量（真有逐小局的差异） —— std=0.8660
+  [ok  ] 风格奖励：数据集上至少出现**两种**不同的塑形值（付奖/不付奖都在） —— [-1.0, 1.0]
+风格奖励：白化统计（**本数据集实测**，范围 = student；8 个小局，其中 8 个进入统计（= 该小局在统计范围里有决策行））
+  轴 riichi     w=1  成对质量轴=none  μ=0.500000  σ=0.500000  付奖小局 0  付奖总额 +0.0
+  [ok  ] 风格奖励：`:none`（恒假质量轴）⇒ 付奖小局数 0、付奖总额 0（红证的负向对照） —— got=(0, 0.0) want=(0, 0.0)
+风格奖励：白化统计（**本数据集实测**，范围 = student；8 个小局，其中 8 个进入统计（= 该小局在统计范围里有决策行））
+  轴 riichi     w=1  成对质量轴=no_deal  μ=0.500000  σ=0.500000  付奖小局 2  付奖总额 +0.0
+  [ok  ] 风格奖励：给了 `MAHJONG_STYLE_AUDIT_DIR` ⇒ 账写到**不参与轮换**的持久路径，且 meta 指向它 —— C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-style-reward\audit-persist\ds-persist.json
+  [ok  ] 风格奖励：持久副本与 compact 里那份**逐字节相同**（同一份 payload，不是第二套口径）
+  [ok  ] 风格奖励：持久副本的文件名 = `<紧凑集目录名>.json`（= `tag`，与 `run-league.ps1` 的 tag 对齐）
+  [ok  ] 风格奖励：**没给**环境变量时老口径逐字不变（账仍在 `<紧凑集>/style-reward.json`） —— C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-style-reward\ds\style-reward.json
+  [ok  ] 风格奖励：缺省（不传）时命令行里没有 `--style-bonus`（判据 a）
+  [ok  ] 风格奖励：关闭时不建 `style_bonus` 列（读回是 None，训练端据此一行都不走）
+  [ok  ] 风格奖励：关闭时磁盘上根本没有 `train.style_bonus.npy`
+  [ok  ] 风格奖励：删掉那一列之后读回是 None（= 老版本紧凑集的形状）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-style-reward\beh.bin 重算 V_old（train 48 / val 48 条）…
+  小局 16 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0 / 基线拟合 scale
+  小局奖励：mean +0.750 std 1.984 千点；V_old：mean +0.059 std 0.051
+  基线重标定：α=-1.669 β=32.4115 ⇒ std(V_used) 1.662（原 0.051）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 2.121 vs std(delta) 2.598 ⇒ **0.816×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 0.990× · 只减均值 1.000×）
+  （用时 0.3s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=24）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 48 条（2 场）/ 验证 48 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 50.0% / 验证 50.0%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=13
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 c（step 0/1）
+epoch   1 [c]: train 3.5446 | val top1(教师一致) 0.667 | 首合法基线 0.667 | policy 0.693 value 3.793 place 1.374 bh 0.684 bt 0.685 danger 0.666 effect 0.0084 ssl_acc nan | **学生行 top1 0.667**(n=24) | 学生行 policy 0.924 | **引擎一致率 0.000**(init 0.000 / 随机 0.500) | 引擎 CE(学生行) 0.9242
+        按类型：discard=0.67(n=48)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-nocol\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-nocol\metrics.json（0.4s）
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-style-reward\beh.bin 重算 V_old（train 48 / val 48 条）…
+  小局 16 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0 / 基线拟合 scale
+  小局奖励：mean +0.749 std 1.984 千点；V_old：mean +0.059 std 0.051
+  基线重标定：α=-1.670 β=32.4115 ⇒ std(V_used) 1.662（原 0.051）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 2.121 vs std(delta) 2.598 ⇒ **0.816×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 0.990× · 只减均值 1.000×）
+  风格奖励塑形：`style_bonus` 列覆盖 48/48 行（非 0 = **拿到钱的行**；`hand` 模式是小局级常数 ⇒ 整手都非 0，`decision` 模式只有动作行非 0）；小局级 mean -1.0 std 0.0 **点** vs 结果奖励 std 1984.3 点 ⇒ **0.00000× 结果奖励的尺度**（= 「这一轴会不会支配梯度」的**尺度**读数：远小于 1 就推不动；**放大倍数 w*/w = inf**（⛔ 不是「该设的 w」）；**所需 w** = 当前 w × 该倍数（⚠ 当前 w 读不到：`MAHJONG_STYLE_BONUS` 没设或不含这一轴 ⇒ ⛔ 不拿倍数当 w 用））
+    逐行（student 行 24 行）mean -1.0 std 0.0 点 vs 同一批行上被减奖励 std 2598.1 点 ⇒ **0.000×**（= 塑形列相对结果奖励的方差尺度；1:1 就是「这一轴与结果奖励同权」）
+    被减的那个奖励（delta + 塑形 + 顺位点）的 std：2.598 千点；std(A_raw)/std(reward(delta+style)) = 0.816×
+  归一化后（学生行 z-score）std = 1.000（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）
+  （用时 0.3s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=24）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 48 条（2 场）/ 验证 48 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 50.0% / 验证 50.0%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=13
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 1 步 × batch 2
+  -- 进入阶段 c（step 0/1）
+epoch   1 [c]: train 3.5446 | val top1(教师一致) 0.667 | 首合法基线 0.667 | policy 0.693 value 3.793 place 1.374 bh 0.684 bt 0.685 danger 0.666 effect 0.0084 ssl_acc nan | **学生行 top1 0.667**(n=24) | 学生行 policy 0.924 | **引擎一致率 0.000**(init 0.000 / 随机 0.500) | 引擎 CE(学生行) 0.9242
+        按类型：discard=0.67(n=48)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-zerocol\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-zerocol\metrics.json（0.4s）
+  [ok  ] 风格奖励：两次训练的 checkpoint 都落盘
+  [ok  ] 风格奖励：**列不存在 vs 列存在 ⇒ 权重逐位相同**（默认关闭 = 逐位不变） —— 579da8e5309a0961 vs 579da8e5309a0961
+⚠⚠ 这一份紧凑集没有 `h0` 列 ⇒ 训练会用**窗口冷启动**，而上线端用**整手 carry** ⇒ 两边不是同一个量；重建数据集（`dataset build --student net:<...>` —— 它会用**学生网**重放整手事件算 `h0`）或显式 `--no-carry` 承担后果
+⚠ `--kl-min-steps 100` 对1 步/轮来说**够不着**（早停永远不会触发）⇒ 钳到 1（轮长的 1/5）
+值头/优势口径：**小局级 baseline**（值头目标 = 本小局收支，千点；`--advantage hand`）
+小局级优势（hand）：用行为策略 C:\Users\HP\source\games\mahjong\python\.tmp\selfcheck\v4-style-reward\beh.bin 重算 V_old（train 48 / val 48 条）…
+  小局 16 个 / 模式 hand / γ=1 λ=0.9 rank_weight=0 / 基线拟合 scale
+  小局奖励：mean -0.547 std 3.404 千点；V_old：mean +0.059 std 0.051
+  基线重标定：α=-2.967 β=32.4116 ⇒ std(V_used) 1.662（原 0.051）—— 基线是状态函数，线性重标定**不改梯度期望、只降方差**
+  优势体检（**归一化之前**）：std(A_raw) 3.588 vs std(delta) 2.598 ⇒ **0.923×**（<1 = 方差被削减；这就是 critic 有没有用的直接度量）（参照：未重标定 0.995× · 只减均值 1.000×）
+  风格奖励塑形：`style_bonus` 列覆盖 48/48 行（非 0 = **拿到钱的行**；`hand` 模式是小局级常数 ⇒ 整手都非 0，`decision` 模式只有动作行非 0）；小局级 mean -1297.1 std 2633.5 **点** vs 结果奖励 std 3404.5 点 ⇒ **0.77354× 结果奖励的尺度**（= 「这一轴会不会支配梯度」的**尺度**读数：远小于 1 就推不动；**放大倍数 w*/w = 1.29**（⛔ 不是「该设的 w」）；**所需 w** = 当前 w × 该倍数（⚠ 当前 w 读不到：`MAHJONG_STYLE_BONUS` 没设或不含这一轴 ⇒ ⛔ 不拿倍数当 w 用））
+    逐行（student 行 24 行）mean -1297.1 std 2633.5 点 vs 同一批行上被减奖励 std 3888.5 点 ⇒ **0.677×**（= 塑形列相对结果奖励的方差尺度；1:1 就是「这一轴与结果奖励同权」）
+    被减的那个奖励（delta + 塑形 + 顺位点）的 std：3.889 千点；std(A_raw)/std(reward(delta+style)) = 0.923×
+  归一化后（学生行 z-score）std = 1.000（⚠ 别拿它比参考量：归一化本身就把尺度钉成 1）
+  （用时 0.1s；优势已冻结、不再随 critic 变动）
+引擎标签（W4）：目标候选从 `cand.derived[88:96]` 现算（打后向听/进张/听牌形 —— **引擎给的稠密标签**，无采样噪声、不花闸门算力）；模仿项权重 `--il-weight` = 0（**缺省 0 = 逐位等于今天**）
+引擎一致率基线（**开训前** = `--init` 那一份网）：学生行 0.0000（n=24）/ 全部行 0.0000 | **随机基线 1/平均候选数** 0.5000 ⇒ 判据：训练后的 `engine_top1`（学生行）必须**显著高于** 0.0000
+数据：训练 48 条（2 场）/ 验证 48 条；lmax=2；标签侧 无；长程 carry **无**（窗口冷启动）；学生行占比 训练 50.0% / 验证 50.0%（`--student` 遮罩生效）
+模型：1,397,992 参数（+SSL 头 1,544）；device=cpu；threads=1；seed=13
+分阶段：a 策略+牌效（0%）→ b 冻主干只训头（0%）→ c 联合微调（其余）；每 epoch 1 步 × batch 48
+  -- 进入阶段 c（step 0/1）
+epoch   1 [c]: train 3.5459 | val top1(教师一致) 0.333 | 首合法基线 0.667 | policy 0.693 value 3.856 place 1.503 bh 0.182 bt 0.069 danger 0.050 effect 0.8079 ssl_acc nan | **学生行 top1 0.333**(n=24) | 学生行 policy 1.386 | **引擎一致率 1.000**(init 0.000 / 随机 0.500) | 引擎 CE(学生行) 1.3863
+        按类型：discard=0.33(n=48)
+
+checkpoint：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-nz\model.pt；指标：C:\Users\HP\source\games\mahjong\python\.tmp\scroot\ckpt\v4-sr-nz\metrics.json（0.3s）
+  [ok  ] 风格奖励：非 0 的塑形**真的改变了权重**（否则上一条会退化成「这一列被忽略」） —— 579da8e5309a0961 vs 28178901e7bb8cb9
+  [ok  ] 风格奖励：`gae` 模式 + 塑形列 ⇒ 当场报错（⛔ 不静默忽略这笔奖励）✓ —— `--style-bonus` 只与 `--advantage hand` 口径配套（gae 的链上奖励由 `v4adv.hand_reward` 现算，塑形项
+  [ok  ] 风格奖励：不开塑形时「被减的奖励」就是 `delta`（ref_std == std(delta/1000)） —— 0.15811388300841897
+  [ok  ] 风格奖励：每小局恒定的那笔塑形**不改变被减奖励的方差**（同时证明它进了那一项） —— 0.158114 → 0.158114
+  [ok  ] 风格奖励：开了才有那条体检读数（关掉时 stats 里连这个键都不存在）
+  [ok  ] 风格奖励：逐小局变化的塑形**把奖励的方差推上去**（= 它真的在推那一轴） —— 0.158114 → 2.970690
+  [ok  ] 质量护栏：Δ=+0.30/SE=1.32/tol=2（**点估计为正 + CI 宽**）⇒ **不再假警**（旧规则会报）✓ —— CI[-2.287,+2.887] ok=True（旧规则=False）
+  [ok  ] 质量护栏：Δ=−3/SE=0.5 ⇒ **仍报**（CI 上界 < 0 **且** 点估计 < −tol）✓
+  [ok  ] 质量护栏：Δ=−1/SE=0.3 ⇒ **仍报**（点估计没到 −2，但 **CI 上界 < 0** 单独触发；旧规则漏报）✓ —— hi=-0.412
+  [ok  ] 质量护栏：点估计**恰** = −tol ⇒ 仍报（由 CI 上界 < 0 触发；`<` 不含等号）✓
+  [ok  ] 质量护栏：判据行的键与顺序（含方向两键 `bad_when`/`bad_rule`，插在 `side` 之后、位置固定） —— got=('metric', 'unit', 'tol', 'side', 'bad_when', 'bad_rule', 'delta', 'lo', 'hi', 'se', 'n_games', 'ok', 'combine', 'sources') want=('metric', 'unit', 'tol', 'side', 'bad_when', 'bad_rule', 'delta', 'lo', 'hi', 'se', 'n_games', 'ok', 'combine', 'sources')
+  [ok  ] 质量护栏：★ 落盘白名单 `COMPANION_WRITTEN` 一个字不加、顺序不动（旧/新产物逐字节可比） —— got=('metric', 'unit', 'tol', 'side', 'delta', 'lo', 'hi', 'se', 'n_games', 'ok', 'combine', 'sources') want=('metric', 'unit', 'tol', 'side', 'delta', 'lo', 'hi', 'se', 'n_games', 'ok', 'combine', 'sources')
+  [ok  ] 质量护栏：`quality --metric` 注册表 = **恰好这 8 个量**、名字与顺序固定（2026-10-11 六个伴随量全注册；`decline_rate` 与它之前那三个一个不少） —— got=('riichi_win_rate', 'win_rate', 'dama_rate', 'decline_rate', 'riichi_rate', 'meld_rate', 'deal_rate', 'avg_win_score') want=('riichi_win_rate', 'win_rate', 'dama_rate', 'decline_rate', 'riichi_rate', 'meld_rate', 'deal_rate', 'avg_win_score')
+  [ok  ] 质量护栏：`up` 类（放铳率）—— 上升显著 ⇒ **越界**；下降（变好，上界仍 < 0）⇒ **不**越界（方向无关的旧规则会把「同时改善防守」的轴误杀） —— Δ=−0.992/SE=0.437 ⇒ CI[-1.848,-0.136] ok=True（旧规则=False）；Δ=+2.0/SE=0.4 ⇒ lo=+1.216 ok=False
+  [ok  ] 质量护栏：行级 `decline_rate` 的分子/分母进了 `PAIR_AXES`（⛔ 不另立一套口径） —— ['avg_win_score', 'dama_rate', 'dama_wins_per_game', 'deal_rate', 'decline_rate', 'decline_rows_per_game', 'fold_rate', 'fold_rows_per_game', 'meld_rate', 'pon_rows_per_game', 'pon_type_rate', 'riichi_rate', 'riichi_turn_mean', 'riichi_win_rate', 'win_rate']
+  [ok  ] 质量护栏：行级 `DECLINE_KEYS` 与手级 `COUNT_KEYS` **不重叠**（前者与**奖励侧审计账**对账、后者与 `style-vector.py` 对账 —— 两份独立账）
+== 逐决策付奖（`--style-bonus-mode`）==
+  [ok  ] 逐决策：模式名单一来源 —— got=('hand', 'decision') want=('hand', 'decision')
+  [ok  ] 逐决策：缺省 = `hand`（老口径） —— got='hand' want='hand'
+  [ok  ] 逐决策：未登记的模式 'Decision' 被硬拒 ✓
+  [ok  ] 逐决策：未登记的模式 'row' 被硬拒 ✓
+  [ok  ] 逐决策：未登记的模式 'per-decision' 被硬拒 ✓
+  [ok  ] 逐决策：能当付奖轴的轴表 —— got=('dama', 'fold', 'meld', 'pon', 'riichi', 'riichi_turn', 'win') want=('dama', 'fold', 'meld', 'pon', 'riichi', 'riichi_turn', 'win')
+  [ok  ] 逐决策：结局量 'deal' 当付奖轴 ⇒ 当场报错 ✓（不猜一行、不退回 hand）
+  [ok  ] 逐决策：结局量 'no_deal' 当付奖轴 ⇒ 当场报错 ✓（不猜一行、不退回 hand）
+  [ok  ] 逐决策：结局量 'win_points' 当付奖轴 ⇒ 当场报错 ✓（不猜一行、不退回 hand）
+  [ok  ] 逐决策：前置闸门拒掉结局量付奖轴 ✓ —— `--style-bonus-mode decision` 不支持这些付奖轴：no_deal（它们是**结局量**，没有
+  [ok  ] 逐决策：白化单位换成**行**（范围内行数 = 8 小局 × 2 席 × 3 行） —— got=48 want=48
+  [ok  ] 逐决策：行级 μ = 动作行 / 范围内行 = 8/48 —— got=0.166666666667 want=0.166666666667
+  [ok  ] 逐决策：行级 σ = √(μ(1−μ))（Bernoulli 同一把尺子） —— got=0.37267799625 want=0.37267799625
+  [ok  ] 逐决策：行级 σ > 0（不撞 σ=0 闸门） —— σ=0.372678
+  [ok  ] 逐决策：白化自检通过（范围内的**行**上均值 ≈ 0、方差 == 1） —— mean=+2.78e-17 var=1.0000000000000002 n=48
+  [ok  ] 逐决策：审计账记下模式 = decision —— got='decision' want='decision'
+  [ok  ] 逐决策：动作行数（8 行 = 4 个小局 × 2 席） —— got=8 want=8
+  [ok  ] 逐决策：付奖行数 + 质量轴拦下 == 动作行（4 + 4 == 8；小局 2/6 的立直者就是放铳者） —— got=(4, 4) want=(4, 4)
+  [ok  ] 逐决策：`hand` 模式的同一份审计账里这些键是 None（不污染老账） —— got=[None] want=[None]
+  [ok  ] 逐决策红证：手级=1 但行级找不到动作行 ⇒ 当场报错、明说**不退化** ✓ —— `decision` 模式取不到'哪一行做了这个动作'（共 **1** 个小局；下面只列前 1 条样例）：game=0 hand=0: [riichi] 手级指
+  [ok  ] 逐决策红证对照：同一份轨迹在 `hand` 模式下照常算得出（μ=0.5、两小局） —— got=(0.5, 2) want=(0.5, 2)
+风格奖励：白化统计（**本数据集实测**，范围 = student；8 个小局，其中 8 个进入统计（= 该小局在统计范围里有决策行））
+  轴 riichi     w=1  成对质量轴=no_deal  μ=0.166667  σ=0.372678  付奖小局 2  付奖总额 +3.6
+风格奖励：**逐决策（decision）付奖** —— 奖励只落在'真的做了那个动作'那一行；白化总体 = student 席的**决策行**（48 行）
+  轴 riichi：动作行（`riichi` 的动作键）8  付奖行 4  质量轴 `no_deal` 拦下 4  ⇒ 付奖行 +拦下 == 动作行 (✓)
+     白化（逐行，**本模式实际使用**）μ=0.166667 σ=0.372678 n=48 行  ⇒ 动作行拿到的钱 w·(1−μ)/σ = +2.2 点
+     ⚠ 手级白化（**仅作参照**，本模式不用）：μ=0.500000 σ=0.500000；『立直小局数』（手级指示量=1）4 ⇒ 付奖行数 / 立直小局数 = 1.000
+  [ok  ] 逐决策：meta 记下模式 —— got='decision' want='decision'
+  [ok  ] 逐决策：列里非 0 行 == **付奖行数**（4 行：2 个小局各 2 席通过质量轴） —— got=4 want=4
+  [ok  ] 逐决策：非动作行是 **0**（不是 `−μ/σ` 的负偏移）—— 否则'付奖行数 == 动作行数'当场失效 —— 非 0 4 / 共 96 行
+  [ok  ] 逐决策：动作行拿到的钱就是 `w·(1−μ_行)/σ_行` —— 2.236068 vs 2.236068
+  [ok  ] 逐决策：同一份数据上 `decision` 与非 0 行结构与 `hand` **不同**（不是 no-op） —— hand 非 0 96 行 vs decision 4 行
+  [ok  ] 逐决策：行级常数轴 σ=0 被硬拒 ✓ —— 轴 'riichi' 的白化 σ = 0（μ=0, n=4）—— 这一轴在本数据集上是常数，白化无从谈起（1/σ 会炸）。要么换一个在本桌上
+  [ok  ] 多家荣和：合成轨迹 1 个小局 —— got=1 want=1
+  [ok  ] 退化组合：`win=…:no_deal` 当场报错并给出实测（恒真 ⇒ 奖励退化成对结果的重复加权）✓ —— 轴 'win' 配伴随质量轴 'no_deal' 会**退化成恒真**（付奖行蕴含了它）⇒ 质量轴形同虚设、奖励变成「只按 win 付奖」=
+  [ok  ] 多家荣和：这一小局**两席**都执行了 `ron`（陷阱本身：手级只记一家、行级看是两家） —— got=[0, 2] want=[0, 2]
+  [ok  ] 多家荣和：加'我就是被记录的那家'之后只剩 1 行（`hand_winner=0`） —— got=1 want=1
+  [ok  ] 多家荣和：这一小局**不再**被判成'两套口径漂移'（上一轮 30/11258 就是这条误判） —— got=[] want=[]
+  [ok  ] 多家荣和：付奖行 == 动作行 == 1（另三席的 `pass` 行付 0） —— got=(1, 1, 0) want=(1, 1, 0)
+  [ok  ] 多家荣和：`row_self_seat` 进审计账（不写下来就没法复判那一列的口径） —— got='winner' want='winner'
+  [ok  ] 多家荣和：双响里**非最近那家**（席位 2）拿不到这笔奖励 = **软信号少付**（⛔ 判据侧不换尺子） —— seat0 +1732.1 点 / seat2 +0.0 点
+  [ok  ] 报数修正：日志报**真实违规小局数** 12（不是样例上限 8）—— 上一轮恒说 8 —— `decision` 模式取不到'哪一行做了这个动作'（共 **12** 个小局；下面只列前 8 条样例）：game=0 hand=0: [riichi] 手级指示量=1（本小局发生过这个动作），但**范围内一行都没有**执行它—— 取不到
+  [ok  ] 报数修正：样例上限 `VIOL_SAMPLES` 与计数**分开**（计数不受它约束） —— VIOL_SAMPLES=8
+  [ok  ] 逐决策：`decision` 时紧凑集命令只多出 `--style-bonus-mode decision` —— got=['--style-bonus-mode', 'decision'] want=['--style-bonus-mode', 'decision']
+  [ok  ] 逐决策：`hand`（缺省）时那一个开关**不进命令行**（老轮次台账逐字可比） —— got=['--style-bonus', 'riichi=1.0:no_deal', '--style-bonus-whiten', 'student'] want=['--style-bonus', 'riichi=1.0:no_deal', '--style-bonus-whiten', 'student']
+== `riichi_turn` 轴（**早立直** · 阈值 T=8）==
+  [ok  ] 早立直：阈值表（唯一一条巡目轴 ⇒ 手级镜像只实现这一条） —— got={'riichi_turn': 8} want={'riichi_turn': 8}
+  [ok  ] 早立直：动作前缀 = 立直宣言（与 `riichi` 轴**同一行规则**） —— got={'riichi_turn': 'riichi:'} want={'riichi_turn': 'riichi:'}
+  [ok  ] 早立直：**实测**恒真闸门（付奖行必须真被伴随量拦下） —— got={'riichi_turn': ('no_deal',), 'fold': ('no_deal',), 'pon': ('no_deal',)} want={'riichi_turn': ('no_deal',), 'fold': ('no_deal',), 'pon': ('no_deal',)}
+  [ok  ] 早立直：登记为 `decision` 专用 + 行级付奖轴 —— ('dama', 'riichi_turn', 'fold', 'pon')
+  [ok  ] 早立直：行级判据 = 宣言行 ∧ 巡目 ≤ T（> T 与'非宣言行'都 False） —— got=(True, False, False) want=(True, False, False)
+  [ok  ] 早立直：`declared_turn` 取不到返回 `None`（⛔ 不返回 0） —— got=None want=None
+  [ok  ] 早立直：宣言行**取不到巡目** ⇒ 当场报错（⛔ 不猜 0）✓ —— 轴 'riichi_turn' 的付奖行是「**宣言立直的那一行**」，判据要**这一行自己的巡目**（`obs.player_draws`
+  [ok  ] 早立直：四数（宣言 / ≤T / >T / 取不到）= (3, 2, 1, 0) —— got=(3, 2, 1, 0) want=(3, 2, 1, 0)
+  [ok  ] 早立直：付奖 + 拦下 == 动作行 == 巡目 ≤ T 的宣言行（1 + 1 == 2） —— got=(2, 1, 1) want=(2, 1, 1)
+  [ok  ] 早立直：账里带阈值与判据句（不写下来就没法复判那一列的口径） —— got=(8, True) want=(8, True)
+  [ok  ] 早立直 ★ **与 `riichi` 轴共存**：同一份轨迹上 `riichi` 三数（晚立直那一行**也付奖**） —— got=(3, 2, 1) want=(3, 2, 1)
+  [ok  ] 早立直：白化自检通过（两轴都 mean≈0 / var == 1） —— riichi var=1.0000000000000002 / riichi_turn var=1.0
+  [ok  ] 早立直：`hand` 模式用它 ⇒ 当场报错（不静默换轴）✓ —— 这些轴只在 `decision` 模式成立：riichi_turn —— 它们的行级判据是'**能而不为**'（`legal` 里有它、这一
+== `fold` 轴（**被威胁时的降り率** · 弱口径 = 現物）==
+  [ok  ] 降り：动作前缀 = 出牌（`discard:`；鸣牌询问 / pass / riichi / win 都不是降り行） —— got={'fold': 'discard:'} want={'fold': 'discard:'}
+  [ok  ] 降り：**实测**恒真闸门（付奖行必须真被伴随量拦下） —— got={'riichi_turn': ('no_deal',), 'fold': ('no_deal',), 'pon': ('no_deal',)} want={'riichi_turn': ('no_deal',), 'fold': ('no_deal',), 'pon': ('no_deal',)}
+  [ok  ] 降り：登记为 `decision` 专用 + 行级付奖轴 —— DECISION_ONLY_AXES=('dama', 'riichi_turn', 'fold', 'pon')
+  [ok  ] 降り：現物 = 宣言牌(9m) + 宣言后的舍牌(5m/2s/赤五⇒5p)，⛔ 不含宣言前的 3z —— got=['2s', '5m', '5p', '9m'] want=['2s', '5m', '5p', '9m']
+  [ok  ] 降り：宣言牌本身由 `sideways` 认定（⛔ 不猜） —— got={2: '9m'} want={2: '9m'}
+  [ok  ] 降り：「被威胁」= **当行** `obs.riichi` 里**别家**有真（⛔ 不是'本小局曾经有人立直'） —— got=(True, (2,)) want=(True, (2,))
+  [ok  ] 降り：★ seat 口径写死 —— 行动者自己立直**不算**威胁（立直后只能摸切、没有选择权） —— got=((True, (2,)), (True, ())) want=((True, (2,)), (True, ()))
+  [ok  ] 降り：打出的牌对威胁家是現物 ⇒ 付奖行；不是 ⇒ 押し（False） —— got=(True, True, False) want=(True, True, False)
+  [ok  ] 降り：非出牌行（pass / riichi: / ron）永远不是降り行 —— got=(False, False, False) want=(False, False, False)
+  [ok  ] 降り：威胁判定按**牌种**（打出的赤五 `0p` 与現物 `5p` 同一种） —— got=(True, True) want=(True, True)
+  [ok  ] 降り：两家威胁（2 現物 9m/5m/2s/5p、3 現物 1z/9p） —— got=(True, (2, 3)) want=(True, (2, 3))
+  [ok  ] 降り：★★ 新口径 = **对至少一家**威胁家是現物 ⇒ `9m`（只对 2 安全）**是**付奖行（`all` 会判 False） —— got=(True, True, False) want=(True, True, False)
+  [ok  ] 降り：无威胁（没别家立直）⇒ 不是被威胁行（threat_rows 不计） —— got=((True, ()), False) want=((True, ()), False)
+  [ok  ] 降り：`obs.riichi` 缺字段 ⇒ `available=False` + 出牌行**硬拒**标记（⛔ 不当'没威胁'） —— got=((False, ()), True) want=((False, ()), True)
+  [ok  ] 降り：`riichi` 状态位为真但 `events` 里**没有**该家的 `riichi` 事件 ⇒ 現物重建不出来 ⇒ 硬拒标记 —— got=True want=True
+  [ok  ] 降り：`row_is_action('fold', …)` 当场报错 ⇒ 唯一落点是 `fold_row_ok` ✓ —— 轴 'fold' 的行级判据**不是**'`chosen` 长什么样'，而是`fold_row_ok(obs, chosen, seat)`
+  [ok  ] 降り：`fold_row_ok(obs, chosen, seat)` 的 `seat` **必填**（缺了当场 TypeError）✓
+  [ok  ] 降り：四数（被威胁行 / 降り / 押し / 取不到）= (4, 3, 1, 0) —— got=(4, 3, 1, 0) want=(4, 3, 1, 0)
+  [ok  ] 降り：四数自洽 `threat == fold + push + missing` —— got=4 want=4
+  [ok  ] 降り：对账 `fold_rows == action_rows`（两处独立累加） —— got=3 want=3
+  [ok  ] 降り：付奖 + 拦下 == 动作行（3 = 2 + 1；切了現物照样可能放铳 ⇒ 非恒真） —— got=(2, 1) want=(2, 1)
+  [ok  ] 降り：账里带口径句（threat_src / genbutsu_src / row_rule）—— 不写下来就没法复判 —— `chosen` 以 `discard:` 开头 ∧ 被威胁（**别家**立直）
+  [ok  ] 降り：白化自检通过（范围内的**行**上均值 ≈ 0、方差 == 1） —— mean=+2.78e-17 var=1.0000000000000002 n=4
+  [ok  ] 降り：手级指示量 = 该席本小局**至少有一行**被判成付奖行（小局 0/1/2 ⇒ 1，小局 3 ⇒ 0） —— got=[0, 1, 2] want=[0, 1, 2]
+  [ok  ] 降り：★ **付钱路按 `step` 查集合**（小局 0/1 付奖、小局 2 被伴随量拦下、小局 3 押し；⛔ 拿行内下标当键时小局 1（step=1）与 2（step=2）会**漏付**） —— got=[True, True, False, False] want=[True, True, False, False]
+  [ok  ] 降り：付钱路非零行数 == 记账路付奖行数（两条路同一集合） —— got=2 want=2
+  [ok  ] 降り：★ 自己已立直的行**不进**威胁集（h1 被排除）；被威胁 3 行里降り 2 / 押し 1 —— got=(3, 2, 1, 0) want=(3, 2, 1, 0)
+  [ok  ] 降り：★ 付奖行 + 拦下 == 动作行 == 降り行（2 = 1 + 1；h2 学生放铳 ⇒ 伴随量非恒真） —— got=(2, 1, 1) want=(2, 1, 1)
+  [ok  ] 降り：`hand` 模式用它 ⇒ 当场报错（不静默换轴）✓ —— 这些轴只在 `decision` 模式成立：fold —— 它们的行级判据是'**能而不为**'（`legal` 里有它、这一行没选它），而
+  [ok  ] 降り：取不到威胁状态 / 現物 ⇒ **硬拒**（⛔ 不静默压低付奖行率）✓ —— 被威胁时的降り（`fold` 轴）：这些行**取不到威胁状态或現物**（`obs.riichi` 缺字段 / 该威胁家在 `obs.events` 里没有 `riichi` 事件 
+== `pon` 轴（**副露种类 = 碰取向**）==
+  [ok  ] 副露种类：四格（鸣牌行 / 碰 / 吃 / 杠）= (4, 2, 1, 1) 且加总自洽 —— got=(4, 2, 1, 1) want=(4, 2, 1, 1)
+  [ok  ] 副露种类：碰的行 == action_rows（两处独立累加） —— got=2 want=2
+  [ok  ] 副露种类：付奖 + 拦下 == 碰的行（2 = 1 + 1；碰完照样可能放铳 ⇒ 伴随量非恒真） —— got=(1, 1) want=(1, 1)
+  [ok  ] 副露种类：账里带口径句（row_rule / type_src / type_prefix） —— `chosen` 以 pon: 开头（= 这一手是**碰**；⛔ `chi:`/`kan:` 那一侧
+  [ok  ] 副露种类：白化自检通过（范围内的**行**上均值 ≈ 0、方差 == 1） —— mean=-2.22e-17 var=1.0000000000000002 n=5
+  [ok  ] 副露种类：手级指示量 = 该席本小局**至少碰过一次**（小局 0/4 ⇒ 1，其余 ⇒ 0） —— got=[0, 4] want=[0, 4]
+  [ok  ] 副露种类：★ 付钱路**只给碰**（碰且未放铳那一行付、被拦下的碰不付、吃/杠/出牌一行都不付；按 `step` 查集合） —— got=[True, False, False, False, False] want=[True, False, False, False, False]
+  [ok  ] 副露种类：`hand` 模式用它 ⇒ 当场报错（不静默换轴）✓ —— 这些轴只在 `decision` 模式成立：pon —— 它们的行级判据是'**能而不为**'（`legal` 里有它、这一行没选它），而 
+  [ok  ] 副露种类：**分母取不到**（鸣牌行 = 0）⇒ **硬拒**（⛔ 不静默付 0）✓ —— 副露种类轴（`pon`）：统计范围里**一行鸣牌决策行都没有**（`chosen` 以 `chi:`/`pon:`/`kan:` 开头的行 = 0）⇒ 这一轴的**分母取不到**、
+  [ok  ] 风格轴：线→目标轴的映射 —— got={'atk': 'win_points', 'def': 'deals', 'win': 'wins'} want={'atk': 'win_points', 'def': 'deals', 'win': 'wins'}
+  [ok  ] 风格轴：三个轴已登记进 `eval.METRICS` —— ('rank_points', 'place', 'score', 'wins', 'deals', 'win_points')
+  [ok  ] 风格轴：`deals` 取负（放铳越少越好 ⇒ 与'正数=更好'约定一致） —— got=[-3.0, -0.0] want=[-3.0, -0.0]
+  [ok  ] 风格轴：`win_points` 原样（打点轴） —— got=[7000.0, 8000.0] want=[7000.0, 8000.0]
+  [ok  ] True
+  [ok  ] 风格轴：护栏容忍带 = 1.0 顺位点（预注册） —— got=1.0 want=1.0
+  [ok  ] 风格轴：`--with-quality` 预设（atk→wins / win→deals / def→wins） —— got={'atk': ('wins',), 'win': ('deals',), 'def': ('wins',)} want={'atk': ('wins',), 'win': ('deals',), 'def': ('wins',)}
+  [ok  ] 风格轴：伴随量容忍带（wins/deals 0.10 ≈0.9pp、win_points 150 点） —— got={'wins': 0.1, 'deals': 0.1, 'win_points': 150.0} want={'wins': 0.1, 'deals': 0.1, 'win_points': 150.0}
+  [ok  ] 风格轴：`--with-quality` 展开（预注册容忍带随行） —— got={'atk': [('wins', 0.1)], 'def': [('wins', 0.1)], 'win': [('deals', 0.1)]} want={'atk': [('wins', 0.1)], 'def': [('wins', 0.1)], 'win': [('deals', 0.1)]}
+  [ok  ] 风格轴：伴随量既不是该线主口径、也不是老护栏（同一个量不需要两条护栏） —— {'atk': ('wins',), 'win': ('deals',), 'def': ('wins',)}
+  [ok  ] 风格轴：`--guard-metric` 显式 TOL —— got=('win_points', 150.0) want=('win_points', 150.0)
+  [ok  ] 风格轴：`--guard-metric` 不写 TOL ⇒ 用预注册值 —— got=('wins', 0.1) want=('wins', 0.1)
+  [ok  ] 风格轴：`--guard-metric` 形状不对 ⇒ 当场报错（不静默丢护栏） —— got=3 want=3
+  [ok  ] 风格轴：`decide()` 缺省**一个键都不多**（新护栏是 opt-in ⇒ 与旧版逐位可比） —— got=('delta', 'lo', 'hi', 'p', 'n', 'sd', 'win', 'lose', 'tie', 'need_for_2', 'verdict', 'adopt') want=('delta', 'lo', 'hi', 'p', 'n', 'sd', 'win', 'lose', 'tie', 'need_for_2', 'verdict', 'adopt')
+  [ok  ] 风格轴：`decide()` 缺省 = 仅按主口径 CI 排除 0 判（adopt ⇔ lo > 0，语义未变） —— lo=+0.5060
+  [ok  ] 风格轴：护栏**单侧** —— 掉 0.5（> 带 0.10）⇒ 破 —— got=False want=False
+  [ok  ] 风格轴：护栏**单侧** —— 掉 0.05（≤ 带 0.10）⇒ 不破 —— got=True want=True
+  [ok  ] 风格轴：护栏**单侧** —— 变好**不**卡人 —— got=True want=True
+  [ok  ] 风格轴：护栏行是同构的 `metric/tol/delta/lo/hi/ok` —— {'metric': 'wins', 'tol': 0.1, 'delta': -0.5, 'lo': -0.5, 'hi': -0.5, 'n': 20, 'ok': False}
+  [ok  ] 风格轴：★ 主口径过 + 护栏破 ⇒ `adopt` 从真变假（红证） —— primary=True adopt=False guards=[{'metric': 'wins', 'tol': 0.1, 'delta': -0.5, 'lo': -0.5, 'hi': -0.5, 'n': 20, 'ok': False}]
+  [ok  ] 风格轴：带内（掉 0.05）⇒ 仍采纳（不是「有护栏就一律否掉」） —— adopt=True
+
+自检：检查项 868，失败 0
+SELFCHECK PASS

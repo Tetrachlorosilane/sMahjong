@@ -1,0 +1,114 @@
+{
+  "tool": "tools/w-ladder.py post",
+  "label": "v4-wl-meld3030-4g-c1",
+  "generations": 4,
+  "final_net": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-meld3030-4g-c1-g04\\net.bin",
+  "student_spec": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-meld3030-4g-c1-g04\\net.bin@0#0.5",
+  "policy": [
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-wl-meld3030-4g-c1-g04\\net.bin@0#0.5",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin",
+    "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin"
+  ],
+  "games": 1000,
+  "seed": 24620022,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\post-v4-wl-meld3030-4g-c1-g04-POST.log",
+  "pre_tag": "v4-wl-meld3030-4g-c1-g01",
+  "post_tag": "v4-wl-meld3030-4g-c1-g04-POST",
+  "pre_dir": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-meld3030-4g-c1-g01",
+  "post_dir": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-meld3030-4g-c1-g04",
+  "style_vector": "S:\\mahjong-training\\w-ladder\\style-vector-per-gen\\v4-wl-meld3030-4g-c1-g04-POST.json",
+  "pairing_check": {
+    "pre": "S:\\mahjong-training\\w-ladder\\traces\\v4-wl-meld3030-4g-c1-g01",
+    "post": "S:\\mahjong-training\\w-ladder\\traces-post\\v4-wl-meld3030-4g-c1-g04",
+    "games": 1000,
+    "seed_mismatch": 0,
+    "student_seat_mismatch": 0,
+    "seed_base_pre": 24620022,
+    "seed_base_post": 24620022,
+    "ok": true
+  },
+  "totals_check": {
+    "seat_hands": 11493,
+    "riichi_hands": 2478,
+    "meld_hands": 5815,
+    "wins": 2228,
+    "deals": 2217,
+    "win_points": 14262200,
+    "riichi_wins": 1311
+  },
+  "paired_delta": {
+    "riichi_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.2875261535549074,
+      "post": 0.21838485953331155,
+      "delta_pp": -6.914129402159588,
+      "se_pp": 0.5107514637812325,
+      "t": -13.5371700180209,
+      "lo_pp": -7.915202271170804,
+      "hi_pp": -5.913056533148373,
+      "n_games": 1000
+    },
+    "meld_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.26953310810276754,
+      "post": 0.5045149867719141,
+      "delta_pp": 23.49818786691465,
+      "se_pp": 0.5617326871962296,
+      "t": 41.831619206994894,
+      "lo_pp": 22.397191800010038,
+      "hi_pp": 24.599183933819262,
+      "n_games": 1000
+    },
+    "win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19447470446650011,
+      "post": 0.19567767892582133,
+      "delta_pp": 0.12029744593212086,
+      "se_pp": 0.4638687804374388,
+      "t": 0.25933507708511366,
+      "lo_pp": -0.7888853637252592,
+      "hi_pp": 1.0294802555895008,
+      "n_games": 1000
+    },
+    "deal_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.19401839222439068,
+      "post": 0.19440019591691418,
+      "delta_pp": 0.038180369252350646,
+      "se_pp": 0.5137190381422079,
+      "t": 0.0743214995309976,
+      "lo_pp": -0.9687089455063768,
+      "hi_pp": 1.0450696840110782,
+      "n_games": 1000
+    },
+    "riichi_win_rate": {
+      "unit": "pct",
+      "unit_cn": "百分点 pp",
+      "pre": 0.5266946726078632,
+      "post": 0.5090460084823106,
+      "delta_pp": -1.7648664125552511,
+      "se_pp": 1.3735522626307564,
+      "t": -1.2848920718713777,
+      "lo_pp": -4.457028847311534,
+      "hi_pp": 0.9272960222010314,
+      "n_games": 887
+    },
+    "avg_win_score": {
+      "unit": "abs",
+      "unit_cn": "点/和了",
+      "pre": 6688.0189218544565,
+      "post": 6331.591064997428,
+      "delta_pp": -356.4278568570285,
+      "se_pp": 129.27296129868415,
+      "t": -2.7571725229803064,
+      "lo_pp": -609.8028610024494,
+      "hi_pp": -103.05285271160753,
+      "n_games": 833
+    }
+  }
+}

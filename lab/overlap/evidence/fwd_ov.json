@@ -1,0 +1,212 @@
+{
+ "case": "fwd_ov",
+ "wall_s": 52.4,
+ "aborted": false,
+ "before": {
+  "commit_free_gb": 18.08,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.18,
+  "free_C_gb": 130.7,
+  "free_E_gb": 505.0,
+  "free_S_gb": 158.6
+ },
+ "after": {
+  "commit_free_gb": 19.03,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.25,
+  "free_C_gb": 130.7,
+  "free_E_gb": 505.0,
+  "free_S_gb": 158.0
+ },
+ "tracks": [
+  "fwd",
+  "collect"
+ ],
+ "cmds": [
+  {
+   "track": "fwd",
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe C:\\Users\\HP\\source\\games\\mahjong\\tools\\v4-forward-gpu.py --weights C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --rows E:\\mahjong-training\\compact\\ov-A-s100 --split train --device cuda --batch 512 --repeat 6 --out S:\\mahjong-training\\w-ladder\\_overlap\\fwd-ov.jsonl",
+   "exit": 0,
+   "own_wall_s": 32.0,
+   "start_offset_s": 0.0
+  },
+  {
+   "track": "collect",
+   "cmd": "S:\\mahjong-training\\tools\\trainer\\trainer.exe selfplay 200 --workers 8 --rotate --rotate-perm --aux --policy net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin --seed 53110031 --out S:\\mahjong-training\\w-ladder\\_overlap\\raw\\collect-d",
+   "exit": 0,
+   "own_wall_s": 52.0,
+   "start_offset_s": 0.0
+  }
+ ],
+ "child_peak_ws_mb": {
+  "fwd#39232": 4018.3,
+  "collect#27844": 160.0
+ },
+ "child_peak_gpu_mib": 1512,
+ "sys": {
+  "cpu_total_pct": {
+   "mean": 30.36,
+   "peak": 40.0,
+   "p50": 32.0,
+   "min": 2.0,
+   "n": 53
+  },
+  "proc_cores": {
+   "mean": 0.59,
+   "peak": 4.81,
+   "p50": 0.32,
+   "min": 0.0,
+   "n": 53
+  },
+  "gpu_util_pct": {
+   "mean": 24.96,
+   "peak": 67.0,
+   "p50": 4.0,
+   "min": 2.0,
+   "n": 53
+  },
+  "gpu_mem_mib": {
+   "mean": 1754.15,
+   "peak": 2022.0,
+   "p50": 1617.0,
+   "min": 1506.0,
+   "n": 53
+  },
+  "S_read_mbs": {
+   "mean": 0.01,
+   "peak": 0.4,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 53
+  },
+  "S_write_mbs": {
+   "mean": 7.85,
+   "peak": 39.5,
+   "p50": 7.2,
+   "min": 0.0,
+   "n": 53
+  },
+  "E_read_mbs": {
+   "mean": 38.25,
+   "peak": 1005.4,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 53
+  },
+  "E_write_mbs": {
+   "mean": 0.0,
+   "peak": 0.1,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 53
+  },
+  "C_read_mbs": {
+   "mean": 5.53,
+   "peak": 77.8,
+   "p50": 0.2,
+   "min": 0.0,
+   "n": 53
+  },
+  "C_write_mbs": {
+   "mean": 0.11,
+   "peak": 1.1,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 53
+  },
+  "disk_pct_busiest": {
+   "mean": 236.89,
+   "peak": 7639.0,
+   "p50": 3.0,
+   "min": 0.0,
+   "n": 53
+  },
+  "commit_free_gb": {
+   "mean": 24.53,
+   "peak": 27.33,
+   "p50": 25.91,
+   "min": 20.78,
+   "n": 53
+  },
+  "free_phys_gb": {
+   "mean": 21.79,
+   "peak": 24.27,
+   "p50": 21.66,
+   "min": 19.54,
+   "n": 53
+  }
+ },
+ "proc": {
+  "java#37348": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 49
+  },
+  "node#8772": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 49
+  },
+  "pwsh#27112": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 53
+  },
+  "pwsh#28780": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 27
+  },
+  "pwsh#31316": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 49
+  },
+  "pwsh#31544": {
+   "mean_cores": 0.02,
+   "peak_cores": 0.4,
+   "n": 53
+  },
+  "pwsh#33544": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 49
+  },
+  "pwsh#35228": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 53
+  },
+  "pwsh#35480": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.01,
+   "n": 53
+  },
+  "python#32572": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 53
+  },
+  "python#39232": {
+   "mean_cores": 0.1,
+   "peak_cores": 0.81,
+   "n": 31
+  },
+  "trainer#27844": {
+   "mean_cores": 0.53,
+   "peak_cores": 4.03,
+   "n": 51
+  },
+  "pwsh#3080": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 1
+  },
+  "pwsh#33328": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 1
+  }
+ },
+ "n_samples": 53
+}

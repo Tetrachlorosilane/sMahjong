@@ -1,0 +1,183 @@
+{
+ "case": "collect2",
+ "wall_s": 90.6,
+ "aborted": false,
+ "before": {
+  "commit_free_gb": 18.88,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 23.73,
+  "free_C_gb": 130.7,
+  "free_E_gb": 534.6,
+  "free_S_gb": 160.2
+ },
+ "after": {
+  "commit_free_gb": 19.37,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.19,
+  "free_C_gb": 130.7,
+  "free_E_gb": 534.6,
+  "free_S_gb": 159.1
+ },
+ "tracks": [
+  "collect-1",
+  "collect-2"
+ ],
+ "cmds": [
+  {
+   "track": "collect-1",
+   "cmd": "S:\\mahjong-training\\tools\\trainer\\trainer.exe selfplay 200 --workers 8 --rotate --rotate-perm --aux --policy net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin --seed 53110011 --out S:\\mahjong-training\\w-ladder\\_overlap\\raw\\collect-b1",
+   "exit": 0,
+   "own_wall_s": 88.0,
+   "start_offset_s": 0.0
+  },
+  {
+   "track": "collect-2",
+   "cmd": "S:\\mahjong-training\\tools\\trainer\\trainer.exe selfplay 200 --workers 8 --rotate --rotate-perm --aux --policy net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-def7-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-win2-g10\\net.bin,net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-atk3-g10\\net.bin --seed 53110012 --out S:\\mahjong-training\\w-ladder\\_overlap\\raw\\collect-b2",
+   "exit": 0,
+   "own_wall_s": 90.0,
+   "start_offset_s": 0.0
+  }
+ ],
+ "child_peak_ws_mb": {
+  "collect-1#29700": 156.7,
+  "collect-2#22836": 157.3
+ },
+ "child_peak_gpu_mib": 1484,
+ "sys": {
+  "cpu_total_pct": {
+   "mean": 54.24,
+   "peak": 117.5,
+   "p50": 55.5,
+   "min": 0.0,
+   "n": 88
+  },
+  "cpu_total_pdh_pct": {
+   "mean": 54.61,
+   "peak": 66.6,
+   "p50": 57.75,
+   "min": 11.3,
+   "n": 18
+  },
+  "proc_cores": {
+   "mean": 15.44,
+   "peak": 32.53,
+   "p50": 15.9,
+   "min": 0.0,
+   "n": 88
+  },
+  "gpu_util_pct": {
+   "mean": 3.23,
+   "peak": 8.0,
+   "p50": 3.0,
+   "min": 2.0,
+   "n": 88
+  },
+  "gpu_mem_mib": {
+   "mean": 1498.77,
+   "peak": 1557.0,
+   "p50": 1485.0,
+   "min": 1484.0,
+   "n": 88
+  },
+  "usb_read_mbs": {
+   "mean": 0.0,
+   "peak": 0.0,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 18
+  },
+  "usb_write_mbs": {
+   "mean": 13.17,
+   "peak": 30.4,
+   "p50": 12.8,
+   "min": 0.0,
+   "n": 18
+  },
+  "sys_read_mbs": {
+   "mean": 0.5,
+   "peak": 1.8,
+   "p50": 0.3,
+   "min": 0.0,
+   "n": 18
+  },
+  "sys_write_mbs": {
+   "mean": 1.39,
+   "peak": 7.3,
+   "p50": 0.2,
+   "min": 0.0,
+   "n": 18
+  },
+  "commit_free_gb": {
+   "mean": 18.42,
+   "peak": 19.14,
+   "p50": 18.41,
+   "min": 17.98,
+   "n": 18
+  },
+  "free_phys_gb": {
+   "mean": 23.24,
+   "peak": 24.05,
+   "p50": 23.18,
+   "min": 22.76,
+   "n": 88
+  }
+ },
+ "proc": {
+  "pwsh#15236": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 87
+  },
+  "pwsh#27112": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 87
+  },
+  "pwsh#35228": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 87
+  },
+  "pwsh#35568": {
+   "mean_cores": 0.12,
+   "peak_cores": 0.79,
+   "n": 87
+  },
+  "python#37136": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 87
+  },
+  "trainer#22836": {
+   "mean_cores": 7.97,
+   "peak_cores": 16.07,
+   "n": 85
+  },
+  "trainer#29700": {
+   "mean_cores": 7.96,
+   "peak_cores": 16.09,
+   "n": 84
+  },
+  "pwsh#37620": {
+   "mean_cores": 0.11,
+   "peak_cores": 0.11,
+   "n": 1
+  },
+  "pwsh#34464": {
+   "mean_cores": 0.47,
+   "peak_cores": 0.67,
+   "n": 2
+  },
+  "pwsh#31788": {
+   "mean_cores": 0.08,
+   "peak_cores": 0.08,
+   "n": 2
+  },
+  "pwsh#28276": {
+   "mean_cores": 0.18,
+   "peak_cores": 0.29,
+   "n": 2
+  }
+ },
+ "n_samples": 88
+}

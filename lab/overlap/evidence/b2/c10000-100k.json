@@ -1,0 +1,15 @@
+{
+  "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe -u tools\\v4-forward-gpu.py --weights tools\\build\\v4-expert-defrep-g10\\net.bin --rows E:\\mahjong-training\\compact\\ov-A-s00 --split train --limit 100000 --chunk 10000 --batch 512 --device cuda --threads 8 --out S:\\mahjong-training\\w-ladder\\_overlap\\b2\\c10000-100k.jsonl",
+  "interval_ms": 400,
+  "wall_s": 9.9,
+  "peak_proc_ws_mb": 3644.8,
+  "min_commit_free_gb": 8.0,
+  "gate_tripped": false,
+  "commit_free_min_gb": 17.86,
+  "exit_code": 0,
+  "tag": "c10000-100k",
+  "peak_proc_commit_mb": 3247.1,
+  "commit_free_before_gb": 21.15,
+  "free_phys_min_gb": 19.53,
+  "samples": 24
+}

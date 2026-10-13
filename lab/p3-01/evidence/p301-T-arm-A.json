@@ -1,0 +1,423 @@
+{
+  "arm": "A",
+  "collect_seconds": 3941.0,
+  "compact_seconds": 2617.7,
+  "train_seconds_measured": 1828.6,
+  "train_seconds_orphan_estimated": 944.4,
+  "train_median_seconds": 236.1,
+  "orphan_shards": [
+    2,
+    3,
+    8,
+    9
+  ],
+  "export_seconds": 18.0,
+  "T_arm_seconds": 9349.7,
+  "T_arm_minutes": 155.8,
+  "delta_per_hour_divisor_minutes": 155.8,
+  "note": "4 片的驱动回调丢失（孤立进程），训练秒数取同臂已测 8 片的**中位数**外推；其余全部实测",
+  "per_shard": {
+    "0": {
+      "verify": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:04:03",
+        "step": "v4-wl-p301-A-g01.s00.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:07:53",
+        "step": "v4-wl-p301-A-g01.s00.compact",
+        "seconds": 230.6,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt2.log",
+        "ts": "03:19:02",
+        "step": "v4-wl-p301-A-g01.s00.train",
+        "seconds": 244.1,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run-attempt2.log",
+        "ts": "03:19:04",
+        "step": "v4-wl-p301-A-g01.s00.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "1": {
+      "verify": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:04:20",
+        "step": "v4-wl-p301-A-g01.s01.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:07:54",
+        "step": "v4-wl-p301-A-g01.s01.compact",
+        "seconds": 213.3,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:31:43",
+        "step": "v4-wl-p301-A-g01.s01.train",
+        "seconds": 234.1,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:31:45",
+        "step": "v4-wl-p301-A-g01.s01.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "2": {
+      "verify": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:04:39",
+        "step": "v4-wl-p301-A-g01.s02.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt1.log",
+        "ts": "03:08:01",
+        "step": "v4-wl-p301-A-g01.s02.compact",
+        "seconds": 202.0,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:34:47",
+        "step": "v4-wl-p301-A-g01.s02.train",
+        "seconds": 180.0,
+        "exit": 1
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:36:38",
+        "step": "v4-wl-p301-A-g01.s02.train-retry",
+        "seconds": 110.0,
+        "exit": 1
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:36:40",
+        "step": "v4-wl-p301-A-g01.s02.export",
+        "seconds": 2.0,
+        "exit": 1
+      }
+    },
+    "3": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:25:02",
+        "step": "v4-wl-p301-A-g01.s03.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:27:49",
+        "step": "v4-wl-p301-A-g01.s03.compact",
+        "seconds": 166.8,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:39:16",
+        "step": "v4-wl-p301-A-g01.s03.train",
+        "seconds": 154.0,
+        "exit": 1
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:41:05",
+        "step": "v4-wl-p301-A-g01.s03.train-retry",
+        "seconds": 108.0,
+        "exit": 1
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:41:07",
+        "step": "v4-wl-p301-A-g01.s03.export",
+        "seconds": 2.0,
+        "exit": 1
+      }
+    },
+    "4": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:41:26",
+        "step": "v4-wl-p301-A-g01.s04.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:44:43",
+        "step": "v4-wl-p301-A-g01.s04.compact",
+        "seconds": 197.1,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:49:10",
+        "step": "v4-wl-p301-A-g01.s04.train",
+        "seconds": 238.1,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:49:12",
+        "step": "v4-wl-p301-A-g01.s04.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "5": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:41:42",
+        "step": "v4-wl-p301-A-g01.s05.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:45:00",
+        "step": "v4-wl-p301-A-g01.s05.compact",
+        "seconds": 197.6,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:53:03",
+        "step": "v4-wl-p301-A-g01.s05.train",
+        "seconds": 228.1,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:53:05",
+        "step": "v4-wl-p301-A-g01.s05.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "6": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:41:59",
+        "step": "v4-wl-p301-A-g01.s06.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:45:12",
+        "step": "v4-wl-p301-A-g01.s06.compact",
+        "seconds": 192.3,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:57:03",
+        "step": "v4-wl-p301-A-g01.s06.train",
+        "seconds": 236.1,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:57:07",
+        "step": "v4-wl-p301-A-g01.s06.export",
+        "seconds": 4.0,
+        "exit": 0
+      }
+    },
+    "7": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:57:35",
+        "step": "v4-wl-p301-A-g01.s07.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:02:33",
+        "step": "v4-wl-p301-A-g01.s07.compact",
+        "seconds": 298.5,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:23:52",
+        "step": "v4-wl-p301-A-g01.s07.train",
+        "seconds": 254.1,
+        "exit": 0
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:10:14",
+        "step": "v4-wl-p301-A-g01.s07.train-retry",
+        "seconds": 180.0,
+        "exit": 1
+      },
+      "export": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:23:54",
+        "step": "v4-wl-p301-A-g01.s07.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "8": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:57:57",
+        "step": "v4-wl-p301-A-g01.s08.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:03:06",
+        "step": "v4-wl-p301-A-g01.s08.compact",
+        "seconds": 309.0,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:14:24",
+        "step": "v4-wl-p301-A-g01.s08.train",
+        "seconds": 240.1,
+        "exit": 1
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:15:40",
+        "step": "v4-wl-p301-A-g01.s08.train-retry",
+        "seconds": 76.0,
+        "exit": 4294967295
+      },
+      "export": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:15:42",
+        "step": "v4-wl-p301-A-g01.s08.export",
+        "seconds": 2.0,
+        "exit": 1
+      }
+    },
+    "9": {
+      "verify": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "03:58:19",
+        "step": "v4-wl-p301-A-g01.s09.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt4.log",
+        "ts": "04:03:12",
+        "step": "v4-wl-p301-A-g01.s09.compact",
+        "seconds": 292.6,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:30:46",
+        "step": "v4-wl-p301-A-g01.s09.train",
+        "seconds": 154.0,
+        "exit": 1
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:32:30",
+        "step": "v4-wl-p301-A-g01.s09.train-retry",
+        "seconds": 104.0,
+        "exit": 1
+      },
+      "export": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:32:32",
+        "step": "v4-wl-p301-A-g01.s09.export",
+        "seconds": 2.0,
+        "exit": 1
+      }
+    },
+    "10": {
+      "verify": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:32:50",
+        "step": "v4-wl-p301-A-g01.s10.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:35:30",
+        "step": "v4-wl-p301-A-g01.s10.compact",
+        "seconds": 159.7,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run.log",
+        "ts": "04:48:12",
+        "step": "v4-wl-p301-A-g01.s10.train",
+        "seconds": 196.0,
+        "exit": 0
+      },
+      "train-retry": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:40:19",
+        "step": "v4-wl-p301-A-g01.s10.train-retry",
+        "seconds": 110.0,
+        "exit": 1
+      },
+      "export": {
+        "log": "p301-A-run.log",
+        "ts": "04:48:14",
+        "step": "v4-wl-p301-A-g01.s10.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    },
+    "11": {
+      "verify": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:33:07",
+        "step": "v4-wl-p301-A-g01.s11.verify",
+        "seconds": 2.0,
+        "exit": 0
+      },
+      "compact": {
+        "log": "p301-A-run-attempt5.log",
+        "ts": "04:35:45",
+        "step": "v4-wl-p301-A-g01.s11.compact",
+        "seconds": 158.2,
+        "exit": 0
+      },
+      "train": {
+        "log": "p301-A-run.log",
+        "ts": "04:51:33",
+        "step": "v4-wl-p301-A-g01.s11.train",
+        "seconds": 198.0,
+        "exit": 0
+      },
+      "export": {
+        "log": "p301-A-run.log",
+        "ts": "04:51:35",
+        "step": "v4-wl-p301-A-g01.s11.export",
+        "seconds": 2.0,
+        "exit": 0
+      }
+    }
+  }
+}

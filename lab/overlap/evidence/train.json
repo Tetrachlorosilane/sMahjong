@@ -1,0 +1,206 @@
+{
+ "case": "train",
+ "wall_s": 200.8,
+ "aborted": false,
+ "before": {
+  "commit_free_gb": 18.38,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 25.06,
+  "free_C_gb": 130.7,
+  "free_E_gb": 534.6,
+  "free_S_gb": 160.2
+ },
+ "after": {
+  "commit_free_gb": 18.09,
+  "commit_limit_gb": 39.71,
+  "free_phys_gb": 24.5,
+  "free_C_gb": 130.7,
+  "free_E_gb": 534.6,
+  "free_S_gb": 160.2
+ },
+ "tracks": [
+  "train"
+ ],
+ "cmds": [
+  {
+   "track": "train",
+   "cmd": "S:\\mahjong-training\\tools\\py312\\python.exe S:\\mahjong-training\\w-ladder\\_p301-evidence\\p301_train.py --data E:\\mahjong-training\\compact\\ov-A-s00 --label ov-train-base --objective ppo --value-target delta --advantage hand --rank-weight 0.2 --epochs 1 --batch 256 --lr 1e-4 --stage-a 0 --stage-b 0 --seed 53110101 --init C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin --behaviour-temp 0.5 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 0.10 --kl-min-steps 60 --baseline-fit scale --val-patience 5 --max-steps 167 --threads 8",
+   "exit": 0
+  }
+ ],
+ "child_peak_ws_mb": {
+  "train#31696": 17171.3
+ },
+ "child_peak_gpu_mib": 1519,
+ "sys": {
+  "cpu_total_pct": {
+   "mean": 7.26,
+   "peak": 17.0,
+   "p50": 7.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "proc_cores": {
+   "mean": 0.03,
+   "peak": 1.22,
+   "p50": 0.01,
+   "min": 0.0,
+   "n": 200
+  },
+  "gpu_util_pct": {
+   "mean": 42.99,
+   "peak": 68.0,
+   "p50": 50.0,
+   "min": 1.0,
+   "n": 200
+  },
+  "gpu_mem_mib": {
+   "mean": 1856.95,
+   "peak": 2354.0,
+   "p50": 1835.0,
+   "min": 1511.0,
+   "n": 200
+  },
+  "S_read_mbs": {
+   "mean": 0.0,
+   "peak": 0.1,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "S_write_mbs": {
+   "mean": 0.01,
+   "peak": 0.3,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "E_read_mbs": {
+   "mean": 21.59,
+   "peak": 171.9,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "E_write_mbs": {
+   "mean": 0.0,
+   "peak": 0.0,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "C_read_mbs": {
+   "mean": 5.02,
+   "peak": 318.8,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "C_write_mbs": {
+   "mean": 0.25,
+   "peak": 31.1,
+   "p50": 0.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "disk_pct_busiest": {
+   "mean": 13.43,
+   "peak": 70.0,
+   "p50": 1.0,
+   "min": 0.0,
+   "n": 200
+  },
+  "commit_free_gb": {
+   "mean": 24.16,
+   "peak": 25.31,
+   "p50": 24.16,
+   "min": 21.44,
+   "n": 200
+  },
+  "free_phys_gb": {
+   "mean": 11.93,
+   "peak": 24.94,
+   "p50": 9.09,
+   "min": 7.58,
+   "n": 200
+  }
+ },
+ "proc": {
+  "java#37348": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "node#8772": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "pwsh#22816": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 97
+  },
+  "pwsh#27112": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "pwsh#31316": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "pwsh#33544": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "pwsh#35228": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "pwsh#36548": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.02,
+   "n": 200
+  },
+  "pwsh#39272": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.34,
+   "n": 200
+  },
+  "python#18928": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 200
+  },
+  "python#31696": {
+   "mean_cores": 0.03,
+   "peak_cores": 1.03,
+   "n": 197
+  },
+  "pwsh#36676": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 2
+  },
+  "pwsh#39028": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 1
+  },
+  "pwsh#28780": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 24
+  },
+  "pwsh#23176": {
+   "mean_cores": 0.0,
+   "peak_cores": 0.0,
+   "n": 1
+  }
+ },
+ "n_samples": 200
+}

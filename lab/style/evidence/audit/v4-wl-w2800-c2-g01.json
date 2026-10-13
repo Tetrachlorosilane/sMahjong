@@ -1,0 +1,72 @@
+{
+  "tool": "mahjong_ml/v4/style_reward.py",
+  "note": "风格奖励塑形的账。判据（强弱）⛔ 不看这里 —— 只看 mahjong_ml/v4/gate.py；本文件回答的是「奖励到底付了多少钱、按什么口径付的」。",
+  "spec": "riichi=2800:no_deal",
+  "whiten_scope": "student",
+  "hands_total": 11329,
+  "hands_eligible": 11329,
+  "axes": [
+    {
+      "axis": "riichi",
+      "kind": "bernoulli",
+      "mu": 0.2875805455026922,
+      "sd": 0.4526344831661262,
+      "n_used": 11329,
+      "n_seen": 11329,
+      "weight": 2800.0,
+      "pair": "no_deal",
+      "pair_meaning": "该小局**未放铳**（`hand_loser != seat`，含流局）",
+      "paid_cells": 9277,
+      "paid_hands": 2914,
+      "paid_sum": 1522470.7967893525,
+      "raw_sum": 2914.0,
+      "paid_hands_all_seats": 3287,
+      "paid_sum_all_seats": 14485912.883938435,
+      "raw_sum_all_seats": 3287.0
+    }
+  ],
+  "whitening_check": {
+    "riichi": {
+      "n": 11329,
+      "mean": 6.123915333112016e-17,
+      "var": 1.0000000000000002,
+      "ok": true
+    },
+    "_all_ok": {
+      "ok": true
+    }
+  },
+  "source": {
+    "accounting_all_seats": {
+      "hands": 11329,
+      "hands_counted": 11329,
+      "paid_hands_total": 11329,
+      "paid_sum_total": 179394.19779073156,
+      "per_axis": {
+        "riichi": {
+          "paid_hands": 3287,
+          "paid_sum": 14485912.883938435,
+          "raw_sum": 3287.0
+        }
+      }
+    },
+    "column": {
+      "train": {
+        "nonzero_rows": 653255,
+        "rows": 653255,
+        "nonzero_frac": 1.0,
+        "hands": 10754,
+        "same_value_within_hand": true
+      },
+      "val": {
+        "nonzero_rows": 34956,
+        "rows": 34956,
+        "nonzero_frac": 1.0,
+        "hands": 575,
+        "same_value_within_hand": true
+      }
+    },
+    "serial_tracker_train": {},
+    "serial_tracker_val": {}
+  }
+}

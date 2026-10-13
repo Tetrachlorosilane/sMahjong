@@ -1,0 +1,31 @@
+{
+  "chain": {
+    "arm": "probe-w6170",
+    "w": 6170.0,
+    "bonus": "riichi=6170:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-dec6170-c1",
+    "seed": 24310051
+  },
+  "returncode": 0,
+  "seconds": 656.0,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-dec6170-c1.log",
+  "staged": [
+    {
+      "tag": "v4-wl-dec6170-c1-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2810170552,
+      "at": "2026-10-10 05:06:03",
+      "copy_matches": true
+    }
+  ],
+  "generations": 1,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-dec6170-c1-g01-from-release.log"
+  ]
+}

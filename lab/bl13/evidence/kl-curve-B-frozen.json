@@ -1,0 +1,16 @@
+[
+ {
+  "threshold": 0.1,
+  "exit": 0,
+  "steps": null,
+  "stop_reason": "",
+  "wall_s": 416.9
+ },
+ {
+  "threshold": 0.3,
+  "exit": 0,
+  "steps": null,
+  "stop_reason": "",
+  "wall_s": 369.6
+ }
+]

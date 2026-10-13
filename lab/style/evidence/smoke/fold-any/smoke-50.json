@@ -1,0 +1,49 @@
+{
+  "tag": "v4-wl-fold-c1-g01",
+  "games": 50,
+  "spec": "fold=5400:no_deal",
+  "student": "net:C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin@0#0.5",
+  "judge": {
+    "decision_rows": 8714,
+    "threat_rows": 1585,
+    "fold_rows": 146,
+    "push_rows": 1439,
+    "missing_rows": 0
+  },
+  "reward_audit": {
+    "n_used": 8714,
+    "threat_rows": 1585,
+    "fold_rows": 146,
+    "push_rows": 1439,
+    "missing_genbutsu_rows": 0,
+    "action_rows": 146,
+    "paid_rows": 111,
+    "blocked_rows": 35,
+    "mu": 0.016754647693366997,
+    "sd": 0.12835080628511122
+  },
+  "sets": {
+    "reward_fold": 146,
+    "reward_rule": 146,
+    "reward_paid": 111,
+    "judge_fold": 146,
+    "reward_threat": 1585,
+    "judge_threat": 1585
+  },
+  "set_equal": {
+    "accounting_vs_rule": true,
+    "rule_vs_paid": true,
+    "reward_vs_judge": true,
+    "threat_equal": true
+  },
+  "symmetric_diff": {
+    "accounting_vs_rule": 0,
+    "reward_vs_judge": 0
+  },
+  "step_mismatch": 0,
+  "no_step_accounting": 0,
+  "self_riichi_only_discard_rows": 6805,
+  "paid_rows_frac": 0.016754647693366997,
+  "pass_threshold_1pct": true,
+  "key_equal": true
+}

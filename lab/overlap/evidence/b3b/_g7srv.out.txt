@@ -1,0 +1,20 @@
+[20:40:28.960] INFO  挂载机器人 AI 包 `first`（kind=builtin，内置启发搜索（牌效机器人））
+[20:40:28.960] INFO  挂载机器人 AI 包 `pass`（kind=builtin，内置启发搜索（牌效机器人））
+[20:40:28.979] INFO  神经网络策略已加载：C:\Users\HP\source\games\mahjong\bot-ai\ppo-v3-g01-g01\net.bin（268801 参数，Features v3 state=615（base 544 + derived 71） cand=96（base 88 + derived 8））
+[20:40:28.980] INFO  挂载机器人 AI 包 `ppo-v3-g01-g01`（kind=net，来源 S:\mahjong-training\ckpt\ppo-v3-g01-g01（打包 2026-09-27））
+[20:40:28.981] INFO  挂载机器人 AI 包 `teacher`（kind=builtin，内置启发搜索（牌效机器人））
+[20:40:29.010] INFO  挂载机器人 AI 包 `v4-bc-004`（kind=net，来源 S:\mahjong-training\ckpt\v4-bc-004（打包 2026-10-02））
+[20:40:29.023] INFO  挂载机器人 AI 包 `v4-league-g08`（kind=net，来源 S:\mahjong-training\ckpt\v4-league-g08（打包 2026-10-02））
+[20:40:29.031] INFO  挂载机器人 AI 包 `v4-p3-001`（kind=net，来源 S:\mahjong-training\ckpt\v4-p3-001（打包 2026-10-02））
+[20:40:29.039] INFO  挂载机器人 AI 包 `v4-ppo-001`（kind=net，来源 S:\mahjong-training\ckpt\v4-ppo-001（打包 2026-10-02））
+[20:40:29.049] INFO  挂载机器人 AI 包 `wl-dama`（kind=net，来源 tools\build\v4-wl-dama5400c-c1-c1-g01（打包 2026-10-11））
+[20:40:29.056] INFO  挂载机器人 AI 包 `wl-meld`（kind=net，来源 tools\build\v4-wl-meld3030-4g-c2-g04（打包 2026-10-11））
+[20:40:29.062] INFO  挂载机器人 AI 包 `wl-p301b-g06`（kind=net，来源 tools\build\v4-wl-p301-B-g06（打包 2026-10-12）· ? 训练口径已动：第 2–6 轮显式放行了 pretrain.py 的 PPO 口径闸门（详见 docs/BOT-AI.md §9））
+[20:40:29.068] INFO  挂载机器人 AI 包 `wl-pon`（kind=net，来源 tools\build\v4-wl-meldtype-c2-g01（打包 2026-10-11））
+[20:40:29.072] INFO  挂载机器人 AI 包 `wl-riichi`（kind=net，来源 tools\build\v4-wl-dec6170-4g-c2-g04（打包 2026-10-11））
+[20:40:29.072] INFO  机器人 AI：teacher, first, pass, random, ppo-v3-g01-g01, v4-bc-004, v4-league-g08, v4-p3-001, v4-ppo-001, wl-dama, wl-meld, wl-p301b-g06, wl-pon, wl-riichi（默认 teacher）
+[20:40:29.110] INFO  回放库已加载 29 场（0 KB）
+[20:40:29.116] INFO  回放库：C:\Users\HP\source\games\mahjong\replays（最多 50 场 / 96 MB）
+[20:40:29.117] INFO  玩家档案已关闭（--no-player-store）：uuid 握手照常，只是不落盘
+LISTENING 0.0.0.0:10099
+[20:40:29.129] INFO  立直麻将服务端已启动 /[0:0:0:0:0:0:0:0]:10099（双栈：IPv4 与 IPv6 都可连）

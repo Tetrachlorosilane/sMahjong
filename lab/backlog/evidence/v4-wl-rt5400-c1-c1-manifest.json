@@ -1,0 +1,31 @@
+{
+  "chain": {
+    "arm": "probe-riichi_turn-w5400",
+    "w": 5400.0,
+    "bonus": "riichi_turn=5400:no_deal",
+    "mode": "decision",
+    "chain": 1,
+    "label": "v4-wl-rt5400-c1-c1",
+    "seed": 24620081
+  },
+  "returncode": 0,
+  "seconds": 697.7,
+  "log": "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-rt5400-c1-c1.log",
+  "staged": [
+    {
+      "tag": "v4-wl-rt5400-c1-c1-g01",
+      "generation": 1,
+      "files": 1000,
+      "bytes": 2809006020,
+      "at": "2026-10-10 15:54:46",
+      "copy_matches": true
+    }
+  ],
+  "generations": 1,
+  "games": 1000,
+  "incumbent": "C:\\Users\\HP\\source\\games\\mahjong\\tools\\build\\v4-expert-defrep-g10\\net.bin",
+  "audit_dir": "S:\\mahjong-training\\w-ladder\\audit",
+  "release_logs": [
+    "S:\\mahjong-training\\w-ladder\\logs\\v4-wl-rt5400-c1-c1-g01-from-release.log"
+  ]
+}

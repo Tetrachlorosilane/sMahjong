@@ -1,0 +1,74 @@
+--- collect: wall=50.9s aborted=False
+    collect    exit=0 own=50.0s start+0.0s
+    peak_ws: {'collect#39368': 162.1}
+    commit_free_gb   mean=18.59 peak=19.01 p50=18.68 min=18.05
+    free_phys_gb     mean=23.51 peak=23.91 p50=23.57 min=22.92
+    usb_write_mbs    mean=11.08 peak=19.2 p50=11.0 min=0.0
+    usb_read_mbs     mean=0.0 peak=0.0 p50=0.0 min=0.0
+    cpu_total_pct    mean=27.74 peak=60.1 p50=28.8 min=0.0
+--- collect2: wall=90.6s aborted=False
+    collect-1  exit=0 own=88.0s start+0.0s
+    collect-2  exit=0 own=90.0s start+0.0s
+    peak_ws: {'collect-1#29700': 156.7, 'collect-2#22836': 157.3}
+    commit_free_gb   mean=18.42 peak=19.14 p50=18.41 min=17.98
+    free_phys_gb     mean=23.24 peak=24.05 p50=23.18 min=22.76
+    usb_write_mbs    mean=13.17 peak=30.4 p50=12.8 min=0.0
+    usb_read_mbs     mean=0.0 peak=0.0 p50=0.0 min=0.0
+    cpu_total_pct    mean=54.24 peak=117.5 p50=55.5 min=0.0
+--- compact: wall=130.0s aborted=False
+    compact    exit=0 own=Nones start+Nones
+    peak_ws: {'compact#27360': 1467.7}
+    commit_free_gb   mean=13.79 peak=17.96 p50=13.22 min=11.77
+    free_phys_gb     mean=12.04 peak=20.39 p50=12.84 min=4.01
+    cpu_total_pct    mean=10.58 peak=28.0 p50=11.0 min=0.0
+--- compact_base2: wall=132.5s aborted=False
+    compact    exit=0 own=132.0s start+0.0s
+    peak_ws: {'compact#6540': 1467.9}
+    commit_free_gb   mean=14.99 peak=18.98 p50=14.27 min=13.27
+    free_phys_gb     mean=15.39 peak=23.98 p50=15.44 min=7.32
+    usb_write_mbs    mean=176.15 peak=1040.2 p50=0.0 min=0.0
+    usb_read_mbs     mean=20.19 peak=110.4 p50=7.3 min=0.0
+    cpu_total_pct    mean=9.78 peak=43.9 p50=5.65 min=0.0
+--- compact_ov: wall=152.2s aborted=False
+    compact    exit=0 own=152.1s start+0.0s
+    collect    exit=0 own=52.0s start+0.0s
+    peak_ws: {'compact#33568': 1468.4, 'collect#24920': 151.9}
+    commit_free_gb   mean=15.41 peak=18.57 p50=14.39 min=13.24
+    free_phys_gb     mean=16.43 peak=23.62 p50=18.01 min=7.44
+    usb_write_mbs    mean=129.13 peak=641.1 p50=12.15 min=0.0
+    usb_read_mbs     mean=2.09 peak=8.8 p50=0.0 min=0.0
+    cpu_total_pct    mean=17.72 peak=67.5 p50=15.1 min=0.0
+--- compact_small: wall=18.5s aborted=False
+    compact    exit=0 own=Nones start+Nones
+    peak_ws: {'compact#39312': 591.8}
+    commit_free_gb   mean=25.08 peak=26.64 p50=26.23 min=21.75
+    free_phys_gb     mean=22.78 peak=24.71 p50=22.8 min=21.16
+    cpu_total_pct    mean=9.58 peak=17.0 p50=10.0 min=0.0
+--- fwd: wall=25.0s aborted=False
+    fwd        exit=0 own=24.0s start+0.0s
+    peak_ws: {'fwd#12900': 4023.0}
+    commit_free_gb   mean=14.51 peak=18.01 p50=13.67 min=13.53
+    free_phys_gb     mean=20.59 peak=23.93 p50=19.78 min=19.52
+    usb_write_mbs    mean=0.06 peak=0.1 p50=0.1 min=0.0
+    usb_read_mbs     mean=0.0 peak=0.0 p50=0.0 min=0.0
+    cpu_total_pct    mean=5.4 peak=12.4 p50=5.5 min=0.0
+--- fwd_ov: wall=52.4s aborted=False
+    fwd        exit=0 own=32.0s start+0.0s
+    collect    exit=0 own=52.0s start+0.0s
+    peak_ws: {'fwd#39232': 4018.3, 'collect#27844': 160.0}
+    commit_free_gb   mean=24.53 peak=27.33 p50=25.91 min=20.78
+    free_phys_gb     mean=21.79 peak=24.27 p50=21.66 min=19.54
+    cpu_total_pct    mean=30.36 peak=40.0 p50=32.0 min=2.0
+--- train: wall=200.8s aborted=False
+    train      exit=0 own=Nones start+Nones
+    peak_ws: {'train#31696': 17171.3}
+    commit_free_gb   mean=24.16 peak=25.31 p50=24.16 min=21.44
+    free_phys_gb     mean=11.93 peak=24.94 p50=9.09 min=7.58
+    cpu_total_pct    mean=7.26 peak=17.0 p50=7.0 min=0.0
+--- train_ov: wall=244.4s aborted=False
+    train      exit=0 own=244.1s start+0.0s
+    collect    exit=0 own=56.0s start+0.0s
+    peak_ws: {'train#26828': 17167.5, 'collect#27384': 156.3}
+    commit_free_gb   mean=24.19 peak=25.22 p50=24.27 min=20.79
+    free_phys_gb     mean=11.86 peak=24.13 p50=8.78 min=6.21
+    cpu_total_pct    mean=14.0 peak=47.0 p50=9.0 min=0.0

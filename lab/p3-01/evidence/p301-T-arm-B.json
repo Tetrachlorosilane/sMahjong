@@ -1,0 +1,84 @@
+{
+ "T_B_seconds_measured": 6600.099999999999,
+ "T_B_minutes_measured": 110.00166666666665,
+ "T_B_round1_estimate_seconds": 598.45,
+ "T_B_minutes_with_estimate": 119.97583333333333,
+ "T_A_minutes": 155.8,
+ "rounds": {
+  "v4-wl-p301-B-g01": {
+   "collect_s": 620.8,
+   "round_total_s": 620.8
+  },
+  "v4-wl-p301-B-g02": {
+   "train": 367.4,
+   "export": 4.1,
+   "collect_s": 508.4,
+   "round_total_s": 879.9
+  },
+  "v4-wl-p301-B-g03": {
+   "verify": 4.2,
+   "compact": 328.0,
+   "train": 421.0,
+   "export": 4.1,
+   "collect_s": 507.3,
+   "round_total_s": 1260.4
+  },
+  "v4-wl-p301-B-g04": {
+   "verify": 4.2,
+   "compact": 323.20000000000005,
+   "train": 431.20000000000005,
+   "export": 4.2,
+   "collect_s": 512.0,
+   "round_total_s": 1270.6000000000001
+  },
+  "v4-wl-p301-B-g05": {
+   "verify": 4.1,
+   "compact": 314.0,
+   "train": 443.4,
+   "export": 4.1,
+   "collect_s": 510.1,
+   "round_total_s": 1271.6
+  },
+  "v4-wl-p301-B-g06": {
+   "verify": 4.0,
+   "compact": 332.0,
+   "train": 447.5,
+   "export": 4.2,
+   "collect_s": 513.1,
+   "round_total_s": 1296.8000000000002
+  }
+ },
+ "med_train_s": 215.45,
+ "shard_train_s": [
+  170.4,
+  197.0,
+  199.1,
+  215.4,
+  215.4,
+  215.5,
+  215.8,
+  221.9,
+  227.9,
+  232.1
+ ],
+ "shard_compact_s": [
+  156.5,
+  157.5,
+  159.8,
+  160.9,
+  162.3,
+  163.0,
+  168.2,
+  169.0
+ ],
+ "round1_note": "第 1 轮 compact/train/export 的驱动台账被同名文件覆盖；s01 训练 218.0 s = ckpt 时间戳实测锚，s00 训练取**逐片**中位数，compact 取 161 s 中位墙钟",
+ "collect_source": {
+  "A": 3941.009472,
+  "v4-wl-p301-B-g01": 620.8,
+  "v4-wl-p301-B-g02": 508.4,
+  "v4-wl-p301-B-g03": 507.3,
+  "v4-wl-p301-B-g04": 512.0,
+  "v4-wl-p301-B-g05": 510.1,
+  "v4-wl-p301-B-g06": 513.1
+ }
+}
