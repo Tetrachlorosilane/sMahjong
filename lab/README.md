@@ -63,6 +63,7 @@ lab/
 | **GPU 自对弈 / 迁移** | 可行性已评估、**未投**（增量事件缓存复用是唯一入口） | `NOTES.md` §6.5 附录 E | `GPU-SELFPLAY-{FEASIBILITY,PLAN}.md` · `GPU-MIGRATION-PLAN.md` |
 | **本机稳定性** | WHEA ID 19（核 corrected machine check）⇒ 缓解 = BIOS/微码 + 只降并行度（一次一个重负载 · `--workers` ≤9） | `NOTES.md` §6.5（低压力策略） | `HOUSEKEEPING-WLADDER.md` · `CLEANUP-LOG*.md` · `LOG-*.txt` |
 | **轮次表 / 复算** | 轮次索引与 RERUN 合规（⛔ 撞 KL 早停的存档不许续） | `NOTES.md` §6.5 附录 E | `ladder-report.md` · `ladder-tables.md` · `RERUN-PLAN.md` · `_rerun\**` |
+| **BL-12 前置探针** | **四条观测候选全「in 弱/出局」**（零训练零采集）：C1 近期行为 +0.0043（勉强越实测 MDE）、C3 信念回灌 +0.0015（CI 含 0）、C4 阴性对照 **−0.0022 出局**；base 用现有 v4 观测已到 AUC **0.906/0.879** ⇒ 观测侧在这两个公开结果上**接近饱和** | `NOTES.md` §6.5（第八十四轮） | `lab/bl12/BL12-{PLAN,SCREEN}.md` · `lab/bl12/evidence/**` · `tools/lab/bl12-probe.py` |
 | **待办 / 想法** | `IMPROVEMENTS.md`（逐条：名称｜效果｜依据｜出处）· `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` | — | `IMPROVEMENTS.md` · `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` |
 
 **索引格式样例**（新增实验照这三行写）：
@@ -87,7 +88,7 @@ lab/
 | `logs\**` 的逐实验 stdout（85 个 `v4-wl-*.log` + 19 个 `post-*.log`） | 1.4 MB | 是**过程日志**不是判决；判决已在 `paired\**\*-POST.json` 与 `audit\**` |
 | `*.npz` / `*.feat.bin` / `compact` / `ckpt` / `__pycache__` / `*.pyc` | — | ⛔ 体积闸门明令不搬 |
 
-**体积闸门**：本目录 + `tools/lab/` 合计 **618 件 / 3.78 MB**（目标 ≤5 MB）。
+**体积闸门**：本目录 + `tools/lab/` 合计 **664 件 / 7.78 MB**（2026-10-13 实测；原记 618 件 / 3.78 MB，第八十三/八十四轮新增证据束后已超目标 ≤5 MB，待收束时再压）。
 口径 = **文档 N 份 + 脚本 M 份 + 小判决件 K 份**；单文件 >2 MB 与 `*.jsonl` 一律只留索引。
 
 ---
