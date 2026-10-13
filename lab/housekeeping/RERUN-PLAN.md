@@ -37,3 +37,12 @@ python -m mahjong_ml.v4.gate --incumbent <A> --candidate <B> --seeds 52940001,52
 
 零绕闸门 · `--workers ≤8` · `OMP/MKL_NUM_THREADS=8` · **一次一个重负载** · `commit_free <8 GB 立即停` · 内存峰值**只认 committed**（ws 另报；⛔ 不采到 venv 蹦床 `Scripts\python.exe`）· 紧凑集/轨迹/ckpt 落**工作区内** `tmp\rerun\**`（子进程写 E:/S: 会 `PermissionError`，已知；⛔ 别改 `paths`、⛔ 不用 junction）· 崩溃/掉盘/WHEA 照实记 · 常驻 `paddleocr_mcp.exe` **不杀**、量化其 ΔCPU（本轮实测**未在跑**）。
 ⛔ 不动 `raw/**`、`style-reward/**`、`compact\v4-heads-g01`、`traces\v4-wl-fold-c1-g01`、`tools\build\**` 端点、`E:\…\compact\ov-A-s00` · ⛔ 不改 `powercfg`/页面文件、⛔ 不重启 · 逐手轨迹/临时紧凑**用完即删**（只留 `summary.json`/`verdict.json`/日志）· ⛔ **本批不发布、不打包**（候选网保留）· ρ `fail` 若在首个 batch 撞上限 ⇒ 该相改 `account` 重跑并**逐字记录**（预先声明的偏离）。
+
+## 偏离（跑后追加 · ⛔ 上文数字一字未改；详见 `RERUN-RESULT.md` §1）
+
+- ⚠ `--kl-min-steps 60` 被**自动钳到「轮长/5」=20(A)/40(B)** ⇒ 早停窗口实际 80/160 步（比预注册更早生效），两臂仍跑满 200/200 步 ⇒ 操作检查②更硬。
+- ⚠ **ρ**：臂 B **首个 batch** 撞 `--rho-max 100`（1/59 行、最坏双边 117）⇒ `fail` 拒（pre-train exit 1、orchestrator **exit 7**）⇒ 按 §4 预先声明改 `account` 重跑（超限 1/12,629、夹批 1）；臂 A 两轮 `fail` 全程 0 超限。
+- ⚠ 墙钟**含**那次失败的 ρ-fail 首轮（237 s）则 B=1,027 s ⇒ 偏差 **19.7% >10%**；按成功链 A 825.4 s / B 790.3 s = **+4.3%**。两条都报。
+- ⚠ 相内 1 Hz 采样有 4 个相瞬时 `commit_free` <8 GB（最低 **5.00 GB**，compact A-r2）—— 违反纪律字面；相前闸门保证启动 ≥8 GB，**无 OOM / 掉盘 / WHEA / 崩溃**。
+- ⚠ 中途两次自伤（都在报告里逐字记）：① 首次驱动崩在 GBK 控制台 ⭐ 编码 ⇒ 复用已完成的 D_1 三相重跑；② 策略自检最初把 JSON 里的 `\\` 当单反斜杠 ⇒ 修好后重扫（A-r1 0/700 → **700/700**）。
+
