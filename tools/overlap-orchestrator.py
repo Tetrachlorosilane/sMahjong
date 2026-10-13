@@ -1793,6 +1793,108 @@ def add_common(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--no-fallback", action="store_true", help="内存闸门触发时只停不回退")
 
 
+def _arg_of(cmd: list, name: str) -> str | None:
+    """从命令行里取 `--name VALUE`（取**最后一个**；缺省 `None`）。"""
+    hit = None
+    for i, tok in enumerate(cmd):
+        if str(tok) == name and i + 1 < len(cmd):
+            hit = str(cmd[i + 1])
+    return hit
+
+
+def rounds_row(spec: dict, result: dict, ctx: dict, round_id) -> dict:
+    """★ BL-14：**回路级记账**（`rounds.jsonl` 的一行）—— θ_k 指纹 · D_k 指纹 · 各自的
+    `behaviour_id` · ρ 统计 · 陈旧度 · 利用率（墙钟/重叠/峰值/`commit_free` 最低）。
+
+    为什么必须是**机器可读**的一行（而不是日志）：BL-13 的判决要按"第 k 轮用哪份 θ、哪份 D、
+    陈旧度多少"复算；从日志正则捞就是第二套口径，早晚漂移（本项目踩过：`train_steps` 正则）。
+
+    ⚠ 三处指纹都**现算**（`sha256_file`）；取不到 ⇒ 该键写 `null` 而**不猜**（fail-closed 的记账面）。
+    """
+    pcmd = primary_cmd(spec)
+    ocmd = [str(x) for x in (spec["other"].get("cmd") or [])]
+    data_dir = _arg_of(pcmd, "--data") or str(spec["primary"].get("src") or "")
+    init_p = _arg_of(pcmd, "--init")
+    label = _arg_of(pcmd, "--label")
+    row: dict = {
+        "tool": TOOL_NAME, "tool_version": TOOL_VERSION, "round": round_id,
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "tag": spec["tag"],
+        "pair": f"{spec['phase']}:{spec['other']['kind'] or '(空)'}",
+        "overlap": bool(result.get("overlap")),
+        # ---- 利用率（判据 5 的全部原始读数）----
+        "wall_s": result.get("wall_s"),
+        "own_wall_s": {n: (result.get(n) or {}).get("own_wall_s") for n in ("primary", "other")},
+        "overlap_interval_s": result.get("overlap_interval_s"),
+        "capture_rate": result.get("capture_rate"),
+        "both_present_samples": result.get("both_present_samples"),
+        "commit_free_min_gb": result.get("commit_free_min_gb"),
+        "commit_free_n_samples": result.get("commit_free_n_samples"),
+        "peak_committed_mb": result.get("peak_committed_mb"),
+        "peak_ws_mb": result.get("peak_ws_mb"),
+        "procs_committed_sum_peak_mb": result.get("procs_committed_sum_peak_mb"),
+        "procs_ws_sum_peak_mb": result.get("procs_ws_sum_peak_mb"),
+        "exit_codes": {n: (result.get(n) or {}).get("code") for n in ("primary", "other")},
+        "gate_trip": result.get("gate_trip"),
+        # ---- θ_k（本段 `--init`）与它声明的身份 ----
+        "theta": {"init_arg": init_p,
+                  "sha256": (sha256_file(Path(init_p)) if init_p and Path(init_p).is_file()
+                             else None)},
+        # ---- D_k 指纹 + 它的 `behaviour_table`（逐 id 的权重身份都在这） ----
+        "data": {"dir": data_dir or None, "meta_sha256": None, "behaviour_table": None,
+                 "behaviour_table_digest": None, "student": None, "student_extra": None},
+        # ---- 采集产物（D_{k+1} 的身份）----
+        "collect": {"out_dir": _arg_of(ocmd, "--out") or (spec["other"].get("out_dir")),
+                    "policies": (_arg_of(ocmd, "--policy") or "").split(",") or None,
+                    "games": _arg_of(ocmd, "selfplay"),
+                    "summary_sha256": None},
+        # ---- 训练侧的 ρ / 陈旧度 / 逐 id 复算（从 `metrics.json` 现读）----
+        "train": {"label": label, "metrics": None, "metrics_sha256": None},
+    }
+    if data_dir:
+        mp = Path(data_dir) / "meta.json"
+        if mp.is_file():
+            row["data"]["meta_sha256"] = sha256_file(mp)
+            try:
+                m = json.loads(mp.read_text(encoding="utf-8"))
+            except ValueError:
+                m = {}
+            row["data"]["student"] = m.get("student")
+            row["data"]["student_extra"] = m.get("student_extra")
+            beh = (m.get("behaviour") or {})
+            row["data"]["behaviour_table"] = beh.get("table")
+            row["data"]["behaviour_enabled"] = beh.get("enabled")
+            row["data"]["behaviour_table_digest"] = (
+                hashlib.sha256(json.dumps(
+                    [[int(r["id"]), str(r["spec"]), r.get("temp"), r.get("sha256")]
+                     for r in (beh.get("table") or [])], sort_keys=True,
+                    ensure_ascii=False).encode("utf-8")).hexdigest()
+                if beh.get("table") else None)
+    cout = row["collect"]["out_dir"]
+    if cout:
+        sp = Path(cout) / "summary.json"
+        if sp.is_file():
+            row["collect"]["summary_sha256"] = sha256_file(sp)
+    if label:
+        # ⚠ 用 `ctx["DATA_ROOT"]`（= 本次 `--data-root`）而**不是**编排器自己的环境变量：
+        #   被跑的那条命令的环境是 `Runner._spawn` 按 `ctx` 造的 —— 两边不一致就会去
+        #   默认根（`S:`）找一个不存在的 `metrics.json`，于是台账里 ρ/陈旧度**静默成 null**
+        #   而那一行看起来"跑过了"（第一次跑就踩到，`rounds.jsonl` 第 0 轮全是 None）。
+        root = ctx["DATA_ROOT"]
+        kp = Path(root) / "ckpt" / str(label) / "metrics.json"
+        row["train"]["metrics"] = str(kp)
+        if kp.is_file():
+            row["train"]["metrics_sha256"] = sha256_file(kp)
+            try:
+                mj = json.loads(kp.read_text(encoding="utf-8"))
+            except ValueError:
+                mj = {}
+            row["train"]["rho"] = mj.get("rho")
+            row["train"]["behaviour_multi"] = mj.get("behaviour_multi")
+            row["train"]["wall_seconds"] = mj.get("wall_seconds")
+            row["train"]["history_len"] = len(mj.get("history") or [])
+    return row
+
+
 def emit(result: dict, out_path) -> None:
     if out_path:
         p = Path(out_path)
@@ -1821,6 +1923,13 @@ def main(argv=None) -> int:
                             "⛔ 不得用作收益数字（**探针 fail-closed 没有豁免开关**）")
         s.add_argument("--wait-quiet", type=float, default=0.0, metavar="SEC",
                        help="先**等**最多 SEC 秒盼一个静窗（每 15 s 扫一次，静了立刻起）")
+        # ★ BL-14：回路级记账（`rounds.jsonl`）—— θ_k 指纹 / D_k 指纹 / behaviour_table /
+        #   ρ 统计 / 陈旧度 / 利用率，一行一轮。⛔ 只在 `pair` 上生效（`check` 不跑东西）。
+        s.add_argument("--rounds", default=None, metavar="JSONL",
+                       help="★ BL-14：跑完把**这一轮**的记账（θ/D 指纹 · behaviour_table · ρ 统计 · "
+                            "陈旧度 · 墙钟/重叠/峰值/commit_free）**追加**到这个 JSONL")
+        s.add_argument("--round", type=int, default=None, metavar="K",
+                       help="轮号（写进 `--rounds` 那一行的 `round` 字段；缺省 = 该文件已有行数）")
     st = sub.add_parser("selftest")
     st.add_argument("--out", default=None)
     st.add_argument("--data-root", default=None)
@@ -1883,6 +1992,28 @@ def main(argv=None) -> int:
 
     code, result = (mode_check(spec, a, ctx) if a.mode == "check" else mode_pair(spec, a, ctx))
     emit(result, a.out)
+    # ★ BL-14：**回路级记账**（只对 `pair`；`check` 没跑东西 ⇒ 不记）。
+    rp = getattr(a, "rounds", None)
+    if rp and a.mode == "pair":
+        try:
+            p = Path(rp)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            rid = getattr(a, "round", None)
+            if rid is None:
+                rid = sum(1 for _ in p.open(encoding="utf-8")) if p.is_file() else 0
+            row = rounds_row(spec, result, ctx, rid)
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+            print(f"\n[rounds] 第 {rid} 轮已记账 → {p.resolve()}")
+            print(f"[rounds] θ(init) sha256={str(row['theta']['sha256'])[:16]}… · "
+                  f"D(meta) sha256={str(row['data']['meta_sha256'])[:16]}… · "
+                  f"behaviour_ids={[r['id'] for r in (row['data']['behaviour_table'] or [])]} · "
+                  f"ρ={row['train'].get('rho')} · 陈旧度="
+                  f"{ {k: (v.get('kl_stale') if isinstance(v, dict) else None)
+                        for k, v in ((row['train'].get('behaviour_multi') or {})
+                                     .get('per_id') or {}).items()} }")
+        except OSError as e:                       # 记账失败**不吞**：打印出来（读数仍已 emit）
+            print(f"⛔ [rounds] 记账写不进去：{type(e).__name__}: {e}")
     return code
 
 

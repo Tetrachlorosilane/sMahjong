@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -517,6 +518,29 @@ def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     return adv
 
 
+def _behaviour_logprobs_at(model: M.V4Model, data: dict, index: np.ndarray, device: str,
+                           batch: int, temp: float) -> np.ndarray:
+    """**指定行**上的 `log π_old(a|s)`（`index` = 行下标）。逐 id 复算 / 探针共用这一份。
+
+    ⚠ 与 `_behaviour_logprobs` 是同一个实现（那一份就是 `index = arange(n)` 的特例）——
+    两份会漂移，而"漂移"在这里意味着"闸门量的尺子与训练用的不一致"（= 假绿）。
+    """
+    model.eval()
+    idx_all = np.asarray(index, dtype=np.int64)
+    out = np.zeros(idx_all.size, dtype=np.float32)
+    with torch.no_grad():
+        for i0 in range(0, idx_all.size, batch):
+            idx = idx_all[i0:min(i0 + batch, idx_all.size)]
+            b = _batch(data, idx, device)
+            logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
+                           h=b.get("h"))["policy"]
+            if temp > 0:
+                logits = logits / float(temp)
+            lp = torch.log_softmax(logits, dim=-1).gather(1, b["label"][:, None]).squeeze(1)
+            out[i0:i0 + idx.size] = lp.to("cpu").numpy()
+    return out
+
+
 def _behaviour_logprobs(model: M.V4Model, data: dict, device: str, batch: int,
                         temp: float) -> torch.Tensor:
     """采集那一步的 `log π_old(a|s)`（**用采集时的权重重算**，不是从轨迹里读的）。
@@ -525,20 +549,8 @@ def _behaviour_logprobs(model: M.V4Model, data: dict, device: str, batch: int,
     权重就是采集用的那份 checkpoint、温度就是策略串里的 `#T`
     ⇒ 重算出来的 log-prob 与当时采样用的分布逐位相同（容差内）。这是 PPO 能离线做的前提。
     """
-    model.eval()
     n = int(data["nlegal"].shape[0])
-    out = torch.zeros(n, dtype=torch.float32)
-    with torch.no_grad():
-        for i0 in range(0, n, batch):
-            idx = np.arange(i0, min(i0 + batch, n))
-            b = _batch(data, idx, device)
-            logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
-                           h=b.get("h"))["policy"]
-            if temp > 0:
-                logits = logits / float(temp)
-            lp = torch.log_softmax(logits, dim=-1).gather(1, b["label"][:, None]).squeeze(1)
-            out[i0:i0 + idx.size] = lp.to("cpu")
-    return out
+    return torch.from_numpy(_behaviour_logprobs_at(model, data, np.arange(n), device, batch, temp))
 
 
 def resolve_weight_path(spec: str) -> Path:
@@ -716,8 +728,376 @@ def assert_behaviour_consistency(model: M.V4Model, data: dict, idx: np.ndarray,
     return kl
 
 
-def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
-                 weights: dict[str, float] | None = None,
+# ================================================================ BL-14：逐 behaviour_id 口径
+#: ρ 的分布只报分位数 —— 采样上限（够了，且不许为它撑内存）
+RHO_SAMPLE_CAP = 400_000
+
+
+def behaviour_ids_of(data: dict) -> np.ndarray | None:
+    """紧凑集的逐行 `behaviour_id`（`None` = 这份数据集**没有**这一列 ⇒ 旧单策略路径）。"""
+    col = data.get("behaviour_id")
+    return None if col is None else np.asarray(col, dtype=np.int64)
+
+
+def behaviour_table_of_meta(meta: dict) -> list[dict]:
+    """meta 的 `behaviour.table[]`（`enabled=false` ⇒ 空表 ⇒ 旧路径）。**缺表就报错**。"""
+    b = (meta or {}).get("behaviour") or {}
+    if not b.get("enabled"):
+        return []
+    tbl = list(b.get("table") or [])
+    if not tbl:
+        raise SystemExit("meta.behaviour.enabled=true 但 `behaviour.table` 是空的 —— "
+                         "按 fail-closed 拒跑（⛔ 不把「没身份」当成「单策略」）")
+    return tbl
+
+
+def behaviour_table_digest(table: list[dict]) -> str:
+    """行为策略表的**规范指纹**（只含身份四元组，⛔ 不含路径 —— 换盘不算换了身份）。"""
+    canon = [[int(r["id"]), str(r["spec"]), r.get("temp"), r.get("sha256")] for r in table]
+    return hashlib.sha256(json.dumps(canon, sort_keys=True,
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _logp_digest(a: np.ndarray) -> str:
+    """一串 `logp` 的指纹（float32 原始字节）—— "记录"侧的载体：同数据同权重 ⇒ 逐位相同。"""
+    return hashlib.sha256(np.ascontiguousarray(a, dtype=np.float32).tobytes()).hexdigest()
+
+
+def _probe_rows(idx: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
+    """从 `idx` 里取 `min(k, |idx|)` 行**确定性**探针（固定 rng ⇒ 两次调用同一条探针）。"""
+    if idx.size <= k:
+        return idx
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(idx, size=int(k), replace=False))
+
+
+def per_behaviour_logprobs(data: dict, table: list[dict], ids: np.ndarray, device: str,
+                           batch: int, *, default_temp: float, allow_unverified: bool,
+                           tag: str, needed_ids: set[int] | None = None,
+                           probe: int = 0) -> tuple[torch.Tensor, dict]:
+    """**逐 `behaviour_id`** 算 `logp_old`（K 个行为 ⇒ K 遍前向；每多一种 ≈ +59 s/轮）。
+
+    三条硬口径（少一条就是"ρ 全错但训练照跑"）：
+
+    ① **身份先核对**：载入 `table[id].path` 之前先用 `sha256` 核对它就是表里声明的那份权重
+       （⛔ 不信路径 —— 路径可以指向被换过的文件；这正是 `_behaviour_record` 的注释里那条教训）。
+    ② **温度逐 id 取**：`table[id].temp`（策略串里的 `#T`），缺省才退回 `default_temp`。
+       一份混代紧凑集里每代的 `#T` 可以不同，用一个温度算全部 = `#0.5` 那个事故的翻版。
+    ③ **未验证的 id 不许静默用**：缺省 `SystemExit`；`--allow-unverified-behaviour` 才降级为
+       "把这些行**显式排除**出策略损失 + 记账 + 响亮打印"（⛔ 不是静默裁剪）。
+
+    返回 `(logp[n]（float32；被排除的行为在那些行上是 NaN）, info)`。
+    """
+    n = int(data["nlegal"].shape[0])
+    out = np.full(n, np.nan, dtype=np.float32)
+    info: dict = {"per_id": {}, "excluded_rows": {}, "builtin_rows": {}, "unverified": [],
+                  "order": [], "probe_lp": {}, "probe_idx": {}}
+    for bid in sorted(int(x) for x in np.unique(ids)):
+        if bid < 0 or bid >= len(table):
+            raise SystemExit(f"`behaviour_id`={bid} 越界（表里只有 {len(table)} 项）—— "
+                             f"紧凑集与 meta **不是同一份**，fail-closed 拒跑")
+        rec = table[bid]
+        rows = np.flatnonzero(ids == bid)
+        entry: dict = {"rows": int(rows.size), "spec": rec.get("spec"),
+                       "temp": rec.get("temp"), "sha256": rec.get("sha256"),
+                       "verified": bool(rec.get("verified"))}
+        if rec.get("kind") == "builtin":
+            # **内置策略**（teacher / bot / first / pass / random）：**没有权重可算 logp**。
+            # ⚠ 只有 `kind == "builtin"` 才走这一支 —— `path is None` **不是**"内置"的证据：
+            #   一个 `net:` 的策略串解析失败时也是 `path=None`，那种必须按**未验证** fail-closed
+            #   （自检的负向断言当场抓到了这条：把"取不到"当"按定义没有"就是假绿）。
+            print(f"  [{tag}] behaviour_id={bid} {rec.get('spec')!r} 是**内置策略**（无权重）⇒ "
+                  f"{rows.size} 行写 NaN（⛔ 不进策略损失；由学生掩码与 NaN 断言双重保证）")
+            info["builtin_rows"][str(bid)] = int(rows.size)
+            entry.update({"builtin": True})
+            info["per_id"][str(bid)] = entry
+            continue
+        if not rec.get("verified"):
+            if not allow_unverified:
+                raise SystemExit(
+                    f"⛔ behaviour_id={bid}（{rec.get('spec')!r}）**身份未验证**"
+                    f"（{rec.get('note')}）—— PPO 的 `logp_old` 必须来自**已知**的那份权重。"
+                    f"要么让构建器钉住 `sha256`（`--behaviour-root` / `--require-behaviour-sha`），"
+                    f"要么显式 `--allow-unverified-behaviour` 接受「这些行被排除出策略损失」。"
+                    f"按 fail-closed 拒跑（⛔ 不许把「取不到」当成「没问题」）")
+            info["unverified"].append(bid)
+            info["excluded_rows"][str(bid)] = int(rows.size)
+            entry.update({"excluded": True})
+            info["per_id"][str(bid)] = entry
+            continue
+        path = rec.get("path")
+        if not path or not Path(path).is_file():
+            raise SystemExit(f"⛔ behaviour_id={bid} 记的权重文件不存在：{path!r}")
+        got = _sha256_file(path)
+        if got != str(rec.get("sha256")):
+            raise SystemExit(
+                f"⛔ behaviour_id={bid} 的**身份对不上**：表里记 {str(rec.get('sha256'))[:16]}… "
+                f"而磁盘上 {path} 是 {got[:16]}… —— 数据是 A 采的却拿 B 的权重算 `logp_old`，"
+                f"ρ 会整体错而训练照跑。这正是逐 id 复算要拦的那件事")
+        temp = float(rec["temp"]) if rec.get("temp") else float(default_temp)
+        t0 = time.perf_counter()
+        mdl = _load_behaviour(str(path), device)
+        # ★ 探针行**永远算**（它是判据 2 的"记录"侧；每 id 只有 ~4096 行，代价小）。
+        pr = _probe_rows(rows, probe, seed=1000 + bid) if probe > 0 else rows
+        lp_probe = _behaviour_logprobs_at(mdl, data, pr, device, batch, temp)
+        info["probe_lp"][str(bid)] = lp_probe
+        info["probe_idx"][str(bid)] = pr
+        # ⚠ **全量只在"这一代真有学生行"时算**：非学生行的 `logp_old` 永远不会被读
+        #   （策略损失走 `row_keep`、ρ 记账走 `row_keep`、陈旧度与续跑探针只走探针行）
+        #   ⇒ 为它们跑一遍 66 万行前向是**纯浪费**（实测 ≈59 s/行为/轮）。
+        #   ⛔ 这不是"少算一个判据"：**每个 id 的复算探针照算**，只是不再为不参与损失的行买单。
+        if needed_ids is None or bid in needed_ids:
+            lp = _behaviour_logprobs_at(mdl, data, rows, device, batch, temp)
+            out[rows] = lp
+            entry.update({"logp_sha256": _logp_digest(lp),
+                          "logp_mean": float(np.mean(lp))})
+        else:
+            entry.update({"logp_sha256": None, "logp_mean": None,
+                          "full_pass_skipped": "该 id 没有学生行（`logp_old` 不会被读）"})
+        del mdl
+        info["order"].append(bid)
+        entry.update({"temp_used": temp, "probe_rows": int(pr.size),
+                      "probe_sha256": _logp_digest(lp_probe),
+                      "seconds": round(time.perf_counter() - t0, 1)})
+        info["per_id"][str(bid)] = entry
+        print(f"  [{tag}] behaviour_id={bid} {rec.get('spec')}（温度 {temp:g}）"
+              f"：{rows.size} 行"
+              + (f" · logp mean {entry['logp_mean']:+.4f}" if entry.get("logp_mean") is not None
+                 else " · **全量已跳过**（无学生行）")
+              + f" · 探针 {entry['probe_rows']} 行 sha256 {entry['probe_sha256'][:16]}…"
+              f" · {entry['seconds']}s")
+    return torch.from_numpy(out), info
+
+
+def assert_behaviour_gate_multi(model: M.V4Model, data: dict, table: list[dict], ids: np.ndarray,
+                                logp_old: torch.Tensor, init_sha: str | None, temp_default: float,
+                                device: str, *, probe: int, tag: str,
+                                probe_lp: dict | None = None) -> dict:
+    """**逐 `behaviour_id` 复算并比对** —— 取代「`--init` 必须 == 那**唯一**一份数据生成策略」。
+
+    四把尺子（缺一即 `SystemExit`，退出码 1、无 traceback）：
+
+      ① **挂钩**（唯一硬拒）：`--init` 的 `sha256` 必须与**至少一个** `behaviour_id` 相同
+         —— `--init` 与全部行为脱钩 = 起点与数据毫无关系（判据 4）。
+      ② **逐 id 复算**：从 `table[id]` 的**身份**重新载入权重、重算探针行上的 `logp`，
+         要求 `KL(记录‖复算) ≤ 1e-2` **且** `max|Δlogp| ≤ 1e-4`（同一条数据、同一策略 ⇒ 必须 ≈0）。
+      ③ **陈旧度 = 预算/记账**（⛔ 不再是硬拒）：逐 id `KL(π_id‖π_init)`；
+         超预算只**记账 + 响亮告警**（见 `--stale-kl-budget` 的预注册理由）。
+      ④ **ρ 见 `compute_loss`**：上限与分布由 `--rho-max` 管（判据 3 的负向红证在那一头）。
+    """
+    n = int(data["nlegal"].shape[0])
+    out: dict = {"init_sha256": init_sha, "table_digest": behaviour_table_digest(table),
+                 "probe_rows_per_id": int(probe), "per_id": {}, "matched_ids": []}
+    if init_sha is None:
+        raise SystemExit(
+            "⛔ 多行为 PPO **必须**给 `--init` —— 不然证明不了「起点与哪一条数据链同源」")
+    present = [int(x) for x in sorted(np.unique(ids))]
+    for bid in present:
+        rec = table[bid]
+        if rec.get("sha256") and str(rec["sha256"]) == init_sha:
+            out["matched_ids"].append(bid)
+    if not out["matched_ids"]:
+        raise SystemExit(
+            f"⛔ `--init`（sha256 {init_sha[:16]}…）与**全部** behaviour_id 都脱钩："
+            f"{ {b: (table[b].get('sha256') or 'null')[:16] for b in present} } —— "
+            f"起点与数据不是同一条链，`logp_old`/ρ/优势全都无从谈起 ⇒ 按 fail-closed 拒跑。"
+            f"（判据 4：⛔ 不许把这条闸门削成「查一下、然后照跑」）")
+    for bid in present:
+        rec = table[bid]
+        rows = np.flatnonzero(ids == bid)
+        pr = _probe_rows(rows, probe, seed=1000 + bid)
+        entry: dict = {"rows": int(rows.size), "probe_rows": int(pr.size),
+                       "sha256": rec.get("sha256"), "verified": bool(rec.get("verified"))}
+        if rec.get("kind") == "builtin":
+            # 内置策略：没有权重可比 ⇒ 跳过复算与陈旧度（**只记账**）。这些行必然是
+            # 非学生行（`is_student` 排掉），所以"没有 logp"不影响策略损失。
+            entry.update({"builtin": True, "note": "内置策略（无权重）：只记账，不参与复算/陈旧度"})
+            out["per_id"][str(bid)] = entry
+            continue
+        if rec.get("verified"):
+            temp = float(rec["temp"]) if rec.get("temp") else float(temp_default)
+            mdl = _load_behaviour(str(rec["path"]), device)
+            lp = _behaviour_logprobs_at(mdl, data, pr, device, 256, temp)
+            del mdl
+            # 「**记录**」侧 = 主路径在**同一条探针行**上算出来的那一串（`probe_lp`）。
+            #   ⚠ 为什么不用 `logp_old[pr]`：全量前向对"没有学生行"的 id **会跳过**（那 66 万行
+            #   永远不被读），但**探针照算** ⇒ 用探针那一串才既严格又不浪费。
+            if probe_lp is not None and str(bid) in probe_lp:
+                rec_lp = np.asarray(probe_lp[str(bid)], dtype=np.float64)
+            else:
+                rec_lp = np.asarray(logp_old, dtype=np.float64)[pr]
+            bad = ~np.isfinite(rec_lp)
+            if bool(bad.any()):
+                raise SystemExit(f"⛔ behaviour_id={bid} 有 {int(bad.sum())}/{pr.size} 探针行"
+                                 f"没有 `logp_old`（NaN）⇒ 复算无从比对")
+            d = rec_lp - np.asarray(lp, dtype=np.float64)
+            entry.update({"kl_recompute": float(d.mean()), "max_abs_logp_dev": float(np.abs(d).max()),
+                          "recompute_sha256": _logp_digest(lp)})
+            if not math.isfinite(entry["kl_recompute"]) or abs(entry["kl_recompute"]) > 1e-2 \
+                    or entry["max_abs_logp_dev"] > 1e-4:
+                raise SystemExit(
+                    f"⛔ behaviour_id={bid} 的**复算对不上**：KL(记录‖复算)="
+                    f"{entry['kl_recompute']:+.3e}（应 ≈0）、max|Δlogp|="
+                    f"{entry['max_abs_logp_dev']:.3e}（应 ≤1e-4）—— 说明这条数据的"
+                    f"`logp_old` 不是用表里那份权重/那个温度算的（挂钩错了）")
+            # 陈旧度：**同一个温度尺子**上的行为 KL（π_id ‖ π_init）。
+            #   ⚠ 只喂探针行（把别的行留 NaN）—— `_behaviour_kl` 只按 `idx` 取，NaN 不会漏进来；
+            #   这样"全量被跳过"的 id 也能给出陈旧度（判据 ③ 对**每一个**行为都成立）。
+            lo = torch.full((n,), float("nan"), dtype=torch.float32)
+            lo[pr] = torch.from_numpy(rec_lp.astype(np.float32))
+            entry["kl_stale"] = _behaviour_kl(model, data, pr, lo, temp, device)
+            entry["matched_init"] = bool(bid in out["matched_ids"])
+        out["per_id"][str(bid)] = entry
+    return out
+
+
+def rho_summary(acc: dict | None) -> dict:
+    """ρ 的分布 + 超限行数（判据 3 的原始输出；`acc=None` ⇒ 空表）。"""
+    if not acc:
+        return {}
+    s = np.concatenate(acc["samples"]) if acc.get("samples") else np.zeros(0, dtype=np.float32)
+    # ⚠ **三个数分开报**（⛔ 别用一个"max ρ"糊过去）：
+    #   `rho_max`/`rho_min` = ρ 本身的上下极值（**采样**里算）；`rho_worst_two_sided` =
+    #   `max(ρ, 1/ρ)` = 上限判据真正比的那个量（它可能来自**很小的** ρ）。实测踩过：
+    #   `|log ratio|max = 23.69` 全部来自 ρ = 5.1e-11，只看 `max ρ` 会把这次越界洗成绿的。
+    hi = max(float(acc.get("worst_hi", 0.0)), float(s.max()) if s.size else 0.0)
+    lo = min(float(acc.get("worst_lo", float("inf"))), float(s.min()) if s.size else float("inf"))
+    out = {"n_rows": int(acc.get("n_rows", 0)), "n_sampled": int(s.size),
+           "n_gt_rho_max": int(acc.get("n_gt_max", 0)),
+           "n_gt_log_ratio_clamp": int(acc.get("n_gt_clamp", 0)),
+           "rho_max": hi, "rho_min": (lo if math.isfinite(lo) else None),
+           "rho_worst_two_sided": float(acc.get("worst_abs", 0.0)),
+           "clipped_batches": int(acc.get("clipped_batches", 0))}
+    if s.size:
+        out.update({"rho_p50": float(np.quantile(s, 0.50)), "rho_p90": float(np.quantile(s, 0.90)),
+                    "rho_p99": float(np.quantile(s, 0.99))})
+    return out
+
+
+def _ppo_plan_multi(*, model: M.V4Model, train_data: dict, device: str, args, meta: dict,
+                    resume: dict | None, n: int, b_ids: np.ndarray, b_table: list[dict],
+                    beh_rec: dict | None, keep_tr) -> dict:
+    """★ BL-14：**多行为（混代）** PPO 的整套前置（逐 id `logp_old` + 逐 id 复算闸门 + 陈旧度预算 + ρ）。
+
+    为什么单独一条路（而不是改老路）：老路的闸门是「**那一份**行为策略必须 == `--init`」。异步回路里
+    `train(D_k, θ_k) ‖ collect(D_{k+1}, θ_k)` 天然产出**两代**数据 ⇒ 那条尺子在结构上就不成立。
+    这条路把"要守的事"拆成**四条正交的尺子**（见 `assert_behaviour_gate_multi` 的 docstring），
+    其中只有"`--init` 与全部 behaviour_id 脱钩"是硬拒 —— 其余是复算证明 + 预算记账。
+
+    ⛔ **只吃开关**：紧凑集没有 `behaviour_id` 列 / meta 没有表 ⇒ 这条路一行都不走（老路逐字节不变）。
+    """
+    g = getattr
+    print(f"PPO（多行为）：紧凑集带 `behaviour_id`，表内 {len(b_table)} 个行为 —— "
+          f"逐 id 重算 `log π_old`（总 {n} 条；**每多一种行为 ≈ +59 s/轮**，如实记）")
+    allow_unver = bool(g(args, "allow_unverified_behaviour", False))
+    probe = int(g(args, "behaviour_probe", 4096) or 0)
+    # ⚠ **全量前向只给"真有学生行"的行为算**（其余行的 `logp_old` 永远不会被读）——
+    #   每个额外行为 ≈ +59 s/轮的成本**只花在要用的那几代上**。探针行**每个 id 都算**。
+    stu = train_data.get("is_student")
+    if stu is None:
+        needed = {int(x) for x in np.unique(b_ids)}
+    else:
+        needed = {int(x) for x in np.unique(b_ids[np.asarray(stu) > 0])}
+    print(f"PPO（多行为）：需要**全量** `logp_old` 的 id = {sorted(needed)}"
+          f"（= 有学生行的那些；其余只算探针行 —— 无条件算 66 万行是纯浪费）")
+    logp_tr, lp_info = per_behaviour_logprobs(
+        train_data, b_table, b_ids, device, int(g(args, "eval_batch", 256) or 256),
+        default_temp=float(g(args, "behaviour_temp", 0.0) or 0.0) or 1.0,
+        allow_unverified=allow_unver, tag="train", needed_ids=needed, probe=probe)
+    # ---- ②③ 逐 id 复算 + 陈旧度预算 ------------------------------------------------
+    init_spec = g(args, "init", None)
+    init_sha = _sha256_file(resolve_weight_path(str(init_spec))) if init_spec else None
+    gate = assert_behaviour_gate_multi(model, train_data, b_table, b_ids, logp_tr, init_sha,
+                                      float(g(args, "behaviour_temp", 0.0) or 0.0) or 1.0,
+                                      device, probe=probe, tag="train",
+                                      probe_lp=lp_info["probe_lp"])
+    matched = int(gate["matched_ids"][0])
+    matched_temp = float(b_table[matched]["temp"]) if b_table[matched].get("temp") else \
+        (float(g(args, "behaviour_temp", 0.0) or 0.0) or 1.0)
+    budget = float(g(args, "stale_kl_budget", 0.30) or 0.0)
+    print(f"PPO（多行为）：`--init` sha256 {str(init_sha)[:16]}… ⇒ 挂钩 behaviour_id={matched}"
+          f"（其余 {len(gate['matched_ids']) - 1} 个同 sha）· 温度尺子 {matched_temp:g}")
+    for bid, e in sorted(gate["per_id"].items(), key=lambda kv: int(kv[0])):
+        if e.get("builtin"):
+            print(f"  id={bid}: **内置策略**（无权重）· rows={e['rows']} ⇒ 只记账（这些行不是学生行）")
+            continue
+        if not e.get("verified"):
+            print(f"  id={bid}: **未验证** ⇒ 该 id 的 {e['rows']} 行**显式排除**出策略损失"
+                  f"（`--allow-unverified-behaviour` 已给；⛔ 不是静默裁剪）")
+            continue
+        st = e.get("kl_stale")
+        flag = ""
+        if e.get("matched_init"):
+            flag = " ← `--init` 那一份（恒等 ⇒ 必须 ≈0）"
+            if not math.isfinite(float(st)) or abs(float(st)) > 1e-2:
+                raise SystemExit(
+                    f"⛔ behaviour_id={bid} 与 `--init` 声明同 sha256，但 KL(π_id‖π_init)="
+                    f"{float(st):+.3e}（应 ≈0）—— 同一份字节的权重不该给出两个分布；"
+                    f"查温度尺子（`#T`）与 `--behaviour-temp` 是否一致")
+        elif budget > 0 and math.isfinite(float(st)) and abs(float(st)) > budget:
+            flag = f" ⚠ **陈旧度超预算**（|{float(st):.3f}| > {budget:g}）—— 记账 + 告警，⛔ 不是硬拒"
+        print(f"  id={bid}: KL(记录‖复算)={e.get('kl_recompute', float('nan')):+.2e} · "
+              f"max|Δlogp|={e.get('max_abs_logp_dev', float('nan')):.2e} · "
+              f"探针={e.get('probe_rows')} 行 · rows={e['rows']} · "
+              f"陈旧度 KL(π_id‖π_init)={float(st):+.4f}{flag}")
+    over = [b for b, e in gate["per_id"].items()
+            if e.get("verified") and not e.get("matched_init")
+            and budget > 0 and math.isfinite(float(e.get("kl_stale", float("nan"))))
+            and abs(float(e["kl_stale"])) > budget]
+    if over:
+        print(f"  ⚠⚠ **陈旧度预算**（`--stale-kl-budget {budget:g}`）：{len(over)} 个 id 越界 "
+              f"（{over}）—— 按预注册**降级为预算/记账**（陈旧度是质量轴、不是口径轴）："
+              f"目标函数仍是「在**记录的行为分布**上」定义的，超预算意味着这几代数据的"
+              f"ρ 会更重尾（ρ 分布见下）⇒ ⛔ 结论只能按「混代可用但需降陈旧度」读")
+    # ---- 行为可用掩码：未验证的 id / 内置策略的行**显式排除**（⛔ 与"静默裁剪"的区别是有账 + 有打印）
+    usable = np.isfinite(np.asarray(logp_tr, dtype=np.float64))
+    if not bool(usable.all()):
+        if keep_tr is not None:
+            bad_stu = int(((np.asarray(keep_tr) > 0) & ~usable).sum())
+            if bad_stu:
+                raise SystemExit(
+                    f"⛔ 有 {bad_stu} 行**学生行**的 `logp_old` 是 NaN（它们的 behaviour_id 要么"
+                    f"未验证、要么是内置策略）—— 学生行必须有**有权重**的行为策略，"
+                    f"否则 PPO 的替代项无从定义。按 fail-closed 拒跑")
+            keep_tr = keep_tr * torch.from_numpy(usable.astype(np.float32)).to(keep_tr.device)
+        print(f"  策略损失的行掩码：排除 {int((~usable).sum())} 行 —— 未验证 "
+              f"{sum(lp_info['excluded_rows'].values())} 行 · 内置策略 "
+              f"{sum(lp_info['builtin_rows'].values())} 行 · **全量跳过的代**（无学生行，"
+              f"`logp_old` 永不被读）{int((~usable).sum()) - sum(lp_info['excluded_rows'].values()) - sum(lp_info['builtin_rows'].values())} 行"
+              f"（⛔ 三类都显式记账，不是静默裁剪）")
+    # ---- ④ ρ 上限 + 分布记账 ------------------------------------------------------
+    rho_max = float(g(args, "rho_max", 0.0) or 0.0)
+    rho_action = str(g(args, "rho_max_action", "fail") or "fail")
+    rho_acc: dict = {"samples": [], "n_rows": 0, "n_gt_max": 0, "n_gt_clamp": 0,
+                     "worst": 0.0, "clipped_batches": 0}
+    print(f"PPO（多行为）：clip={float(g(args, 'ppo_clip', 0.2) or 0.2):g} "
+          f"entropy={float(g(args, 'ppo_entropy', 0.01) or 0.0):g}；"
+          f"ρ 上限 `--rho-max`={rho_max:g}（动作 **{rho_action}**；0 = 关）·"
+          f" 数值保险 `LOG_RATIO_CLAMP`={LOG_RATIO_CLAMP:g}（ρ≤{math.exp(LOG_RATIO_CLAMP):.1f}）"
+          f"**逐行计数上报**（⛔ 不再静默夹取）")
+    assert_ppo_excludes_rwr(str(g(args, "objective", "ppo")), float(g(args, "rwr_beta", 0.0) or 0.0))
+    print(f"PPO（多行为）：grad-clip {float(g(args, 'grad_clip', 0.5) or 0.0):g}、"
+          f"KL 早停阈值 {float(g(args, 'kl_early_stop', 0.03) or 0.0):g}")
+    # ---- 续跑：沿用第八十轮那三把尺子（身份 + 链条起点 + 连续性探针），作用在**挂钩那个 id** 上
+    pr = _probe_rows(np.flatnonzero(b_ids == matched), 64, seed=7)
+    if resume is None:
+        kl0 = float(gate["per_id"][str(matched)]["kl_stale"])
+        kl_seg = None
+    else:
+        beh_for_resume = str(g(args, "behaviour", None) or b_table[matched].get("path") or "")
+        kl0, kl_seg = assert_resume_behaviour(resume, beh_for_resume, matched_temp, model,
+                                              train_data, meta, logp_tr, pr, device)
+    if beh_rec is not None:
+        beh_rec.update({"temp": float(matched_temp), "kl0": (None if kl0 is None else float(kl0)),
+                        "kl_segment": (None if kl_seg is None else float(kl_seg)),
+                        "table_digest": gate["table_digest"],
+                        "matched_id": matched, "per_id": gate["per_id"]})
+    return {"logp_tr": logp_tr, "p_temp": float(matched_temp), "kl0": kl0, "kl_seg": kl_seg,
+            "beh_rec": beh_rec, "rho_acc": rho_acc, "keep_tr": keep_tr, "gate": gate,
+            "lp_info": lp_info}
+
+
+def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],                 weights: dict[str, float] | None = None,
                  ssl: tuple | None = None,
                  row_keep: torch.Tensor | None = None,
                  row_w: torch.Tensor | None = None,
@@ -727,7 +1107,9 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
                  adv_fixed: torch.Tensor | None = None,
                  adv_norm: str = "batch",
                  ref: tuple[float, torch.Tensor] | None = None,
-                 il: tuple[float, torch.Tensor] | None = None) -> tuple[torch.Tensor, dict[str, float]]:
+                 il: tuple[float, torch.Tensor] | None = None,
+                 rho: tuple[float, str, dict] | None = None
+                 ) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
     @param weights 逐头权重（`model.loss_weights()` 的注册表；分阶段训练时按阶段缩放）
@@ -756,6 +1138,10 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         （`softmax(logits/T)`，与 `_policy_logits()` 逐字一致）；③ **只吃掩码、不吃 RWR 权重**
         （与 `danger` 同一个理由：它是"这张牌该不该打"的行为标签，按回报加权等于按结果
         去偏"打哪张"，会把标签本身带歪）。`b["il_target"]` 由调用方按行号取好（见 `train()`）。
+    @param rho ★ BL-14：`(rho_max, rho_action, rho_acc)` —— **有界重要性比 + 记账**。
+        `rho_max <= 0` 且 `rho_acc is None` ⇒ **一行都不走**（旧路径逐字节不变）。
+        `rho_action = "fail"`（缺省）超限**响亮失败**；`"account"` 显式降级（夹到 `ln rho_max`）
+        并把超限行数/最坏 ρ 写进 `rho_acc`（⛔ 两种都不许静默裁剪）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -767,6 +1153,11 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
     il_tgt: torch.Tensor | None = None
     if il is not None:
         il_w, il_tgt = float(il[0]), il[1]
+    rho_max = 0.0
+    rho_action = "fail"
+    rho_acc: dict | None = None
+    if rho is not None:
+        rho_max, rho_action, rho_acc = float(rho[0]), str(rho[1]), rho[2]
 
     def reduce_row(per_row: torch.Tensor, w: torch.Tensor | None = None) -> torch.Tensor:
         """逐行损失 → 标量（有掩码/权重时按权重归一；没有时就是 mean，与原行为逐位相同）。
@@ -814,6 +1205,67 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         #   ② 替代项在**未选中的行上显式置 0**：`where` 是选择而不是乘法，NaN 漏不过来。
         log_ratio = (logp_new - logp_old).clamp(-LOG_RATIO_CLAMP, LOG_RATIO_CLAMP)
         ratio = torch.exp(log_ratio)
+        # ---- ★ BL-14：**有界重要性比 + 记账**（⛔ 取代"静默夹一下就走"）-------------------
+        # 为什么必须有：`LOG_RATIO_CLAMP` 是**数值**保险（堵 inf/NaN），它同时也是一个**静默**
+        # 的 ρ 上限（≈54.6）—— 超限的行被悄悄改掉，台账上一个字都没有。那正是 `#0.5` 事故
+        # （ρ≈2e15、一个 step 整网 NaN、照跑完 4 epoch 并落盘废 ckpt）能藏住的原因。
+        # 现在：① 每次都用**裁剪前**的 `logp_new − logp_old` 记分布与超限行数；
+        #       ② `--rho-max > 0` 时超限 ⇒ 响亮失败（缺省）或显式降级（夹到 ln rho_max）+ 记账。
+        if rho_acc is not None:
+            with torch.no_grad():
+                raw = (logp_new - logp_old).detach()
+                sel0 = row_keep > 0 if row_keep is not None else torch.ones_like(raw, dtype=torch.bool)
+                r0 = raw[sel0] if bool(sel0.any()) else raw
+                rho_acc["n_rows"] = rho_acc.get("n_rows", 0) + int(r0.numel())
+                rho_acc["n_gt_clamp"] = rho_acc.get("n_gt_clamp", 0) + int(
+                    (r0.abs() > LOG_RATIO_CLAMP).sum())
+                if rho_max > 0:
+                    lim = math.log(float(rho_max))
+                    # ⚠ **双边**判据：ρ > rho_max **或** ρ < 1/rho_max 都算越界（`|log ratio| > ln ρ_max`）。
+                    #   为什么必须双边：ρ 的上界与下界是同一件事的两面（`log_ratio` 的绝对值），
+                    #   而**极端小**的 ρ 同样会把 `kl_inv`/悲观支带飞。实测踩到的就是**低侧**：
+                    #   `|log ratio|max = 23.69` 全部来自 ρ = 5.1e-11（不是 ρ 大）。
+                    over = int((r0.abs() > lim).sum())
+                    rho_acc["n_gt_max"] = rho_acc.get("n_gt_max", 0) + over
+                    if r0.numel():
+                        rho_acc["worst_abs"] = max(float(rho_acc.get("worst_abs", 0.0)),
+                                                   float(torch.exp(r0.abs().max())))
+                        rho_acc["worst_hi"] = max(float(rho_acc.get("worst_hi", 0.0)),
+                                                  float(torch.exp(r0.max())))
+                        rho_acc["worst_lo"] = min(float(rho_acc.get("worst_lo", float("inf"))),
+                                                  float(torch.exp(r0.min())))
+                    if over and rho_action == "fail":
+                        hi = float(torch.exp(r0.max())) if r0.numel() else float("nan")
+                        lo = float(torch.exp(r0.min())) if r0.numel() else float("nan")
+                        raise SystemExit(
+                            f"⛔ ρ 超过预注册上限 `--rho-max {rho_max:g}`：本批 {over}/"
+                            f"{r0.numel()} 行（|logp_new−logp_old| > ln ρ_max = {lim:.4f}，"
+                            f"等价于 ρ > {rho_max:g} **或** ρ < {1.0 / rho_max:.6g}），"
+                            f"本批 ρ 实际落在 [{lo:.4g}, {hi:.4g}]、"
+                            f"最坏双边比值 max(ρ,1/ρ) = "
+                            f"{float(torch.exp(r0.abs().max())):.3g}。"
+                            f"⛔ 不许静默裁剪：要么查明数据/温度口径，要么显式 "
+                            f"`--rho-max-action account` 接受「夹到上限 + 记账」"
+                            f"（那会把这几行的替代项改成有偏估计，账要留着）")
+                    if over:
+                        raw = raw.clamp(-lim, lim)
+                        rho_acc["clipped_batches"] = rho_acc.get("clipped_batches", 0) + 1
+                if r0.numel():
+                    # ⚠ `cap` 要按**已采样的元素个数**算（不是数组个数）：一个 batch 一个数组，
+                    #   按个数算会在"每个 batch 都超大"时把采样上限撑破（400k 行的 budget 失效）。
+                    cap = RHO_SAMPLE_CAP - sum(int(a.size) for a in rho_acc["samples"])
+                    if cap > 0:
+                        v = torch.exp(r0[:cap].to("cpu")).numpy().astype(np.float32)
+                        rho_acc["samples"].append(v)
+                        rho_acc["sample_max"] = max(float(rho_acc.get("sample_max", 0.0)),
+                                                    float(v.max()))
+                        if os.environ.get("MAHJONG_RHO_DEBUG"):
+                            print(f"    [rho-debug] |r0|max={float(r0.abs().max()):.4f} "
+                                  f"sampled_n={int(v.size)} v_max={float(v.max()):.6g} "
+                                  f"worst={float(rho_acc.get('worst', 0.0)):.6g}")
+                if rho_max > 0 and rho_acc.get("n_gt_max", 0) and rho_action == "account":
+                    log_ratio = raw.clamp(-LOG_RATIO_CLAMP, LOG_RATIO_CLAMP)
+                    ratio = torch.exp(log_ratio)
         surr = -torch.min(ratio * adv, torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv)
         if row_keep is not None:
             surr = torch.where(row_keep > 0, surr, torch.zeros_like(surr))
@@ -1659,12 +2111,52 @@ def train(args) -> dict:
     logp_tr = None
     ppo_cfg = None
     p_temp = 1.0                     # 策略温度：非 PPO 恒为 1.0（= 不缩放）
+    #: ★ BL-14：ρ 的分布记账（`--rho-max > 0` 或多行为路径才非 None ⇒ 旧路径一行都不走）
+    rho_acc: dict | None = None
+    rho_cfg: tuple | None = None
+    #: ★ BL-14：多行为闸门的读数（`None` = 没走那条路 ⇒ `metrics.json` 不多任何键）
+    beh_gate: dict | None = None
     # ★ BL-04：**行为策略标识**（`sha256(权重文件)` + 策略串）—— 续跑时"是不是同一份网"由它判。
     # 只要给了 `--behaviour` 就记（PPO 与 gae-hand 两条路都要它）。
     beh_rec: dict | None = None
     if getattr(args, "behaviour", None):
         beh_rec = _behaviour_record(str(args.behaviour), meta)
-    if objective == "ppo":
+    # ★ BL-14：**多行为（混代）**路径的开关判据 —— 紧凑集有 `behaviour_id` 列 **且** meta 有表。
+    # 两条都不满足（老紧凑集 / 没开 `--behaviour-id`）⇒ `multi=False` ⇒ 下面那条老路**逐字节不变**。
+    b_ids = behaviour_ids_of(train_data)
+    b_table = behaviour_table_of_meta(meta)
+    multi_flag = bool(getattr(args, "behaviour_multi", False))
+    # ⚠ 判"混代"只看**学生行**的 id：teacher/对手的行本来就不进策略损失，它们的
+    #   行为策略是哪一份**不影响** `logp_old` 的用途（`is_student` 已把它们排掉）。
+    stu_col = train_data.get("is_student")
+    stu_ids = (b_ids[np.asarray(stu_col) > 0] if (b_ids is not None and stu_col is not None)
+               else b_ids)
+    n_bids = int(np.unique(stu_ids).size) if stu_ids is not None else 0
+    # ⛔ **fail-closed**：**学生行里混了多代**却没开多行为路径 ⇒ 单一 `--behaviour` 会给
+    #   别的代的学生行算 `logp_old`（ρ 整体错而训练照跑）。宁可当场拒跑。
+    if objective == "ppo" and n_bids > 1 and not multi_flag:
+        raise SystemExit(
+            f"⛔ 这份紧凑集的**学生行**有 **{n_bids} 个 `behaviour_id`**（混代数据），但没给 "
+            f"`--behaviour-multi` —— 单一 `--behaviour` 只能给**一份**行为策略算 `logp_old`，"
+            f"其余几代的学生行 ρ 会整体错。要么加 `--behaviour-multi` 走逐 id 路径，"
+            f"要么只用单代数据。按 fail-closed 拒跑")
+    multi = bool(b_table) and b_ids is not None and objective == "ppo" and multi_flag
+    if objective == "ppo" and b_ids is not None and n_bids == 1 and not multi_flag:
+        # 学生行只有一代（例：一次采集只用一个学生网 + teacher 补位）⇒ 加不加这一列**数值上
+        # 完全等价**。这正是判据「加列 ⇒ 训练逐字节不变」的那条路（`python/selfcheck.py` 钉着）。
+        print(f"PPO：紧凑集带 `behaviour_id`（**学生行**单一代）但未开 `--behaviour-multi` "
+              f"⇒ 走**逐字节相同**的旧单策略路径")
+    if multi:
+        plan = _ppo_plan_multi(model=model, train_data=train_data, device=device, args=args,
+                               meta=meta, resume=resume, n=n, b_ids=b_ids, b_table=b_table,
+                               beh_rec=beh_rec, keep_tr=keep_tr)
+        logp_tr, p_temp = plan["logp_tr"], plan["p_temp"]
+        kl0, kl_seg = plan["kl0"], plan["kl_seg"]
+        beh_rec, rho_acc, keep_tr = plan["beh_rec"], plan["rho_acc"], plan["keep_tr"]
+        beh_gate = plan["gate"]
+        ppo_cfg = (float(getattr(args, "ppo_clip", 0.2) or 0.2),
+                   float(getattr(args, "ppo_entropy", 0.01) or 0.0))
+    if objective == "ppo" and not multi:
         beh = getattr(args, "behaviour", None)
         if not beh:
             raise SystemExit("--objective ppo 需要 --behaviour <采集用的 ckpt/net.bin>"
@@ -1731,6 +2223,18 @@ def train(args) -> dict:
             beh_rec.update({"temp": float(temp),
                             "kl0": (None if kl0 is None else float(kl0)),
                             "kl_segment": (None if kl_seg is None else float(kl_seg))})
+    # ★ BL-14：ρ 的分布记账 —— ⚠ **必须在 `if objective == "ppo"` 之外**（多行为路径在
+    #   `_ppo_plan_multi` 里已经建好 `rho_acc`，而它走的是另一条分支 ⇒ 放里面会被跳过）。
+    #   单行为路径只在显式给了 `--rho-max > 0` 时才建 ⇒ 不给开关时旧路径**一个新键都不多**。
+    if objective == "ppo":
+        rho_max = float(getattr(args, "rho_max", 0.0) or 0.0)
+        if rho_acc is None and rho_max > 0:
+            rho_acc = {"samples": [], "n_rows": 0, "n_gt_max": 0, "n_gt_clamp": 0,
+                       "worst": 0.0, "clipped_batches": 0}
+        if rho_acc is not None:
+            rho_cfg = (rho_max, str(getattr(args, "rho_max_action", "fail") or "fail"), rho_acc)
+            print(f"PPO：ρ 记账已开（上限 {rho_max:g} / 动作 "
+                  f"{rho_cfg[1]}；逐行计数 + 分位数，⛔ 不静默夹取）")
     # ---- 手级 GAE（§14 P1）：`--advantage gae-hand` 的预计算（行为策略的 V ⇒ GAE ⇒ 冻结）----
     adv_tr = None
     val_extra: dict[str, np.ndarray] | None = None
@@ -2048,7 +2552,8 @@ def train(args) -> dict:
                                        policy_temp=p_temp, adv_fixed=adv_b,
                                        adv_norm=("none" if adv_tr is not None else "batch"),
                                        ref=(None if ref_b is None else (ref_beta, ref_b)),
-                                       il=(None if il_b is None else (il_w, il_b)))
+                                       il=(None if il_b is None else (il_w, il_b)),
+                                       rho=rho_cfg)
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -2172,6 +2677,19 @@ def train(args) -> dict:
                  if ce_log else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
+        # ★ BL-14：**ρ 的分布**（判据 3 的原始输出）—— 每一轮都打，不是只在出问题时打。
+        if rho_cfg is not None:
+            rs = rho_summary(rho_cfg[2])
+            row["rho"] = rs
+            print(f"        ρ（重要性比，上限 {rho_cfg[0]:g} / 动作 {rho_cfg[1]}；**双边**判据）："
+                  f"p50={rs.get('rho_p50', float('nan')):.4f} "
+                  f"p90={rs.get('rho_p90', float('nan')):.4f} "
+                  f"p99={rs.get('rho_p99', float('nan')):.4f} · "
+                  f"min={rs.get('rho_min')} max={rs.get('rho_max'):.4g} · "
+                  f"max(ρ,1/ρ)={rs.get('rho_worst_two_sided'):.4g} · "
+                  f"超限行 {rs['n_gt_rho_max']}/{rs['n_rows']} · "
+                  f"超 LOG_RATIO_CLAMP 行 {rs['n_gt_log_ratio_clamp']} · "
+                  f"已夹批数 {rs['clipped_batches']}")
         last_epoch = epoch
         if stop_reason:
             break
@@ -2237,6 +2755,29 @@ def train(args) -> dict:
         "epochs": args.epochs, "batch": args.batch, "steps_per_epoch": steps,
         "stage_steps": stage_steps, "wall_seconds": wall, "history": history,
         "stop_reason": stop_reason, "grad_clip": float(getattr(args, "grad_clip", 0.5) or 0.0),
+        # ★ BL-14：**多行为口径的台账**（只在真走那条路时多这几个键 —— 缺省关 ⇒ 逐字节不变）。
+        #   为什么必须落进 `metrics.json`（而不是只打印）：回路编排器（`overlap-orchestrator`
+        #   的 `--rounds`）要按**机器可读**的方式记「这一轮的 θ 指纹 / D 指纹 / per-id 复算 /
+        #   陈旧度 / ρ 统计」；从日志里正则捞 = 第二个口径，早晚漂移。
+        **({"behaviour_multi": {
+            "table_digest": beh_gate["table_digest"],
+            "matched_ids": beh_gate["matched_ids"],
+            "init_sha256": beh_gate["init_sha256"],
+            "probe_rows_per_id": beh_gate["probe_rows_per_id"],
+            "per_id": beh_gate["per_id"],
+            "stale_kl_budget": float(getattr(args, "stale_kl_budget", 0.0) or 0.0),
+            "stale_over_budget": [b for b, e in beh_gate["per_id"].items()
+                                  if e.get("verified") and not e.get("matched_init")
+                                  and float(getattr(args, "stale_kl_budget", 0.0) or 0.0) > 0
+                                  and e.get("kl_stale") is not None
+                                  and abs(float(e["kl_stale"]))
+                                  > float(getattr(args, "stale_kl_budget", 0.0) or 0.0)],
+            "rho_max": float(getattr(args, "rho_max", 0.0) or 0.0),
+            "rho_max_action": str(getattr(args, "rho_max_action", "fail") or "fail"),
+        },
+           "rho": (rho_summary(rho_cfg[2]) if rho_cfg is not None else None),
+           "behaviour_identity": beh_rec}
+           if beh_gate is not None else {}),
         # ★ BL-04：续跑的那一段**只在真续跑时**多这几个键（缺省关 ⇒ `metrics.json` 逐字节不变）
         **({"resumed_from": resume["path"], "resume_entry_gstep": int(entry_gstep),
             "resume_state_written": bool(save_optimizer),
@@ -2328,6 +2869,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--behaviour-temp", type=float, default=0.0,
                     help="行为策略的采样温度（缺省从数据集 meta 的 `student` 串里解析 `#T`，再缺省 1.0）")
     ap.add_argument("--ppo-clip", type=float, default=0.2, help="PPO 截断 ε")
+    # ---- ★ BL-14：有界重要性比 + 逐 id 复算闸门（**全部缺省关** ⇒ 旧路径逐字节不变）----
+    ap.add_argument("--rho-max", type=float, default=0.0, metavar="RHO",
+                    help="重要性比 ρ = π_new/π_old 的**预注册上限**（0 = 关，缺省）。"
+                         "超限时按 `--rho-max-action` **响亮失败**或**显式降级 + 记账**；"
+                         "⚠ 无论开关如何，ρ 的分布与超限行数都会逐轮上报"
+                         "（原来只有 `LOG_RATIO_CLAMP=4` 的**静默**夹取）")
+    ap.add_argument("--rho-max-action", choices=["fail", "account"], default="fail",
+                    help="ρ 超 `--rho-max` 时怎么办：`fail`（缺省）= `SystemExit`（exit 1、无 traceback）；"
+                         "`account` = 夹到 `ln rho_max` + 记账 + 打印超限行数（⛔ 不是静默裁剪）")
+    ap.add_argument("--stale-kl-budget", type=float, default=0.30, metavar="KL",
+                    help="★ 允许的**陈旧度预算**：逐 behaviour_id 的 `KL(π_id‖π_init)` 超过它就"
+                         "**记账 + 响亮告警**（⛔ 不是硬拒：陈旧度是质量轴、不是口径轴）。"
+                         "预注册值 0.30 = KL 早停阈值 0.03 的 10×")
+    ap.add_argument("--behaviour-probe", type=int, default=4096, metavar="N",
+                    help="逐 behaviour_id **复算**的探针行数（每 id 抽 N 行重算 logp 并比对）；"
+                         "0 = 全部行（贵但最严）")
+    ap.add_argument("--allow-unverified-behaviour", action="store_true",
+                    help="允许**身份未验证**（`sha256=null`）的行为：那些行被**显式排除**出策略损失"
+                         "+ 记账 + 响亮打印。⚠ 缺省**不**允许 ⇒ `SystemExit`（fail-closed）")
+    ap.add_argument("--behaviour-multi", action="store_true",
+                    help="★ 走**多行为（混代）** PPO 路径：逐 `behaviour_id` 重算 `logp_old` + "
+                         "逐 id 复算闸门 + 陈旧度预算。⚠ 缺省**关**（旧单策略路径逐字节不变）；"
+                         "⚠ 数据集混了多个 id 却不开它 ⇒ **当场拒跑**（fail-closed）")
     ap.add_argument("--ppo-entropy", type=float, default=0.01, help="熵奖励系数（学生行上）")
     ap.add_argument("--grad-clip", type=float, default=0.5,
                     help="梯度总范数裁剪（v3 同口径 0.5；0 = 关）。日志里的 `|g|` 是**裁剪前**的范数")

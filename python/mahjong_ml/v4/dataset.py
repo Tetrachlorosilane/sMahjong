@@ -34,6 +34,7 @@ v3 的紧凑集存的是 **state 615 / cand 96**（特征 v3 的拼装结果）�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -424,12 +425,21 @@ _COLUMNS: dict[str, tuple] = {
     "aux_own_shanten_after": (np.int8, ()),
     "aux_own_tenpai": (np.uint8, ()),
     "aux_win_flag": (np.uint8, ()),
+    # `behaviour_id`（BL-14）：**这一行的动作是"哪一份行为策略"采出来的** —— 下标进 meta 的
+    #   `behaviour.table[]`（`{id, spec, kind, sha256, path, temp, verified}`）。
+    #   为什么需要它：一份紧凑集里可以混**多代**数据（异步回路的 `train(D_k,θ_k) ‖ collect(D_{k+1},θ_k)`
+    #   天然如此）⇒ `logp_old` 必须**逐 id** 用各自那份权重重算，一条 `--behaviour` 覆盖不了。
+    #   ⚠⛔ **模型绝不许读这一列**（它是"数据从哪来"的元信息，不是观测）：判据 = 加/不加该列，
+    #   前向**逐位相同**（`python/selfcheck.py` 的 `behaviour_id_no_leak_tests` 钉着）。
+    #   ⚠ 与 `h0`/`style_bonus` 同一个做法：`--behaviour-id` 没开就**不建这一列**
+    #   （老紧凑集读回 `None`，训练走**逐字节相同**的旧单策略路径）。
+    "behaviour_id": (np.int16, ()),
 }
 
 
 def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
                  mode: str = "w+", dm: int | None = None,
-                 style: bool = False) -> dict[str, np.memmap]:
+                 style: bool = False, behaviour: bool = False) -> dict[str, np.memmap]:
     """建/开这一份切分的全部列（`mode="w+"` 建、`"r+"` 由子进程开）。
 
     @param dm 学生网的 `d_model` —— 它只用来定 `h0` 列的宽度（`_COLUMNS` 里的 `"dm"` 占位符）。
@@ -439,12 +449,16 @@ def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
     @param style 是否建**风格奖励**那一列 `style_bonus`（`--style-bonus` 给了才 True）。
         ⚠ 与 `dm` 同一个做法：**没开就不建这一列**（不建一个全 0 的列 —— 那会让训练端
         "以为有塑形"却拿到 0，正是本仓最忌讳的静默降级）。
+    @param behaviour 是否建**行为策略**那一列 `behaviour_id`（`--behaviour-id` 给了才 True）。
+        ⚠ 同上：**没开就不建**（旧紧凑集没有它 ⇒ 训练端走逐字节相同的单策略路径）。
     """
     if dm is not None and int(dm) <= 0:
         raise spec.ContractError(f"dm 必须是正的 d_model（给了 {dm!r}）")
     out: dict[str, np.memmap] = {}
     for name, (dt, tail) in _COLUMNS.items():
         if name == _style.COLUMN and not style:
+            continue
+        if name == "behaviour_id" and not behaviour:
             continue
         shape = [n]
         for t in tail:
@@ -460,6 +474,141 @@ def open_columns(out_dir: Path, tag: str, n: int, lmax: int,
             out[name] = np.lib.format.open_memmap(out_dir / f"{tag}.{name}.npy", mode=mode,
                                                   dtype=dt, shape=tuple(shape))
     return out
+
+
+# ================================================================ BL-14：行为策略身份
+def sha256_file(p) -> str:
+    """文件指纹（**行为策略标识**用：`sha256(net.bin)`）—— 逐字节判"是不是同一份网"。
+
+    ⚠ 与 `pretrain._sha256_file` **同一个算法、逐字节同结果**（那一份是续跑闸门的尺子）；
+    两份都存在的理由：`dataset` 的构建路径**不许引 torch**（`pretrain` 是 torch 重依赖），
+    所以不能互相 import。⛔ 改这里必须同时改那边，判据 = `python/selfcheck.py` 的同名断言。
+    """
+    h = hashlib.sha256()
+    with Path(p).open("rb") as fh:
+        for blk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+#: 策略串里**本来就没有权重**的几种（内置机器人 / 固定动作）—— 它们的 `sha256` 恒为 `None`，
+#: 但**不算"未验证"**（没有权重可钉，不是"该有却取不到"）。
+BEHAVIOUR_BUILTINS = ("teacher", "bot", "first", "pass", "random")
+
+
+def _policy_temp(label: str) -> float | None:
+    """策略串里的采样温度 `#T`（缺省 ⇒ `None` = 没有声明，训练端按 1.0）。
+
+    ⚠ 温度**逐行为**取（不是整份数据一个）：一份混代紧凑集里每代的 `#T` 可以不同，
+    而 `logp_old` 必须在"那一代自己的 `softmax(logits/T)`"上算（`pretrain._policy_logits` 的口径）。
+    取法：`rsplit("#", 1)[1]` 且必须是有限正数 —— 认不出就 `None`（⛔ 不猜 1.0）。
+    """
+    if "#" not in label:
+        return None
+    tail = label.rsplit("#", 1)[1].strip()
+    try:
+        v = float(tail)
+    except ValueError:
+        return None
+    return v if (v == v and abs(v) != float("inf") and v > 0) else None
+
+
+def _policy_weight_candidates(label: str, root: Path | None) -> list[Path]:
+    """策略串 → **可能要读的权重文件**候选（按优先级）。⛔ 只做路径解析，不读文件。
+
+    认得的形状（`PROTOCOL §8.4`）：`teacher` / `net:<文件>[@α][#T]` /
+    `net:<A>!net:<B>@<cond>`（域掩码，两半都是权重）/ 机器人的**注册名**（`bot-ai/<名>/net.bin`）。
+    """
+    out: list[Path] = []
+    for part in str(label).replace("!net:", "\x00net:").split("\x00"):
+        p = part.strip()
+        if p.lower().startswith("net:"):
+            body = p[4:]
+            for cut in ("@", "#"):
+                if cut in body:
+                    body = body.split(cut, 1)[0]
+            if body:
+                cand = Path(body)
+                out.append(cand)
+                if root is not None and not cand.is_absolute():
+                    out.append(Path(root) / cand)
+        elif p and p.lower() not in BEHAVIOUR_BUILTINS:
+            # 注册名（`--bot-ai-dir` 的一级子目录 = 一个包）
+            for base in ([Path(root)] if root is not None else []) + [Path("bot-ai"), Path(".")]:
+                out.append(base / p / "net.bin")
+    return out
+
+
+def resolve_behaviour(label: str, root: Path | None) -> dict:
+    """一条策略串 → `behaviour_table` 的一行。**sha256 由构建器自己算**（⛔ 不信生产者声明）。
+
+    ⚠ **fail-closed**：认不出 / 找不到文件 ⇒ `verified=False`（**不写一个假的 sha256**），
+    由 `build(..., require_sha=True)` 或训练端的 `--require-behaviour-sha` 决定是否**拒跑**。
+    为什么不让"取不到"等于"没问题"：那正是本仓 `AGENTS.md §6.5 ①` 那条 fail-closed 判据。
+    """
+    s = str(label)
+    kind = "builtin" if s.lower() in BEHAVIOUR_BUILTINS else (
+        "net" if "net:" in s else "alias")
+    rec = {"spec": s, "kind": kind, "temp": _policy_temp(s), "sha256": None,
+           "path": None, "verified": False, "note": None}
+    if kind == "builtin":
+        rec.update({"verified": True, "note": "无权重（内置策略）"})
+        return rec
+    for cand in _policy_weight_candidates(s, root):
+        try:
+            if cand.is_file():
+                rec.update({"sha256": sha256_file(cand), "path": str(cand.resolve()),
+                            "verified": True, "note": None})
+                return rec
+        except OSError as e:                     # 存在但读不了 ⇒ 也是"取不到"
+            rec["note"] = f"{type(e).__name__}: {e}"
+    rec["note"] = rec["note"] or "权重文件找不到（给了候选：" + \
+        ", ".join(str(c) for c in _policy_weight_candidates(s, root)[:4]) + "）"
+    return rec
+
+
+def _last_line_policies(f: Path) -> list[str]:
+    """`g*.jsonl` 的**最后一行**是 `game` 行（`TraceRecorder` / `trace.cpp` 都是三段拼接），
+    它带 `policies[4]` ⇒ 读**一行**就能拿到这一场用过的全部策略串。
+
+    ⚠ 为什么必须这么取：逐行扫 `policy` 要 **json 解析整个文件**（1000 场 ≈ 70 万行）；
+    而 `behaviour_id` 的编号必须**与并行度无关**（"并行产物 == 串行产物"是判据）⇒
+    编号取自"全部文件的 `policies` 的**排序后去重**"，两边算出来是同一份。
+    """
+    try:
+        size = f.stat().st_size
+        with f.open("rb") as fh:
+            fh.seek(max(0, size - 65536))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("type") == "game":
+            pol = row.get("policies")
+            return [str(x) for x in pol] if isinstance(pol, list) else []
+    return []
+
+
+def behaviour_table_of(files: list[Path], root: str | Path | None = None) -> dict:
+    """全部轨迹文件 → `{"table": [...], "index": {label: id}, "unsorted": [...]}`。
+
+    `id` = 标签在**排序去重**后的下标（`int16`，-1 保留给"轨迹里没声明过的标签"）。
+    """
+    labels: set[str] = set()
+    for f in files:
+        labels.update(_last_line_policies(f))
+    ordered = sorted(labels)
+    table = [{"id": i, **resolve_behaviour(lab, Path(root) if root else None)}
+             for i, lab in enumerate(ordered)]
+    return {"table": table, "index": {lab: i for i, lab in enumerate(ordered)},
+            "unsorted": sorted(labels)}
 
 
 def _rank_points_of(f: Path) -> dict[int, list[float]]:
@@ -499,7 +648,9 @@ def _rank_points_of(f: Path) -> dict[int, list[float]]:
 
 
 def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
-                student: str | None = None, carry=None, bonus=None) -> None:
+                student: str | None = None, carry=None, bonus=None,
+                beh_index: dict[str, int] | None = None,
+                student_set: frozenset = frozenset()) -> None:
     """把一个文件的**前 `take` 条**决策写进 `mm` 的 `[i0, i0+take)` 行。
 
     ⚠ 串行与并行**共用这一份行逻辑**（并行只是把不同文件分给不同进程，各写各的连续行区间）
@@ -512,12 +663,20 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
         ⚠ 它必须**已经 `prebuild` 过这个文件**：`style_bonus` 是小局级量，而小局的结局只有扫完
         整小局才知道 ⇒ "边走边算"写不出第一行（详见 `BonusTracker` 的 docstring）。
         查不到小局**当场报错**（不填 0）。
+    @param beh_index `{策略串: behaviour_id}`（`None` = 这一份没有 `behaviour_id` 列）。
+        ⚠ 编号**全域一致**（来自 `behaviour_table_of`，串行/并行各自算同一份）；
+        轨迹里出现了表外的标签 ⇒ 写 **-1** 并**当场报错**（⛔ 不静默记成某个已知 id：
+        那会把"A 的行为"当成"B 的行为"，正是这一列要防的事）。
     """
     if carry is not None and "h0" not in mm:
         raise spec.ContractError(
             "要写 `h0` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 `dm`（并行分支要从 "
             "req.json 读回同一个 dm）。**不静默跳过**：跳过就等于训练端拿到一份没有长程 carry 的"
             "数据，而上线端用整手 carry")
+    if beh_index is not None and "behaviour_id" not in mm:
+        raise spec.ContractError(
+            "要写 `behaviour_id` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 "
+            "`behaviour=True`（并行分支要从 req.json 读回同一个开关）。**不静默跳过**")
     if bonus is not None and _style.COLUMN not in mm:
         raise spec.ContractError(
             f"要写 `{_style.COLUMN}` 列但这一份 mm 里没有它 —— `open_columns` 时漏了 `style=True`"
@@ -602,7 +761,24 @@ def _write_file(mm: dict, f: Path, i0: int, take: int, *, lmax: int, aux: bool,
             # ① `is_student`：这一行的动作是不是**本轮被训练的那一代**做的（v3 的 `--student` 口径）。
             #    ⚠ 不遮的后果是**静默**的：把对手网/老师的动作也算进策略损失（v3 实测学生行占比
             #    0.75 而非 0.25，指标照样好看）。
-            mm["is_student"][i] = 1 if (student is None or row.get("policy") == student) else 0
+            #    ★ BL-14：`student_extra` 把**额外几代**也标成学生（`D_k ∪ D_{k+1}` 都算学生行）——
+            #    ⛔ 不改 `student` 本身的语义（`meta["student"]`、温度 `#T`、carry 网仍取它）。
+            mm["is_student"][i] = 1 if (student is None
+                                        or row.get("policy") == student
+                                        or row.get("policy") in student_set) else 0
+            # ①b `behaviour_id`（BL-14）：这一行的**行为策略身份**（下标进 meta 的
+            #    `behaviour.table[]`）。⚠ 与 `is_student` 是**两条正交的轴**：`is_student` 说
+            #    "要不要算进策略损失"，`behaviour_id` 说"这一行的 `logp_old` 该用哪份权重算"。
+            #    表外标签 ⇒ 当场报错（写 -1 再继续就是给人一个"能跑但 ρ 全错"的数据集）。
+            if beh_index is not None:
+                pol = row.get("policy")
+                bid = beh_index.get(pol)
+                if bid is None:
+                    raise spec.ContractError(
+                        f"{f.name}:{ln} 轨迹里的策略串 {pol!r} 不在 `behaviour.table` 里"
+                        f"（表里的标签：{sorted(beh_index)[:8]}）—— 说明 `game` 行的 `policies`"
+                        f"与逐行 `policy` 不一致（或表是用别的文件集算的）。⛔ 不写 -1 蒙混过去")
+                mm["behaviour_id"][i] = int(bid)
             # ② `delta`：本小局该家的收支（点）—— RWR / 优势加权的**唯一回报来源**（事后回填）。
             #    缺字段记 0（那这一行的权重就是 1，等于回到纯模仿）。
             hd = row.get("hand_delta")
@@ -767,7 +943,9 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
           aux: bool = False, limit_files: int | None = None, workers: int = 0,
           quiet: bool = False, student: str | None = None,
           carry_model: str | None = None, style_bonus: str = "",
-          style_whiten: str = "student", style_mode: str = _style.MODE_HAND) -> dict:
+          style_whiten: str = "student", style_mode: str = _style.MODE_HAND,
+          behaviour: bool = False, behaviour_root: str | None = None,
+          require_behaviour_sha: bool = False, student_extra: tuple = ()) -> dict:
     """轨迹目录 → v4 数据集（`train.*.npy` / `val.*.npy` 各一组列 + `meta.json`）。
 
     @param aux 是否要求并读取标签侧 `g*.aux.npz`（信念/危险头的监督来源）
@@ -792,6 +970,12 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         组合时（没开塑形）这个参数**什么都不做**。
     @param workers 并行进程数（0 = 自动，≤75% 的核、上限 12）；**产物与串行逐字节相同**是判据
         （各进程只写自己那段连续行区间，行逻辑只有 `_write_file` 一份）
+    @param behaviour ★ BL-14：建逐行 `behaviour_id` 列 + meta 的 `behaviour.table[]`
+        （**缺省关** ⇒ 与加这个功能之前**逐字节相同**）。表里每行 = 一条策略串 + `sha256(net.bin)`
+        （**构建器自己算**，⛔ 不信生产者声明）+ 温度 `#T`。用 `--behaviour-root` 解析相对路径 / 注册名。
+        ⚠⛔ 这一列**绝不许进模型输入**（判据 = 加/不加它前向**逐位相同**）。
+    @param require_behaviour_sha 有行为策略钉不住权重就**当场报错**（fail-closed）；
+        缺省只**响亮打印**未验证清单并把 `verified=false` 写进 meta（训练端再按自己的口径拒）。
 
     ★ `h0` 的口径（**三条，写死在这里，别在别处再抄一份**）：
 
@@ -917,6 +1101,25 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
     elif style_whiten not in ("student", "all"):
         raise spec.ContractError(f"`--style-bonus-whiten` 只认 student|all（收到 {style_whiten!r}）")
     train_files, val_files = _v3.split_files(files, val_frac, split_seed)
+    # ---- ★ BL-14：行为策略表（逐行 `behaviour_id` 的编号来源）---------------------------
+    # 编号 = **全部轨迹文件 `game` 行的 `policies` 排序去重后的下标** ⇒ 与并行度无关
+    # （"并行产物 == 串行产物"是判据），且**逐 id** 给出 `sha256` 供训练端复算闸门用。
+    beh: dict | None = None
+    if behaviour:
+        beh = behaviour_table_of(train_files + val_files, behaviour_root)
+        unver = [r for r in beh["table"] if not r["verified"]]
+        if unver:
+            lines = "\n".join(f"    id={r['id']} {r['spec']!r} —— {r['note']}" for r in unver)
+            if require_behaviour_sha:
+                raise spec.ContractError(
+                    f"⛔ `--require-behaviour-sha`：{len(unver)} 个行为策略**钉不住权重**"
+                    f"（fail-closed，不写一份没身份的数据集）：\n{lines}")
+            print(f"  ⚠ 行为策略身份：{len(unver)}/{len(beh['table'])} 个**未验证**"
+                  f"（`sha256=null`）—— 训练端若要跑 PPO 会**拒用**这些 id 的行：\n{lines}")
+    beh_index = beh["index"] if beh else None
+    #: ★ BL-14：**额外算作学生**的策略串集合（`--student-extra`）—— 只影响 `is_student` 的判定，
+    #: ⛔ 不动 `student`（温度权威源 / carry 网 / `h0` 口径都仍取它）。
+    student_set = frozenset(str(x) for x in (student_extra or ()))
 
     def one_split(part: list[Path], tag: str) -> dict:
         counts = []
@@ -928,7 +1131,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         n = sum(counts)
         if n == 0:
             raise spec.ContractError(f"{tag} 切分里没有决策（val_frac={val_frac} 太小？）")
-        mm = open_columns(out_dir, tag, n, lmax, mode="w+", dm=dm, style=bonus_on)
+        mm = open_columns(out_dir, tag, n, lmax, mode="w+", dm=dm, style=bonus_on,
+                          behaviour=bool(behaviour))
         # 每个文件的**行区间**（行号只由"文件顺序 + 文件内行序"决定，与并行度无关）
         tasks: list[tuple[Path, int, int]] = []
         off = 0
@@ -965,6 +1169,11 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                 # ⚠ `own_policies` 也要带：子进程要按同一批"学生席"算小局级奖励 ——
                 #   不带的话子进程会按四席取或算（并行产物 ≠ 串行产物，而那是判据）。
                 "style_own": (sorted(student_policies) if student_policies else None),
+                # ⚠ BL-14：`behaviour` 开关与**编号表**都要带过去 —— 少了开关子进程不写这一列
+                #   （写盘时才炸），少了表子进程会报"标签不在表里"（两份表必须逐项相同）。
+                "behaviour": bool(behaviour),
+                "student_extra": (sorted(student_set) if student_set else None),
+                "beh_index": (dict(beh_index) if beh_index else None),
                 "chunks": [[[str(f), int(i0), int(take)] for f, i0, take in ch] for ch in chunks],
             }, ensure_ascii=False), encoding="utf-8")
             _spawn([["_chunk", str(req), str(k)] for k in range(len(chunks))], tmp / "logs")
@@ -975,7 +1184,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                                           mode=style_mode_on) if bonus_on else None
             for f, i0, take in tasks:
                 _write_file(mm, f, i0, take, lmax=lmax, aux=aux, student=student,
-                            carry=carry_factory, bonus=tracker)
+                            carry=carry_factory, bonus=tracker, beh_index=beh_index,
+                            student_set=student_set)
             if tracker is not None:
                 serial_audit.update(tracker.audit())
             for m in mm.values():
@@ -990,6 +1200,25 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         rank_frac = float(np.isfinite(
             np.asarray(np.load(out_dir / f"{tag}.rank_points.npy", mmap_mode="r")[:n],
                        dtype=np.float32)).mean())
+        # ★ BL-14：`behaviour_id` 的**自证**（与 `h0` 同一套精神，判据不同）：
+        #   这一列**允许**只有一个 id（单策略数据就是合法的），所以不能拿"多 id"当判据。
+        #   判据 = ① 每个 id 都**在表内**（`-1` 一条都不许有 —— 写路径已经拒了，这里独立复验）；
+        #          ② 逐 id 的行数**加起来 == n**（不许有"没归属"的行）。
+        beh_info: dict | None = None
+        if behaviour:
+            bid = np.asarray(np.load(out_dir / f"{tag}.behaviour_id.npy", mmap_mode="r")[:n],
+                             dtype=np.int64)
+            uniq, cnt = np.unique(bid, return_counts=True)
+            rows = {int(u): int(c) for u, c in zip(uniq, cnt)}
+            if -1 in rows:
+                raise spec.ContractError(
+                    f"`behaviour_id` 列有 {rows[-1]} 行是 **-1**（没有归属的行为策略）—— "
+                    f"这一列存在的意义就是「每行都能指名道姓」，⛔ 不写一份有空洞的列")
+            if sum(rows.values()) != n:
+                raise spec.ContractError(
+                    f"`behaviour_id` 逐 id 行数之和 {sum(rows.values())} != {n}（{tag}）")
+            beh_info = {"rows_by_id": {str(k): v for k, v in sorted(rows.items())},
+                        "n_ids": len(rows), "decisions": int(n)}
         # ★ `h0` 的**覆盖率自证**：非全 0 的行占比。为什么这能当判据：采集里必然有一批
         #   `n > K` 的行（一手的事件数远超 60）⇒ 非 0 是**必然**的。若为 0，只可能是算错了
         #   （载错了网 / 没喂进去 / 前缀口径写反）—— 那就**当场报错**，绝不写出一份全 0 的列
@@ -1051,7 +1280,8 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                         f"逐决策付奖的判据是「付奖行数 == 动作行数」")
         return {"files": [f.name for f in part], "decisions": n, "lmax": lmax,
                 "rtg_frac": rtg_frac, "rank_frac": rank_frac, "h0_frac": h0_frac,
-                "style": style_info, "serial_style_audit": dict(serial_audit)}
+                "style": style_info, "serial_style_audit": dict(serial_audit),
+                "behaviour": beh_info}
 
     train = one_split(train_files, "train")
     val = one_split(val_files, "val")
@@ -1096,6 +1326,9 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         "lmax": max(train["lmax"], val["lmax"]),
         "val_frac": val_frac, "split_seed": split_seed,
         "student": student,
+        # ★ BL-14：额外算作学生的策略串（`--student-extra`）—— 只影响 `is_student` 掩码；
+        # ⛔ 不参与 `student` 的任何口径（温度权威源 / carry 网 / `h0`）。
+        "student_extra": (sorted(student_set) if student_set else None),
         "rtg_frac": {"train": train["rtg_frac"], "val": val["rtg_frac"]},
         "rank_frac": {"train": train["rank_frac"], "val": val["rank_frac"]},
         # ---- W1b：长程 carry（`h0` 列）的三条自证 ----
@@ -1119,6 +1352,23 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
             "whitening": (_style.stats_to_json(whitening) if bonus_on else None),
             "whitening_check": (style_check if bonus_on else None),
             "audit_path": (str(reward_audit_path) if reward_audit_path else None),
+        },
+        # ---- ★ BL-14：行为策略身份（逐行 `behaviour_id` + 这张表）----
+        # 口径：`id` = 全部轨迹 `game` 行 `policies` 的**排序去重**下标；每行 = 策略串 +
+        #   `sha256(权重文件)`（**构建器自己算**）+ 温度 `#T`。训练端的**逐 id 复算闸门**
+        #   与**逐 id `logp_old`** 都只读这一份（⛔ 不另存一份 ids）。
+        # ⚠ `enabled=false` 时**整块都在**（而不是缺键）：读侧按同一个键判，少一个键就是
+        #   "老数据集 vs 新数据集"分叉，而那正是本仓最忌讳的第二种口径。
+        "behaviour": {
+            "enabled": bool(behaviour),
+            "column": ("behaviour_id" if behaviour else None),
+            "id_rule": "sorted(distinct policies across all trace `game` rows)",
+            "table": (beh["table"] if beh else []),
+            "root": (str(behaviour_root) if behaviour_root else None),
+            "require_sha": bool(require_behaviour_sha),
+            "unverified": ([r["id"] for r in beh["table"] if not r["verified"]] if beh else []),
+            "splits": {"train": (train["behaviour"] if behaviour else None),
+                       "val": (val["behaviour"] if behaviour else None)},
         },
         "source": ("teacher 自对弈轨迹（`--aux` 带标签侧）" if aux else "自对弈轨迹"),
     }
@@ -1173,6 +1423,18 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
                   + ("（同一小局四行同值已断言）" if style_mode_on == _style.MODE_HAND
                      else "（decision 模式：**只有动作行非 0**、行内不同值是刻意的）"))
             print(f"    奖励账（可审计）：{reward_audit_path}")
+        # ---- ★ BL-14：行为策略身份的**原始输出**（训练端的闸门/ρ 全按这张表）----
+        if not behaviour:
+            print("  行为策略身份：**关闭**（没给 `--behaviour-id`）—— 不建 `behaviour_id` 列，"
+                  "训练走逐字节相同的**单策略**路径")
+        else:
+            tb = meta["behaviour"]["table"]
+            print(f"  行为策略身份：`behaviour_id` 已建，表内 **{len(tb)}** 个行为"
+                  f"（未验证 {len(meta['behaviour']['unverified'])} 个）；训练行按 id 分布："
+                  f"{train['behaviour']['rows_by_id']}；验证 {val['behaviour']['rows_by_id']}")
+            for r in tb:
+                print(f"    id={r['id']} {r['kind']:7s} temp={r['temp']} "
+                      f"sha256={(r['sha256'] or 'null')[:16]} {r['spec']}")
     return meta
 
 
@@ -1266,7 +1528,7 @@ def load_split(out_dir: str | Path, split: str) -> dict:
     out: dict = {"meta": meta, "split": split}
     for name in ("tile", "evt", "ctx", "cand", "nlegal", "label", "label_type", "effect", "value",
                  "placement", "seat", "game", "hand_no", "is_student", "delta", "rtg",
-                 "rank_points", "h0", _style.COLUMN,
+                 "rank_points", "h0", _style.COLUMN, "behaviour_id",
                  "aux_opp_hand", "aux_opp_tenpai",
                  "aux_opp_dealin", "aux_own_shanten_after", "aux_own_tenpai", "aux_win_flag"):
         p = out_dir / f"{split}.{name}.npy"
@@ -1317,6 +1579,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backfill-rank", action="store_true",
                     help="**只回填 `rank_points` 列**（src = 采集目录（含 summary.json），"
                          "out = 已存在的紧凑集；不重算张量）—— 老数据集升级用")
+    ap.add_argument("--behaviour-id", action="store_true",
+                    help="★ BL-14：建逐行 `behaviour_id` 列 + meta 的 `behaviour.table[]`"
+                         "（每行 = 策略串 + **构建器自己算的** `sha256(net.bin)` + 温度 `#T`）。"
+                         "⚠ 缺省**关** ⇒ 与加这个功能之前**逐字节相同**；⚠⛔ 该列**不进模型输入**")
+    ap.add_argument("--behaviour-root", default=None, metavar="DIR",
+                    help="解析策略串里**相对路径 / 注册名**的根（例：`bot-ai/` 或权重目录）。"
+                         "找不到就 `verified=false`（⛔ 不写假 sha256）")
+    ap.add_argument("--require-behaviour-sha", action="store_true",
+                    help="有行为策略钉不住权重就**当场报错**（fail-closed）；缺省只响亮打印清单")
+    ap.add_argument("--student-extra", default="", metavar="SPEC[,SPEC…]",
+                    help="★ BL-14：把**额外几代**也标成学生行（逗号分隔的**确切策略串**）。"
+                         "用途：一份紧凑集里并上 `D_k` 与 `D_{k+1}`，两代都算学生、`--init` 取"
+                         "**最新那一代** ⇒ 「陈旧 1 轮」这件事才可判。"
+                         "⚠ 只改 `is_student` 列；⛔ 不动 `--student`（温度 `#T` / carry 网 / `h0`）")
     args = ap.parse_args(argv)
     if args.cmd == "_chunk":
         # 内部子命令（并行用；见 `_spawn`）：把 req.json 里第 k 组任务写进（父进程已建好的）列
@@ -1370,7 +1646,19 @@ def main(argv: list[str] | None = None) -> int:
         if style_on and not style_stats:
             raise spec.ContractError("req.json 里有 `style` 却没有 `style_stats`（μ/σ）—— "
                                      "并行分支漏传了白化参数，写出来的列会与串行不同")
-        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+", dm=dm, style=style_on)
+        mm = open_columns(out_dir, tag, n, int(req["lmax"]), mode="r+", dm=dm, style=style_on,
+                          behaviour=bool(req.get("behaviour")))
+        # ⚠ BL-14：编号表**从 req.json 读回**（父进程算的）—— 子进程自己重算会得到同一份
+        #   （编号规则是"全量排序去重"、与是谁算无关），但**多一条一致性检查**更安全：
+        #   父进程改了口径而忘了传，这里会退化成"表为空 ⇒ 每个标签都不在表里 ⇒ 当场报错"。
+        beh_index = ({str(k): int(v) for k, v in (req.get("beh_index") or {}).items()}
+                     if req.get("behaviour") else None)
+        if req.get("behaviour") and not beh_index:
+            raise spec.ContractError("req.json 里有 `behaviour` 却没有 `beh_index` —— "
+                                     "并行分支漏传了编号表（写出来的列会是 -1 / 报错）")
+        # ★ BL-14：额外学生串也要从 req.json 读回（漏了 ⇒ 子进程的 `is_student` 与父进程不同
+        #   ⇒ "并行产物 == 串行产物"当场失效，而那正是判据）。
+        child_student_set = frozenset(str(x) for x in (req.get("student_extra") or ()))
         if carry_factory is not None:
             # `open_columns(mode="r+")` 是**打开已有文件**（numpy 会忽略传入的 shape/dtype、
             # 按文件头走）⇒ 这里再自己核一次宽度：错了就会把别的宽度写进去（静默）。
@@ -1386,7 +1674,8 @@ def main(argv: list[str] | None = None) -> int:
                                            mode=style_mode)
                        if style_on else None)
             _write_file(mm, f, i0, take, lmax=int(req["lmax"]), aux=bool(req["aux"]),
-                        student=req.get("student"), carry=carry_factory, bonus=tracker)
+                        student=req.get("student"), carry=carry_factory, bonus=tracker,
+                        beh_index=beh_index, student_set=child_student_set)
         for m in mm.values():
             m.flush()
         return 0
@@ -1398,7 +1687,11 @@ def main(argv: list[str] | None = None) -> int:
     build(args.src, args.out, val_frac=args.val_frac, split_seed=args.split_seed, aux=args.aux,
           limit_files=args.limit_files, workers=args.workers, student=args.student,
           carry_model=args.carry_model, style_bonus=args.style_bonus,
-          style_whiten=args.style_bonus_whiten, style_mode=args.style_bonus_mode)
+          style_whiten=args.style_bonus_whiten, style_mode=args.style_bonus_mode,
+          behaviour=args.behaviour_id, behaviour_root=args.behaviour_root,
+          require_behaviour_sha=args.require_behaviour_sha,
+          student_extra=tuple(x.strip() for x in str(args.student_extra or "").split(",")
+                              if x.strip()))
     return 0
 
 

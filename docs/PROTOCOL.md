@@ -1505,6 +1505,34 @@ trainer selfplay 1000 --workers 6 --rotate-perm --seed 52870101 --out <dir> \
   ⚠ 这一支是**训练端 C++ 专用**：Java 侧 `mahjong.ai.Policies.byName` **没有**它，所以
   `MAHJONG_PRODUCER=java` 下用它会报"未知策略名"（能力缺口**显式**暴露，不悄悄降级）。
 
+#### 8.4.1 数据生成策略的**身份**（`behaviour_id` / `behaviour_table`）—— BL-14（2026-10-13）
+
+**要解决的问题**：异步回路里 `train(D_k, θ_k) ‖ collect(D_{k+1}, θ_k)` 天然让**训练用的 `--init`**
+（下一代的 θ）与**数据的生成者**（θ_k）**不是同一份网**。旧口径（`--init` 必须逐字等于
+数据集 `student` 串）在这种数据上**结构性不成立**；而只按一个 `--behaviour` 算 `logp_old`，
+其余几代的行 ρ 会整体错**而训练照跑**。
+
+**紧凑集侧（`python -m mahjong_ml.v4.dataset build`）**：
+
+| 新增 | 形状 | 含义 |
+| --- | --- | --- |
+| 列 `behaviour_id` | `int16`，逐决策行 | 这一行的动作是**哪一份行为策略**采出来的；下标进 `meta.behaviour.table[]`。⚠ **缺省不建**（`--behaviour-id` 才建）⇒ 老紧凑集与老路径**逐字节不变**。⛔ **该列绝不进模型输入**（判据 = 加/不加它，前向**逐位相同**，`python/selfcheck.py` 钉着） |
+| `meta.behaviour` | 对象 | `{enabled, column, id_rule, table[], root, require_sha, unverified[], splits{train,val}}` |
+| `meta.behaviour.table[i]` | 对象 | `{id, spec, kind, temp, sha256, path, verified, note}` —— `spec` = 采集时的**确切策略串**（= 轨迹 `policy` 值），`sha256` = **构建器自己算的** `sha256(权重文件)`（⛔ 不信生产者声明），`temp` = 串里的 `#T`（逐行为，缺省 `null`），`verified=false` ⇒ 钉不住权重（fail-closed 的记账面） |
+
+`id` 的规则 = **全部轨迹文件 `game` 行的 `policies` 排序去重后的下标**（与并行度无关 ⇒
+"并行产物 == 串行产物"照旧成立）。轨迹里出现表外标签 ⇒ **当场报错**（⛔ 不写 −1 蒙混）。
+
+新增开关：`--behaviour-id` · `--behaviour-root DIR`（解析相对路径 / `bot-ai/<名>/net.bin` 注册名）·
+`--require-behaviour-sha`（钉不住就报错，fail-closed）· `--student-extra SPEC[,SPEC…]`
+（把**额外几代**也标成学生行 —— 只改 `is_student` 列，⛔ 不动 `--student`：温度 `#T` / carry 网 / `h0` 仍取它）。
+
+**训练侧（`python -m mahjong_ml.v4.pretrain`）**：`--behaviour-multi`（逐 `behaviour_id` 重算
+`logp_old` + 逐 id 复算闸门 + 陈旧度预算，**缺省关**）· `--rho-max RHO` / `--rho-max-action fail|account`
+（重要性比上限，超限**响亮失败**或缺省外的**显式降级 + 记账**）· `--stale-kl-budget KL` ·
+`--behaviour-probe N` · `--allow-unverified-behaviour`。闸门四条尺子与 ρ/陈旧度的判据见
+`docs/TRAINING-V4.md` §17.11；预注册见 `S:\mahjong-training\w-ladder\BL14-PLAN.md`。
+
 ### 8.5 数据集校验
 
 ```bash

@@ -2747,3 +2747,31 @@ python -m mahjong_ml.v4.pretrain --data <紧凑集> --label bl04-segB --objectiv
 
 ⚠ 同时更正第七十八轮的两个推断：① `wl-p301-B-g06` / `wl-p301-A-g01` 的"口径已动"是**字段 bug 造成的
 假象**，不是"结构性必然"；② 那句「≥3 段的链天然要绕 PPO 口径闸门」**撤销**。
+
+### 17.11 异步 / 全重叠（BL-14，2026-10-13）：数据生成策略 ≠ 训练 init 的**合规可判**
+
+> 判据行在 `AGENTS.md` §6.5；逐字原始输出见 `NOTES.md` §6.5 **第八十一轮**；格式登记见 `docs/PROTOCOL.md` §8.4.1。
+> 预注册 `S:\mahjong-training\w-ladder\BL14-PLAN.md`（跑前冻写）。⛔ 本轮**只做机制 + 利用率**，不做强度结论。
+
+**结构事实**：一个"干净"轮次是 `(D_k, θ_k)` 配对（D_k 由 θ_k 生成 ∧ `--init` = θ_k ⇒ 旧闸门天然通过）。
+要**重叠**就必须在训练 `D_k`（用 θ_k）时用 **θ_k** 去采集 `D_{k+1}`（θ_{k+1} 还不存在）⇒ 之后用
+`--init = θ_{k+1}` 训 `D_{k+1}` ⇒ **D_{k+1} 落后一轮策略**。这不是 bug，是这条路线**必然**的代价 ⇒ 机制必须能判它。
+
+| 机制 | 落点 | 开关（**全部缺省关** ⇒ 旧路径逐字节不变） |
+| --- | --- | --- |
+| 逐行行为身份 | `dataset.py`：列 `behaviour_id`(int16) + `meta.behaviour.table[]`（`sha256` **构建器自己算**） | `dataset --behaviour-id [--behaviour-root DIR] [--require-behaviour-sha] [--student-extra SPEC,…]` |
+| 逐 id `logp_old` | `pretrain.per_behaviour_logprobs`：每个 id 一遍前向（**只给有学生行的代算全量**，探针行每 id 照算） | `pretrain --behaviour-multi` |
+| 逐 id **复算闸门** | `pretrain.assert_behaviour_gate_multi`：`\|KL(记录‖复算)\|≤1e-2 ∧ max\|Δlogp\|≤1e-4` | 随 `--behaviour-multi` 开 |
+| 陈旧度**降级为预算** | 逐 id `KL(π_id‖π_init)`，超预算**记账 + 响亮告警**（⛔ 不硬拒） | `--stale-kl-budget 0.30` |
+| 有界重要性比 | `compute_loss`：**双边** ρ 分布 + 超限行数；超 `--rho-max` ⇒ 响亮失败或显式降级 + 记账 | `--rho-max 100 --rho-max-action fail\|account` |
+| 回路记账 | `tools/overlap-orchestrator.py` 的 `--rounds JSONL`（θ/D 指纹 · behaviour_table · ρ · 陈旧度 · 墙钟/重叠/峰值） | `pair --rounds <jsonl>` |
+
+**四条尺子（缺一即 `SystemExit`，exit 1、无 traceback）**：① `--init` 的 `sha256` 必须与**至少一个**
+`behaviour_id` 相同（与**全部**脱钩 = 起点与数据毫无关系）；② 逐 id 复算 ≈0；③
+未验证身份（`sha256=null`）缺省**拒跑**（`--allow-unverified-behaviour` 才降级为"排除这些行 + 记账"）；
+④ 学生行里混了多代却**没开** `--behaviour-multi` ⇒ **当场拒跑**（⛔ 单一 `--behaviour` 会给别的代算 `logp_old`）。
+
+**实测（生产比例 1000 场 ‖ 167 步，预注册 `ρ≤100` / 陈旧度预算 0.30）**：串行 394.0 s → 重叠 **285.5 s**
+（**省 27.5%**、捕获率 100%、训练拖慢 **1.708×**、采集拖慢 1.135×、`commit_free` 最低 9.08 GB）；
+4 个行为各 4096 行探针 `KL(记录‖复算)=0.00e+00`、`max|Δlogp|=0.00e+00`；陈旧度 0.136/0.101/**0.000**/0.262 全在预算内。
+⇒ 结论只到"机制落地 + 该配方的利用率"，**强度**由 BL-13 答（多族牌山配对闸门）。

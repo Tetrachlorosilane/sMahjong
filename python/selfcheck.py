@@ -4915,6 +4915,92 @@ ok(_dr["adopt_primary"] is True and _dr["adopt"] is False and len(_dr["guards"])
 ok(_dk["adopt_primary"] is True and _dk["adopt"] is True,
    "风格轴：带内（掉 0.05）⇒ 仍采纳（不是「有护栏就一律否掉」）", f"adopt={_dk['adopt']}")
 
+# ============================================================================================
+# ---- ★ BL-14（异步 / 全重叠）：数据侧行为身份 + 逐 id 复算闸门 + 有界 ρ ----------------------
+# 判据与 `S:\mahjong-training\w-ladder\BL14-PLAN.md` 的预注册一一对应：
+#   ① `behaviour_id` 列**缺省不建**（旧紧凑集逐字节不变）、开了才建；
+#   ② 该列**绝不许进模型**（静态：模型/块/编码器/adv 里一个字都不许出现它）；
+#   ③ 身份解析：`#T` 逐行为取；内置策略无权重 ⇒ **不算**「未验证」（两件事必须分开）；
+#   ④ 表指纹：确定性 + 对身份变化**敏感**（否则「同一份 D」是假绿）；
+#   ⑤ 闸门硬拒：缺 `--init` / `--init` 与**全部** behaviour_id 脱钩 ⇒ `SystemExit`（fail-closed）；
+#   ⑥ 未验证行为 ⇒ 缺省 `SystemExit`；内置策略 ⇒ NaN + 单独记账（不是「未验证」）；
+#   ⑦ ρ 记账：**双边**（ρ 大与 ρ 小都越界）+ 分位数 + `max(ρ,1/ρ)`
+#      —— 实测踩过：只报 `max ρ` 会把「ρ 极小」那一侧的越界洗成绿的。
+for _f in ("model.py", "blocks.py", "cache.py", "spec.py", "adv.py"):
+    ok("behaviour_id" not in (Path(v4_ds.__file__).parent / _f).read_text(encoding="utf-8"),
+       f"BL-14：`behaviour_id` 没进 {_f}（静态反泄漏）")
+eq("BL-14：`behaviour_id` 的 dtype（int16；-1 保留给「没归属」）",
+   v4_ds._COLUMNS["behaviour_id"], (np.int16, ()))
+_bh_tmp = scratch("bl14-cols")
+_mm_off = v4_ds.open_columns(_bh_tmp, "train", 4, 3)
+ok("behaviour_id" not in _mm_off,
+   "BL-14：没开 `--behaviour-id` ⇒ **不建**这一列（旧紧凑集逐字节不变）", str(sorted(_mm_off))[:60])
+_mm_on = v4_ds.open_columns(_bh_tmp, "val", 4, 3, behaviour=True)
+eq("BL-14：开了才建（形状 = 行数）", tuple(_mm_on["behaviour_id"].shape), (4,))
+eq("BL-14：`#T` 逐行为解析（认不出 ⇒ None，⛔ 不猜 1.0）",
+   [v4_ds._policy_temp(x) for x in
+    ("net:a.bin#0.5", "net:a.bin@0", "teacher", "net:a#x", "net:a#-1")],
+   [0.5, None, None, None, None])
+eq("BL-14：内置策略**不算**「未验证」（sha256=None 但 verified=True：没有权重可钉）",
+   {k: v for k, v in v4_ds.resolve_behaviour("teacher", None).items()
+    if k in ("kind", "sha256", "verified")},
+   {"kind": "builtin", "sha256": None, "verified": True})
+_r_net = v4_ds.resolve_behaviour("net:no/such/net.bin#0.5", None)
+ok(_r_net["sha256"] is None and _r_net["verified"] is False and _r_net["temp"] == 0.5,
+   "BL-14：串里指了权重却找不到 ⇒ `verified=False`（⛔ 不写假 sha256）", str(_r_net["note"])[:60])
+_bt = [{"id": 0, "spec": "net:A#0.5", "temp": 0.5, "sha256": "aa"},
+       {"id": 1, "spec": "teacher", "temp": None, "sha256": None}]
+eq("BL-14：表指纹确定性（同一份表两次相同）",
+   v4_pt.behaviour_table_digest(_bt), v4_pt.behaviour_table_digest(list(_bt)))
+ok(v4_pt.behaviour_table_digest(_bt)
+   != v4_pt.behaviour_table_digest([{**_bt[0], "sha256": "bb"}, _bt[1]]),
+   "BL-14：表指纹对身份变化**敏感**（换权重 ⇒ 换指纹；否则「同一份 D」是假绿）")
+eq("BL-14：没开开关 ⇒ `behaviour_table_of_meta` 空表（旧路径）",
+   v4_pt.behaviour_table_of_meta({"behaviour": {"enabled": False, "table": _bt}}), [])
+eq("BL-14：`behaviour_ids_of` 读列",
+   v4_pt.behaviour_ids_of({"behaviour_id": np.array([0, 1], dtype=np.int16)}).tolist(), [0, 1])
+_bh_gate_bad = 0
+for _sha0 in (None, "cc"):
+    try:
+        v4_pt.assert_behaviour_gate_multi(None, {"nlegal": np.zeros((4, 1), np.int16)}, _bt,
+                                         np.array([0, 0, 1, 1]), np.zeros(4, dtype=np.float32),
+                                         _sha0, 1.0, "cpu", probe=4, tag="sc")
+    except SystemExit:
+        _bh_gate_bad += 1
+eq("BL-14：闸门仍咬人 —— 缺 `--init` / `--init` 与全部 behaviour_id 脱钩 ⇒ SystemExit（2 例）",
+   _bh_gate_bad, 2)
+_bh_unver = 0
+try:
+    v4_pt.per_behaviour_logprobs(
+        {"nlegal": np.zeros((2, 1), np.int16)},
+        [{"id": 0, "spec": "net:A", "temp": None, "sha256": None, "path": None,
+          "verified": False, "kind": "net"}],
+        np.zeros(2, dtype=np.int64), "cpu", 2, default_temp=1.0,
+        allow_unverified=False, tag="sc")
+except SystemExit:
+    _bh_unver += 1
+eq("BL-14：未验证行为 ⇒ 缺省 SystemExit（⛔ 不许静默用）", _bh_unver, 1)
+_lp_b, _lp_i = v4_pt.per_behaviour_logprobs(
+    {"nlegal": np.zeros((3, 1), np.int16)},
+    [{"id": 0, "spec": "teacher", "temp": None, "sha256": None, "path": None,
+      "verified": True, "kind": "builtin"}],
+    np.zeros(3, dtype=np.int64), "cpu", 2, default_temp=1.0, allow_unverified=False, tag="sc")
+ok(bool(np.isnan(np.asarray(_lp_b)).all()) and _lp_i["builtin_rows"] == {"0": 3}
+   and _lp_i["excluded_rows"] == {},
+   "BL-14：内置策略 ⇒ NaN + 记 `builtin_rows`（⛔ 不算「未验证」、不进策略损失）",
+   f"builtin={_lp_i['builtin_rows']} unverified={_lp_i['excluded_rows']}")
+# ρ 记账：合成 ρ ∈ {1, 1, 1e-6（小侧越界）, 200（大侧越界）}
+_ra = {"samples": [np.array([1.0, 1.0, 1e-6, 200.0], dtype=np.float32)], "n_rows": 4,
+       "n_gt_max": 2, "n_gt_clamp": 2, "worst_abs": 1e6, "worst_hi": 200.0,
+       "worst_lo": 1e-6, "clipped_batches": 1}
+_rs = v4_pt.rho_summary(_ra)
+eq("BL-14：ρ 越界行数是**双边**的（ρ 太小也算）", _rs["n_gt_rho_max"], 2)
+eq("BL-14：ρ 上/下极值**分开报**（⛔ 只报 max ρ 会把小侧越界洗成绿的）",
+   (round(_rs["rho_max"], 9), round(_rs["rho_min"], 12)), (200.0, 1e-6))
+eq("BL-14：`max(ρ,1/ρ)` 是上限判据真正比的那个量",
+   round(_rs["rho_worst_two_sided"], 6), 1e6)
+eq("BL-14：分位数在 **ρ** 上算（p50 = 1）", round(_rs["rho_p50"], 6), 1.0)
+
 print(f"\n自检：检查项 {count}，失败 {len(fails)}")
 for f in fails:
     print(f"  FAIL: {f}")
