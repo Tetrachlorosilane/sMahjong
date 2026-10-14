@@ -4,7 +4,7 @@
 #   ./update.sh                     更新到"最新的含服务端包的非 prerelease 发布"；本来在跑就自动重启
 #   ./update.sh --list              只列出最近的发布 + "会不会选它"（干跑，不下载）
 #   ./update.sh --check             只查有没有新内容（不下载、不安装、不动进程）
-#   ./update.sh --tag v1.14.0       指定 tag（精确匹配）
+#   ./update.sh --tag v1.18.0       指定 tag（精确匹配）
 #   ./update.sh --include-prerelease  允许选中 prerelease 发布
 #   ./update.sh --force             即使远端摘要与本地记录相同也重装
 #   ./update.sh --no-restart        装完不重启（自己挑时间 ./restart.sh）
@@ -28,8 +28,8 @@
 # ## 怎么判断"有没有新版"
 #
 #   ① **tag 不同** → 有新版；② tag 相同但**资产 sha256 变了** → 也算有新版
-#   （本仓库修 bug 时不换版本号、原地重发同名资产）。⚠ 包内 `VERSION` 写的是 `1.14.0`
-#   （**不带 v**）而 release tag 是 `v1.14.0`，所以两边都先归一化再比 —— 旧版直接比字符串，
+#   （本仓库修 bug 时不换版本号、原地重发同名资产）。⚠ 包内 `VERSION` 写的是 `1.18.0`
+#   （**不带 v**）而 release tag 是 `v1.18.0`，所以两边都先归一化再比 —— 旧版直接比字符串，
 #   在刚解压出来的包上**永不相等**，"已是最新"这条短路从来没生效过。
 #   ⚠ 若上游**既没有 digest 也没有 `<资产>.sha256` 边车**，就明说"无校验可用"（只记大小），
 #   ⛔ 不假装校过。
@@ -61,7 +61,7 @@ trap cleanup EXIT
 
 die() { echo "错误：$*" >&2; exit 1; }
 
-# 包内 VERSION = "1.14.0"，release tag = "v1.14.0" —— 先归一化再比（见文件头 §"怎么判断有没有新版"）
+# 包内 VERSION = "1.18.0"，release tag = "v1.18.0" —— 先归一化再比（见文件头 §"怎么判断有没有新版"）
 TAB="$(printf '\t')"   # 显式制表符：TSV 解析全靠它
 norm_tag() { case "${1:-}" in '') printf '' ;; v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
 
@@ -72,7 +72,7 @@ usage() {
   ./update.sh                       最新（含服务端包、非 prerelease）；本来在跑就自动重启
   ./update.sh --list                列出最近的发布与"会不会选它"（干跑，不下载）
   ./update.sh --check               只查有没有新内容（不下载、不安装、不动进程）
-  ./update.sh --tag v1.14.0         指定 tag（精确匹配）
+  ./update.sh --tag v1.18.0         指定 tag（精确匹配）
   ./update.sh --include-prerelease  允许选中 prerelease 发布
   ./update.sh --force               即使远端摘要与本地记录相同也重装
   ./update.sh --no-restart          装完不重启（自己挑时间 ./restart.sh）

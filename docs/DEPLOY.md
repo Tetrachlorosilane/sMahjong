@@ -201,7 +201,7 @@ java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要�
 ./update.sh --list                  # 列出最近的发布 + "会不会选它"（干跑，不下载）
 ./update.sh --check                 # 只查有没有新内容（不动进程、不下载）
 ./update.sh                         # 装最新；本来在跑就自动重启
-./update.sh --tag v1.14.0 --force   # 指定版本 / 强制重装
+./update.sh --tag v1.18.0 --force   # 指定版本 / 强制重装
 ./update.sh --no-restart            # 只装，不重启
 ./update.sh --include-prerelease    # 允许选中 prerelease 发布
 REPO=you/sMahjong ./update.sh       # 换仓库（自建 fork）
@@ -228,7 +228,7 @@ REPO=you/sMahjong ./update.sh       # 换仓库（自建 fork）
 ⚠ **为什么不能只比版本号**：本仓库修 bug 时**不换版本号、原地重发同名资产**
 （`v1.8.0` 就这样重发过两次）。所以 `update.sh` 还比 release 资产的 `digest`，
 同一 tag 下资产变了也会装（`--check` 会显示"同一个 tag 下的资产变了"）。
-⚠ 包内 `VERSION` 写的是 `1.14.0`（**不带 v**）而 release tag 是 `v1.14.0`，
+⚠ 包内 `VERSION` 写的是 `1.18.0`（**不带 v**）而 release tag 是 `v1.18.0`，
 两边都先归一化再比；⚠ 若上游**既没有 `digest`、也没有 `<资产>.sha256` 边车**，
 脚本会**明说"无校验可用"**（只核大小），⛔ 不假装校过。
 
@@ -358,3 +358,9 @@ stream {
 | 玩家档案一直不落盘 | 落盘有 **2 秒节流**（登录太密集时合并写），正常；退出/清理时都会补写。看日志有没有"落盘失败" |
 | 日志里出现「玩家档案过期清理」 | 正常：超过 `--uuid-ttl-days`（默认 60 天）没登录的记录被清掉了 |
 | 想改规则 | 建房间时客户端可传 `rules` 对象（见 `docs/PROTOCOL.md` §5），服务端逐项校验 |
+
+## 10. 发版记录
+
+| 版本 | 内容 |
+| --- | --- |
+| **`v1.18.0`** | **服务端包**（`sMahjong-server-v1.18.0.zip`），带**修复版自更新脚本**。修掉的四条：① 自更新**取错资产**（旧规则 `/releases/latest` → 取 tag → 按 tag 拼 `sMahjong-server-<tag>.zip`，而近几个发布都不含服务端包 ⇒ 拼出来必然 404）；② **摘要比对从未生效**（正则写成 `"name":"…"` 而真实响应是 `"name": "…"`，且 `digest` 与 `name` 不同行）；③ "**已是最新**"短路从未命中（包内 `VERSION` 不带 `v` 而 tag 带 `v`，旧版直接比字符串，刚解压出来的包永不相等）；④ **`cp` 自覆盖致半装静默 `rc=0`**（`update.sh` 替换正在运行的自己 ⇒ `cp` 就地截断同一 inode）。版本落点是 `client/CMakeLists.txt` 与 `client/src/main.cpp`（本仓库客户端与服务端**共用同一个版本号**，发布包版本取自前者）。⚠ `v1.15.0`（四个风格包）/ `v1.16.0`（强度候选包）/ `v1.17.0-weights`（权重归档）**都是机器人包或权重归档、不含服务端包** ⇒ 服务端自 v1.14.0 之后一直没再发过。 |

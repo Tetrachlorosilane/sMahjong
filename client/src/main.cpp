@@ -87,7 +87,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("mahjong-client"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.14.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("1.18.0"));
 
     // ⚠⚠ **音频栈必须在 `QApplication` 还活着的时候拆掉**（2026-09-29 修的真 bug）：
     //   `sound::Player` 是函数内静态对象 ⇒ 它的析构发生在 **main 返回之后**，那时

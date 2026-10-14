@@ -53,7 +53,7 @@
     ./update.sh --check   # 只查有没有新版（不动任何东西）
     ./update.sh           # 装最新版；本来在跑就自动重启
     ./update.sh --list    # 列出最近的发布 + "会不会选它"（干跑，不下载）
-    ./update.sh --tag v1.14.0 --force   # 指定版本 / 强制重装
+    ./update.sh --tag v1.18.0 --force   # 指定版本 / 强制重装
     ./update.sh --include-prerelease    # 允许选中 prerelease 发布
 
 它挑的是"**最新的、含服务端包的非 prerelease 发布**"，不是"整仓最新的发布" ——
