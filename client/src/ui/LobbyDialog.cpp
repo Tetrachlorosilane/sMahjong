@@ -1,6 +1,7 @@
 #include "ui/LobbyDialog.h"
 
 #include "i18n/Lang.h"
+#include "ui/BotAiCombo.h"
 
 #include <QComboBox>
 #include <QFormLayout>
@@ -108,7 +109,7 @@ LobbyDialog::LobbyDialog(QWidget* parent)
     //   （见 `mahjong.ai.BotAis`），所以这里也不给任何手填入口。
     m_botAi = new QComboBox(createBox);
     m_botAi->addItem(lang::t(QStringLiteral("ui.lobby.bot_ai_default")), QString());
-    m_botAi->setToolTip(lang::t(QStringLiteral("ui.lobby.bot_ai_tip")));
+    fitBotAiCombo(m_botAi, lang::t(QStringLiteral("ui.lobby.bot_ai_tip")));
     // 一位必要点数（`docs/日本麻将.md` L116/L143/L157）：0 = 不要求。
     // 自选填写框 —— 切预设时填该预设的默认值（M.League 0 / 天凤·雀魂 30000），
     // 玩家可以改成任意值；它决定 All Last 轮庄后是否进延长战、以及庄家能否和了止/听牌止。
@@ -286,6 +287,7 @@ void LobbyDialog::setBotAis(const QJsonArray& ais)
     }
     const int idx = m_botAi->findData(keep);
     m_botAi->setCurrentIndex(idx >= 0 ? idx : 0);
+    fitBotAiCombo(m_botAi, lang::t(QStringLiteral("ui.lobby.bot_ai_tip")));   // 清单来了才量得出最长包名
 }
 
 int lobbyrules::defaultRequiredPoints(const QString& preset)

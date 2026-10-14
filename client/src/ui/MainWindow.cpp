@@ -7,6 +7,7 @@
 #include "net/Protocol.h"
 #include "ui/ActionBar.h"
 #include "ui/AutoBar.h"
+#include "ui/BotAiCombo.h"
 #include "ui/LobbyDialog.h"
 #include "ui/ReplayWindow.h"
 #include "ui/ResultDialog.h"
@@ -171,7 +172,7 @@ void MainWindow::buildWaitingPage()
     // 机器人用哪一代 AI（房主、开局前）：值由服务端 `room.bot_ai` 回落，改选就发 `set_bot_ai`
     m_botAiLabel = new QLabel(lang::t("ui.main.bot_ai"), m_waitPage);
     m_botAiCombo = new QComboBox(m_waitPage);
-    m_botAiCombo->setToolTip(lang::t("ui.main.bot_ai_tip"));
+    fitBotAiCombo(m_botAiCombo, lang::t("ui.main.bot_ai_tip"));
     m_botAiCombo->addItem(lang::t("ui.lobby.bot_ai_default"), QString());
     auto* leaveBtn = new QPushButton(lang::t("ui.main.leave_room"), m_waitPage);
     btnRow->addWidget(m_readyBtn);
@@ -487,8 +488,8 @@ void MainWindow::updateWaitingRoom(const QJsonObject& room)
         m_botAiCombo->setEnabled(canPick);
         if (m_botAiLabel)
             m_botAiLabel->setEnabled(canPick);
-        m_botAiCombo->setToolTip(canPick ? lang::t("ui.main.bot_ai_tip")
-                                         : lang::t("ui.main.host_only_start"));
+        fitBotAiCombo(m_botAiCombo, canPick ? lang::t("ui.main.bot_ai_tip")
+                                           : lang::t("ui.main.host_only_start"));
     }
 }
 
@@ -511,6 +512,7 @@ void MainWindow::setBotAiCatalogue(const QJsonArray& ais)
         const int idx = m_botAiCombo->findData(keep);
         m_botAiCombo->setCurrentIndex(idx >= 0 ? idx : 0);
         m_botAiCombo->blockSignals(false);
+        fitBotAiCombo(m_botAiCombo, lang::t("ui.main.bot_ai_tip"));   // 清单来了才量得出最长包名
     }
     if (m_lobby)
         m_lobby->setBotAis(ais);

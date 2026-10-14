@@ -13,6 +13,7 @@
 #include "net/Protocol.h"
 #include "ui/ActionBar.h"
 #include "ui/AutoBar.h"
+#include "ui/BotAiCombo.h"
 #include "ui/LobbyDialog.h"
 #include "ui/MainWindow.h"
 #include "ui/ReplayWindow.h"
@@ -1829,17 +1830,19 @@ int run(const QString& outDir)
         w.setAutoAnswer(false);
         QList<QJsonObject> cmds;
         w.setCommandTapForTest([&cmds](const QJsonObject& o) { cmds << o; });
-        // 服务端握手：清单两项（teacher 是默认；ppo2-g04 是训练出来的网络）
+        // 服务端握手：清单三项（teacher 是默认；ppo2-g04 是训练出来的网络；
+        // 第三项故意用**与真实注册表里最长包名同长**的名字，让下面的宽度断言真的量到长名）
         w.feedEventForTest(parseEv(
                 R"({"ev":"hello_ok","pid":1001,"name":"我","bot_ais":[)"
                 R"({"name":"teacher","spec":"teacher","default":true},)"
-                R"({"name":"ppo2-g04","spec":"net:X:/ckpt/ppo2-g04/net.bin","default":false}]})"));
+                R"({"name":"ppo2-g04","spec":"net:X:/ckpt/ppo2-g04/net.bin","default":false},)"
+                R"({"name":"ppo-v3-g01-g01","spec":"net:X:/ckpt/ppo-v3-g01-g01/net.bin","default":false}]})"));
 
         LobbyDialog* dlg = w.findChild<LobbyDialog*>();
         QComboBox* lobbyCombo = dlg ? dlg->botAiComboForTest() : nullptr;
         check(lobbyCombo != nullptr, QStringLiteral("大厅有「机器人 AI」下拉框"));
-        checkEq(QString::number(lobbyCombo ? lobbyCombo->count() : -1), QStringLiteral("3"),
-                QStringLiteral("建桌下拉框 = 「跟服务端默认」+ 服务端给的 2 个 AI"));
+        checkEq(QString::number(lobbyCombo ? lobbyCombo->count() : -1), QStringLiteral("4"),
+                QStringLiteral("建桌下拉框 = 「跟服务端默认」+ 服务端给的 3 个 AI"));
         checkEq(lobbyCombo ? lobbyCombo->itemData(0).toString() : QStringLiteral("?"), QString(),
                 QStringLiteral("第一项「跟服务端默认」的数据是空串（= 报文不带 bot_ai）"));
         checkEq(lobbyCombo ? lobbyCombo->itemData(1).toString() : QStringLiteral("?"),
@@ -1918,6 +1921,32 @@ int run(const QString& outDir)
               QStringLiteral("非房主：下拉框不可用，但仍显示这一桌当前的 AI"));
         w.feedEventForTest(roomEv(1001, true, QStringLiteral("teacher")));
         check(wc && !wc->isEnabled(), QStringLiteral("牌局进行中：机器人 AI 不可改"));
+
+        // 回归：「AI 选择栏过短、显示不全 AI 包名」（真踩过：默认 `AdjustToContentsOnFirstShow`
+        // 按**第一项**「跟服务端默认」定宽 ⇒ 长包名被省略号截断；用户点名的口径是**固定 30 字符宽**，
+        // 只做"按最长名自适应"实测仍嫌短）。两条一起钉：① ≥ 30 个 'W' 的像素宽（30 字符口径）
+        // ② ≥ **当前注册清单**里最长名字的像素宽 + 内边距。⛔ 不硬编码任何像素值/包名。
+        auto width30 = [](QComboBox* box) {
+            return box ? botAiComboWidth30(QFontMetrics(box->font())) : -1;
+        };
+        check(lobbyCombo && lobbyCombo->minimumWidth() >= width30(lobbyCombo),
+              QStringLiteral("大厅「机器人 AI」下拉框宽 ≥ 30 字符（30×'W' = %1 px，实测 %2 px）")
+                      .arg(width30(lobbyCombo))
+                      .arg(lobbyCombo ? lobbyCombo->minimumWidth() : -1));
+        check(lobbyCombo && lobbyCombo->minimumWidth() >= botAiComboLongestNeed(lobbyCombo),
+              QStringLiteral("大厅「机器人 AI」下拉框宽 ≥ 最长包名像素宽 + 内边距（需 %1 px，实测 %2 px）")
+                      .arg(botAiComboLongestNeed(lobbyCombo))
+                      .arg(lobbyCombo ? lobbyCombo->minimumWidth() : -1));
+        check(wc && wc->minimumWidth() >= width30(wc),
+              QStringLiteral("等待室「机器人 AI」下拉框宽 ≥ 30 字符（30×'W' = %1 px，实测 %2 px）")
+                      .arg(width30(wc))
+                      .arg(wc ? wc->minimumWidth() : -1));
+        check(wc && wc->minimumWidth() >= botAiComboLongestNeed(wc),
+              QStringLiteral("等待室「机器人 AI」下拉框宽 ≥ 最长包名像素宽 + 内边距（需 %1 px，实测 %2 px）")
+                      .arg(botAiComboLongestNeed(wc))
+                      .arg(wc ? wc->minimumWidth() : -1));
+        check(wc && wc->toolTip().contains(QStringLiteral("teacher")),
+              QStringLiteral("等待室下拉框 tooltip 带完整包名（被压窄时悬停也能看清）"));
     }
 
     // ---------- 回归：聊天「发送」按钮必须真的能发出去 ----------

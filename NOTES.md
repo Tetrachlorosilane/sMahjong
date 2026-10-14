@@ -5033,12 +5033,28 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   而本仓库在此之前那三个发布**都不含服务端包**：`v1.15.0`（四个**风格**机器人包 `wl-riichi` /
   `wl-dama` / `wl-pon` / `wl-meld`）· `v1.16.0`（**强度候选**机器人包 `wl-p301b-g06`）·
   `v1.17.0-weights`（**权重归档**，prerelease）⇒ **服务端自 `v1.14.0` 之后一直没再发过**，本版就是补那个缺口。
-  本版**只有一个资产**（无客户端 / 无机器人包）：`sMahjong-server-v1.18.0.zip` **440,238 B** sha256
+  本版**发布时只有一个资产**（服务端包；无客户端 / 无机器人包）：`sMahjong-server-v1.18.0.zip` **440,238 B** sha256
   `651c53dce4a66447bfbac849aef748b651c0a9e0183479d7753ce2027e60a4fd`（asset id **641364396**；
   远端 `size=440238` + `digest=sha256:651c53dc…a4fd` **==** 本地 `Get-FileHash`；上传 HTTP 201、
   **0 次重试**）。包内容验收：`tar -tvf` **5 个 `.sh` 全 `-rwxr-xr-x`**（`make-zip.mjs` 手写 zip，
   Unix 可执行位保住）· 包内 `VERSION` = `1.18.0`（6 字节，原始字节 `31 2e 31 38 2e 30`）·
   服务端 `--selftest` **1538 项 / 0 失败**（SELFTEST PASS）。
+  ⭐ **客户端资产同版发布**（`v1.18.0` **同一个 release/tag** 下后补，⛔ 未新建 tag、未动服务端资产 ——
+  服务端资产仍是 id **641364396** / `440,238 B` / `sha256:651c53dc…a4fd`，`created_at` 未变）：
+  `sMahjong-client-v1.18.0-win64.zip` **38,864,891 B** sha256
+  `a62dea4c67350162683714d57d34d5508d8396e2275278899d8a0aaef3be656d`（asset id **641462878**；
+  远端 `size=38864891` + `digest=sha256:a62dea4c…be656d` **==** 本地 `Get-FileHash`；上传 **HTTP 201、
+  1 次重试**（传输瞬断 `read ECONNRESET`，自动重放后同名同大小 ⇒ 判为已完成）。包内容 = `tools/package-release.ps1`
+  的客户端口径：**88 个条目** = `mahjong-client.exe` + 6 个 Qt DLL + `platforms/`·`styles/`·`tls/`(3) +
+  `tiles/`(38) + `fonts/`(1) + `i18n/`(1) + `licenses/`(7) + `sfx/`(8) + `README.txt`，**不含 `settings.json`**。
+  本版客户端修的是 UI：「大厅建桌 / 等待室」两处**「机器人 AI」下拉框过短、长包名（如 `ppo-v3-g01-g01`）
+  被省略号截断** —— 控件最小宽钉到 **30 字符**（`QFontMetrics::horizontalAdvance(QString(30,'W'))` =
+  本机 **366 px**）+ `AdjustToContents` + tooltip 显示全名；回归断言在 `client --selftest`（904 项 / 0 失败）。
+  ⚠ **为什么同版**：本仓库客户端与服务端**共用同一个版本号**（`tools/package-release.ps1` 取
+  `client/CMakeLists.txt:6` 并**强制** `client/src/main.cpp:90` 相等），同一次发版两边天然同号 ⇒
+  客户端资产挂到既有 `v1.18.0` 上，不另开版本。
+  ⚠ **不破坏服务端自更新**：该资产名与 `sMahjong-server-v<语义版本>.zip` 的模式**不匹配** ⇒
+  `update.sh` 永远不会选中它（`tools\update-pick-test.mjs` 仍 **15/15 PASS**）。
   ⭐ **旧脚本收敛实测**（WSL Ubuntu · bash 5.2.21 · **真 API** · 隔离临时目录，⛔ 未碰任何真实安装）：
   旧脚本 = 从**已发布的 `v1.14.0` 包里解出**的 `update.sh`，与 `git show 94573ab^:server/pack/update.sh`
   **逐字节相同**（7202 B · sha256 `80741b2e1fe3fa73805a4179f07e7a3c302ea3c9295fb8607b5c86b828a45c72`）
