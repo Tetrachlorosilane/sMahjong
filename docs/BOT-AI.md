@@ -248,6 +248,39 @@ python -m mahjong_ml.packbot --out bot-ai `
 | `wl-meld` | net | **速攻型**（风格包，2026-10-11 打包；风格奖励 **0.5× 免费带**剂量）：权重来源 `tools\build\v4-wl-meld3030-4g-c2-g04`；重建 = 把该目录的 `bot.json` / `net.bin` / `net.json` **三个文件拷进 `bot-ai/wl-meld/`** · **强度：未跑闸门（本批不写强度数字，用户口径）** |
 | `wl-p301b-g06` | net | **v4 强度候选**（2026-10-12 打包，随 **v1.16.0** 发布；**非风格包**）：权重来源 `tools\build\v4-wl-p301-B-g06`；重建 = 把该目录的 `bot.json` / `net.bin` / `net.json` **三个文件拷进 `bot-ai/wl-p301b-g06/`** · ⚠ **训练口径已动**：该网第 2–6 轮**显式放行了** `pretrain.py:1390-1394` 的 PPO 口径闸门（证据 `S:\mahjong-training\w-ladder\P3-01-RESULT.md` §1.3；⛔ 别把它当"合规 PPO 结果"引用，只能当"探索性端点"） · **强度：本次闸门过线才写** —— vs 现任 `v4-expert-defrep-g10`，**同牌山逐场配对**（`rank_points` = 顺位点/场/席，正 = 候选更好）：**Δ=+2.54，95%CI [+1.56,+3.51]，n=12,000**（**2 套新牌山 53060001/53060002 × 6,000 场**，`--rotate-perm` 24 排列、`--workers 8`、主口径 = `rank_points`〔⛔ 未用 `--line`〕）；护栏（单侧，CI 下界须 ≥ −TOL）`wins` +0.074 [+0.043,+0.104] · `deals` +0.024 [−0.001,+0.049] · `score`（净得失点/场/席）+1085 [+685,+1485] **全不破**；套间极差 0.235 = CI 半宽的 **0.24×**；实际 MDE **0.974**（预测 0.96）· ⚠ **判决条件于这两套牌山**：另一族（52930001/2）上"B − A"的对照读数是 **+0.05 [−0.90,+1.03]**，与本族的 (B−现任)−(A−现任) ≈ **+2.19** 差约 2.2 点 ⇒ ⛔ 不跨族外推。读数 `S:\mahjong-training\w-ladder\p3pkg-readout-p3pkg-B-g06-vs-defrep.json`；冻写稿 `EVAL-PUBLISH-PLAN.md` |
 
+### 9.1 逐包「在线 / 退化」实测（本机 `bot-ai/`，2026-10-13）
+
+**判据**（`AGENTS.md` §6.5 第 17 条）：**头"上线" = 前向实际读取 且带非退化 `policy_gate`** ——
+`heads.policy_gate.weight` 全 0（或缺张量）⇒ 该 ckpt 的 `belief_tenpai` **不在推理路径**
+（`gate ≡ 1+tanh(bias)`，与 `bt` 无关 ⇒ 退化为 `{policy}`）；`fusion.mem.weight` 同理管事件塔的 `h_evt`。
+⚠ **这是逐 ckpt 的性质**：表级常量（`ONLINE_HEADS`）只说明"代码会读它"，**不能**代替逐包实测。
+
+| 包（`bot-ai/<名>/net.bin`） | `policy_gate` max\|w\| / bias max\|b\| | `fusion.mem.w` max\|w\| | 状态 | 后果 |
+| --- | --- | --- | --- | --- |
+| `v4-bc-004` | **0 / 0** | **0（缺张量）** | ⚠ 退化 | 退化为 `{policy}`：`belief_tenpai` 与 `h_evt` 均不进推理路径 |
+| `v4-league-g08` | **0 / 0** | **0（缺张量）** | ⚠ 退化 | 退化为 `{policy}`：`belief_tenpai` 与 `h_evt` 均不进推理路径 |
+| `v4-p3-001` | **0 / 0** | **0（缺张量）** | ⚠ 退化 | 退化为 `{policy}`：`belief_tenpai` 与 `h_evt` 均不进推理路径 |
+| `v4-ppo-001` | **0 / 0** | **0（缺张量）** | ⚠ 退化 | 退化为 `{policy}`：`belief_tenpai` 与 `h_evt` 均不进推理路径 |
+| `wl-dama` | 0.0519 / 0.0410 | 0.0193 | ✅ 在线 | `belief_tenpai` 与 `h_evt` 都进推理路径 |
+| `wl-meld` | 0.0716 / 0.0711 | 0.0307 | ✅ 在线 | `belief_tenpai` 与 `h_evt` 都进推理路径 |
+| `wl-p301b-g06` | 0.0617 / 0.0450 | 0.0243 | ✅ 在线 | `belief_tenpai` 与 `h_evt` 都进推理路径 |
+| `wl-pon` | 0.0509 / 0.0414 | 0.0202 | ✅ 在线 | `belief_tenpai` 与 `h_evt` 都进推理路径 |
+| `wl-riichi` | 0.0642 / 0.0808 | 0.0309 | ✅ 在线 | `belief_tenpai` 与 `h_evt` 都进推理路径 |
+| `ppo-v3-g01-g01` | — | — | v3 格式跳过 | 权重格式 1（v3），`policy_gate` 这套判据不适用 |
+
+**合计 10 个 `net.bin`：在线 5 · 退化 4 · v3 跳过 1 · 解析失败 0。**
+
+- ⚠ **四个 `v4-*` 包全部退化**（不是抽样）：`policy_gate.weight` **与 bias 全 0**，且 **`fusion.mem.*` 整组缺失**
+  ⇒ 这两个头都不进推理路径。⚠ 它们**照样能加载、照样打牌** —— 上面 §5 说的"坏包只跳过它一个"指的是
+  **加载错误**，**零门控不是坏包**；对它们而言 §1/§3.1 的"纯 Java 手写前向读它"只对 `policy` 头成立。
+- ⚠ **本表只覆盖本机 `bot-ai/` 里现存的 10 个 `net.bin`**。上面那张"随发布包附带的几代"表里
+  **只存在于 release 资产 / 已下架**的包（v2 世代与 `ppo2-*` 等）**不在本机、未实测** ——
+  ⛔ 不许把"上了那张表"读成"已测在线"。
+- **复现**：`node tools/policy-gate-check.mjs`（无参数 = 扫 `bot-ai/*/net.bin`；一个都没扫到 ⇒ 退出码 **2**，
+  ⛔ 不许当"全都非退化"）。负/正向：`node tools/policy-gate-check.mjs --strict <net.bin>` ——
+  退化包退出 **1**、在线包退出 **0**（同一份代码两个方向都实测过）。
+- 判据出处：`AGENTS.md` §6.5 第 17 条 · `docs/TRAINER-CPP.md` §6.25 · `NOTES.md` §6.5 第八十六轮。
+
 > 📦 **权重归档**：`tools\build\` 里"GitHub 上一份都没有"的**谱系端点 + 今日实验网**（50 个网 / 280,011,438 B）见 release **`v1.17.0-weights`**（资产 `v4-weights-20261013.zip`，sha256 `7458d486e37e66d784e6b19e9def12809d90a4777091da3a5f97924df4f44fa1`）+ `lab/housekeeping/WEIGHTS-ARCHIVE.md`；⛔ 那是权重归档，不构成新 bot、不构成强度声明。
 
 > ⚠ **特征 v3（v1.10.6 起）与 v2 权重不兼容**：`net.bin` 头部记着 state/cand 维度，
