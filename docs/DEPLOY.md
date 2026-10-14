@@ -173,6 +173,9 @@ unzip ~/sMahjong-bot-ai-v1.10.5.zip  # 一包全给（内含 bot-ai/ 一层）
   但它**不在** `players/`、`replays/` 那类"要备份"的清单里 —— 权重是可重新分发的产物。
 - **坏包只跳过它一个**（清单读不出 / 未知 `kind` / 权重缺失或损坏 / 名字撞内置锚点），
   日志里留 WARN，其余包照常用；**点名的**（`--bot-ai` / `--bot-ai-reg`）坏了才是启动报错。
+- ⚠ **权重"坏没坏"与"头在不在线"是两件事**：`heads.policy_gate.weight` 全 0（或缺张量）的包**能正常跑**，
+  但它的 `belief_tenpai` **实际不在推理路径**（退化为 `{policy}`）⇒ 上线前逐个量：
+  `node tools/policy-gate-check.mjs --strict`（判据与实测表见 `docs/TRAINER-CPP.md` §6.25）。
 - 安全口径：客户端只能选**名字**，`net:<路径>` 一律被拒（回 `error{bad_bot_ai}`）——
   否则等于把"读服务器任意文件"开放给房间。
 - 包格式（自己打一代进去）、命名规则与坏包清单见仓库 **`docs/BOT-AI.md`**；

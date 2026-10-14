@@ -93,7 +93,7 @@
 | 验证五层 | `AGENTS.md` §4（L1 规则引擎 → L2 客户端 → L3 协议 e2e → L4 GUI 定点 → L5 真机联调）· 注解 `NOTES.md` §4 |
 | 训练/对拍 | `tools/trainer-*-parity.mjs` · `tools/selfplay-check.mjs` · `python/selfcheck.py` |
 | 文档纪律 | `AGENTS.md` §8（判据/命令/不变量 ↔ 案例/注解/推导）· 本索引 |
-| 文档自检 | `node tools/doc-refs-check.mjs`：AGENTS **字节预算**（⚠ 实测截断点 65,244 B）· 章节号完整 · 全仓 `§引用`可解 · **本索引完整性**；另两条同类：`tools/handover-facts.mjs --check`（HANDOVER §1 的 git 事实）、`tools/round-index.mjs --check`（NOTES §6.5 轮次索引表）；**训练侧头表**：`tools/head-tables-check.mjs`（三端 + 文档同名同值，规格见 `docs/TRAINER-CPP.md` §6.25） |
+| 文档自检 | `node tools/doc-refs-check.mjs`：AGENTS **字节预算**（⚠ 实测截断点 65,244 B）· 章节号完整 · 全仓 `§引用`可解 · **本索引完整性**；另两条同类：`tools/handover-facts.mjs --check`（HANDOVER §1 的 git 事实）、`tools/round-index.mjs --check`（NOTES §6.5 轮次索引表）；**训练侧头表**：`tools/head-tables-check.mjs`（三端 + 文档同名同值，规格见 `docs/TRAINER-CPP.md` §6.25）· `tools/policy-gate-check.mjs`（逐 ckpt 量 `heads.policy_gate.*` / `fusion.mem.*` 的非退化性：零 gate ⇒ 该头不在推理路径）· `tools/obs-keys-check.mjs`（PROTOCOL §8.2 白名单四处同集合同序）· `tools/v4-derived-check.mjs`（`cand` 派生段 ⑨⑩⑪ 恒 0 与 `seq_delta` 缺省口径的三端同改） |
 | 人工手册 | `AGENTS.md`（每次会话自动加载）· `NOTES.md`（细节分册，章节号与 AGENTS 一一对应） |
 
 ## 2. 按角色查

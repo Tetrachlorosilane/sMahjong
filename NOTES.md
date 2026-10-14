@@ -939,7 +939,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 
 ## 6.5 训练接口（机器学习 / 自对弈）
 
-> **轮次索引**（66 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
+> **轮次索引**（75 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
 > ⚠ **编号不单调是历史事实**：第六十七轮物理上在第六十六轮**之前**；**1–4 / 48–54 没有独立小节**
 > （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
 > 编号被 `docs/TRAINING-V4.md` / `docs/HANDOVER.md` / 代码注释大量引用。
@@ -1021,6 +1021,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十三轮 | 2026-10-13 | BL-13 重跑（信任域打开 0.10）—— 自变量终于活动，但「新鲜度 vs 数据量」仍测不出 |
 | 第八十四轮 | 2026-10-13 | BL-12 便宜前置探针（观测/目标改进第一步）—— 四条候选全「in 弱/出局」（零训练 · 零采集） |
 | 第八十五轮 | 2026-10-13 | 权重归档首版「静默取错副本」两条 —— 按目录名索引 vs 按"解析后真实路径 + sha256" |
+| 第八十六轮 | 2026-10-13 | Java↔v4 接口审计收尾 —— 零 gate 判据 + 五处盲区补断言（零训练 · 零采集） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6291,6 +6292,15 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **判据**：取权重 / 证据副本一律按**解析后真实路径 + sha256** 定位（⛔ 不按目录名）；**已发布权重以包内副本为权威**；反查不中**不许**按目录名顶替 —— 如实报"未中"。
 - **裁定（⛔ 不重打包）**：未中反查的 5 份**已发布**权重（`ppo-v3-g01-g01` · `v4-bc-004` · `v4-p3-001` · `v4-ppo-001` · `v4-league-g08`）**不必补进本 zip** —— 它们**已发布**的权重本身在 `v1.10.6` / `v1.13.0` / `v1.14.1` 的资产里 ⇒ **保持已验证 digest 不变**（asset `637292839` 仍 254,863,741 B / `7458d486…4fa1`，⛔ 未重传）。
 - **残留**：`AGENTS.md` §6.5 加一行判据（64,214 → 64,612 B，余 **632 B**），为腾字节从 §6.5/§6.4 搬走 4 片（**逐字**留档见本文件 §6.5 **附录 F**，三组核对未找到 0）；zip 与清单脚本在**仓库外** `S:\mahjong-training\weights-archive\`（⛔ 未入库）；⛔ **未删任何权重**、⛔ **未动既有 release / 资产**。
+
+**第八十六轮：Java↔v4 接口审计收尾 —— 零 gate 判据 + 五处盲区补断言（零训练 · 零采集）（2026-10-13）**
+> 审计件 `lab/housekeeping/JAVA-MODEL-INTERFACE-AUDIT.md`（零 gate 全表 + 五处处置 + 红证）；结论仍 = **无真缺口**。`--selftest` **1538 / 0**（基线 1507 + 31）；新增 `tools/{policy-gate,obs-keys,v4-derived}-check.mjs`；⛔ 未改 `AGENTS.md`（建议入档行在审计件，余 632 B）、⛔ 未训练/未采集、⛔ 未动 `raw/**`/`style-reward/**`/端点/既有 release。
+- ⭐ **零 gate 判据**（`node tools/policy-gate-check.mjs`）：`heads.policy_gate.weight` 全 0（或缺张量）⇒ 该 ckpt 的 `belief_tenpai` **不在推理路径**（`gate ≡ 1+tanh(bias)`，与 `bt` 无关）；非零（0.0519~0.0716）⇒ 在线。`bot-ai/*` 10 个 `net.bin` 实测：**在线 5（`wl-*`）· 退化 4（`v4-bc-004`/`v4-league-g08`/`v4-p3-001`/`v4-ppo-001`，`fusion.mem.*` 同时整组缺失）** · v3 跳过 1；负/正向：`--strict` 对退化包退出 1、对在线包退出 0。
+- 盲区① `SelfTest.teacherLabelTests()`：`SelfPlay` 真跑 1 局的端到端 4 条 —— 学生座位每条决策都带 `teacher`/`teacher_index`、老师座位一条不带、形状/值域 = `legal` 下标、**关开关 0 行**（正向对照）。
+- 盲区② `tools/obs-keys-check.mjs`：`PROTOCOL §8.2` 表 / `Observation.toJson` / `SelfTest.want` / `selfplay-check.OBS_KEYS` 四处**同集合 + 表序同键序**（33 键）；解析失败即 FAIL。红证：多一个键 / 标题改名都非零退出。
+- 盲区③（**定策 = 保留 fail-open，但不许静默**）：`enumerate` 的输出就是 `obs.legal`，fail-closed 会把"服务端多下发一个 option 类型"变成**整场半庄静默死亡**（§6.5）⇒ 改为逐 option 记数（`droppedOptionCount/Types`）+ 6 条断言（未知 type 不产出动作、也不进 `legal`、计数与类型被点名、全已知时计数恒 0）。
+- 盲区④ `seq_delta` 恒缺省：三端读取口径 = `min(缺省 1, 8)/8`、末槽宽 1（`v4-derived-check` 跨端钉）；`SelfTest` 加 6 条（缺省 == 显式 1 / 非缺省只改一个通道 / 下标 95 / 0.125 / 0.5 / 夹到 1.0）+ 「观测**从不**发 `seq_delta`」。
+- 盲区⑤ `cand` ⑨⑩⑪ 恒 0：`tools/v4-derived-check.mjs` 钉 88+11+29=128 · 已实现 8 维 · 比例尺 8 值 · `blocks.py` 按 `DERIVED_CANDIDATE` 截断 · 文档 §4.3 同数同句；`SelfTest.candDerivedTests()` 钉行为（①–⑧ 非 0 正向对照、列 96–98 恒 0）。**副产品**：把 `cand[96]` 置 1 ⇒ 4 条 golden 逐位判据一起红 ⇒ 这 3 列**确实被前向读取**，「三端同改」是真承重。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 

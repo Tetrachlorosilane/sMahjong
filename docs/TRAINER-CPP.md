@@ -1226,6 +1226,7 @@ matvec 在改动前是**纯标量**（汇编里只有 `vaddss`/`vmulss`：一个
 | 三端源码 + 本节文本**同名同值** | `node tools/head-tables-check.mjs` | Python 实跑取真值；Java `V4Policy`、C++ `v4policy.hpp` 的字面量逐一比对 |
 | **Python** 行为判据（清零后动作是否变 + 假绿对照） | `python -m mahjong_ml.v4 check`（⑦/⑦′） | `ONLINE_HEADS=('policy','belief_tenpai')`；零初始化门控下退化成 `('policy',)` ⇒ 必须带非退化门控 |
 | **Java / C++** 行为判据（同一 golden 夹具） | `node tools/trainer-v4-parity.mjs --golden` | 打印 `dValue / dBelief / dGate`：`dValue` 必须**恰好 0**（离线头），`dBelief`、`dGate` 必须 **> 0**（在线）。实测（Java，2026-10-07）：`dValue=0.00 dBelief=0.0248 dGate=0.359` |
+| **逐 ckpt** 权重里那一组数到底是不是 0（表级常量不算） | `node tools/policy-gate-check.mjs [<net.bin>…] [--strict]` | 直接解析 `net.bin` 张量表：`heads.policy_gate.weight` max\|w\| = 0（或缺张量）⇒ 该 ckpt 的 `belief_tenpai` **不在推理路径**（退化为 `{policy}`）；`fusion.mem.weight` 同理管 `h_evt`。实测（2026-10-13，`bot-ai/*` 10 包）：在线 5（`wl-*`，0.0509–0.0716）· **退化 4**（`v4-bc-004` `v4-league-g08` `v4-p3-001` `v4-ppo-001`，`fusion.mem.*` 同时整组缺失）· v3 格式 1 个跳过 |
 
 **⚠ 门控恒等时的口径（2026-10-07 裁决，三端一致）**：`heads.policy_gate.*` 是**可缺张量**，
 所以"Δ=0"有两种完全不同的原因，⛔ 别混成一句"没测到"：

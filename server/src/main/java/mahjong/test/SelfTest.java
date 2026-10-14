@@ -109,6 +109,8 @@ public final class SelfTest {
         neuralForwardTests();
         v4ForwardTests();
         v4CacheTests();
+        teacherLabelTests();
+        candDerivedTests();
         hybridPolicyTests();
         samplingPolicyTests();
         botAiTests();
@@ -4425,6 +4427,165 @@ public final class SelfTest {
         check("v4 缓存红证：关掉缓存后命中数为 0", net.cacheHits() == 0);
     }
 
+    /**
+     * 审计盲区①：Java `--teacher-label` 的**正向端到端产出**（2026-10-13 补）。
+     *
+     * <p>此前这条 DAgger 路径只有"代码看着接对了"+ C++ 侧的负向报错，没有任何端到端证据。
+     * 这里用 {@link mahjong.train.SelfPlay} 真跑 1 场 × 1 小局（`maxHands`）逐行核对四件事：
+     *
+     * <ol>
+     *   <li><b>学生座位每条决策都带</b> `teacher`/`teacher_index`（形状：`teacher ∈ obs.legal`、
+     *       `teacher_index` = 它在 `legal` 里的下标 —— 与 `chosen`/`chosen_index` 同一把尺子）；</li>
+     *   <li><b>老师座位一条都不许有</b>：`isTeacherPolicy` 的分支是"学生才另问一次老师"，
+     *       若老师座位也有 `teacher`，那它只是把 `chosen` 抄了一遍 ⇒ DAgger 的对照臂是自循环；</li>
+     *   <li><b>值域</b>：`teacher_index ≥ 0` 且 `< |legal|`；</li>
+     *   <li><b>正向对照</b>：同配置关掉开关 ⇒ 一份轨迹里一个 `teacher` 键都没有（防"字段无条件
+     *       写在别处"的假绿 —— 只测开关打开时"有"，是测不出这个的）。</li>
+     * </ol>
+     */
+    private static void teacherLabelTests() {
+        java.nio.file.Path root;
+        try {
+            root = java.nio.file.Files.createTempDirectory("mj-teacher-label");
+        } catch (java.io.IOException e) {
+            check("teacher-label：建临时目录（" + e.getMessage() + "）", false);
+            return;
+        }
+        List<Map<String, Object>> on = selfPlayRows(root.resolve("on"), true);
+        check("teacher-label：真跑出决策行（" + on.size() + " 条）", on.size() > 20);
+        if (on.size() <= 20) {
+            return;
+        }
+        final int student = 3;                     // seatPolicy = {teacher, teacher, teacher, first}
+        int studentRows = 0;
+        int withTeacher = 0;
+        boolean teacherSeatLeak = false;
+        boolean shapeBad = false;
+        String shapeDetail = "";
+        for (Map<String, Object> row : on) {
+            int seat = Json.i(row, "seat", -1);
+            boolean has = row.containsKey("teacher") || row.containsKey("teacher_index");
+            if (seat != student) {
+                if (has) {
+                    teacherSeatLeak = true;
+                }
+                continue;
+            }
+            studentRows++;
+            if (!has) {
+                continue;
+            }
+            withTeacher++;
+            String teacher = Json.str(row, "teacher", null);
+            List<Object> legal = Json.list(row, "legal");
+            int pos = -1;
+            if (legal != null) {
+                pos = legal.indexOf(teacher);
+            }
+            int idx = Json.i(row, "teacher_index", -2);
+            if (teacher == null || pos < 0 || idx != pos) {
+                shapeBad = true;
+                shapeDetail = "teacher=" + teacher + " teacher_index=" + idx + " legal_pos=" + pos;
+            }
+        }
+        check("teacher-label：学生座位每一条决策都带 teacher（" + withTeacher + "/" + studentRows + "）",
+                studentRows > 0 && withTeacher == studentRows);
+        check("teacher-label：老师座位一条都不带（否则标签只是 chosen 的复制）", !teacherSeatLeak);
+        check("teacher-label：形状/值域 —— teacher ∈ legal 且 teacher_index == 它的下标"
+                + (shapeBad ? "（" + shapeDetail + "）" : ""), !shapeBad);
+        // 正向对照：关掉开关 ⇒ 一行都不许有（同种子、同座位策略，只有开关不同）
+        List<Map<String, Object>> off = selfPlayRows(root.resolve("off"), false);
+        check("teacher-label：关掉开关的对照场次也跑出了决策行（" + off.size() + " 条）",
+                off.size() > 20);
+        int offLeak = 0;
+        for (Map<String, Object> row : off) {
+            if (row.containsKey("teacher") || row.containsKey("teacher_index")) {
+                offLeak++;
+            }
+        }
+        eq("teacher-label 正向对照：关掉开关后 0 行带 teacher", offLeak, 0);
+    }
+
+    /** 跑 1 场 × 1 小局的确定性自对弈（四席 = 老师×3 + `first` 学生），返回 `g0.jsonl` 的决策行。 */
+    private static List<Map<String, Object>> selfPlayRows(java.nio.file.Path dir, boolean teacherLabel) {
+        mahjong.train.SelfPlay.Config cfg = new mahjong.train.SelfPlay.Config();
+        cfg.games = 1;
+        cfg.workers = 1;
+        cfg.seedBase = 20261013L;
+        cfg.maxHands = 1;
+        cfg.outDir = dir.toString();
+        cfg.teacherLabel = teacherLabel;
+        cfg.seatPolicy = new String[]{"teacher", "teacher", "teacher", "first"};
+        mahjong.train.SelfPlay.run(cfg);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (String line : readLines(dir.resolve("g0.jsonl"))) {
+            Map<String, Object> row = Json.asObj(Json.tryParse(line));
+            if (row != null && "decision".equals(row.get("type"))) {
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    /**
+     * 审计盲区⑤的 **Java 端**：`cand` 派生段 ⑨⑩⑪ 恒 0（`FEATURES-V4.md` §4.3 / `blocks.py:473-475`）。
+     *
+     * <p>跨端（Python / Java / C++ / 文档）的**机械比对**在 `tools/v4-derived-check.mjs`；这里只钉
+     * Java 侧的**行为**，因为"定义一致"不等于"这一端真的留了 0"：① 派生 ①–⑧ 必须真的有非 0
+     * （否则"⑨⑩⑪ = 0"可能只是**整段都 0** 的假绿）；② ⑨⑩⑪（= 基础 88 + 已实现 8 起、共 3 列）
+     * 与预留 29 列必须全 0。
+     */
+    private static void candDerivedTests() {
+        eq("cand 基础段宽 88", mahjong.ai.V4Features.CAND_BASE, 88);
+        eq("cand 派生段宽 11", mahjong.ai.V4Features.CAND_DERIVED, 11);
+        eq("cand 总宽 128", mahjong.ai.V4Features.C_CAND, 128);
+        eq("cand 预留段宽 29",
+                mahjong.ai.V4Features.C_CAND - mahjong.ai.V4Features.CAND_BASE
+                        - mahjong.ai.V4Features.CAND_DERIVED, 29);
+        eq("已实现的逐候选派生维（三端同改锚点）", mahjong.ai.ObsFeatures.PER_CANDIDATE, 8);
+        eq("派生比例尺长度 = 已实现维数", mahjong.ai.Features.DERIVED_CAND_SCALE.length, 8);
+        eq("v4 新增 3 维的起始列", mahjong.ai.V4Features.CAND_BASE
+                + mahjong.ai.ObsFeatures.PER_CANDIDATE, 96);
+        Table t = new Table("CAND", "派生段", Rules.defaults());
+        t.debugDeterministicSeed = true;
+        t.seedBase = 1313L;
+        for (int i = 0; i < 4; i++) {
+            t.addBot(i);
+        }
+        Round r = new Round(t, 0, 1, 0, 0, new int[]{25000, 25000, 25000, 25000}, 0, 99991L);
+        r.debugSetup();
+        int drawn = r.debugOpeningTile();
+        List<Map<String, Object>> opts = r.debugTurnOptions(0, drawn);
+        mahjong.ai.V4Features.Tensors tf = mahjong.ai.V4Features.assemble(
+                mahjong.ai.Observation.ofTurn(r, 0, opts, drawn, false, null).toJson());
+        final int v4From = mahjong.ai.V4Features.CAND_BASE + mahjong.ai.ObsFeatures.PER_CANDIDATE;
+        final int v4To = mahjong.ai.V4Features.CAND_BASE + mahjong.ai.V4Features.CAND_DERIVED;
+        boolean implementedNonZero = false;
+        boolean v4Zero = true;
+        boolean reservedZero = true;
+        for (float[] row : tf.cand) {
+            for (int x = mahjong.ai.V4Features.CAND_BASE; x < v4From; x++) {
+                if (row[x] != 0f) {
+                    implementedNonZero = true;
+                }
+            }
+            for (int x = v4From; x < v4To; x++) {
+                if (row[x] != 0f) {
+                    v4Zero = false;
+                }
+            }
+            for (int x = v4To; x < mahjong.ai.V4Features.C_CAND; x++) {
+                if (row[x] != 0f) {
+                    reservedZero = false;
+                }
+            }
+        }
+        check("cand 派生 ①–⑧ 真的进张量（" + tf.cand.length + " 个候选里至少一个非 0，正向对照）",
+                implementedNonZero);
+        check("cand 派生 ⑨⑩⑪（列 " + v4From + "–" + (v4To - 1) + "）恒 0", v4Zero);
+        check("cand 预留段（列 " + v4To + "–127）恒 0", reservedZero);
+    }
+
     /** 七个头里逐位不同的元素个数（自检用）。 */
     private static long badHeads(java.util.Map<String, float[]> a, java.util.Map<String, float[]> b) {
         long bad = 0;
@@ -6945,6 +7106,94 @@ public final class SelfTest {
         eq("摸切只在声明时出现", Json.write(mahjong.ai.Action.discard("5m").toCmd()),
                 "{\"type\":\"discard\",\"tile\":\"5m\"}");
 
+        // ---------- ①d 未知 / 空载荷选项：**保留 fail-open，但不许静默**（2026-10-13 补，审计盲区③）
+        // 定策理由见 `Action` 类注释「未知选项类型」：`enumerate` 的返回值就是 `obs.legal`，
+        // 改 fail-closed 会把"服务端多下发一个 option 类型"变成整场半庄静默死亡；丢弃则只让训练侧
+        // 少一个动作。所以判据不是"抛异常"，而是**丢弃可机检**：不产出动作 + 不记进 legal + 有计数。
+        List<Map<String, Object>> unkOpts = new ArrayList<>();
+        unkOpts.add(Json.obj("type", "discard", "tiles", Json.arr("1m", "2m")));
+        unkOpts.add(Json.obj("type", "future_option"));          // 负向：认不出的 type
+        unkOpts.add(Json.obj("type", "chi"));                    // 负向：已知 type 但载荷缺失
+        unkOpts.add(Json.obj("type", "pass"));
+        mahjong.ai.Action.resetDroppedOptions();
+        List<mahjong.ai.Action> unkOut = mahjong.ai.Action.enumerate(unkOpts);
+        eq("未知类型被丢弃且不产出动作（2 打牌 + 过 = 3 条）", unkOut.size(), 3);
+        boolean unkLeak = false;
+        for (mahjong.ai.Action a : unkOut) {
+            if (a.key().contains("future_option") || mahjong.ai.Action.CHI.equals(a.type)) {
+                unkLeak = true;
+            }
+        }
+        check("未知类型不进 `legal`（动作空间里没有它）", !unkLeak);
+        // 计数就是"有没有人忘了改 enumerate"的哨兵：丢弃 2 条，且类型被点名
+        eq("丢弃条数被记数（未知 type + 载荷缺失 = 2）",
+                mahjong.ai.Action.droppedOptionCount(), 2L);
+        eq("丢弃的选项类型被点名",
+                mahjong.ai.Action.droppedOptionTypes(), new java.util.TreeSet<>(
+                        Arrays.asList("chi", "future_option")));
+        // 正向对照：全部已知类型 ⇒ 计数必须是 0（否则计数是盏恒亮的灯，上面那条就没意义）
+        mahjong.ai.Action.resetDroppedOptions();
+        List<Map<String, Object>> knownOnly = new ArrayList<>();
+        knownOnly.add(Json.obj("type", "discard", "tiles", Json.arr("1m")));
+        knownOnly.add(Json.obj("type", "riichi", "tiles", Json.arr("1m")));
+        knownOnly.add(Json.obj("type", "kan",
+                "kans", Json.arr(Json.obj("kind", "ankan", "tile", "7z"))));
+        knownOnly.add(Json.obj("type", "pon", "tiles", Json.arr("5p", "5p")));
+        knownOnly.add(Json.obj("type", "chi", "sets", Json.arr(Json.arr("2m", "3m"))));
+        knownOnly.add(Json.obj("type", "tsumo"));
+        knownOnly.add(Json.obj("type", "ron"));
+        knownOnly.add(Json.obj("type", "pass"));
+        knownOnly.add(Json.obj("type", "kyuushu"));
+        List<mahjong.ai.Action> knownActions = mahjong.ai.Action.enumerate(knownOnly);
+        eq("全部已知类型 ⇒ 丢弃计数为 0（正向对照）",
+                mahjong.ai.Action.droppedOptionCount(), 0L);
+        eq("全部已知类型 ⇒ 9 条选项每条各展开出一个动作",
+                knownActions.size(), 9);
+        mahjong.ai.Action.resetDroppedOptions();
+        eq("null 选项表 ⇒ 空动作集且不记丢弃", mahjong.ai.Action.enumerate(null).size(), 0);
+        eq("null 选项表 ⇒ 计数仍为 0", mahjong.ai.Action.droppedOptionCount(), 0L);
+
+        // ---------- ①e `seq_delta` **恒缺省**（审计盲区④）：判据 = 文档「本实现不发 / 缺省 = 1」
+        // 与三端读取口径一致。Java 侧两半都要钉：① 观测**永不**发这个字段；② 特征侧按
+        // 「缺省 = 1、夹到 8、再 /8」读 —— 缺省与非缺省必须都能被前向看见（否则"恒缺省"是空话）。
+        Map<String, Object> evBase = Json.obj("type", "discard", "tile", "1z", "actor", 0,
+                "turn", 3, "tsumogiri", true, "sideways", false);
+        float[][] evDefault = mahjong.ai.V4Features.eventMatrix(
+                Json.obj("seat", 0, "events", Json.arr(evBase)));
+        // ⚠ 窗口 `K_EVT = 60`，事件**新的在尾部** ⇒ 单条事件落在最后一行（不是第 0 行）
+        final int evRowIdx = evDefault.length - 1;
+        Map<String, Object> evExplicit1 = new java.util.LinkedHashMap<>(evBase);
+        evExplicit1.put("seq_delta", 1);
+        float[][] evOne = mahjong.ai.V4Features.eventMatrix(
+                Json.obj("seat", 0, "events", Json.arr(evExplicit1)));
+        eq("seq_delta 缺省 == 显式 1（逐位相同）",
+                java.util.Arrays.toString(evOne[evRowIdx]),
+                java.util.Arrays.toString(evDefault[evRowIdx]));
+        Map<String, Object> evFour = new java.util.LinkedHashMap<>(evBase);
+        evFour.put("seq_delta", 4);
+        float[][] evD4 = mahjong.ai.V4Features.eventMatrix(
+                Json.obj("seat", 0, "events", Json.arr(evFour)));
+        int seqCol = -1;
+        int seqDiffCols = 0;
+        for (int x = 0; x < evD4[evRowIdx].length; x++) {
+            if (evD4[evRowIdx][x] != evDefault[evRowIdx][x]) {
+                seqDiffCols++;
+                seqCol = x;
+            }
+        }
+        eq("非缺省 seq_delta 只改一个通道", seqDiffCols, 1);
+        eq("seq_delta 通道下标 = 95（`v4/spec.py` 的 EVT_LAYOUT 锚点）", seqCol, 95);
+        check("缺省 = 1 ⇒ 通道值 1/8 = 0.125",
+                Math.abs(evDefault[evRowIdx][seqCol] - 0.125f) < 1e-6f);
+        check("非缺省 = 4 ⇒ 通道值 4/8 = 0.5",
+                Math.abs(evD4[evRowIdx][seqCol] - 0.5f) < 1e-6f);
+        Map<String, Object> evBig = new java.util.LinkedHashMap<>(evBase);
+        evBig.put("seq_delta", 20);
+        float[][] evD20 = mahjong.ai.V4Features.eventMatrix(
+                Json.obj("seat", 0, "events", Json.arr(evBig)));
+        check("超过 8 被夹到 8 ⇒ 通道值 1.0（>8 不再区分）",
+                Math.abs(evD20[evRowIdx][seqCol] - 1.0f) < 1e-6f);
+
         // ---------- ② 观测：字段白名单 + 反作弊不变式（含正向对照）
         Table t = new Table("OBS", "观测桌", Rules.defaults());
         t.debugDeterministicSeed = true;
@@ -7020,6 +7269,16 @@ public final class SelfTest {
         // 未立直家的 `riichi_turn` 必须是 0（内部 -1 → 公开 0，契约见 PROTOCOL §8.2）
         check("未立直家的 riichi_turn = 0",
                 Json.write(afterEv.get("riichi_turn")).equals("[0,0,0,0]"));
+        // `seq_delta`：契约是「**本实现不发**，缺省 = 1」（PROTOCOL §8.2 / 审计盲区④）。
+        // 正向对照在 ①e（特征侧真的按缺省 1 读）；这里钉"发不发"这一半 —— 只要哪天有人顺手
+        // 给事件加了这个字段，它就不再是"容错位"而是个真实通道，文档与三端读取口径都要跟着改。
+        boolean seqLeak = false;
+        for (Map<String, Object> e : obsEvents(afterEv)) {
+            if (e.containsKey("seq_delta")) {
+                seqLeak = true;
+            }
+        }
+        check("观测事件**从不**发 seq_delta（恒缺省，PROTOCOL §8.2「本实现不发」）", !seqLeak);
 
         // ---------- ③ 策略适配器：合法动作原样下发，非法/异常/空一律退回内置机器人
         mahjong.ai.Decision dec =

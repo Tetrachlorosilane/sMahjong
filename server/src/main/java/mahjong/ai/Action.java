@@ -39,6 +39,21 @@ import mahjong.util.Json;
  * {@code chosen_index} 无从分辨（2026-09 被 {@code tools/selfplay-check.mjs} 抓出来）。
  * 裸 {@code pon} 只作为**老客户端 / 老数据集**的兼容形态保留：它按"普通牌优先"的默认取法执行，
  * 也就是本次 {@code legal} 里的第一条 pon（见 {@link #resolve}）。
+ *
+ * <h2>未知选项类型：**保留 fail-open，但不许静默**（2026-10-13 定策）</h2>
+ * {@link #enumerate} 遇到认不出的 {@code type}（或已知 type 但载荷缺失，例如没有 {@code sets} 的
+ * {@code chi}）时**不抛异常、不产出动作**，只把它记进 {@link #droppedOptionCount()} /
+ * {@link #droppedOptionTypes()}。
+ *
+ * <p>为什么**不改 fail-closed**：`enumerate` 在**每一次决策**的热路径上，它的返回值就是
+ * {@code obs.legal}（"合法动作 + 掩码"的唯一来源）。把它改成抛异常，等于让"服务端多下发一个新
+ * option 类型"变成**整场半庄静默死亡**——这正是 {@code AGENTS.md} §6.5「策略不许把异常抛给牌桌
+ * 线程」要防的那类事故；而丢弃的后果只是"训练侧看不到这个新动作"（策略仍能出牌/过），可恢复得多。
+ *
+ * <p>所以判据是：**丢弃必须可机检**——① 未知类型一定不产出动作、不进 {@code legal}；
+ * ② 丢弃条数与类型集合被计数（{@link #droppedOptionTypes()}）；③ 全部已知类型时计数**恒为 0**
+ * （否则计数是盏恒亮的灯）。自检见 {@code SelfTest.trainingInterfaceTests} 的「未知选项类型」组。
+ * ⚠ 新增协议 option 类型时，这条计数就是"有没有人忘了同时改 {@code enumerate}"的哨兵。
  */
 public final class Action {
 
@@ -63,6 +78,31 @@ public final class Action {
     public static final int KYUUSHU_ID = TSUMO_ID + 4;
     /** 固定头大小（吃/杠不在其中，它们是按询问枚举的）。 */
     public static final int FIXED_ACTIONS = KYUUSHU_ID + 1;    // 79
+
+    // ------------------------------------------------------------ fail-open 的可观测化
+    // 见类注释「未知选项类型」：丢弃是刻意的（别改成抛异常），但**必须能被数出来**。
+    /** `enumerate` 至今丢弃的选项条数（未知 type / 已知 type 但载荷缺失）。 */
+    private static final java.util.concurrent.atomic.AtomicLong DROPPED =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 被丢弃的 option `type` 集合（空 type 记为 `"<missing>"`）。 */
+    private static final java.util.Set<String> DROPPED_TYPES =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** 丢弃计数（判据：全部已知类型时必须为 0）。 */
+    public static long droppedOptionCount() {
+        return DROPPED.get();
+    }
+
+    /** 被丢弃过的 option `type` 集合（给自检/诊断用；判据它的成员就是"没人处理的新类型"）。 */
+    public static java.util.Set<String> droppedOptionTypes() {
+        return java.util.Set.copyOf(DROPPED_TYPES);
+    }
+
+    /** 清零丢弃计数（自检用；生产路径没人调它）。 */
+    public static void resetDroppedOptions() {
+        DROPPED.set(0);
+        DROPPED_TYPES.clear();
+    }
 
     /** 动作类型。 */
     public final String type;
@@ -126,6 +166,9 @@ public final class Action {
      *
      * <p>这就是"合法动作集 + 掩码"：训练侧不需要知道任何规则，展开出来的每一项都是合法的，
      * 且 {@link #toCmd()} 一定被状态机接受。
+     *
+     * <p>⚠ **展开不到的 option 不抛异常，但会被计数**（见类注释「未知选项类型」）：
+     * {@link #droppedOptionCount()} / {@link #droppedOptionTypes()}。
      */
     public static List<Action> enumerate(List<Map<String, Object>> options) {
         List<Action> out = new ArrayList<>();
@@ -134,6 +177,7 @@ public final class Action {
         }
         for (Map<String, Object> o : options) {
             String type = Json.str(o, "type", "");
+            final int before = out.size();
             switch (type) {
                 case DISCARD: {
                     List<Object> ts = Json.list(o, "tiles");
@@ -197,6 +241,12 @@ public final class Action {
                 default:
                     // 认不出的选项**不进动作空间**（新协议字段不该让老训练器乱猜）
                     break;
+            }
+            if (out.size() == before) {
+                // 这一条 option **一个动作都没产出**：要么 type 认不出，要么已知 type 的载荷缺失。
+                // 两条都记进同一本账 —— 判据只需要"有没有东西被丢掉"，不需要区分原因。
+                DROPPED.incrementAndGet();
+                DROPPED_TYPES.add(type.isEmpty() ? "<missing>" : type);
             }
         }
         return out;
