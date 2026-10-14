@@ -1,0 +1,66 @@
+[
+  {
+    "url": "https://api.github.com/repos/o/r/releases/1100",
+    "assets_url": "https://api.github.com/repos/o/r/releases/1100/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v3.1.0",
+    "id": 1100,
+    "tag_name": "v3.1.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-08-02T00:00:00Z",
+    "published_at": "2026-08-02T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/11001",
+        "id": 11001,
+        "name": "sMahjong-server-v3.1.0.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 310,
+        "digest": null,
+        "download_count": 0
+      },
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/11002",
+        "id": 11002,
+        "name": "sMahjong-server-v3.1.0.zip.sha256",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "text/plain",
+        "state": "uploaded",
+        "size": 65,
+        "digest": null,
+        "download_count": 0
+      }
+    ],
+    "body": "有边车校验文件"
+  },
+  {
+    "url": "https://api.github.com/repos/o/r/releases/1101",
+    "assets_url": "https://api.github.com/repos/o/r/releases/1101/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v3.0.0",
+    "id": 1101,
+    "tag_name": "v3.0.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-08-01T00:00:00Z",
+    "published_at": "2026-08-01T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/11011",
+        "id": 11011,
+        "name": "sMahjong-server-v3.0.0.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 300,
+        "digest": null,
+        "download_count": 0
+      }
+    ],
+    "body": "既无 digest 也无边车"
+  }
+]

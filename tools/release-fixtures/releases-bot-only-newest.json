@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://api.github.com/repos/o/r/releases/700",
+    "assets_url": "https://api.github.com/repos/o/r/releases/700/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v7.2.0",
+    "id": 700,
+    "tag_name": "v7.2.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-12T07:59:49Z",
+    "published_at": "2026-10-12T07:59:49Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/7001",
+        "id": 7001,
+        "name": "wl-p301b-g06.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 5096791,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "download_count": 0
+      }
+    ],
+    "body": "强度候选机器人包"
+  },
+  {
+    "url": "https://api.github.com/repos/o/r/releases/600",
+    "assets_url": "https://api.github.com/repos/o/r/releases/600/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v7.1.0",
+    "id": 600,
+    "tag_name": "v7.1.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-10T18:14:42Z",
+    "published_at": "2026-10-10T18:14:42Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/6001",
+        "id": 6001,
+        "name": "wl-riichi.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 5097665,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "download_count": 0
+      }
+    ],
+    "body": "风格包"
+  },
+  {
+    "url": "https://api.github.com/repos/o/r/releases/500",
+    "assets_url": "https://api.github.com/repos/o/r/releases/500/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v7.0.0",
+    "id": 500,
+    "tag_name": "v7.0.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-09-29T06:10:19Z",
+    "published_at": "2026-09-29T06:10:19Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/5001",
+        "id": 5001,
+        "name": "sMahjong-client-v7.0.0-win64.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 38849862,
+        "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "download_count": 0
+      },
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/5002",
+        "id": 5002,
+        "name": "sMahjong-server-v7.0.0.zip",
+        "label": "",
+        "uploader": { "login": "x", "id": 1, "type": "User" },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 222222,
+        "digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "download_count": 0
+      }
+    ],
+    "body": "发布"
+  }
+]

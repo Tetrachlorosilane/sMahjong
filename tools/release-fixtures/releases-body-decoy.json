@@ -1,0 +1,32 @@
+[
+  {
+    "url": "https://api.github.com/repos/o/r/releases/200",
+    "assets_url": "https://api.github.com/repos/o/r/releases/200/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v5.0.0",
+    "id": 200,
+    "tag_name": "v5.0.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-08-01T00:00:00Z",
+    "published_at": "2026-08-01T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/2001",
+        "id": 2001,
+        "name": "sMahjong-server-v5.0.0.zip",
+        "label": "",
+        "uploader": {
+          "login": "x",
+          "id": 1,
+          "type": "User"
+        },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 555,
+        "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "download_count": 0
+      }
+    ],
+    "body": "本次发布资产：`\"name\": \"sMahjong-server-v9.9.9.zip\"`\n摘要：`\"digest\": \"sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"`\n```json\n{\"name\":\"sMahjong-server-v9.9.9.zip\",\"digest\":\"sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"}\n```\n"
+  }
+]

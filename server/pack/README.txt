@@ -12,7 +12,7 @@
     ./status.sh           # 看进程 / 端口 / 版本 / 日志尾部
     ./stop.sh             # 停止（先 SIGTERM，最多等 20s 再 SIGKILL）
     ./restart.sh          # 重启
-    ./update.sh           # 从 GitHub Release 拉最新包，校验 sha256 后原地替换（在跑就自动重启）
+    ./update.sh           # 拉最新的**含服务端包**的发布，校验 sha256 后原地替换（在跑就自动重启）
 
 客户端连 `服务器IP:10086` 即可（本机就是 `localhost:10086`）。
 换端口：`PORT=9000 ./start.sh`；只监听本机：`HOST=127.0.0.1 ./start.sh`。
@@ -28,7 +28,7 @@
     stop.sh              停止（幂等；--force 直接 SIGKILL）
     restart.sh           重启（stop + start）
     status.sh            状态一览（只读）
-    update.sh            自动更新（--check 只看不装；--tag 指定版本；--force 重装）
+    update.sh            自动更新（--list 干跑；--check 只看不装；--tag 指定版本；--force 重装）
     DEPLOY.md            部署细节：防火墙、systemd、WSL 端口转发、思考时间等
     logs/  run/          运行期产生（日志 / PID / 备份），升级时会保留
     replays/             对局记录（服务端写，回放界面读）
@@ -52,11 +52,18 @@
 
     ./update.sh --check   # 只查有没有新版（不动任何东西）
     ./update.sh           # 装最新版；本来在跑就自动重启
-    ./update.sh --tag v1.8.0 --force   # 指定版本 / 强制重装
+    ./update.sh --list    # 列出最近的发布 + "会不会选它"（干跑，不下载）
+    ./update.sh --tag v1.14.0 --force   # 指定版本 / 强制重装
+    ./update.sh --include-prerelease    # 允许选中 prerelease 发布
+
+它挑的是"**最新的、含服务端包的非 prerelease 发布**"，不是"整仓最新的发布" ——
+本仓库有些发布只发机器人包或训练权重，那些发布里没有 `sMahjong-server-*.zip`，
+所以 `update.sh` 会**按资产名去找**并**继续往前找**，找不到就报错退出（不会装作成功）。
 
 判断"有没有新版"不只看版本号：**同一个 tag 下原地重发的资产**（本仓库修 bug 时
-会这么做）也会被认出来 —— 比对的是 release 资产的 sha256。旧 jar 会备份到
-`run/backup/`，回滚就是把备份拷回去再 `./restart.sh`。
+会这么做）也会被认出来 —— 比对的是 release 资产的 sha256。⚠ 若那个发布既没有 sha256
+摘要、也没有 `.sha256` 校验文件，脚本会**明说"无校验可用"**（只核大小），不会假装校过。
+旧 jar 会备份到 `run/backup/`，回滚就是把备份拷回去再 `./restart.sh`。
 
 四、机器人用哪一代 AI（bot-ai/）
 --------------------------------

@@ -1,0 +1,62 @@
+[
+  {
+    "url": "https://api.github.com/repos/o/r/releases/100",
+    "assets_url": "https://api.github.com/repos/o/r/releases/100/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v1.9.0",
+    "id": 100,
+    "tag_name": "v1.9.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-14T00:00:00Z",
+    "published_at": "2026-10-14T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/1001",
+        "id": 1001,
+        "name": "sMahjong-server-v1.9.0.zip",
+        "label": "",
+        "uploader": {
+          "login": "x",
+          "id": 1,
+          "type": "User"
+        },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 900,
+        "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+        "download_count": 0
+      }
+    ],
+    "body": "旧号但时间新（对抗性顺序）"
+  },
+  {
+    "url": "https://api.github.com/repos/o/r/releases/101",
+    "assets_url": "https://api.github.com/repos/o/r/releases/101/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v1.16.0",
+    "id": 101,
+    "tag_name": "v1.16.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-01T00:00:00Z",
+    "published_at": "2026-10-01T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/1011",
+        "id": 1011,
+        "name": "sMahjong-server-v1.16.0.zip",
+        "label": "",
+        "uploader": {
+          "login": "x",
+          "id": 1,
+          "type": "User"
+        },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 1600,
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "download_count": 0
+      }
+    ],
+    "body": "新号但时间旧"
+  }
+]

@@ -4639,11 +4639,14 @@ AGENTS §6.4 ④（原 `RoundClaims.shouldStop` 后的括注；判据仍在 §2.
   已补上自动化断言 `SelfTest.fourKanAbortOrderTests` —— 用注入策略摆出「2 家各 2 次杠 +
   那一张舍张**必定**被碰」的局面，断言流局那一刻 `meld` 报文与四家副露**都必须为 0**。
   要动 `Round.play()` 里那句 `fourKanAbortNow()` 的位置，先读它。
-- **shell 脚本（`server/pack/*.sh`）在本机无法执行**（Windows 上没有可用的 bash）：
-  改动它们时本机只能做**静态审查 + 解析逻辑的独立验证**（例如拿真实 API 响应跑一遍
-  `update.sh` 里的 `sed`/`grep` 链）。⚠ 但这**只是本机的验证手段受限**，不代表脚本有问题：
-  `start / stop / restart / status / update` 已由使用者在真机（Ubuntu）确认可正常运行 ——
-  所以这条**不需要**为了"补验证"去改脚本。
+- ~~**shell 脚本（`server/pack/*.sh`）在本机无法执行**（Windows 上没有可用的 bash）~~ ——
+  ⚠ **2026-10-15 更正：这条是错的，而且它本身害了事**。本机有两条可用的 POSIX shell：
+  Git Bash（`C:\Program Files\Git\bin\bash.exe`）与 **WSL Ubuntu**（`awk`/`sed`/`unzip`/`sha256sum` 齐全）。
+  正因为写着"只能静态审查 + 不代表脚本有问题"，`update.sh` 那条"取不到最新服务端包"的 bug 才一直没被跑出来
+  （改它们时本机**要真跑**：见 §9.5 的复现与 `node tools\update-pick-test.mjs`）。
+  ⚠ 唯一要用对的是：`C:\Windows\System32\bash.exe` 是 **WSL 存根**，会去跑默认登录 shell
+  （本机默认 zsh ⇒ `bash -c ...` 实际以 zsh 执行，报 `zsh:1: no such file`）；要指定就直接调
+  Git Bash 的 exe 或 `wsl.exe -d Ubuntu -- bash`。
 
 ---
 
@@ -4768,19 +4771,75 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   - `start.sh` 后台启动（`nohup` + PID 写 `run/`、日志写 `logs/`，幂等：已在跑就不重复起）；
   - `stop.sh` 优雅停止（SIGTERM → 最多 20s → SIGKILL；`--force` 直接杀）；
   - `restart.sh` / `status.sh`（状态含进程/端口/版本/日志尾）；
-  - `update.sh` **自动获取并安装更新**：查 GitHub Release → 比 **tag + 资产 sha256**
+  - `update.sh` **自动获取并安装更新**：查**发布列表** → 挑服务端包（规则见下）→ 比 **tag + 资产 sha256**
     （本仓库会**同 tag 原地重发**，只比版本号会永远停在"已是最新"）→ 下载 → 校验摘要 →
     `unzip -t` → 备份旧 jar 到 `run/backup/` → 替换（保留 `logs/ run/ replays/`）→ 需要时重启。
-    `--check` 只看不装，`--tag` 指定版本，`--force` 重装。解析逻辑用真 API 响应验证过
-    （`tag_name` 与**本资产**的 `digest` 都能取到）。
+    `--list` 干跑、`--check` 只看不装、`--tag` 指定版本、`--include-prerelease`、`--force` 重装。
+    - **2026-10-15 修：旧选择规则取不到服务端包**（用户报障）。旧版走 `releases/latest` +
+      "**按 tag 拼资产名**"（`ASSET="${PREFIX}${TAG}.zip"`），而本仓库近几个发布都不含服务端包：
+      `v1.17.0-weights`（prerelease，只有 `v4-weights-20261013.zip`）· `v1.16.0`（只有 `wl-p301b-g06.zip`）·
+      `v1.15.0`（只有四个 `wl-*.zip`）；**真正含服务端包的最新发布是 `v1.14.0`**。
+      实测（WSL Ubuntu 跑原脚本）：`/releases/latest` → `v1.16.0` → 去下
+      `sMahjong-server-v1.16.0.zip` → `curl: (22) ... error: 404`，退出码 22（脚本自己的提示一条都没出）。
+      ⚠ 当时 `releases/latest` **恰好**跳过了 prerelease 的 `v1.17.0-weights`（那是"整仓最新非 prerelease"
+      的定义），所以"跳过 prerelease"这条**旧版从来没有真正实现过**，只是侥幸。
+    - 同一处另有两条独立硬伤（都在旧版）：
+      ① **摘要比对从未生效** —— 正则写成 `"name":"…"` 而真实响应是 `"name": "…"`（**带空格**），
+      且 `digest` 与 `name` **不在同一行**；实测 27 个 release 的 `assets[].name` 用带空格的正则才匹配得到
+      （不带空格匹配 0 次）⇒ 它每次都打印"（API 没给，跳过摘要比对）"，而 API **确实给了** digest。
+      ⇒ `docs/DEPLOY.md` §4 与本节原来写的"比资产 sha256 / 同 tag 重发也能认出来"当时**是假的**。
+      ② **`VERSION` 与 tag 永不相等** —— 包内 `VERSION` 是 `1.14.0`（`package-release.ps1` 写的是 `$ver`，
+      **不带 v**）而 tag 是 `v1.14.0`（实测：真包 `sMahjong-server-v1.14.0.zip` 里 `VERSION` 的原始字节
+      `31 2e 31 34 2e 30` = `1.14.0`）⇒ "已是最新"这条短路**从来没有命中过**，每次 `update.sh` 都会重装。
+    - **修法**：改成"拉 `releases?per_page=100` → 非 draft（缺省也非 prerelease）→ 按资产名模式
+      `sMahjong-server-v<语义版本>.zip` 匹配 → **语义版本排序取最大**"；`VERSION`/tag 两边先 `norm_tag`
+      归一化；摘要缺失时退回 `<资产>.sha256` 边车、都没有就**明说"无校验可用"**。
+      选择逻辑写成**内联的 POSIX awk**（`awk` 是 Ubuntu 基础包，⛔ 不引入 jq/python3 依赖）。
+      ⛔ **不能用 `sed`/`grep` 扫整份响应**：release 的 `body` 是任意 markdown，实测 **27/27 个 release 的
+      body 里都出现 `sMahjong-server-`**，`v1.10.0`/`v1.3.0` 的 body 里还有 `"name":` ——
+      按行/按正则扫全文会先命中笔记文字。所以 awk 里做的是**真正的 JSON 词法 + 栈式结构解析**
+      （字符串里的 `{}[],:` 不参与结构判定）；实测同一份 JSON **压成一行无缩进**后结果不变。
+    - ⚠ **另踩一个坑：`update.sh` 会把正在运行的自己 `cp` 覆盖掉**。包里也带 `update.sh`，安装步骤原本
+      `cp -f "$f" "./$(basename "$f")"` —— `cp` 是**就地截断同一个 inode**，bash 逐块读脚本、被换掉内容后
+      从旧偏移继续读就会读到错位命令：**装到一半静默退出、退出码还是 0**（实测：jar 换好了，但
+      `VERSION`/`run/installed.sha256`/`installed.tag` 全没写、也没重启 —— **半装被报成成功**）。
+      孤立实验（WSL + Git Bash 都复现）：
+      ```bash
+      # A.sh 100 行填充 + 尾部 `cp -f B.sh A.sh; echo REACHED_END`（B.sh 只有 2 行）
+      bash A.sh          # → 什么都不打印，rc=0（REACHED_END 永远到不了）
+      # 换成 `cp -f B.sh .A.new && mv -f .A.new A.sh`
+      bash A.sh          # → REACHED_END，rc=0  ✅
+      ```
+      ⇒ 安装步骤改成 `install_file()`：先写 `./.<名字>.new` 再 `mv`（rename 换 inode，bash 手上的旧 fd
+      仍读旧内容）。⛔ **不要改回裸 `cp`**。
+    - 回归：**`node tools\update-pick-test.mjs`**（离线，15 项，夹具是**录下来的真实 release JSON**
+      `tools/release-fixtures/releases-real-20261015.json` + 8 个构造的对抗性 JSON）：
+      真实列表选中 `v1.14.0` / prerelease 不选 / 只有 bot 包的最新发布不选（继续往前找）/
+      `v1.9.0` vs `v1.16.0` 语义版本反例 / body 诱饵 / draft / 无服务端包必须非零退出 /
+      `--tag` 负向 / 紧凑 JSON / `VERSION` 归一化 / 边车 / 无校验可用 / **离线全流程安装**。
+      最后一项的"发布包"夹具是**测试当场用 `tools/make-zip.mjs` 打**的（`*.zip` 被 `.gitignore`
+      挡着，⛔ 不进仓库），包内那份 `update.sh` 故意比正在跑的短 ⇒ 正是"自覆盖"那个坑的最小复现。
+      它**需要 POSIX shell**（优先 Git Bash，其次 WSL Ubuntu），找不到 ⇒ 退出码 **2** 并说明原因
+      （⛔ 不静默跳过）。
+      夹具清单：`releases-real-20261015.json`（真实发布列表）·
+      `release-latest-real.json`（`/releases/latest` 的真实响应 —— **旧规则就是被它带到 `v1.16.0`** 的物证）·
+      其余 `releases-*.json` 是构造的对抗性夹具。
+    - 已验证环境（2026-10-15）：本机**有**可用的 POSIX shell —— Git Bash
+      (`C:\Program Files\Git\bin\bash.exe`) 与 **WSL Ubuntu** 都能跑 `server/pack/*.sh`
+      （`awk`/`sed`/`unzip`/`sha256sum` 齐全）；原脚本的失败与修好后的成功都是**真跑出来的**，
+      不再是"静态审查"。⚠ `C:\Windows\System32\bash.exe` 是 **WSL 存根**（会去跑默认登录 shell，
+      本机默认是 zsh ⇒ `bash -c` 会以 zsh 执行），别拿它当 bash 用。
 - ⚠ **`.sh` 的可执行位必须写进 zip**：PowerShell 的 `Compress-Archive`（.NET `ZipArchive`）把条目的
   `versionMadeBy` 写成 0（FAT），Linux 侧**忽略**权限位 → 解压后 `.sh` 全是 0644、
   `./start.sh` 报 Permission denied（实测 bsdtar 显示 `-rw-rw-r--`）。
   所以服务端包改由 **`tools/make-zip.mjs`** 手写（`versionMadeBy = Unix(3)` + `externalAttrs` 高位 = 0755）。
   自检方式：`tar -tvf release\sMahjong-server-v<版本>.zip` 里 `.sh` 必须是 `-rwxr-xr-x`。
 - 脚本本身**用 LF 写**（`.gitattributes` 已保证），发布包里再核对一次没有 CRLF（有的话 Linux 上直接
-  `bad interpreter`）。本机没有可用的 bash（`bash.exe` 是 WSL 存根、Git bash 起不来），所以脚本是
-  **静态审查 + 解析逻辑对着真 API 验证**，没在真 Ubuntu 上跑过 —— 目标机第一次跑请看 `./status.sh` 与日志。
+  `bad interpreter`）。⚠ **2026-10-15 更正**：本机**有**可用的 bash —— Git Bash
+  (`C:\Program Files\Git\bin\bash.exe`) 与 **WSL Ubuntu** 都能跑这些脚本，所以不必再只靠静态审查
+  （`update.sh` 的失败与修复就是真跑出来的，见上文；⚠ `C:\Windows\System32\bash.exe` 只是 WSL 存根，
+  会去跑默认登录 shell）。回归：`node tools\update-pick-test.mjs`。目标机第一次跑仍请看
+  `./status.sh` 与日志。
 
 - ⚠ **版本号有两处，脚本会两边一起核对**：`client/CMakeLists.txt` 的 `project(... VERSION)` 与
   `client/src/main.cpp` 的 `setApplicationVersion()`。不一致直接报错 —— 「包名 v1.6.0、程序自称 1.5.0」

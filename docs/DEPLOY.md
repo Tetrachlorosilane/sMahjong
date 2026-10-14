@@ -195,19 +195,45 @@ java -jar mahjong-server.jar --help        # 权威清单（本节只是摘要�
 ## 4. 自动更新（update.sh）
 
 ```bash
-./update.sh --check     # 只查有没有新内容（不动进程、不下载）
-./update.sh             # 装最新；本来在跑就自动重启
-./update.sh --tag v1.8.0 --force    # 指定版本 / 强制重装
+./update.sh --list                  # 列出最近的发布 + "会不会选它"（干跑，不下载）
+./update.sh --check                 # 只查有没有新内容（不动进程、不下载）
+./update.sh                         # 装最新；本来在跑就自动重启
+./update.sh --tag v1.14.0 --force   # 指定版本 / 强制重装
 ./update.sh --no-restart            # 只装，不重启
-REPO=you/sMahjong ./update.sh        # 换仓库（自建 fork）
+./update.sh --include-prerelease    # 允许选中 prerelease 发布
+REPO=you/sMahjong ./update.sh       # 换仓库（自建 fork）
 ```
 
-它做的事：查 GitHub Release → 比"版本 + **资产 sha256**"→ 下载 → 校验摘要（可选 `--sha256` 兜底）
-→ `unzip -t` 完整性 → 解包 → 备份旧 jar → 替换 jar/脚本/文档（保留 `logs/ run/ replays/ players/`）→ 重启。
+它做的事：查发布列表 → 挑服务端包（规则见下）→ 比"版本 + **资产 sha256**"→ 下载
+→ 校验摘要（可选 `--sha256` 兜底）→ `unzip -t` 完整性 → 解包 → 备份旧 jar
+→ 替换 jar/脚本/文档（保留 `logs/ run/ replays/ players/`）→ 重启。
+**挑不出服务端包、下载失败、摘要不符、包结构异常一律非零退出**，不会"取不到就跳过"。
+退出码：`0` 成功或已是最新，`1` 出错，`2` 参数错。
+
+**它怎么挑"最新"**（⛔ 不是"整仓最新的发布"）：
+
+1. 拉 `releases?per_page=100`（**发布列表**），⛔ **不用 `releases/latest`** —— 那只是
+   "整仓最新的非 prerelease 发布"，而本仓库有些发布**根本不含服务端包**（例如只发风格机器人包、
+   只发强度候选机器人包、只发训练权重归档），于是旧版会去下载一个不存在的
+   `sMahjong-server-v<那个 tag>.zip`（HTTP 404）。
+2. 只在**非 draft** 发布里挑；**prerelease 缺省跳过**（权重归档就是 prerelease），
+   要装得显式给 `--include-prerelease`。
+3. 服务端包**按资产名模式** `sMahjong-server-v<语义版本>.zip` 匹配，
+   ⛔ 不拿 tag 去拼资产名（拼出来的名字一旦不存在就只能 404，没有"往前找"的余地）。
+4. **按语义版本排序取最大**，⛔ 不用 tag 字符串比较（字典序会说 `v1.9.0 > v1.16.0`）。
 
 ⚠ **为什么不能只比版本号**：本仓库修 bug 时**不换版本号、原地重发同名资产**
-（`v1.8.0` 就这样重发过两次）。所以 `update.sh` 还比 release 资产的`digest`，
+（`v1.8.0` 就这样重发过两次）。所以 `update.sh` 还比 release 资产的 `digest`，
 同一 tag 下资产变了也会装（`--check` 会显示"同一个 tag 下的资产变了"）。
+⚠ 包内 `VERSION` 写的是 `1.14.0`（**不带 v**）而 release tag 是 `v1.14.0`，
+两边都先归一化再比；⚠ 若上游**既没有 `digest`、也没有 `<资产>.sha256` 边车**，
+脚本会**明说"无校验可用"**（只核大小），⛔ 不假装校过。
+
+⚠ **`update.sh` 会替换正在运行的自己**（安装步骤把包里的 `update.sh` 也换掉）：
+实现上刻意先写临时名再 `mv`（`rename` 换 inode），因此脚本一定跑完；
+⛔ **不要把它改回 `cp` 就地覆盖** —— `cp` 是截断同一个 inode，bash 会从错位处继续读，
+**装到一半静默退出、退出码还是 0**（jar 换了但 `VERSION`/`run/installed.sha256` 没写、也没重启）。
+回归：`node tools\update-pick-test.mjs`（离线，用录下来的真实 release JSON + 真实发布包当夹具）。
 
 回滚：
 
@@ -321,7 +347,9 @@ stream {
 | 客户端连不上 | `./status.sh` 或 `ss -lntp \| grep 10086`；检查 ufw / 云安全组 |
 | 客户端连上后马上断开 | 服务端日志有原因；确认客户端发的是 `{"cmd":"hello",...}` 且以 `\n` 结尾 |
 | 中文日志乱码 | 脚本已带 `-Dstdout.encoding=UTF-8`；自己起 java 时手动加上 |
-| `update.sh` 说"已是最新"但确实修了 bug | 加 `--force`，或先 `./update.sh --check` 看资产摘要是否变了 |
+| `update.sh` 说"已是最新"但确实修了 bug | 加 `--force`，或先 `./update.sh --check` 看资产摘要是否变了。⚠ 若输出写着"**该发布没有摘要可对**"（上游既无 `digest` 也无 `.sha256` 边车），那"是否原地重发"就判不了 —— 直接 `--force` |
+| `update.sh` 报"**挑不出可安装的服务端包**" | 最新发布不含服务端包（只发机器人包/权重归档）。`./update.sh --list` 看全部发布与"会不会选它"，或 `--tag v<版本>` 指定一个确实带 `sMahjong-server-*.zip` 的发布 |
+| 想装 prerelease 的发布 | 缺省跳过 prerelease；显式加 `--include-prerelease` |
 | 更新后行为没变 | `./status.sh` 看进程启动时间；systemd 场景别忘了 `systemctl restart mahjong` |
 | 老玩家回来变成"新玩家" / 掉线重连接不回座位 | 看 `players/players.json` 在不在、可不可写（§3.4）；换目录/换机器时把这个目录一起搬过去 |
 | 玩家档案一直不落盘 | 落盘有 **2 秒节流**（登录太密集时合并写），正常；退出/清理时都会补写。看日志有没有"落盘失败" |

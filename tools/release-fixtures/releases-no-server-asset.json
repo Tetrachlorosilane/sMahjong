@@ -1,0 +1,62 @@
+[
+  {
+    "url": "https://api.github.com/repos/o/r/releases/400",
+    "assets_url": "https://api.github.com/repos/o/r/releases/400/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v4.1.0",
+    "id": 400,
+    "tag_name": "v4.1.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-15T00:00:00Z",
+    "published_at": "2026-10-15T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/4001",
+        "id": 4001,
+        "name": "wl-riichi.zip",
+        "label": "",
+        "uploader": {
+          "login": "x",
+          "id": 1,
+          "type": "User"
+        },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 5097665,
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "download_count": 0
+      }
+    ],
+    "body": "只有风格包"
+  },
+  {
+    "url": "https://api.github.com/repos/o/r/releases/401",
+    "assets_url": "https://api.github.com/repos/o/r/releases/401/assets",
+    "html_url": "https://github.com/o/r/releases/tag/v4.0.0",
+    "id": 401,
+    "tag_name": "v4.0.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-09-01T00:00:00Z",
+    "published_at": "2026-09-01T00:00:00Z",
+    "assets": [
+      {
+        "url": "https://api.github.com/repos/o/r/releases/assets/4011",
+        "id": 4011,
+        "name": "sMahjong-client-v4.0.0-win64.zip",
+        "label": "",
+        "uploader": {
+          "login": "x",
+          "id": 1,
+          "type": "User"
+        },
+        "content_type": "application/zip",
+        "state": "uploaded",
+        "size": 38849862,
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "download_count": 0
+      }
+    ],
+    "body": "只有客户端包"
+  }
+]
