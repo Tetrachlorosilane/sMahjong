@@ -4744,7 +4744,11 @@ AGENTS §6.4 ④（原 `RoundClaims.shouldStop` 后的括注；判据仍在 §2.
 `--alpha auto` / `--alpha <数值>` 是**实验与评测臂**用的（P5b 混合），带了先验的包强度基准就变成
 teacher（约 95% 决策听老师），而"这一代比上一代强多少"必须用**纯网络**的同牌山配对来量。
 `packbot` 现在会在 `--zip` 与 α>0 同时出现时打一条 WARN；这一条是**用户定的发布口径**
-（2026-09-26：我先把 `ppo2-g05` 误发成 `alpha=2`，删掉旧资产后按纯网络重发）。
+（2026-09-26：我先把 `ppo2-g05` 误发成 `alpha=2`，删掉旧资产（id **590675539**）后按纯网络重发
+（id **590708487**，sha256 `1f4a580a…`；它挂在**已发布的 `v1.10.4`** 上、`created_at` 比该 release 的
+`published_at` 晚一天）；⚠ 这与 `ppo2-g04` 那份由 `--alpha auto` 选出的 `alpha: 2`（让位 95.1%，见
+`docs/AUDIT.md` 的"打包器"一行）是**两个包、两件事** —— `ppo2-g04` 是在 `v1.10.5` 按本口径**去掉 α
+先验重打**（`net.bin` 逐字节未变、仅 `bot.json` 去掉 `alpha`），**不是误发**）。
 ⚠ **两种 zip 的落点都是服务端根目录**：包内已带 `bot-ai/<名字>/` 前缀，
 所以**解压到服务端目录**（而不是解压到已存在的 `bot-ai/` 里 —— 那会多一层）。
 ⚠ 权重是**二进制发布资产**，不进仓库（`.gitignore` 里的 `bot-ai/`）：改了训练脚本要重发时重新打包。
@@ -5016,6 +5020,47 @@ tag 不存在时会把 tag 建到 `main` 上（本项目开发分支是 `Trainin
   ⚠ 顺手修掉 `selfcheck.py` 里一条**写死 `S:/mahjong-training`** 的断言（换盘/换机本来会假红），
   以及会话内 shell 被限制在仓库时用 `MAHJONG_DATA_ROOT=python\.tmp\selfcheck-root` 跑自检的路子。
   本地草稿与摘要表：`release\RELEASE-v1.14.0.md`。
+
+- **v1.18.0**（2026-10-15，**服务端包（含修复版自更新脚本）**）：release id **413083434**
+  （<https://github.com/Tetrachlorosilane/sMahjong/releases/tag/v1.18.0>），tag `v1.18.0` → 远端
+  **`50a73ecfafd297480ec60bc6332ea8f598591b94`**（**正式发布**：`draft=false` / `prerelease=false`；
+  **现为仓库 Latest**）。发布记录件 = `lab/housekeeping/RELEASE-v1.18.0.md`，落在其后的提交 **`fc6cfee`**。
+  ⚠ **为什么必须是这个号**（用户报障"旧部署自更新取不到服务端包"）：旧部署手上那版 `update.sh` 的规则是
+  `GET /releases/latest` → 取 `tag_name` → **按 tag 拼**资产名 `sMahjong-server-<tag>.zip`，所以要让老机器
+  **一行脚本都不用改**就收敛到本版，必须同时满足三条：① tag **严格大于 `v1.16.0`**（否则
+  `/releases/latest` 不指它）② **正式发布**（`draft=false` / `prerelease=false` —— `v1.17.0-weights`
+  是 prerelease）③ 资产名**正好**是 `sMahjong-server-v1.18.0.zip`（旧脚本按名字拼 URL，差一个字符就 404）。
+  而本仓库在此之前那三个发布**都不含服务端包**：`v1.15.0`（四个**风格**机器人包 `wl-riichi` /
+  `wl-dama` / `wl-pon` / `wl-meld`）· `v1.16.0`（**强度候选**机器人包 `wl-p301b-g06`）·
+  `v1.17.0-weights`（**权重归档**，prerelease）⇒ **服务端自 `v1.14.0` 之后一直没再发过**，本版就是补那个缺口。
+  本版**只有一个资产**（无客户端 / 无机器人包）：`sMahjong-server-v1.18.0.zip` **440,238 B** sha256
+  `651c53dce4a66447bfbac849aef748b651c0a9e0183479d7753ce2027e60a4fd`（asset id **641364396**；
+  远端 `size=440238` + `digest=sha256:651c53dc…a4fd` **==** 本地 `Get-FileHash`；上传 HTTP 201、
+  **0 次重试**）。包内容验收：`tar -tvf` **5 个 `.sh` 全 `-rwxr-xr-x`**（`make-zip.mjs` 手写 zip，
+  Unix 可执行位保住）· 包内 `VERSION` = `1.18.0`（6 字节，原始字节 `31 2e 31 38 2e 30`）·
+  服务端 `--selftest` **1538 项 / 0 失败**（SELFTEST PASS）。
+  ⭐ **旧脚本收敛实测**（WSL Ubuntu · bash 5.2.21 · **真 API** · 隔离临时目录，⛔ 未碰任何真实安装）：
+  旧脚本 = 从**已发布的 `v1.14.0` 包里解出**的 `update.sh`，与 `git show 94573ab^:server/pack/update.sh`
+  **逐字节相同**（7202 B · sha256 `80741b2e1fe3fa73805a4179f07e7a3c302ea3c9295fb8607b5c86b828a45c72`）
+  —— 这就是"旧部署手上那份"的物证。按旧规则跑：`/releases/latest` = **`v1.18.0`** → 拼出
+  **`sMahjong-server-v1.18.0.zip`** → `curl -sI -L` = **HTTP 200**（不是 404）；**反向对照**（同一规则
+  用在 `v1.16.0` 上）⇒ **HTTP 404** = 报障原文。⚠ **如实记**：旧脚本整跑一遍顺带命中**它自己的** `cp`
+  自覆盖缺陷 —— 本次 `norm_tag: command not found`、**rc=127**，jar 已换（422,090 B）但 `VERSION` /
+  `run/installed.sha256` 没写 = **半装**；历史记录**同一根因**当时观测到的是 **rc=0（静默）** ——
+  **同因不同果**，都是「`cp` 覆盖正在被 bash 读取的 inode」。
+  **版本落点（1.14.0 → 1.18.0）**：`client/CMakeLists.txt:6` · `client/src/main.cpp:90`
+  （本仓库客户端与服务端**共用同一个版本号**：`tools/package-release.ps1` 取前者为默认并**强制后者相等**，
+  不一致直接报错）· `docs/DEPLOY.md:201/228` + **新增 §10 发版记录** · `server/pack/README.txt:56` ·
+  `server/pack/update.sh:7/31/32/64/75`。⚠ **仓库里没有 `server/pack/VERSION`** —— 那是打包时按 `$ver`
+  现写进包里的（包内 = 6 字节 `1.18.0`）。⛔ 本版**未改历史记录 / 录下来的真实数据**（`NOTES.md` 的
+  v1.14.0 段、`docs/BOT-AI.md:282`、`tools/release-fixtures/**`、`tools/update-pick-test.mjs` 全部原样 ——
+  它们是"当时的事实陈述"而不是"当前版本落点"）。
+  ⚠ 本条目所有数字**本轮都重新核过**：`GET /releases/tags/v1.18.0`（tag / `draft` / `prerelease` /
+  asset id / `size` / `digest`）+ 从 `releases/download/v1.18.0/…` **重新下载**该资产（本地 sha256 与记录
+  一致）+ `tar -tvf`（权限位）+ 包内 `VERSION` 原始字节；旧脚本那条另用
+  `git show 94573ab^:server/pack/update.sh` 与 v1.14.0 包内那份**各自算 sha256** 对拍。
+  指针：发版记录见 `docs/DEPLOY.md` §10；「自更新脚本不许用 `releases/latest` + 按 tag 拼资产名」这条判据
+  在 `AGENTS.md` §6.5 第 18 条。
 
 ### 9.6 天鳳牌譜导出：为什么要逐条对着参考实现写
 
