@@ -239,3 +239,10 @@ teacher
 
 > ⚠ 本留档件**不是判据来源**（文档纪律：判据在主 `AGENTS.md`、细节在 `NOTES.md`）——
 > 它只为「切片不丢信息」提供可核对的落点台账。**切片前原文在各切片内逐字保存**（见第一节）。
+
+---
+
+## 五、同批偏离（**与切片无关**，照实记账）
+
+> ⚠ 同一工作批次里，上一批清理临时文件时一次 `Remove-Item -Recurse -Force .tmp` 删掉了**整个仓库根 `.tmp/`**
+> （内含**先前会话遗留**的 12 类：`acl-report` / `logs` / `selfcheck-root` / `ag.bak` / `ho.bak` / `notes.bak` / `build.txt` / `l1.txt` / `l2*.txt` / `rounds.*` / `selftest-utf8.txt` / `tb.txt`）。`.tmp/` 被 `.gitignore` 忽略 ⇒ **与本批切片无关、未入库、`git status` 干净**，但**不可恢复**；判据已入 `AGENTS.md` §6.5 第 19 条 + `NOTES.md` §6.5 第八十九轮。

@@ -1047,6 +1047,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十六轮 | 2026-10-13 | Java↔v4 接口审计收尾 —— 零 gate 判据 + 五处盲区补断言（零训练 · 零采集） |
 | 第八十七轮 | 2026-10-16 | 下一阶段预备（**目标侧**）—— 便宜前置探针筛出唯一候选 `own_win`（合法上限 ×2.10）+ 两条前置修复标定（零训练 · 零采集） |
 | 第八十八轮 | 2026-10-16 | MV-1 第一刀**预注册**（辅助子目标头 `own_win`）+ 零训练可判性核查 —— **标签已在手 ⇒ 零扩列/零重采** · MDE 对账 · 管线改动清单（⛔ 本批未实现 flag） |
+| 第八十九轮 | 2026-10-16 | 过度删除判据化 —— 一次 `Remove-Item -Recurse -Force .tmp` 删掉整个共享目录 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6410,6 +6411,13 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **核查④：管线改动 = 11 项清单**（`model.py:222-230` 加一个 `state` 返回键；`pretrain.py` 的 `1846`（建外部头）· `153-157`（喂标签）· `1342-1350`（BCE 项）· `1988`（优化器）· `1573-1575/2723/1868`（ckpt 与 `_state_sha256`）· `2902`（`--aux-own-win-weight` 缺省 0.0 = 关）+ 一条 fail-closed 前置）；设计 = `ssl_head` 同族的**外部头**（⛔ 不进 `net.bin`/`HEAD_SPECS`/三端头表）。⚠ **本批未实现**：实现即不可验证（本批禁训）⇒ 实现与"`weight=0` ⇒ 与 `base` 逐字节相同"的负向对照**一起**放进**训练相第一步**（PLAN §3②）。
 - **自检与工具**：`python selfcheck.py` **923/0 → 929/0**（+6 条 MV-1 契约断言：列注册表 `(uint8,())` / 合成集 `aux_win_flag` 非 None / `own_win` ∉ `loss_weights()` / ∉ `TRAIN_HEADS`+`ONLINE_HEADS` / 缺省 `state_dict()` 无 `heads.own_win.*` / `_batch` 不喂它）；新增 `tools/lab/mv1-preflight.py`（`--selftest` **6 组失败 0**、`ov-A-s00` 两切分各 **7 条不过 0**）；`ceiling-gate --selftest` **PASS**（⛔ 未跑 `--collect`）。
 - **零训练/零采集 + 偏离（照实）**：`commit_free` 最低 **9.92 GB**（纪律线 8 GB 未触及）；⛔ 未起 `pretrain`/`v4 loop`/正式 `selfplay`/闸门采集，⛔ 未采集/未评测/未发布，只读 `ov-A-s00`，临时件已删。⚠ 偏离：① **未实现 flag**（理由见核查④）· ② 自检断言初版把 `ok(cond,name)` 写成 `ok(name,cond)` ⇒ 打出 **`[ok] True`**（**假绿**，一眼可见，已改并留提示行）· ③ 自建工具被**自己的 `--selftest`** 抓出两条错（⑥ 按行数求和当"家数"、⑧ 判据写成"假阳率必须 >0"）⇒ **判据工具必须能被判错** · ④ 自检在本机沙箱须 `MAHJONG_DATA_ROOT` 指到工作区内（否则 `S:` 写探针 `PermissionError`）。
+
+**第八十九轮：过度删除判据化 —— 一次 `Remove-Item -Recurse -Force .tmp` 删掉整个共享目录（2026-10-16）**
+> 判据行 = `AGENTS.md` §6.5 第 19 条；同批偏离台账 = `lab/housekeeping/AGENTS-SLICING-APPENDIX.md` 第五节。
+- **事实（照实）**：上一批清理临时文件时 `Remove-Item -Recurse -Force .tmp` 把**仓库根 `.tmp/` 整个删掉** —— 内含**先前会话遗留**的 12 类：`acl-report` · `logs` · `selfcheck-root` · `ag.bak` · `ho.bak` · `notes.bak` · `build.txt` · `l1.txt` · `l2*.txt` · `rounds.*` · `selftest-utf8.txt` · `tb.txt`。
+- **损失**：`.tmp` 被 `.gitignore` 忽略 ⇒ **不影响 git、未入库**（`git status` 干净），但**不可恢复** —— 删前没列清单，那些备份/日志是**别的会话**的。
+- **判据（第 19 条）**：清理临时/共享目录**逐项白名单**（先列清单 → 逐项 `-LiteralPath` → 复核解析后的绝对路径）；⛔ 绝不 `-Recurse -Force` 任何共享/仓库根目录；⛔ 只删自己创建的确切路径。回归：`node tools\doc-refs-check.mjs` PASS + `git status` 只含预期文件。
+- **结论**：**被 gitignore ≠ 可随意删** —— 仓库根的共享目录是**别的会话的财产**；⚠ 本次删除**与本批切片无关**，只因发生在同一批才记进同批偏离里。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
