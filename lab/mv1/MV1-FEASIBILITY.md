@@ -119,7 +119,7 @@ MV1-PREFLIGHT SELFTEST PASS
 | 值头目标只有 `final`/`rtg`/`delta` | `python/mahjong_ml/v4/pretrain.py:2902`（`choices=["final","rtg","delta"]`） | ⛔ 没有"二值/打点"选项 |
 | 数据侧**列已注册**（`uint8`、标量） | `python/mahjong_ml/v4/dataset.py:427`（`_COLUMNS`） | `"aux_win_flag": (np.uint8, ())` |
 | 数据侧**已落列**（生产者登记） | `python/mahjong_ml/v4/auxlabels.py:41`（`"win_flag": ()`；登记见 `:54`）· `dataset.py:380`（回填）· `server/.../train/TraceRecorder.java:470` + `trainer/src/trace.cpp:456` | 数据生产端**已经**在写这一列 |
-| 它今天只被**审计/天花板**用（判"作弊列"，不许进输入） | `v4/value_audit.py:366`（`label_win(结局)`）· `selfcheck.py:3361-3370`（`legit*` 不许含它） | 作为**标签**合法，作为**输入**禁止 |
+| 它今天只被**审计/天花板**用（判"作弊列"，不许进输入） | `v4/value_audit.py:366`（`label_win(结局)`）· `python/selfcheck.py` 的 `CEIL_GROUPS` 合法性断言块（`_legit_keys` 那一段；⛔ 不写死行号 —— 本批自己就往它前面插了 25 行） | 作为**标签**合法，作为**输入**禁止 |
 
 ⇒ **最终自变量定义（与任务给定一致，无需改写）**：
 **新增一个辅助头 `own_win`（BCE，目标 = 既有二值 `aux_win_flag`）**；今天它**既不是任何头的目标、也不在任何损失里**（"存在但没人用"），
@@ -197,6 +197,8 @@ MV1-PREFLIGHT SELFTEST PASS
 - ⚠ `wins`/`deals`/`win_points` 的 tol 沿用 `gate.QUALITY_TOL`（0.10/0.10/150）—— ⛔ 本批未改任何容忍带（改它就是事后调判据）。
 - ⚠ **本机沙箱下 `python selfcheck.py` 必须用 `MAHJONG_DATA_ROOT` 指到工作区内**（否则 `paths.ensure_root` 对 `S:\mahjong-training` 写探针 ⇒ `PermissionError`）；
   口径 = **逐字不改自检代码**、只改环境变量，⛔ 未把训练数据落进仓库（`.tmp/` 已 gitignore）。
+- ⚠ **自己把自己的行号引用写旧了**：`selfcheck.py` 的 `CEIL_GROUPS` 断言块在本批插入 25 行后从 `3361` 漂到 `3387` ⇒ 本条改成**不写死行号**的指认（"`_legit_keys` 那一段"）。
+  **教训**：同一提交里既插行又引行号，行号一定漂；⛔ 要么先引、要么不引编号。
 - 未跑 `ceiling-gate --collect`（那是采集/评测，本批禁）；只打算跑它的 `--selftest`（零训练）。
 
 
