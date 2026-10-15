@@ -1046,6 +1046,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十五轮 | 2026-10-13 | 权重归档首版「静默取错副本」两条 —— 按目录名索引 vs 按"解析后真实路径 + sha256" |
 | 第八十六轮 | 2026-10-13 | Java↔v4 接口审计收尾 —— 零 gate 判据 + 五处盲区补断言（零训练 · 零采集） |
 | 第八十七轮 | 2026-10-16 | 下一阶段预备（**目标侧**）—— 便宜前置探针筛出唯一候选 `own_win`（合法上限 ×2.10）+ 两条前置修复标定（零训练 · 零采集） |
+| 第八十八轮 | 2026-10-16 | MV-1 第一刀**预注册**（辅助子目标头 `own_win`）+ 零训练可判性核查 —— **标签已在手 ⇒ 零扩列/零重采** · MDE 对账 · 管线改动清单（⛔ 本批未实现 flag） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6400,9 +6401,20 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - ⚠ **偏离（照实）**：① 探针初版用"配对 ΔMSE" ⇒ 跨目标**量纲不可比**，改成方差归一的**配对 ΔR²**；② 主判决从"in 强/弱"改成"合法上限是否升高"，并对 4 个高 R² 目标加**恒等式嫌疑**标注（`value_final`/`rank_pts`/`placement` 的 R² 主要来自 `ctx` 里的**当前点数**，`shanten` 与 `effect` 同源）；③ **测量脚本自己的两个坑**（都不是探针的问题）：`p.stdout.read()` 在蹦床下等不到 EOF（祖先进程持有管道）⇒ 改 `communicate()`；外部采样在 1 s 轮询里做 `np.where`（50 场索引）把探针从 **17.8 s 拖到 ≈10 min** ⇒ 改成 3 时点 + 探针自报。
 - **残留**：`tmp/nextphase/**`（探针 JSON/日志/诊断脚本 < 1 MB）**用完即删**；保留 `lab/nextphase/**` + `tools/lab/nextphase-probe.py`；⛔ 未动 `raw/**`、`style-reward/**`、`compact\v4-heads-g01`、`traces\v4-wl-fold-c1-g01`、`tools\build\**` 端点、`compact\ov-A-s00`（全程只读）；⛔ 未改 `powercfg`/页面文件、⛔ 未用 junction、⛔ 未重启。
 
+**第八十八轮：MV-1 第一刀预注册（辅助子目标头 `own_win`）+ 零训练可判性核查（2026-10-16）**
+> 预注册 `lab/mv1/MV1-PLAN.md`（= `S:\mahjong-training\w-ladder\MV1-PLAN.md`；跑前冻写，跑后只在 §10 追加偏离）；核查 `lab/mv1/MV1-FEASIBILITY.md`；前置工具 `tools/lab/mv1-preflight.py`；判据行仍在 `AGENTS.md` §6.5（第 17 条）。
+- ⭐ **第一刀 = 唯一自变量「新增一个辅助头，目标 y = 既有二值 `aux_win_flag`」**（依据 `lab/nextphase/evidence/nextphase-probe-full.json`：`own_win` 合法上限 R² **0.13939 = `delta` 0.06643 的 ×2.10**，唯一不受压；`own_win_delta` ΔR² +0.0110 CI 含 0 已出局）⇒ ⛔ **不做打点回归变体**（那是第二刀）。
+- ⭐ **核查①：标签已在手 ⇒ 本刀零扩列、零重采**（`ov-A-s00` 只读实测）：`aux_win_flag` = `uint8` 标量 · 覆盖率 **1.000000** · 非零比 **0.217515 / 0.221687** · 在 `(game,hand_no,seat)` 内逐行常数（违规 **0/43461 · 0/2252**）· 每小局**恰 1 家**和了且该家 == 该局 `delta` 最大者（9825/9825 · 515/515）· 与 `delta>0` **不是同一列**（假阳率 15.3%/18.6%）。
+- **核查②：`own_win` 今天"存在但没人用" ⇒ 本刀是纯新增头、不是改现有头目标**：头清单 `model.py:51-62`（7 头无它）· `Heads` `:199-211` · `pretrain.py:153-157` 的 aux 喂给清单**不含** `aux_win_flag` · 值头目标只有 `final/rtg/delta`（`pretrain.py:2902`）；而数据侧列**已注册**（`dataset.py:427`）且**已落列**（`auxlabels.py:41` · `TraceRecorder.java:470` · `trace.cpp:456`）。
+- **核查③：判据预对账（N = 3 族 × 4,000 场/臂 = n 12,000；零训练纯算术）**：`rank_points` `MDE_95` = **0.973**（台账 ≈0.97 **对上**）· `Bonferroni(3族)` = **1.189**；护栏 `wins` tol/MDE **2.33** ✅ · `deals` **2.78** ✅ · `win_points` **0.393 ❌ 不得作否决依据**（要它可作否决需 n ≥ 77,500 / 37,970）。输入 = `ceiling-gate\p3pkg-B-g06-vs-defrep-verdict.json`（同 N/同族数/同工具），算法 = 反解 `eval.required_n`（α=0.05、功效 0.8）+ CI 半宽。
+- **核查④：管线改动 = 11 项清单**（`model.py:222-230` 加一个 `state` 返回键；`pretrain.py` 的 `1846`（建外部头）· `153-157`（喂标签）· `1342-1350`（BCE 项）· `1988`（优化器）· `1573-1575/2723/1868`（ckpt 与 `_state_sha256`）· `2902`（`--aux-own-win-weight` 缺省 0.0 = 关）+ 一条 fail-closed 前置）；设计 = `ssl_head` 同族的**外部头**（⛔ 不进 `net.bin`/`HEAD_SPECS`/三端头表）。⚠ **本批未实现**：实现即不可验证（本批禁训）⇒ 实现与"`weight=0` ⇒ 与 `base` 逐字节相同"的负向对照**一起**放进**训练相第一步**（PLAN §3②）。
+- **自检与工具**：`python selfcheck.py` **923/0 → 929/0**（+6 条 MV-1 契约断言：列注册表 `(uint8,())` / 合成集 `aux_win_flag` 非 None / `own_win` ∉ `loss_weights()` / ∉ `TRAIN_HEADS`+`ONLINE_HEADS` / 缺省 `state_dict()` 无 `heads.own_win.*` / `_batch` 不喂它）；新增 `tools/lab/mv1-preflight.py`（`--selftest` **6 组失败 0**、`ov-A-s00` 两切分各 **7 条不过 0**）；`ceiling-gate --selftest` **PASS**（⛔ 未跑 `--collect`）。
+- **零训练/零采集 + 偏离（照实）**：`commit_free` 最低 **9.92 GB**（纪律线 8 GB 未触及）；⛔ 未起 `pretrain`/`v4 loop`/正式 `selfplay`/闸门采集，⛔ 未采集/未评测/未发布，只读 `ov-A-s00`，临时件已删。⚠ 偏离：① **未实现 flag**（理由见核查④）· ② 自检断言初版把 `ok(cond,name)` 写成 `ok(name,cond)` ⇒ 打出 **`[ok] True`**（**假绿**，一眼可见，已改并留提示行）· ③ 自建工具被**自己的 `--selftest`** 抓出两条错（⑥ 按行数求和当"家数"、⑧ 判据写成"假阳率必须 >0"）⇒ **判据工具必须能被判错** · ④ 自检在本机沙箱须 `MAHJONG_DATA_ROOT` 指到工作区内（否则 `S:` 写探针 `PermissionError`）。
+
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
 > 本文件独有（`AGENTS.md` 里没有同号节）：判据、命令、红证都在这一节，刻意不占指令预算。
+
 > 速记版（用法 + 四条坑）在脚本自己的头部注释块里。
 
 ### 11.1 它存在的原因

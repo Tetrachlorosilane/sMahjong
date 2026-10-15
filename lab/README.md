@@ -22,6 +22,7 @@ lab/
 ├── p3-pkg/         (+evidence/)   P3-PKG 打包闸门
 ├── bl13/  bl14/    (+evidence/)   BL-13 / BL-14 训练轮次
 ├── nextphase/      (+evidence/)   **下一阶段预备（目标侧）**：预注册 + 便宜前置探针筛查 + 两条前置修复标定
+├── mv1/                           **MV-1 第一刀**（辅助子目标头 `own_win`）：预注册 + 零训练可判性核查（标签已在手 ⇒ 零扩列）
 ├── mslt/           (+evidence/)   多段链式训练
 ├── overlap/        (+evidence/)   采集 ‖ 训练 重叠（B1/B2/B3b）
 ├── axis-p2-11/                    P2-11 轴/域普查（domains · formal · minimal）
@@ -67,6 +68,7 @@ lab/
 | **轮次表 / 复算** | 轮次索引与 RERUN 合规（⛔ 撞 KL 早停的存档不许续） | `NOTES.md` §6.5 附录 E | `ladder-report.md` · `ladder-tables.md` · `RERUN-PLAN.md` · `_rerun\**` |
 | **BL-12 前置探针** | **四条观测候选全「in 弱/出局」**（零训练零采集）：C1 近期行为 +0.0043（勉强越实测 MDE）、C3 信念回灌 +0.0015（CI 含 0）、C4 阴性对照 **−0.0022 出局**；base 用现有 v4 观测已到 AUC **0.906/0.879** ⇒ 观测侧在这两个公开结果上**接近饱和** | `NOTES.md` §6.5（第八十四轮） | `lab/bl12/BL12-{PLAN,SCREEN}.md` · `lab/bl12/evidence/**` · `tools/lab/bl12-probe.py` |
 | **下一阶段预备（目标侧）** | 目标侧候选便宜前置探针（**零训练零采集**）：主判决 = **换了 y 之后合法信息上限升不升**（`delta` 标定 **0.06643** ≈ 文档 0.0693）⇒ 唯一抬高上限的是**自家和了 `own_win` ×2.10**（0.13939）；⛔ 但"**自家本小局打点**"这一列**在紧凑集里根本不存在** ⇒ 真正的手牌价值目标必须**先扩列**；E2 辅助重加权 / E3 奖励口径**整族不可用**（上限=自身 / 同源 / 信息不在 / 被优势归一化消掉） | `NOTES.md` §6.5（第八十七轮） | `lab/nextphase/NEXTPHASE-{PLAN,SCREEN}.md` · `lab/nextphase/evidence/**` · `tools/lab/nextphase-probe.py` |
+| **MV-1 第一刀**（辅助子目标头 `own_win`） | **预注册 + 零训练可判性核查**（⛔ 未训练/未采集）：唯一自变量 = 新增一个辅助头、`y` = 既有二值 `aux_win_flag`（`nextphase` 实测其合法上限 R² **0.13939 = ×2.10**）；⭐ **该列已在手**（`uint8` 标量 · 覆盖率 1.0 · 非零比 0.2175/0.2217 · `(小局,座位)` 内常数 · 每局恰 1 家和了且 == 该局 `delta` 最大者）⇒ **零扩列、零重采**；N=3×4,000 的 `MDE_95`=`rank_points` **0.973** / Bonf **1.189**，护栏 `wins` 2.33 ✅ · `deals` 2.78 ✅ · `win_points` **0.393 ❌ 不得作否决**；⛔ 本批**未实现** flag（实现即不可验证） | `NOTES.md` §6.5（第八十八轮） | `lab/mv1/MV1-{PLAN,FEASIBILITY}.md` · `tools/lab/mv1-preflight.py` |
 | **自对弈逃逸（文献综合）** | **无人类数据自对弈破局部最优的文献综合**（三分区：甲=零人类数据可搬运 / 乙=代价大 / 丙=依赖人类数据仅备选）+ 训练策略分配专章 + 3 个最小可行改造 | — | `lab/research/SELFPLAY-ESCAPE-LIT.md` |
 | **待办 / 想法** | `IMPROVEMENTS.md`（逐条：名称｜效果｜依据｜出处）· `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` | — | `IMPROVEMENTS.md` · `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` |
 

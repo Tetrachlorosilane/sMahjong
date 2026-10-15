@@ -1953,6 +1953,31 @@ ok(bool((_hg >= 0).all()), "v4：值头软标签非负（不会造出负概率�
 ok(_torch.equal(_v4m(**_x, mask=None)["policy"][:, 0], _v4m(**_x, mask=None)["policy"][:, 0]),
    "v4：前向是确定性的（无 dropout）—— 红证①与判据④都依赖这条")
 
+# ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
+# 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
+# ⚠ 这六条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分；
+#   "开关关 ⇒ 与 base 逐字节相同"的**运行期**对照要一次短训练（属训练相第一步），⛔ 不在自检里跑。
+#   ⛔ 它们**不是**「头已实现」的断言 —— 实现前 / 实现后（只要缺省关）都必须绿。
+eq("MV-1：辅助头目标列 `aux_win_flag` 在列注册表里（uint8 标量 ⇒ 零扩列）",
+   v4_ds._COLUMNS["aux_win_flag"], (np.uint8, ()))
+# ⚠ `ok(cond, name)` —— 参数序与 `eq(name, got, want)` **相反**（AGENTS §6.1 那条坑）。
+#   写反了不会报错：`ok("句子", True)` 会把**字符串当条件**（恒真）而把布尔当名字 ⇒ 打出 `[ok] True`
+#   = **假绿**。判据：`[ok]` 后面必须是一句人话，不是 `True`/`False`。
+ok(_v4tr.get("aux_win_flag") is not None,
+   "MV-1：合成紧凑集（`aux=True`）里 `aux_win_flag` 非 None（数据侧真在落这一列；缺了本刀没标签）",
+   f"aux 列={sorted(k for k in _v4tr if k.startswith('aux_'))}")
+ok("own_win" not in v4_model.loss_weights(),
+   "MV-1：`own_win` **不在** `loss_weights()` —— 缺省开关 ⇒ 头权重注册表一个字不改"
+   "（⚠ 若实现改成「注册头」⇒ 本条红 ⇒ 回来改计划，别静默绕过）",
+   f"heads={sorted(v4_model.loss_weights())}")
+ok("own_win" not in v4_model.TRAIN_HEADS and "own_win" not in v4_model.ONLINE_HEADS,
+   "MV-1：`own_win` **不在** `TRAIN_HEADS`/`ONLINE_HEADS`（新辅助头不得进三端头表、不进推理路径）")
+ok(not [k for k in v4_model.build(seed=5).state_dict() if "own_win" in k],
+   "MV-1：缺省模型的 `state_dict()` 里**没有** `heads.own_win.*`（不建头 ⇒ net.bin/夹具/ckpt 逐字节不变）")
+ok("own_win" not in v4_pt._batch(_v4tr, np.arange(2), "cpu"),
+   "MV-1（今天）：`_batch` **不喂** `own_win` —— 标签在数据里、没人用（核查②的机械版）"
+   "；⚠ 实现之后本条必须改写成「开关关着 ⇒ `_batch` 不喂它」（见 MV1-FEASIBILITY §4.2 第 6 条）")
+
 # ---- P3 开局：学生掩码（`--student`）+ 回报列（`delta`）+ RWR 权重（2026-09-27）------------
 _std = "net:tools/build/x/net.bin#1.0"
 _sp_src = scratch("v4-sp-src")
