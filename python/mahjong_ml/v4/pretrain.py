@@ -82,6 +82,26 @@ class MaskedEventHead(nn.Module):
         return self.proj(e_tokens)
 
 
+class OwnWinHead(nn.Module):
+    """★ MV-1 第一刀：辅助子目标头 `own_win`（`Linear(D_MODEL → 1)`，读 `forward()` 的 `state`）。
+
+    y = **既有的二值 `aux_win_flag`**（自家本小局和了，0/1；列已在紧凑集里 ⇒ 零扩列、零重采）。
+    与 `MaskedEventHead`（`ssl_head`）**同族的外部头**：⛔ 不进 `HEAD_SPECS` / `TRAIN_HEADS` /
+    `ONLINE_HEADS` / 三端头表 / `net.bin` 张量表 / 推理路径；⛔ 不进 `loss_weights()`。
+
+    ⚠ **只当 `--aux-own-win-weight > 0` 时才建**（缺省 0.0 = 关）⇒ 关着时对象不存在：
+    无参数、无梯度、无 ckpt 键、`compute_loss(aux_own=None)` 一行都不走
+    （与 `ref=None`/`il=None`/`rho=None`/`ssl=None` 同一处口径）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(M.D_MODEL, 1)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.proj(state).squeeze(-1)
+
+
 def mask_events(evt: torch.Tensor, frac: float, gen: torch.Generator) -> tuple:
     """把一部分**真实事件** token 置 0 并返回 `(掩码后的 evt, 掩码位, 类型目标)`。
 
@@ -107,7 +127,8 @@ def _device(pref: str) -> str:
 
 
 def _batch(data: dict, idx: np.ndarray, device: str,
-           ablate: dict[str, list[tuple[int, int]]] | None = None) -> dict[str, torch.Tensor]:
+           ablate: dict[str, list[tuple[int, int]]] | None = None,
+           aux_own_win: bool = False) -> dict[str, torch.Tensor]:
     """按行号取一个 batch（memmap → torch）。`idx` **升序**（与 v3 的 `bc._batch` 同规矩）。
 
     ⚠ 候选宽度取**这一份切分自己的** `cand.shape[1]`，不是 `meta["lmax"]`：
@@ -116,6 +137,9 @@ def _batch(data: dict, idx: np.ndarray, device: str,
 
     @param ablate **块消融**：`{张量名: [(起点, 宽度), …]}` ⇒ 那些通道整段置 0
         （`docs/TRAINING-V4.md` §8.3 的消融矩阵；只改输入，不动权重，也不碰标签）
+    @param aux_own_win ★ MV-1：**仅当开关开**时多喂一个 `own_win` 键（= `aux_win_flag` 的
+        float32 视图）。缺省 `False` ⇒ `b` 的**键集合与加这个功能之前逐键相同**
+        （判据：`--aux-own-win-weight 0` 与「不带该开关」两次跑的日志/指纹/`net.bin` 全同）。
     """
     lmax = int(data["cand"].shape[1])
     nleg = np.asarray(data["nlegal"][idx], dtype=np.int64)
@@ -155,6 +179,11 @@ def _batch(data: dict, idx: np.ndarray, device: str,
                      ("aux_own_shanten_after", "own_shanten")):
         if data.get(src) is not None:
             b[dst] = torch.from_numpy(np.asarray(data[src][idx], dtype=np.float32)).to(device)
+    # ★ MV-1 第一刀：辅助头 `own_win` 的标签（**只有开关开时才进 `b`**）。二值 `uint8` 标量列，
+    #   转 float32 后直接喂 `binary_cross_entropy_with_logits`（它要 float 目标）。
+    if aux_own_win and data.get("aux_win_flag") is not None:
+        b["own_win"] = torch.from_numpy(
+            np.asarray(data["aux_win_flag"][idx], dtype=np.float32)).to(device)
     if ablate:
         for tensor, spans in ablate.items():
             if tensor not in b:
@@ -1108,7 +1137,8 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
                  adv_norm: str = "batch",
                  ref: tuple[float, torch.Tensor] | None = None,
                  il: tuple[float, torch.Tensor] | None = None,
-                 rho: tuple[float, str, dict] | None = None
+                 rho: tuple[float, str, dict] | None = None,
+                 aux_own: tuple[torch.Tensor, float, str] | None = None
                  ) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
@@ -1142,6 +1172,13 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
         `rho_max <= 0` 且 `rho_acc is None` ⇒ **一行都不走**（旧路径逐字节不变）。
         `rho_action = "fail"`（缺省）超限**响亮失败**；`"account"` 显式降级（夹到 `ln rho_max`）
         并把超限行数/最坏 ρ 写进 `rho_acc`（⛔ 两种都不许静默裁剪）。
+    @param aux_own ★ MV-1 第一刀：`(own_win logits [B], 权重 w, 行口径)` —— 辅助子目标头
+        `own_win` 的 **BCE** 项：`total += w · BCE(logits, b["own_win"])`。
+        三条口径：① **`None`（缺省）⇒ 一行都不走**（与 `ref=None`/`il=None`/`rho=None`/`ssl=None`
+        同一处口径 ⇒ 缺省关时逐位不变）；② **走全部行**，⛔ 不吃 `row_keep`/RWR（与
+        `value`/`placement`/`belief_*` 同族：标签讲的是"这个局面"，与四条座位里谁动的手无关）；
+        ③ `行口径 == "student"` 时**额外**报一个 `own_win_student`（只在学生行上的 BCE）——
+        那是**次口径报告**，⛔ 不改总损失、也不改主判据。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -1348,6 +1385,20 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
         l_e = reduce_row(per_row)
         parts["effect"] = float(l_e.detach())
         total = total + w["effect"] * l_e
+    # ★ MV-1 第一刀：**辅助子目标头** `own_win` 的 BCE 项（`aux_own=None` ⇒ 一行都不走）。
+    #   为什么值得加：`own_win` 的**合法上限**（R² 0.13939）是现标量 `delta`（0.06643）的 ×2.10、
+    #   且是唯一不受天花板压的目标（`lab/nextphase/NEXTPHASE-SCREEN.md`）；而"份额能不能转成
+    #   可学增益"只能由闸门答（⛔ 贴标签的读数不是强弱判据）。
+    if aux_own is not None:
+        logits_own, w_own, rows_own = aux_own[0], float(aux_own[1]), str(aux_own[2])
+        per_row_own = F.binary_cross_entropy_with_logits(logits_own, b["own_win"], reduction="none")
+        # ⚠ **全部行**（state 级头的规矩）：不加 `reduce_row` 的默认因子 `eff`（掩码 × RWR）。
+        l_own = per_row_own.mean()
+        parts["own_win"] = float(l_own.detach())
+        total = total + w_own * l_own
+        if rows_own == "student" and row_keep is not None:
+            # 次口径报告：只在学生行上的 BCE（**只入 `parts`，不进 `total`**）
+            parts["own_win_student"] = float(reduce_row(per_row_own, row_keep).detach())
     # ★ W4 第一步：**逐候选引擎标签**的模仿项 `w · CE(logits, 引擎最优候选)`。
     #   为什么值得加：`effect`（打后向听/进张）与 `cand.derived`（含听牌形）是**引擎给的稠密标签** ——
     #   无采样噪声、无 critic、不依赖闸门算力；而 RL 的效应（~1 顺位点）落在 ±2.35 的分辨率里看不见。
@@ -1570,15 +1621,31 @@ def _stage_of(step: int, total: int, frac_a: float, frac_b: float) -> str:
     return "c"
 
 
-def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict) -> None:
-    torch.save({"model": model.state_dict(),
-                "ssl_head": ssl_head.state_dict(),
-                "config": {"model": "v4", "params": model.param_count(), "dims": model.dims()},
-                "dataset_meta": meta,
-                "feature_version": spec.FEATURE_VERSION_V4,
-                "blocks_fingerprint": spec.fingerprint(),
-                "loss_weights": weights,
-                **extra}, path)
+def _own_win_sd(own_win_head) -> dict:
+    """★ MV-1：辅助头 `own_win` 的 `state_dict()`（**关着时返回空字典**）。
+
+    为什么要有这个中转：`_state_sha256(*sds)` 按 `sorted(sd)` 迭代 ⇒ 传 `None` 会当场炸。
+    而"缺省关 ⇒ 与今天逐字节相同"要求**空字典不参与 sha、也不进 ckpt**
+    （⚠ 写错成"`None` 也进 sha"⇒ `base` 臂的指纹会变，负向对照当场假红）。
+    """
+    return {} if own_win_head is None else own_win_head.state_dict()
+
+
+def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict,
+                    own_win_head=None) -> None:
+    ck = {"model": model.state_dict(),
+          "ssl_head": ssl_head.state_dict(),
+          "config": {"model": "v4", "params": model.param_count(), "dims": model.dims()},
+          "dataset_meta": meta,
+          "feature_version": spec.FEATURE_VERSION_V4,
+          "blocks_fingerprint": spec.fingerprint(),
+          "loss_weights": weights,
+          **extra}
+    # ★ MV-1：辅助头 `own_win` 只在开关开时落盘 —— 关着时**这个键根本不存在**
+    #   （不是"存在且为 None"）⇒ 缺省路径的 ckpt 与加这个功能之前逐字节相同。
+    if own_win_head is not None:
+        ck["own_win_head"] = own_win_head.state_dict()
+    torch.save(ck, path)
 
 
 # ================================================================ ★ BL-04：优化器状态续跑
@@ -1623,9 +1690,16 @@ def _sha256_file(p) -> str:
 
 
 def _state_sha256(*sds) -> str:
-    """权重指纹：按**参数名排序**逐张量取原始字节（与 `torch.save` 的容器格式无关）。"""
+    """权重指纹：按**参数名排序**逐张量取原始字节（与 `torch.save` 的容器格式无关）。
+
+    ⚠ 传进来的每一份 `state_dict` 都参与指纹（MV-1 的 `own_win` 只在开关开时被传进来；
+    **关着时必须不传**（用 `_own_win_sd()` 得到的空字典直接跳过）—— 否则 `base` 臂的
+    指纹会与今天不同，负向对照就成了假红。
+    """
     h = hashlib.sha256()
     for sd in sds:
+        if not sd:                                     # 空字典 ⇒ 不参与（`None` 由调用方过滤）
+            continue
         for name in sorted(sd):
             t = sd[name].detach().to("cpu")
             h.update(name.encode("utf-8"))
@@ -1704,7 +1778,9 @@ def _recorded_args(args) -> dict:
     """
     d = dict(vars(args))
     for k, default in (("save_optimizer", False), ("resume_optimizer", None),
-                       ("stop_after_steps", 0)):
+                       ("stop_after_steps", 0),
+                       # ★ MV-1：新开关在缺省值时一个键都不进（与上面三条同一个做法）
+                       ("aux_own_win_weight", 0.0), ("aux_own_win_rows", "all")):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -1730,6 +1806,7 @@ def load_resume_state(spec_str: str) -> dict:
         raise SystemExit(f"续跑存档格式号 {fmt} ≠ 本版 {RESUME_FORMAT}（{p}）—— "
                          f"字段语义变过就**重新起一段**，⛔ 不按新语义读老存档")
     return {"path": str(p), "model": ck.get("model"), "ssl_head": ck.get("ssl_head"),
+            "own_win_head": ck.get("own_win_head"),
             "resume": res}
 
 
@@ -1837,6 +1914,29 @@ def train(args) -> dict:
         print(f"长程 carry：`h0[{int(train_data['h0'].shape[1])}]` 已接入前向"
               f"（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推")
 
+    # ---- ★ MV-1 第一刀：辅助子目标头 `own_win` 的**前置闸门（fail-closed）**--------------------
+    # 三条（`lab/mv1/MV1-FEASIBILITY.md` §4.1 #10）：① 权重不能为负；② 权重 > 0 时**标签列必须在**
+    # （缺列 ⇒ 当场退出，⛔ 绝不静默退化成"没这一列、这一项不生效"——那会得到一条"看着在训辅助头、
+    # 其实一笔没算"的轨迹，正是本项目最贵的那类假绿）；③ 行口径只认 all|student。
+    # ⚠ **权重 == 0（缺省）时这里一个字符都不打印**（缺省关 ⇒ 旧日志逐字不变）。
+    aux_own_w = float(getattr(args, "aux_own_win_weight", 0.0) or 0.0)
+    aux_own_rows = str(getattr(args, "aux_own_win_rows", "all") or "all")
+    if aux_own_rows not in ("all", "student"):
+        raise SystemExit(f"`--aux-own-win-rows` 只认 all|student（收到 {aux_own_rows!r}）")
+    if aux_own_w < 0:
+        raise SystemExit(f"`--aux-own-win-weight` 不能为负（收到 {aux_own_w:g}）：0 = 关（缺省）")
+    if aux_own_w > 0 and train_data.get("aux_win_flag") is None:
+        raise SystemExit(
+            f"⛔ `--aux-own-win-weight {aux_own_w:g}` > 0，但这一份紧凑集**没有 `aux_win_flag` 列**"
+            f"（{data_dir}）—— 辅助头 `own_win` 没有监督目标。按 fail-closed 拒跑："
+            f"缺列时继续只会得到一条「辅助头一笔没算、其余照旧」的轨迹"
+            f"（先 `python tools\\lab\\mv1-preflight.py --root <该紧凑集> --split train` 查标签）")
+    if aux_own_w > 0:
+        print(f"辅助头 `own_win`（MV-1 第一刀）：**开**，权重 {aux_own_w:g}，目标 = 二值 "
+              f"`aux_win_flag`（BCE，**全部行**，⛔ 不吃 row_keep/RWR）；行口径次报告 "
+              f"`--aux-own-win-rows {aux_own_rows}`；"
+              f"⛔ 它是**外部头**：不进 `HEAD_SPECS`/`net.bin`/三端头表/推理路径")
+
     device = _device(args.device)
     threads = guard.apply_cpu_limit(args.threads)
     torch.manual_seed(args.seed)
@@ -1844,6 +1944,10 @@ def train(args) -> dict:
     rng_gen = torch.Generator(device="cpu").manual_seed(args.seed)
     model = M.build(seed=args.seed).to(device)
     ssl_head = MaskedEventHead().to(device)
+    # ★ MV-1：辅助子目标头**只当开关开时才建**（缺省 0.0 ⇒ `None` ⇒ 无参数/无梯度/无 ckpt 键）。
+    #   ⚠ 建在这里（`ssl_head` 之后）不扰动任何 RNG：`M.build` 已经把 `torch.manual_seed` 用掉，
+    #   而训练路径此后不再抽 torch 全局 RNG（Adam 无随机、掩码用独立的 `rng_gen`）。
+    own_win_head = OwnWinHead().to(device) if aux_own_w > 0 else None
     # 初始化：`--init <ckpt|net.bin>` 时从上一代权重起步（P3/P4 都是"接着上一代练"）
     init_spec = getattr(args, "init", None)
     if init_spec:
@@ -1860,12 +1964,15 @@ def train(args) -> dict:
         resume = load_resume_state(resume_spec)
         res0 = resume["resume"]
         ssl_head.load_state_dict(resume["ssl_head"], strict=True)
+        # ★ MV-1：辅助头也在存档里（**只有它存在时**才载 —— 关着时存档里根本没有这个键）
+        if own_win_head is not None and resume.get("own_win_head"):
+            own_win_head.load_state_dict(resume["own_win_head"], strict=True)
         if init_spec:
             pass                                  # 权重已由 `--init` 载入，下面核对指纹
         else:
             model.load_state_dict(resume["model"], strict=True)
             print(f"续跑：权重 + SSL 头从 {resume['path']} 载入（`--init` 没给 ⇒ 就用存档那一份）")
-        got_w = _state_sha256(model.state_dict(), ssl_head.state_dict())
+        got_w = _state_sha256(model.state_dict(), ssl_head.state_dict(), _own_win_sd(own_win_head))
         if got_w != str(res0.get("weights_sha256")):
             raise SystemExit(
                 f"`--init` 与 `--resume-optimizer` **不是同一份权重**"
@@ -1873,7 +1980,9 @@ def train(args) -> dict:
                 f"接着走；⛔ 换个起点再套上别人的优化器状态只会得到一条无意义的轨迹")
         # 参数冻结状态（`--only-heads` / 阶段 b 的 `requires_grad`）必须原样恢复
         rg = dict(res0.get("requires_grad") or {})
-        for kind, mod in (("model", model), ("ssl", ssl_head)):
+        for kind, mod in (("model", model), ("ssl", ssl_head), ("own", own_win_head)):
+            if mod is None:
+                continue                              # ★ MV-1：开关关着时辅助头对象不存在
             for name, p in list(mod.named_parameters()):
                 key = f"{kind}.{name}"
                 if key in rg:
@@ -1986,6 +2095,9 @@ def train(args) -> dict:
     trunk = [p for m in (model.tile, model.event, model.ctx, model.cand, model.fusion)
              for p in m.parameters()]
     heads = list(model.heads.parameters()) + list(ssl_head.parameters())
+    # ★ MV-1：辅助头进优化器**只在它存在时**（关着时这一项是空列表 ⇒ 参数组逐位相同）
+    if own_win_head is not None:
+        heads = heads + list(own_win_head.parameters())
     if only:
         for name, p in model.heads.named_parameters():
             if name.split(".")[0] not in only:
@@ -2525,7 +2637,8 @@ def train(args) -> dict:
             idx = np.sort(perm[step * args.batch:(step + 1) * args.batch])
             if idx.size == 0:
                 break
-            b = _batch(train_data, idx, device, ablate=ablate or None)
+            b = _batch(train_data, idx, device, ablate=ablate or None,
+                       aux_own_win=own_win_head is not None)
             if adv_tr is not None:
                 b["vtarget"] = torch.from_numpy(vtar_tr[idx]).to(device)
             # ★ W4：这一批的**引擎最优候选**下标（逐行取好；`il_w=0` 时只用来报 `il_ce` 读数）
@@ -2553,7 +2666,11 @@ def train(args) -> dict:
                                        adv_norm=("none" if adv_tr is not None else "batch"),
                                        ref=(None if ref_b is None else (ref_beta, ref_b)),
                                        il=(None if il_b is None else (il_w, il_b)),
-                                       rho=rho_cfg)
+                                       rho=rho_cfg,
+                                       # ★ MV-1：辅助头 `own_win`（`None` ⇒ 那一项一行都不走）
+                                       aux_own=(None if own_win_head is None
+                                                else (own_win_head(out["state"]), aux_own_w,
+                                                      aux_own_rows)))
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -2720,7 +2837,8 @@ def train(args) -> dict:
             "format": RESUME_FORMAT,
             "optimizer": opt.state_dict(),
             "base_lrs": [float(x) for x in base_lrs],
-            "weights_sha256": _state_sha256(model.state_dict(), ssl_head.state_dict()),
+            "weights_sha256": _state_sha256(model.state_dict(), ssl_head.state_dict(),
+                                            _own_win_sd(own_win_head)),
             "counters": {
                 "gstep": int(gstep), "epoch": int(seg_epoch), "step_in_epoch": int(seg_step),
                 "steps": int(steps), "total_steps": int(total_steps), "n": int(n),
@@ -2733,7 +2851,11 @@ def train(args) -> dict:
             },
             "requires_grad": {
                 **{f"model.{k}": bool(v.requires_grad) for k, v in model.named_parameters()},
-                **{f"ssl.{k}": bool(v.requires_grad) for k, v in ssl_head.named_parameters()}},
+                **{f"ssl.{k}": bool(v.requires_grad) for k, v in ssl_head.named_parameters()},
+                # ★ MV-1：辅助头只在它存在时进（关着 ⇒ 这一项是空字典 ⇒ 存档逐字节不变）
+                **({} if own_win_head is None else
+                   {f"own.{k}": bool(v.requires_grad)
+                    for k, v in own_win_head.named_parameters()})},
             "rng": _rng_fingerprint(rng_gen),
             "behaviour": beh_rec,
             # ★ BL-04（第七十九轮）：`π_ref` 的**来源 + 权重指纹**。少了它，续跑那一段的锚会被按
@@ -2747,7 +2869,8 @@ def train(args) -> dict:
             # 链条起点的读数（续跑时沿用 ⇒ 台账里"开训前那一份网"始终指**链条**起点）
             "chain": {"il_init_student": il_init, "il_init_all": il_init_all, "il_rand": il_rand},
         }
-    save_checkpoint(out / "model.pt", model, ssl_head, meta, weights, extra)
+    save_checkpoint(out / "model.pt", model, ssl_head, meta, weights, extra,
+                    own_win_head=own_win_head)
     result = {
         "label": args.label, "data": str(args.data), "dataset_meta": meta,
         "params": model.param_count(), "device": device, "torch_threads": threads,
@@ -2982,6 +3105,18 @@ def main(argv: list[str] | None = None) -> int:
     # P1 自监督：掩码事件重建
     ap.add_argument("--mask-frac", type=float, default=0.15, help="掩码多少比例的真实事件 token（0 = 关）")
     ap.add_argument("--ssl-weight", type=float, default=0.2, help="掩码重建损失权重")
+    # ---- ★ MV-1 第一刀：辅助子目标头 `own_win`（**缺省 0.0 = 关**；`lab/mv1/MV1-PLAN.md`）---------
+    ap.add_argument("--aux-own-win-weight", type=float, default=0.0, metavar="W",
+                    help="★ MV-1：**辅助子目标头 `own_win`** 的损失权重 "
+                         "（BCE，目标 = 既有二值 `aux_win_flag` = 自家本小局和了）。"
+                         "**缺省 0.0 = 关**：不建头、不进优化器、不进 ckpt、`compute_loss` 一行都不走。"
+                         ">0 时该头读 `model.forward()` 的 `state`（**全部行**，⛔ 不吃 row_keep/RWR）。"
+                         "⛔ 它是**外部头**（与 `ssl_head` 同族）：不进 `HEAD_SPECS`/`net.bin`/"
+                         "三端头表/推理路径（判据 = 把该头丢掉后 policy 输出**逐位相同**）")
+    ap.add_argument("--aux-own-win-rows", choices=["all", "student"], default="all",
+                    help="`own_win` 头的**次口径报告**（⛔ 不改主判据、不改总损失）："
+                         "`all`（缺省）= 只报全部行（= 训练口径，与 value/placement/belief_* 同族）；"
+                         "`student` = 额外报一个 `own_win_student`（只在学生行上的 BCE，仅入 `parts`）")
     args = ap.parse_args(argv)
     if args.device == "auto" and not torch.cuda.is_available():
         print("（提示）没有 CUDA，用 CPU 跑；大轮次请用 GPU（设计 §0.1.3 的显存/占用纪律）")

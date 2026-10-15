@@ -1955,9 +1955,11 @@ ok(_torch.equal(_v4m(**_x, mask=None)["policy"][:, 0], _v4m(**_x, mask=None)["po
 
 # ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
 # 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
-# ⚠ 这六条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分；
-#   "开关关 ⇒ 与 base 逐字节相同"的**运行期**对照要一次短训练（属训练相第一步），⛔ 不在自检里跑。
-#   ⛔ 它们**不是**「头已实现」的断言 —— 实现前 / 实现后（只要缺省关）都必须绿。
+# ⚠ 这十二条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分
+#   + 「开关开着时那一项真在算」的**正向对照**（`_batch` 喂标签、梯度真到主干、`state` 键在）。
+#   "开关关 ⇒ 与 base 逐字节相同"的**运行期**对照（同数据/同 seed/同 `--init` 两次短跑：
+#   `net.bin` sha256 相同 ∧ 逐 step 日志逐字相同 ∧ 数据顺序指纹相同）是**训练相第一步**的读数，
+#   ⛔ 不在自检里跑（自检只跑合成数据的微型 `train()`）；见 `NOTES.md` §6.5 第九十轮。
 eq("MV-1：辅助头目标列 `aux_win_flag` 在列注册表里（uint8 标量 ⇒ 零扩列）",
    v4_ds._COLUMNS["aux_win_flag"], (np.uint8, ()))
 # ⚠ `ok(cond, name)` —— 参数序与 `eq(name, got, want)` **相反**（AGENTS §6.1 那条坑）。
@@ -1970,13 +1972,53 @@ ok("own_win" not in v4_model.loss_weights(),
    "MV-1：`own_win` **不在** `loss_weights()` —— 缺省开关 ⇒ 头权重注册表一个字不改"
    "（⚠ 若实现改成「注册头」⇒ 本条红 ⇒ 回来改计划，别静默绕过）",
    f"heads={sorted(v4_model.loss_weights())}")
+eq("MV-1：头权重注册表逐字未变（7 头，`own_win` 不在其中）",
+   tuple(sorted(v4_model.loss_weights())),
+   ("belief_hand", "belief_tenpai", "danger", "effect", "placement", "policy", "value"))
 ok("own_win" not in v4_model.TRAIN_HEADS and "own_win" not in v4_model.ONLINE_HEADS,
    "MV-1：`own_win` **不在** `TRAIN_HEADS`/`ONLINE_HEADS`（新辅助头不得进三端头表、不进推理路径）")
 ok(not [k for k in v4_model.build(seed=5).state_dict() if "own_win" in k],
    "MV-1：缺省模型的 `state_dict()` 里**没有** `heads.own_win.*`（不建头 ⇒ net.bin/夹具/ckpt 逐字节不变）")
+# ⚠ **成对判据**（缺一半就是空转或假绿）：关着**不喂** ∧ 开着**真喂**。
 ok("own_win" not in v4_pt._batch(_v4tr, np.arange(2), "cpu"),
-   "MV-1（今天）：`_batch` **不喂** `own_win` —— 标签在数据里、没人用（核查②的机械版）"
-   "；⚠ 实现之后本条必须改写成「开关关着 ⇒ `_batch` 不喂它」（见 MV1-FEASIBILITY §4.2 第 6 条）")
+   "MV-1：`_batch` 缺省（= 开关关）**不喂** `own_win` —— `b` 的键集合与加这个功能之前逐键相同",
+   f"键={sorted(v4_pt._batch(_v4tr, np.arange(2), 'cpu'))}")
+ok("own_win" in v4_pt._batch(_v4tr, np.arange(2), "cpu", aux_own_win=True),
+   "MV-1 正向对照：开关开时 `_batch` **真喂** `own_win`（⛔ 只有上一条「不喂」是空转）",
+   f"键={sorted(v4_pt._batch(_v4tr, np.arange(2), 'cpu', aux_own_win=True))}")
+# `state` 返回键（辅助头读它）—— 它**不是头**：不进两张头表，也不进 `net.bin` 张量表。
+ok("state" in _out and tuple(_out["state"].shape) == (1, v4_model.D_MODEL),
+   "MV-1：`forward()` 多返回一个 `state` 键（外部辅助头 `own_win` 读它；多一个键不改上线前向）",
+   f"shape={tuple(_out['state'].shape)}")
+ok("state" not in v4_model.contract_heads() and "state" not in v4_model.ONLINE_HEADS,
+   "MV-1：`state` **不在** `TRAIN_HEADS`/`ONLINE_HEADS`（`export` 按 `state_dict()` 建表 ⇒ 不进 net.bin）")
+# ③ **梯度真的到主干**（PLAN §3①(c)，零训练可判：随机初始化 + 合成 batch）—— 正向 + 负向成对。
+#    ⚠ 必须**重新**前向（上面那次在 `no_grad` 里算的 ⇒ `state` 没有 graph_fn）。
+_v4g = v4_model.build(seed=11)
+_v4own = v4_pt.OwnWinHead()
+_v4own_out = _v4g(**_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))
+_v4own_l = _torch.nn.functional.binary_cross_entropy_with_logits(
+    _v4own(_v4own_out["state"]), _torch.ones(1))
+_v4own_l.backward()
+
+
+def _trunk_grad_norm(_m) -> float:
+    """`tile`/`event`/`ctx`/`cand`/`fusion` 五块参数的梯度总范数（辅助头**够不够到主干**的读数）。"""
+    acc = 0.0
+    for _n, _p in _m.named_parameters():
+        if _n.split(".")[0] in ("tile", "event", "ctx", "cand", "fusion") and _p.grad is not None:
+            acc += float(_p.grad.detach().norm()) ** 2
+    return acc ** 0.5
+
+
+_v4g_norm = _trunk_grad_norm(_v4g)
+ok(_v4g_norm > 0.0,
+   f"MV-1：辅助头 BCE 的梯度**真的到主干**（‖∂L_own/∂主干‖ = {_v4g_norm:.3e} > 0）")
+_v4g.zero_grad(set_to_none=True)
+_torch.nn.functional.binary_cross_entropy_with_logits(
+    v4_pt.OwnWinHead()(_torch.zeros_like(_v4own_out["state"])), _torch.ones(1)).backward()
+ok(_trunk_grad_norm(_v4g) == 0.0,
+   "MV-1 负向对照：把辅助头的输入换成**常数** ⇒ 主干梯度恒 0（这条判据能被判错，不是空转）")
 
 # ---- P3 开局：学生掩码（`--student`）+ 回报列（`delta`）+ RWR 权重（2026-09-27）------------
 _std = "net:tools/build/x/net.bin#1.0"

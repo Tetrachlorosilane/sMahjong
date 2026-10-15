@@ -221,6 +221,12 @@ class Heads(nn.Module):
             logits = logits.masked_fill(~mask, float("-inf"))
         return {
             "policy": logits,
+            # ⚠ **`state` 只是一个键，不是一个头**（MV-1 第一刀，2026-10-16）：外部辅助头
+            #   `own_win`（`pretrain.OwnWinHead`，与 `ssl_head` 同族）要读它，而它本来就在
+            #   这里现成（`u.mean(1)`）。与 `:277-279` 的 `h_evt`/`e_tokens` 同款：**多一个键
+            #   不改任何上线前向**（本仓库无 dropout/BN ⇒ 前向逐位不变），也**不进 `net.bin`**
+            #   （`export` 按 `state_dict()` 建张量表，字典键不进表）。
+            "state": state,                                     # [B,dm]
             "value": self.value(state),                         # [B,VALUE_BINS]
             "placement": self.placement(state),                 # [B,4]
             "belief_hand": self.belief_hand(state).view(*state.shape[:-1], 3, 34),

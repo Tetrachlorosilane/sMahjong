@@ -1048,6 +1048,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十七轮 | 2026-10-16 | 下一阶段预备（**目标侧**）—— 便宜前置探针筛出唯一候选 `own_win`（合法上限 ×2.10）+ 两条前置修复标定（零训练 · 零采集） |
 | 第八十八轮 | 2026-10-16 | MV-1 第一刀**预注册**（辅助子目标头 `own_win`）+ 零训练可判性核查 —— **标签已在手 ⇒ 零扩列/零重采** · MDE 对账 · 管线改动清单（⛔ 本批未实现 flag） |
 | 第八十九轮 | 2026-10-16 | 过度删除判据化 —— 一次 `Remove-Item -Recurse -Force .tmp` 删掉整个共享目录 |
+| 第九十轮 | 2026-10-16 | MV-1 第一刀**训练相第一步** —— `own_win` 辅助头实现（缺省关）+ 负向对照（`weight=0` ≡ base：`net.bin` sha256 / 逐字日志 / 数据顺序指纹）+ 正向冒烟五条 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6418,6 +6419,16 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **损失**：`.tmp` 被 `.gitignore` 忽略 ⇒ **不影响 git、未入库**（`git status` 干净），但**不可恢复** —— 删前没列清单，那些备份/日志是**别的会话**的。
 - **判据（第 19 条）**：清理临时/共享目录**逐项白名单**（先列清单 → 逐项 `-LiteralPath` → 复核解析后的绝对路径）；⛔ 绝不 `-Recurse -Force` 任何共享/仓库根目录；⛔ 只删自己创建的确切路径。回归：`node tools\doc-refs-check.mjs` PASS + `git status` 只含预期文件。
 - **结论**：**被 gitignore ≠ 可随意删** —— 仓库根的共享目录是**别的会话的财产**；⚠ 本次删除**与本批切片无关**，只因发生在同一批才记进同批偏离里。
+
+**第九十轮：MV-1 第一刀「训练相第一步」—— `own_win` 辅助头实现（缺省关）+ 三条负向对照 + 五条正向冒烟（2026-10-16）**
+> 预注册 `lab/mv1/MV1-PLAN.md`（§10 追加偏离，§1–§9 一字不改）；实现清单 `lab/mv1/MV1-FEASIBILITY.md` §4 的 11 项；判据行仍在 `AGENTS.md` §6.5（第 17 条）。
+- **实现（11 项逐项落地）**：`model.py` 的 `Heads.forward` 多返回一个 `state` 键 · `pretrain.py` 的 `OwnWinHead`（**外部头**，`ssl_head` 同族）· `_batch(aux_own_win=)` **只在开关开**时喂 `aux_win_flag` · `compute_loss(aux_own=)` 的 BCE 项（**全部行**，⛔ 不吃 `row_keep`/RWR）· 优化器参数组 · ckpt 的 `own_win_head` 段（**只在开时存在**，不是"存在且为 None"）· `_state_sha256`（空字典不参与）· `--aux-own-win-weight`（缺省 **0.0 = 关**）/`--aux-own-win-rows`（次口径报告）· fail-closed 前置（`>0` 而缺列 ⇒ `SystemExit`）· `_recorded_args` 按该函数既有规矩 pop 缺省值。⛔ 不进 `HEAD_SPECS`/`net.bin`/三端头表/推理路径；⛔ 数据侧零改动。
+- ⭐ **负向对照**（同一 label · 同数据/seed/`--init` · 4 步 · `--save-optimizer`）：`--aux-own-win-weight 0` vs **完全不传** ⇒ ① `net.bin` sha256 **相同**（`474346914D9A…C1A1`，5,594,680 B）；② **整份 stdout 逐字节相同**（含 4 行 `[val] step`；两文件 sha256 同为 `0DBD2F31…4426`）；③ **数据顺序指纹相同**（`perm_sha256=f05b2010…25c0`）；另：**78/78 参数张量逐位相同**、`_state_sha256` 同为 `0cc5232d…760b`、`metrics.json` **只差 `wall_seconds`**（⚠ `model.pt` 的*文件*哈希不同 = `torch.save` 写 zip 条目打了当前时间戳 ⇒ 判据不落在它上面）。
+- ⭐ **正向冒烟**（`--aux-own-win-weight 0.3`）：① 头损失在降（累积均值 0.601307 → 0.553748 → 0.539145 → 0.524134；**第 48 步精确末值 0.46985 < 边缘 BCE 0.5291**，由 (S48−S47)/512 精确还原）；② 头 `max|W|` 0.138744 → 0.550654 > 0（非退化）；③ **梯度真到主干**：base vs aux **78/78 张量全不同**（‖Δ‖₂ 合计 **1.122984**，最大 `event.cell.weight_hh` 4.766e-1）；④ **推理路径未变**（挂头/清零头 policy **逐位相同** max|Δ|=0；`net.bin` 带/去掉 `own_win_head` 段 sha256 同为 `42B7A7D1…E5AA`；`HEAD_SPECS`/`TRAIN_HEADS`/`ONLINE_HEADS` 逐字未变；正向对照 = 头输出确实依赖 `state`，max|Δ|=1.516）；⑤ 开关关着时 `state_dict()` 无 `heads.own_win.*`、ckpt 里无 `own_win_head` 段。
+- **回归与纪律**：`python selfcheck.py` **929/0 → 935/0**（+6：`own_win` ∉ `loss_weights()` 的逐字对照 · `_batch` 关/开**成对**判据 · `state` 键 ∧ 不在两张头表 · **辅助头 BCE 梯度真到主干** + 负向"输入换常数 ⇒ 主干梯度恒 0"）· `doc-refs-check` PASS · `round-index --check` PASS · `handover-facts --check` PASS。
+- **资源读数**：`commit_free` 最低 **13.70 GB**（纪律线 8 GB **未触及**、0 次越线、**未触发 exit 7**）；真身峰值 **committed 3,583.8 MB / ws 7,822.6 MB**（判据 = 91,648 B 解释器镜像 ∧ 命令行含 `mahjong_ml`；⚠ 同秒 venv **蹦床** 47,104 B 自报 **1.3 MB / 7.4 MB** = 复现第八十七轮的假读数）；墙钟：负向两跑各 32.5/32.7 s、+0.3 四步 32.9 s、lr 抬档四跑 33.3/55.5/93.7/140.3 s（`--threads 8`，一次一个重负载）。
+- ⛔ **未跑**正式两臂训练 · ⛔ **未跑** 24,000 场闸门 · ⛔ **未采集/未评测/未发布**；临时件 `.tmp/mv1/**`（采样器/探针/日志/ckpt/net.bin）**逐项 `-LiteralPath` 删除**（⛔ 无 `-Recurse -Force`）。
+- **偏离（照实，逐字进 `MV1-PLAN.md` §10）**：① 正向冒烟的 ①(a) 阈值跨过用了 **smoke-only** 的 `--head-lr-mult 20`（预注册配方头 lr = 3e-3，4 步只有 0.6453 ⇒ 阈值的**步数预算**约 300+ 步；正式两臂仍用缺省 3.0）；② `save_checkpoint` 多了一个 `own_win_head=None` 关键字参数（关着时不写这个键）；③ 判据落在 `net.bin` sha256 + `_state_sha256` + 逐张量逐位，⛔ 不落在 `model.pt` 文件哈希上。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
