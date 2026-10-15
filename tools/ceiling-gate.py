@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import ctypes.wintypes as wt
 import hashlib
 import json
 import math
@@ -815,14 +816,78 @@ def collect_plan(args, probes: Probes) -> list:
     return specs
 
 
+class _PE32(ctypes.Structure):
+    _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)), ("th32ModuleID", wt.DWORD),
+                ("cntThreads", wt.DWORD), ("th32ParentProcessID", wt.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                ("szExeFile", ctypes.c_char * 260)]
+
+
+def kill_tree(pid: int) -> dict:
+    """**树杀**一个相 —— **纯 ctypes，零子进程**。
+
+    为什么要树杀：采集端常常是"启动器 + 真身"两层（venv 的 `Scripts\\python.exe` 是 47 KB 蹦床，
+    真身在 `.uv-python`），只杀顶层会留下孤儿继续吃内存 —— 那正是"纪律线看起来执行了、
+    其实没执行"的第二种形态。
+    为什么不用 `taskkill`：本文件的 AST 自检 ⑫ 数着"子进程只有**两处**"（进程扫描 / 采集执行）
+    ⇒ ⛔ 本文件不许再长出一个子进程落点（更不许出现任何训练入口）。
+    """
+    out = {"pid": int(pid), "killed": False, "how": "toolhelp32 后代后序 + TerminateProcess"}
+    if not pid:
+        return out
+    snap: dict[int, int] = {}
+    h = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if h and h != ctypes.c_void_p(-1).value:
+        try:
+            e = _PE32()
+            e.dwSize = ctypes.sizeof(_PE32)
+            ok = ctypes.windll.kernel32.Process32First(h, ctypes.byref(e))
+            while ok:
+                snap[int(e.th32ProcessID)] = int(e.th32ParentProcessID)
+                ok = ctypes.windll.kernel32.Process32Next(h, ctypes.byref(e))
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    kids: dict[int, list[int]] = {}
+    for c, pp in snap.items():
+        kids.setdefault(pp, []).append(c)
+    post, stack, seen = [], [int(pid)], set()
+    while stack:
+        cur = stack.pop()
+        post.append(cur)
+        for c in kids.get(cur, []):
+            if c not in seen:
+                seen.add(c)
+                stack.append(c)
+    killed = 0
+    for q in reversed(post):                       # 后序：先杀真身、再杀蹦床
+        h2 = ctypes.windll.kernel32.OpenProcess(0x0001, False, int(q))     # PROCESS_TERMINATE
+        if not h2:
+            continue
+        try:
+            if ctypes.windll.kernel32.TerminateProcess(h2, 1):
+                killed += 1
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h2)
+    out.update({"killed": killed > 0, "n_terminated": killed, "tree_size": len(post)})
+    return out
+
+
 def collect_run(args, specs: list, probes: Probes) -> None:
-    """真跑采集：**串行**（一次一个重负载）+ 每步查提交余量（< 8 GB 立即停）。"""
+    """真跑采集：**串行**（一次一个重负载）+ **跑之前与跑期间都查提交余量**（< 8 GB 立即停）。
+
+    ⚠ 为什么必须**跑期间**也查：原先只有 `subprocess.run` **起跑前**那一次检查
+    （`commit_free >= 8 GB` 才起）⇒ 采集涨起来把提交吃穿之后**没有人再看**，纪律线只写在
+    文档里而没有工具执行（NOTES §6.5 第八十三轮的"4 个相瞬时 <8 GB、最低 5.00 GB"就是这么来的）。
+    现在：1 s 栅格轮询 + 越线 **kill 进程树** + `SystemExit`（退出码 1，与其它闸门一致）。
+    """
     env = dict(os.environ)
     env["MAHJONG_DATA_ROOT"] = str(DATA)
     env["MAHJONG_TRAINER"] = str(args.trainer or os.environ.get("MAHJONG_TRAINER", ""))
     env["PYTHONIOENCODING"] = "utf-8"
     env["OMP_NUM_THREADS"] = str(min(args.workers, MAX_WORKERS))
     env["MKL_NUM_THREADS"] = str(min(args.workers, MAX_WORKERS))
+    poll = float(getattr(args, "mem_poll_sec", 1.0) or 1.0)
     for s in specs:
         free = commit_free_gb()
         probes.add(f"collect:mem:{s['wall']}-{s['arm']}", free >= MIN_COMMIT_FREE_GB,
@@ -831,8 +896,36 @@ def collect_run(args, specs: list, probes: Probes) -> None:
             raise SystemExit(f"⛔ commit_free {free:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 立即停")
         _say(f"[collect] {s['wall']}-{s['arm']} ⇒ {s['out']}\n          $ {' '.join(s['cmd'])}")
         Path(s["out"]).mkdir(parents=True, exist_ok=True)
-        rc = subprocess.run(s["cmd"], cwd=str(REPO), env=env).returncode
-        probes.add(f"collect:rc:{s['wall']}-{s['arm']}", rc == 0, f"退出码 {rc}")
+        log = Path(s["out"]).parent / f"{s['wall']}-{s['arm']}.collect.log"
+        with log.open("a", encoding="utf-8", errors="replace") as fh:
+            p = subprocess.Popen([str(x) for x in s["cmd"]], cwd=str(REPO), env=env,
+                                 stdout=fh, stderr=subprocess.STDOUT)
+            trip = None
+            t0 = time.time()
+            while p.poll() is None:
+                time.sleep(poll)
+                free = commit_free_gb()
+                if free < MIN_COMMIT_FREE_GB:
+                    trip = free
+                    break
+            if trip is not None:
+                _say(f"⛔ [采集期内存闸门] commit_free={trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB "
+                     f"（跑动中）⇒ kill 进程树、本相作废")
+                probes.add(f"collect:kill_tree:{s['wall']}-{s['arm']}",
+                           bool(kill_tree(p.pid).get("killed")),
+                           f"taskkill /T /F /PID {p.pid}（崩床/真身两层都要杀）")
+                p.kill()
+                try:
+                    p.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    pass
+                probes.add(f"collect:mem_kill:{s['wall']}-{s['arm']}", False,
+                           f"跑动中 commit_free={trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 杀相并停")
+                raise SystemExit(f"⛔ 采集跑动中 commit_free {trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB "
+                                 f"⇒ 已杀相并停（⛔ 不把越线读数当合格，也不继续跑剩下的相）")
+            rc = p.returncode
+            wall = round(time.time() - t0, 1)
+        probes.add(f"collect:rc:{s['wall']}-{s['arm']}", rc == 0, f"退出码 {rc}（{wall}s）")
         if rc != 0:
             raise SystemExit(f"⛔ 采集失败（退出码 {rc}）：{' '.join(s['cmd'])}")
 
@@ -1210,6 +1303,8 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=8, help=f"采集并行度（⛔ ≤{MAX_WORKERS}）")
     ap.add_argument("--python", default="", help="--collect：跑 style-vector.py 的解释器")
     ap.add_argument("--trainer", default="", help="--collect：trainer.exe")
+    ap.add_argument("--mem-poll-sec", type=float, default=1.0,
+                    help="--collect：采集**跑动期**的提交余量轮询间隔（秒）；越线即树杀 + 停（⛔ 不可关）")
     ap.add_argument("--collect-out", default=str(COLLECT_ROOT), help="--collect：采集落点根")
     ap.add_argument("--allow-busy", action="store_true",
                     help="--collect：机器上有别人的负载也跑（⛔ 计时会被污染）")

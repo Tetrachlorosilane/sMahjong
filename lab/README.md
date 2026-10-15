@@ -21,6 +21,7 @@ lab/
 ├── p3-01/          (+evidence/)   P3-01 数据新鲜度（结案）
 ├── p3-pkg/         (+evidence/)   P3-PKG 打包闸门
 ├── bl13/  bl14/    (+evidence/)   BL-13 / BL-14 训练轮次
+├── nextphase/      (+evidence/)   **下一阶段预备（目标侧）**：预注册 + 便宜前置探针筛查 + 两条前置修复标定
 ├── mslt/           (+evidence/)   多段链式训练
 ├── overlap/        (+evidence/)   采集 ‖ 训练 重叠（B1/B2/B3b）
 ├── axis-p2-11/                    P2-11 轴/域普查（domains · formal · minimal）
@@ -64,6 +65,7 @@ lab/
 | **本机稳定性** | WHEA ID 19（核 corrected machine check）⇒ 缓解 = BIOS/微码 + 只降并行度（一次一个重负载 · `--workers` ≤9） | `NOTES.md` §6.5（低压力策略） | `HOUSEKEEPING-WLADDER.md` · `CLEANUP-LOG*.md` · `LOG-*.txt` |
 | **轮次表 / 复算** | 轮次索引与 RERUN 合规（⛔ 撞 KL 早停的存档不许续） | `NOTES.md` §6.5 附录 E | `ladder-report.md` · `ladder-tables.md` · `RERUN-PLAN.md` · `_rerun\**` |
 | **BL-12 前置探针** | **四条观测候选全「in 弱/出局」**（零训练零采集）：C1 近期行为 +0.0043（勉强越实测 MDE）、C3 信念回灌 +0.0015（CI 含 0）、C4 阴性对照 **−0.0022 出局**；base 用现有 v4 观测已到 AUC **0.906/0.879** ⇒ 观测侧在这两个公开结果上**接近饱和** | `NOTES.md` §6.5（第八十四轮） | `lab/bl12/BL12-{PLAN,SCREEN}.md` · `lab/bl12/evidence/**` · `tools/lab/bl12-probe.py` |
+| **下一阶段预备（目标侧）** | 目标侧候选便宜前置探针（**零训练零采集**）：主判决 = **换了 y 之后合法信息上限升不升**（`delta` 标定 **0.06643** ≈ 文档 0.0693）⇒ 唯一抬高上限的是**自家和了 `own_win` ×2.10**（0.13939）；⛔ 但"**自家本小局打点**"这一列**在紧凑集里根本不存在** ⇒ 真正的手牌价值目标必须**先扩列**；E2 辅助重加权 / E3 奖励口径**整族不可用**（上限=自身 / 同源 / 信息不在 / 被优势归一化消掉） | `NOTES.md` §6.5（第八十七轮） | `lab/nextphase/NEXTPHASE-{PLAN,SCREEN}.md` · `lab/nextphase/evidence/**` · `tools/lab/nextphase-probe.py` |
 | **待办 / 想法** | `IMPROVEMENTS.md`（逐条：名称｜效果｜依据｜出处）· `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` | — | `IMPROVEMENTS.md` · `BACKLOG.md` · `IDEAS-COMPLEMENTARY-AND-ARCH.md` |
 
 **索引格式样例**（新增实验照这三行写）：

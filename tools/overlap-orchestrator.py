@@ -201,6 +201,149 @@ def proc_alive(pid: int) -> bool:
     return True
 
 
+# ================================================================ 进程树（"蹦床"问题，判据 ⑤）
+class _PE32(ctypes.Structure):
+    _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)), ("th32ModuleID", wt.DWORD),
+                ("cntThreads", wt.DWORD), ("th32ParentProcessID", wt.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                ("szExeFile", ctypes.c_char * 260)]
+
+
+_TH32CS_SNAPPROCESS = 0x00000002
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+def process_tree() -> dict[int, tuple[int, str]]:
+    """`{pid: (ppid, image)}` —— 一次 `CreateToolhelp32Snapshot`（⛔ 不 per-tick 起 PowerShell）。
+
+    ⚠ 为什么必须有它：`python\\.venv\\Scripts\\python.exe` 是 **47 KB 的 venv 蹦床**，它
+    `re-exec` 出真身（`.uv-python\\…\\python.exe`，91 KB）后**立刻退出** ⇒ 采样器若只认
+    `Popen.pid`，训练相的 committed/ws/CPU 全部记成蹦床的假读数（实测 1.3 MB / 7.1 MB，
+    见 NOTES §6.5 第八十一轮偏离②）。判据 ⑤ = **解释器镜像 ∧ 命令行特征** 两个条件同时成立。
+    """
+    out: dict[int, tuple[int, str]] = {}
+    h = ctypes.windll.kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if h == _INVALID_HANDLE or not h:
+        return out
+    try:
+        e = _PE32()
+        e.dwSize = ctypes.sizeof(_PE32)
+        ok = ctypes.windll.kernel32.Process32First(h, ctypes.byref(e))
+        while ok:
+            out[int(e.th32ProcessID)] = (int(e.th32ParentProcessID),
+                                         e.szExeFile.decode("mbcs", "replace").lower())
+            ok = ctypes.windll.kernel32.Process32Next(h, ctypes.byref(e))
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+    return out
+
+
+def _cmdline_stub(cmd: list) -> str:
+    """命令行的**特征串**（判据 ⑤ 的第二半）：`-m <模块>` 优先，否则取第一个 `.py`。"""
+    toks = [str(x) for x in cmd]
+    for i, tk in enumerate(toks):
+        if tk == "-m" and i + 1 < len(toks):
+            return toks[i + 1]
+    for tk in toks:
+        if tk.lower().endswith(".py"):
+            return Path(tk).name
+    return Path(toks[0]).name if toks else ""
+
+
+def resolve_real_pid(pid: int, cmd: list, *, tree=None, cmdline_impl=None, alive_check=None,
+                     timeout_s: float = 8.0, poll_s: float = 0.4, allow_self: bool = True) -> dict:
+    """把一个**可能已经退出的蹦床 pid** 解析成"真正在干活"的后代 pid（fail-closed）。
+
+    判据（判据 ⑤，两个条件**同时**成立才算命中）：
+      ① **解释器镜像**：后代镜像名必须匹配 `python*` / `trainer*` / `java*`（本仓训练入口都是 Python）；
+      ② **命令行特征**：后代的 `Win32_Process.CommandLine` 里必须含 `-m <模块>` 或脚本名。
+    ⛔ 只看镜像会把别人的 python 认成我们的；只看命令行会被蹦床本身骗过（它也有同样的命令行）。
+    ⛔ 解析不到 ⇒ `ok=False`（调用方**必须**按 fail-closed 记账，⛔ 不许把蹦床读数当训练读数）。
+
+    返回 `{ok, pid, image, cmdline, how, descendants, tries}`。
+
+    `allow_self=True`（缺省，**生产路径用这个**）：本 pid 活着且**没有后代** ⇒ 本 pid 就是真身
+    （"直起真身"那条路）。`allow_self=False`：这种情况按失败处理 —— **标定/自检**用它把
+    "蹦床 + 真身后代" 与 "本来就没有后代" 两条路分开量。
+    """
+    t0 = time.time()
+    feat = _cmdline_stub(cmd)
+    want = feat.lower()
+    alive_fn = alive_check or proc_alive
+    tries = 0
+    last: dict = {}
+    while time.time() - t0 < timeout_s:
+        tries += 1
+        rows = tree() if tree is not None else process_tree()
+        # 从 pid 出发做**后代闭包**（蹦床可能套两层：Scripts\python.exe → .uv-python\python.exe）
+        kids: dict[int, list[int]] = {}
+        for c, (pp, _img) in rows.items():
+            kids.setdefault(pp, []).append(c)
+        seen, stack, desc = set(), [int(pid)], []
+        while stack:
+            cur = stack.pop()
+            for c in kids.get(cur, []):
+                if c in seen:
+                    continue
+                seen.add(c)
+                desc.append(c)
+                stack.append(c)
+        for c in desc:
+            img = rows.get(c, (0, ""))[1]
+            if not img.startswith(("python", "trainer", "java")):
+                continue
+            cl = ""
+            try:
+                cl = str((cmdline_impl or cmdline_of)(c) or "").strip()
+            except Exception:                       # noqa: BLE001 —— 探针异常一律当"取不到"
+                cl = ""
+            if not cl:
+                last = {"ok": False, "pid": c, "why": "命令行取不到（fail-closed）", "tries": tries,
+                        "n_desc": len(desc), "seen": [(d, rows.get(d, (0, ""))[1]) for d in desc[:8]]}
+                continue
+            if want and want not in cl.lower():
+                last = {"ok": False, "pid": c, "why": f"镜像像但命令行不含特征 {want!r}", "tries": tries,
+                        "n_desc": len(desc),
+                        # ⚠ 这里取命令行只为**诊断可读**，必须走**同一个注入口**（⛔ 不直接调真实现，
+                        #   否则自检会去 CIM 探真机的无关进程，读数与被测逻辑无关）
+                        "seen": [(d, rows.get(d, (0, ""))[1],
+                                  str((cmdline_impl or cmdline_of)(d) or "")[:80]) for d in desc[:4]]}
+                continue
+            return {"ok": True, "pid": int(c), "image": img, "cmdline": cl,
+                    "how": "后代闭包 + 镜像 ∧ 命令行特征", "trampoline_pid": int(pid),
+                    "descendants": len(desc), "tries": tries}
+        if alive_fn(pid) and not desc:
+            if allow_self:
+                # ⚠ **本 pid 活着且没有后代** ⇒ 它就是真身（"直起真身"那条路：直接把
+                #   `.uv-python\\…\\python.exe` 或 `trainer.exe` 交给 `Popen`，⛔ 没有蹦床可解）。
+                #   ⛔ 这**不是**"取不到读数"：调用方拿到的是一个**真 pid**。
+                #   （`allow_self=False` 时按失败处理 —— 标定/自检要能区分这两条路。）
+                return {"ok": True, "pid": int(pid), "image": str(rows.get(int(pid), (0, ""))[1]),
+                        "cmdline": str((cmdline_impl or cmdline_of)(int(pid)) or "")[:200],
+                        "how": "无后代 ⇒ 本 pid 即真身（直起真身）", "trampoline_pid": int(pid),
+                        "descendants": 0, "tries": tries, "is_spawn_itself": True}
+            last = {"ok": False, "pid": int(pid), "why": "还没有后代（蹦床尚未 re-exec）",
+                    "tries": tries, "n_desc": 0}
+        elif desc and not last.get("pid"):
+            # ⚠ **不许覆盖**已记下的具体原因（"命令行取不到" / "命令行不含特征"）—— 那才是可行动的
+            #   读数；用一个泛泛的"都没匹配上"盖掉它，等于把诊断信息丢了（自检 ⑨ 就是这么抓到的）。
+            last = {"ok": False, "pid": None, "why": f"有 {len(desc)} 个后代但都没匹配上",
+                    "tries": tries, "n_desc": len(desc),
+                    "seen": [(d, rows.get(d, (0, ""))[1]) for d in desc[:8]]}
+        elif not desc:
+            # ⚠ 进程**已经退出且没有后代** ⇒ 再等下去只会白等（`Popen.pid` 已是死号）
+            last = {"ok": False, "pid": None,
+                    "why": "被观察的 pid 已退出且没有后代（蹦床没来得及 re-exec / 命令本来就很短）",
+                    "tries": tries, "n_desc": 0}
+            break
+        time.sleep(poll_s)
+    return {"ok": False, "pid": None, "why": last.get("why") or "解析超时（没有匹配的后代）",
+            "tries": tries, "feature": feat, "descendants_seen": last.get("n_desc", 0),
+            "last_seen": last.get("seen")}
+
+
+
 # ================================================================ 标志位 / 预算语义（AGENTS.md §6.5 第三条）
 def chunk_rows(n) -> int:
     """`--chunk` 的语义：`<= 0` 是**坏值**（调用方 exit 2），⛔ **不是"不限"**。
@@ -347,15 +490,18 @@ def exit_for_fallback(rm: dict | None = None, fell_back: bool = True,
 
 
 def final_exit_code(rm: dict | None = None, fell_back: bool = True, fell_back_ok: bool = True,
-                    failures=(), contaminated: bool = False) -> int:
+                    failures=(), contaminated: bool = False, gate_enforced: bool = False) -> int:
     """整个 `pair` 的**最终退出码**（纯函数 ⇒ 判据 ⑧ 可以逐条钉住优先级）。
 
-    优先级：**收尸/回退失败（5）> 相失败（7）> 污染（6）> 0**。
-    ⛔ 理由：5 = "盘上留了东西、且没兜底"，7 = "有一相真的没跑成"，6 = "跑成了但读数脏了"。
-    把 7 排在 6 前面是**必须**的 —— 否则"主相一秒就死"会被印成"跑过了只是脏了"（实测踩过）。
+    优先级：**收尸/回退失败（5）> 相失败 / 闸门杀相（7）> 污染（6）> 0**。
+    ⛔ 理由：5 = "盘上留了东西、且没兜底"，7 = "有一相真的没跑成（含被资源闸门杀掉）"，
+    6 = "跑成了但读数脏了"。把 7 排在 6 前面是**必须**的 —— 否则"主相一秒就死"会被印成
+    "跑过了只是脏了"（实测踩过）。
+    ⚠ `gate_enforced=True`（资源纪律线**真的动了手**——比如串行路径的 `commit_free < 8 GB` 杀相）
+    必须与"相非 0 退出"同级 ⇒ 7（AGENTS §6.5 判据①⑦：违规不能被 6/0 吃掉）。
     """
     code = exit_for_fallback(rm=rm, fell_back=fell_back, fell_back_ok=fell_back_ok)
-    if code == 0 and failures:
+    if code == 0 and (failures or gate_enforced):
         return 7
     if code == 0 and contaminated:
         return 6
@@ -728,6 +874,8 @@ def load_spec(path: Path, ctx: dict, overrides: dict) -> dict:
         gate["timeout_s"] = overrides["timeout"]
     if overrides.get("min_commit_free_gb") is not None:
         gate["min_commit_free_gb"] = overrides["min_commit_free_gb"]
+    if overrides.get("resolve_timeout_s") is not None:
+        gate["resolve_timeout_s"] = overrides["resolve_timeout_s"]
     if overrides.get("no_fallback"):
         gate["fallback"] = "abort"
     if overrides.get("allow_rm_roots"):
@@ -871,6 +1019,13 @@ class Runner:
         #  `own_wall_s` 就被虚大、`capture_rate` 跟着虚高 = 关于重叠效率的假绿（实测踩过）。
         self.exited_at: dict[str, float] = {}
         self.gate_killed: set[str] = set()
+        #: **蹦床解析**（判据 ⑤）：相名 → 真身 pid / 解析失败原因（⛔ 失败时读数不可用）
+        self.real_pid: dict[str, int] = {}
+        self.real_pid_fail: dict[str, dict] = {}
+        #: 串行路径的闸门**动作**开关（原先串行只记账不动作 ⇒ 8 GB 纪律线形同不存在）
+        self.gate_serial_action: bool = False
+        #: 闸门已杀过相 ⇒ 不再起后续相（避免在半成品上继续跑）
+        self._stop_run: bool = False
         self.lock: dict = {}
         self.gate_trip = None
         self.commands_run = 0
@@ -890,34 +1045,85 @@ class Runner:
         print(s, flush=True)
 
     # -- 内存闸门线程（1 s 栅格、零 CIM）-----------------------------------
+    def _resolve(self, name: str, p: subprocess.Popen, cmd: list) -> dict:
+        """**蹦床解析**（判据 ⑤）：`Popen.pid` 可能只是 venv 的 47 KB `Scripts\\python.exe`，
+        真身是它 `re-exec` 出来的 91 KB `.uv-python\\…\\python.exe`。⛔ 只认 `Popen.pid` 就会把
+        训练内存记成 1.3 MB（NOTES §6.5 第八十一轮偏离②）。
+        成功 ⇒ 把 `{name: 真身 pid}` 写进 `self.real_pid`；失败 ⇒ **记账 + 标 fail-closed**
+        （⛔ 不许把蹦床读数当训练读数）。只在**相起跑时**做一次（⛔ 不进 1 s 采样循环）。
+        """
+        r = resolve_real_pid(p.pid, cmd, timeout_s=float(self.gate.get("resolve_timeout_s") or 8.0))
+        self.rec("resolve_real_pid", name=name, trampoline_pid=p.pid, ok=bool(r.get("ok")),
+                 **{k: v for k, v in r.items() if k != "ok"})
+        if not r.get("ok"):
+            self.real_pid_fail[name] = r
+            self.say(f"  ⚠ [蹦床解析] {name}: ⛔ 未解析到真身（{r.get('why')}）⇒ "
+                     f"该相内存/CPU 读数**不可用**（fail-closed，⛔ 不当 0、也不当蹦床的假读数）")
+            return r
+        self.real_pid[name] = int(r["pid"])
+        self.say(f"  [蹦床解析] {name}: 蹦床 pid={p.pid} → 真身 pid={r['pid']}（{r['image']}）")
+        return r
+
     def _sampler(self, procs: dict) -> None:
         abort_file = self.ev / f"{self.tag}.abort"
         poll = float(self.gate.get("poll_sec", 1.0) or 1.0)
         while not self._stop.wait(poll):
             m = mem()
             snap = list(procs.items())              # ⚠ 快照：串行路径会**逐步往 dict 里填**子进程
+            per: dict = {}
+            for n, p in snap:
+                # ⛔ 采样对象 = **解析后的真身**（解析不到 ⇒ 显式记 unresolved，⛔ 不回落到蹦床）
+                tgt = self.real_pid.get(n)
+                if tgt and proc_alive(tgt):
+                    per[n] = {**proc_mem(tgt), "cpu_s": proc_cpu(tgt), "sampled_pid": tgt}
+                elif tgt:
+                    per[n] = {"exited": True, "sampled_pid": tgt}
+                elif p.poll() is None:
+                    per[n] = {"unresolved": True, "trampoline_pid": p.pid,
+                              **self.real_pid_fail.get(n, {})}
+                else:
+                    per[n] = {"exited": True, "trampoline_pid": p.pid}
             row = {"ev": "sample", "t": time.time(), "ts": time.strftime("%H:%M:%S"), **m,
-                   "procs": {n: {**proc_mem(p.pid), "cpu_s": proc_cpu(p.pid)}
-                             for n, p in snap if p.poll() is None}}
+                   "procs": per}
             # 每一相**真的**退出时刻：只在第一次看见"已退出"时记（⛔ 不是我去 wait 它的时刻）
             for n, p in snap:
-                if p.poll() is not None and n not in self.exited_at:
+                done = (p.poll() is not None) or (self.real_pid.get(n) and
+                                                  not proc_alive(self.real_pid[n]))
+                if done and n not in self.exited_at:
                     self.exited_at[n] = time.time()
-                    self.rec("phase_gone", name=n, pid=p.pid, code=p.returncode,
+                    self.rec("phase_gone", name=n, pid=p.pid,
+                             real_pid=self.real_pid.get(n), code=p.returncode,
                              at_offset_s=round(self.exited_at[n] - self.t_start, 1))
             self.samples.append(row)
             self.ledger_fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             self.ledger_fh.flush()
+            trip = None
             if row["commit_free_gb"] < float(self.gate["min_commit_free_gb"]):
-                self.gate_trip = {"reason": "commit_free 低于阈值",
-                                  "commit_free_gb": row["commit_free_gb"],
-                                  "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
-                return
-            if abort_file.exists():
-                self.gate_trip = {"reason": f"外部采样器写了 {abort_file.name}（同一闸门）",
-                                  "commit_free_gb": row["commit_free_gb"],
-                                  "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
-                return
+                trip = {"reason": "commit_free 低于阈值",
+                        "commit_free_gb": row["commit_free_gb"],
+                        "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
+            elif abort_file.exists():
+                trip = {"reason": f"外部采样器写了 {abort_file.name}（同一闸门）",
+                        "commit_free_gb": row["commit_free_gb"],
+                        "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
+            if trip:
+                first = self.gate_trip is None
+                self.gate_trip = trip
+                if first:
+                    self.rec("gate_trip", **trip, serial=self.gate_serial_action)
+                if self.gate_serial_action:
+                    # **串行也要真执行**（原先只记账 ⇒ 8 GB 纪律线形同不存在）：采样线程负责杀当前相
+                    # —— 编排器主线程此刻正阻塞在 `wait_phase` 上，只有采样线程能动手。
+                    # kill **进程树**（相常是 venv 蹦床 + 真身两层 ⇒ 只杀蹦床会留下孤儿真身继续吃内存）。
+                    for n, p in list(procs.items()):
+                        if p.poll() is None and n not in self.gate_killed:
+                            self.rec("gate_kill_tree", name=n, pid=p.pid, **kill_tree(p.pid))
+                            p.kill()
+                            self.gate_killed.add(n)
+                # ⚠ **不 return**：闸门响了这一相作废，但采样必须继续到"看到它真的退出"为止，
+                #   否则 `commit_free` 最低值与真退出时刻都会缺（AGENTS §6.5 判据⑦）。
+            if self.gate_killed:
+                return                         # 串行已杀 ⇒ 不再需要新采样点
 
     # -- 跑一条命令 ---------------------------------------------------------
     def _spawn(self, name: str, cmd: list, cwd) -> subprocess.Popen:
@@ -940,6 +1146,9 @@ class Runner:
         p = subprocess.Popen([str(x) for x in cmd], cwd=str(cwd) if cwd else None, env=env,
                              stdout=log, stderr=subprocess.STDOUT)
         self.rec("spawn", name=name, pid=p.pid, cmd=" ".join(str(x) for x in cmd), own_t0=t0)
+        # ⚠ **相起跑时**做一次蹦床解析（判据 ⑤）：`Popen.pid` 常常是 venv 蹦床，真身要按
+        #   「解释器镜像 ∧ 命令行特征」两个条件一起认；⛔ 不进 1 s 采样循环（那会每秒起一次 PowerShell）。
+        self._resolve(name, p, cmd)
         return p
 
     def _wait(self, name: str, p: subprocess.Popen, t0: float) -> dict:
@@ -1091,6 +1300,11 @@ class Runner:
                 th.join(timeout=5)
             elif not self.overlap:
                 self.say("\n--- 串行（主相 → 从相；顺序是判据本身）---")
+                # ⚠ 串行路径原先是"只记账、不动作" —— 这正是 bl14/rerun 见过 `commit_free` 5.00 GB
+                #   仍在跑的原因（纪律线**没有被工具执行**）。现在：闸门一响 ⇒ **杀当前相** + 记账 +
+                #   退出码 7（判据 ⑥⑦：资源纪律违规是一条**看得见的失败**，⛔ 不许被 6/0 吃掉）。
+                #   优先级沿用 `final_exit_code`：5（收尸失败）> 7（有相非 0 / 闸门杀）> 6（污染）> 0。
+                self.gate_serial_action = True
                 th = threading.Thread(target=self._sampler, args=(procs,), daemon=True)
                 th.start()
                 t0 = time.time()
@@ -1098,17 +1312,26 @@ class Runner:
                 procs["primary"] = pp
                 phase_start["primary"] = t0
                 res["primary"] = wait_phase("primary", pp, t0)
+                if self.gate_trip:
+                    self.gate_killed.add("primary")
+                    self.rec("gate_trip", **self.gate_trip, action="kill primary（串行）")
+                    self._stop_run = True
                 t1 = time.time()
-                po = self._spawn("other", ocmd, None)
-                procs["other"] = po
-                phase_start["other"] = t1
-                res["other"] = wait_phase("other", po, t1)
+                if not self._stop_run:
+                    po = self._spawn("other", ocmd, None)
+                    procs["other"] = po
+                    phase_start["other"] = t1
+                    res["other"] = wait_phase("other", po, t1)
+                    if self.gate_trip:
+                        self.gate_killed.add("other")
+                        self.rec("gate_trip", **self.gate_trip, action="kill other（串行）")
                 self._stop.set()
                 th.join(timeout=5)
                 if self.gate_trip:
-                    self.rec("gate_seen_in_serial", **self.gate_trip)
-                    self.say(f"  （串行里看到 commit_free 触及阈值 {self.gate_trip['commit_free_gb']} GB"
-                             f" —— 串行**不动作**，仅记账）")
+                    self.say(f"  ⛔ [内存闸门·串行] {self.gate_trip['reason']}："
+                             f"commit_free={self.gate_trip['commit_free_gb']} GB < "
+                             f"{self.gate_trip['threshold']} GB ⇒ **已杀当前相**（不再只是记账），"
+                             f"本相读数作废、退出码 7")
             else:
                 self.say(f"\n--- 重叠：{self.spec['phase']}（primary）‖ {self.spec['other']['kind']}（other）---")
                 self.gate_trip = None
@@ -1229,13 +1452,19 @@ class Runner:
 
         contaminated = any(e["ev"] == "contaminated" for e in self.events)
         failures = phase_failures(res, ignore=self.gate_killed)
+        gate_enforced = bool(self.gate_serial_action and self.gate_trip)
         code = final_exit_code(rm=result.get("reap"),
                                fell_back=bool(res.get("fell_back", True)),
                                fell_back_ok=bool(res.get("fell_back_ok", True)),
-                               failures=failures, contaminated=contaminated)
+                               failures=failures, contaminated=contaminated,
+                               gate_enforced=gate_enforced)
         if failures:
             self.say(f"\n⛔ **有相非 0 退出**：{failures} ⇒ exit=7"
                      f"（⛔ 不许当成'跑过了'；主相/从相的产物都可能是半成品）")
+        if gate_enforced:
+            self.say(f"\n⛔ **资源纪律线（串行）真的动了手**：commit_free "
+                     f"{self.gate_trip['commit_free_gb']} GB < {self.gate_trip['threshold']} GB "
+                     f"⇒ 杀掉 {sorted(self.gate_killed)} ⇒ exit=7（该相读数作废）")
         result.update({"exit_code": code, "phase_failures": failures, "phases": {
             "primary": res.get("primary"), "other": res.get("other"),
             "primary_serial_fallback": res.get("primary_serial_fallback")},
@@ -1251,7 +1480,11 @@ class Runner:
             "src_manifest_changed": src_before != src_after,
             "contaminated": contaminated,
             "gate_killed": sorted(self.gate_killed),
-            "timing_reliable": (not contaminated) and (not failures),
+            "gate_enforced": gate_enforced,
+            "gate_trip": self.gate_trip,
+            "real_pid": {k: v for k, v in self.real_pid.items()},
+            "real_pid_unresolved": {k: v.get("why") for k, v in self.real_pid_fail.items()},
+            "timing_reliable": (not contaminated) and (not failures) and (not gate_enforced),
             "raw": res})
         for e in self.events:
             if e["ev"] == "contaminated":
@@ -1429,6 +1662,158 @@ def mode_calibrate_mem(args, ctx: dict) -> tuple[int, dict]:
     return (0 if out["ok"] else 1), out
 
 
+# ================================================================ calibrate-trampoline（判据 ⑤ 的标定）
+_TRAMPOLINE_CHILD = r'''# -*- coding: utf-8 -*-
+"""标定用的**已知负载**子进程：先吃 `gb` GiB 匿名内存，再按 `busy` 烧 CPU，最后按 `secs` 退出。"""
+import sys, time
+gb, secs, busy, ready = float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+buf = bytearray(int(gb * 1024 ** 3))
+for i in range(0, len(buf), 4096):
+    buf[i] = 1
+open(ready, "w").write("ready")
+t0 = time.time()
+x = 0.0
+while time.time() - t0 < secs:
+    if busy:
+        for _ in range(20000):
+            x += 0.5 ** 2
+        time.sleep(0.001)
+    else:
+        time.sleep(0.05)
+print("child done", x)
+'''
+
+
+def mode_calibrate_trampoline(args, ctx: dict) -> tuple[int, dict]:
+    """标定：**同一条命令**分别用「venv 蹦床 `Scripts\\python.exe`」和「真身解释器」起，
+    比较采样器拿到的 committed / ws / CPU —— 证明"钉住 `Popen.pid` = 取到假读数"（判据 ⑤）。
+
+    判据（跑前写死，⛔ 不"看着差不多"）：
+      ① 蹦床臂：`Popen.pid` 的 committed/ws **≈ 空载**（< 名义负载的 15%）**且** 该 pid 很快退出；
+      ② 真身臂：同一个采样口径下 committed **≈ 名义值（±25%）**、ws 同步涨、CPU > 0；
+      ③ 真实解析（镜像 ∧ 命令行特征）在**蹦床臂**上必须解析到**另一个 pid**，且那个 pid 的
+         committed ≈ 名义值 ⇒ **"直起真身" 与 "解析真身" 两条路都必须能拿到真读数**。
+    ⛔ 只做已知负载（0.35 GiB / 6 s），⛔ 不起任何训练/采集。
+    """
+    ev = Path(str(args.evidence_dir or (Path(ctx["DATA_ROOT"]) / "w-ladder" / "_overlap" / "tool")))
+    ev.mkdir(parents=True, exist_ok=True)
+    script = ev / "_ov_trampoline_child.py"
+    script.write_text(_TRAMPOLINE_CHILD, encoding="utf-8")
+    gb, secs = float(args.load_gb), float(args.load_secs)
+    tramp = Path(str(args.trampoline_python or (Path(ctx["REPO"]) / "python" / ".venv" / "Scripts" / "python.exe")))
+    real = Path(str(args.real_python or (Path(ctx["REPO"]) / ".uv-python"
+                                        / "cpython-3.12.13-windows-x86_64-none" / "python.exe")))
+    out: dict = {"tool": TOOL_NAME, "mode": "calibrate-trampoline",
+                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "load_gb": gb, "load_secs": secs,
+                 "trampoline_python": str(tramp), "real_python": str(real),
+                 "exists": {"trampoline": tramp.is_file(), "real": real.is_file()},
+                 "rows": [], "checks": []}
+    if not (tramp.is_file() and real.is_file()):
+        out["checks"].append({"id": "interpreter-paths", "ok": False,
+                              "detail": f"解释器路径不存在：{out['exists']}（fail-closed，⛔ 不猜）"})
+        out["ok"] = False
+        return 2, out
+    print("=== 「蹦床 vs 真身」标定（已知负载；⛔ 零训练）===")
+    print(f"  名义负载 {gb} GiB ≈ {gb * 1024:.0f} MB · 时长 {secs}s · "
+          f"warmup 走 {args.warmup_s}s 再取读数")
+    nominal = gb * 1024.0
+    for arm, exe in (("trampoline", tramp), ("real", real)):
+        ready = ev / f"_ov_tramp_{arm}.ready"
+        ready.unlink(missing_ok=True)
+        cmd = [str(exe), "-u", str(script), str(gb), str(secs), "1", str(ready)]
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # ⚠ **次序是判据的一部分**：先等负载就绪 + warmup + 取 `Popen.pid` 读数，**再**做蹦床解析。
+        #   反过来（先解析再采样）会踩一个真实的坑：解析在"没有后代"时要等到超时，而**那时本相
+        #   可能已经跑完了** —— 事后 `OpenProcess` 对整个镜像都失败（⚠ `GetProcessMemoryInfo`
+        #   对**已退出**的 pid 会返回 `current = 0.2 MB / ws = 0.0`，而 `peak` 仍是真值 365 MB）
+        #   ⇒ 读到一个"活着的假 0"。实测就是这么踩到的。
+        t0 = time.time()
+        while not ready.exists() and p.poll() is None and time.time() - t0 < 120:
+            time.sleep(0.1)
+        time.sleep(max(1.0, float(args.warmup_s)))
+        popen_mem, tries = {}, 0
+        while tries < 5 and p.poll() is None:
+            tries += 1
+            popen_mem = proc_mem(p.pid)
+            if popen_mem:
+                break
+            time.sleep(1.0)
+        popen_cpu = proc_cpu(p.pid)
+        alive0 = proc_alive(p.pid)
+        res = resolve_real_pid(p.pid, cmd, timeout_s=float(getattr(args, "resolve_timeout", 8.0)),
+                               allow_self=False)
+        real_mem = {}
+        if res.get("ok"):
+            for _ in range(3):
+                real_mem = proc_mem(int(res["pid"]))
+                if real_mem:
+                    break
+                time.sleep(0.5)
+        row = {"arm": arm, "spawn_exe": str(exe), "popen_pid": p.pid,
+               "trampoline_alive": alive0, "popen_alive_now": proc_alive(p.pid),
+               "popen_mem": popen_mem, "popen_cpu_s": popen_cpu,
+               "read_tries": tries, "read_fail": not bool(popen_mem),
+               "resolve": res, "system": mem()}
+        if res.get("ok"):
+            rp = int(res["pid"])
+            row.update({"real_pid": rp, "real_alive": proc_alive(rp),
+                        "real_mem": real_mem, "real_cpu_s": proc_cpu(rp)})
+        out["rows"].append(row)
+        print(f"  ① {arm}: spawn={exe.name} popen_pid={p.pid} alive={row['trampoline_alive']} "
+              f"committed={row['popen_mem'].get('committed_mb')} MB ws={row['popen_mem'].get('ws_mb')} MB "
+              f"cpu={row['popen_cpu_s']}s（**旧口径**）")
+        if res.get("ok"):
+            print(f"     解析真身 pid={res['pid']}（how={res['how']}）"
+                  f" committed={row['real_mem'].get('committed_mb')} MB "
+                  f"ws={row['real_mem'].get('ws_mb')} MB cpu={row['real_cpu_s']}s（**新口径**）")
+        else:
+            print(f"     ⛔ 解析失败：{res.get('why')}（⛔ 不许回落到蹦床读数）")
+        try:
+            p.wait(timeout=secs + 120)
+        except subprocess.TimeoutExpired:
+            kill_tree(p.pid)
+            p.kill()
+        ready.unlink(missing_ok=True)
+
+    tr = next(r for r in out["rows"] if r["arm"] == "trampoline")
+    rl = next(r for r in out["rows"] if r["arm"] == "real")
+    # ① 蹦床臂：Popen.pid 的读数必须**明显低于**名义值（或该 pid 已退 ⇒ 读数无效）
+    t_committed = float(tr["popen_mem"].get("committed_mb") or 0.0)
+    c1 = (not tr["trampoline_alive"]) or (t_committed < 0.15 * nominal)
+    out["checks"].append({"id": "trampoline-is-fake", "ok": bool(c1),
+                          "detail": f"蹦床 pid={tr['popen_pid']} alive={tr['trampoline_alive']} "
+                                    f"committed={t_committed} MB（名义 {nominal:.0f}）"
+                                    f" ⇒ {'假读数/已退（符合预期）' if c1 else '⛔ 竟然涨到了名义值'}"})
+    # ② 真身臂（**直起真身**）：`Popen.pid` 就是真身 ⇒ 同一采样口径下读数必须 ≈ 名义值
+    #    ⚠ 这一臂**预期解析不出后代**（它本身不是蹦床）—— 那不是失败，是"直起真身"的定义。
+    r_committed = float(rl["popen_mem"].get("committed_mb") or 0.0)
+    c2 = (not rl["read_fail"]) and abs(r_committed - nominal) <= 0.25 * nominal
+    out["checks"].append({"id": "real-body-committed", "ok": bool(c2),
+                          "detail": f"真身臂 pid={rl['popen_pid']} committed={r_committed} MB"
+                                    f"（名义 {nominal:.0f}；读数尝试 {rl['read_tries']} 次"
+                                    f"{'，⛔ 全部取不到 ⇒ fail-closed' if rl['read_fail'] else ''}）"
+                                    f"⇒ {'对得上' if c2 else '⛔ 对不上'}；"
+                                    f"后代解析={(rl.get('resolve') or {}).get('how') or '无后代（直起真身，本就该没有）'}"})
+    # ③ 蹦床臂上"解析真身"必须解析到**另一个 pid** 且它的 committed ≈ 名义值
+    tr_res = tr.get("resolve") or {}
+    tr_real = float((tr.get("real_mem") or {}).get("committed_mb") or 0.0)
+    c3 = (tr_res.get("ok") is True and int(tr_res.get("pid") or 0) != int(tr["popen_pid"])
+          and abs(tr_real - nominal) <= 0.25 * nominal)
+    out["checks"].append({"id": "resolved-real-body", "ok": bool(c3),
+                          "detail": f"蹦床臂解析：ok={tr_res.get('ok')} pid={tr_res.get('pid')}"
+                                    f"（蹦床 {tr['popen_pid']}）committed={tr_real} MB"
+                                    f"（名义 {nominal:.0f}）⇒ "
+                                    f"{'解析到了真身 ✅' if c3 else '⛔ 没解析到 / 读数不对'}"})
+    # ④ CPU：真身臂必须看到非 0 CPU 秒（证明"核真在动"能测到）
+    c4 = float(rl.get("popen_cpu_s") or 0.0) > 0.0
+    out["checks"].append({"id": "cpu-visible", "ok": bool(c4),
+                          "detail": f"真身臂 cpu_s={rl.get('popen_cpu_s')}（期望 >0）"})
+    out["ok"] = all(c["ok"] for c in out["checks"])
+    print(f"\n判据：① 蹦床 pid 是**假读数** ② 直起真身 ⇒ committed ≈ 名义值 ③ 解析（镜像∧命令行特征）"
+          f"也能拿到真读数 ④ CPU 看得见。{'全部通过' if out['ok'] else '⛔ 有不通过'}")
+    return (0 if out["ok"] else 1), out
+
+
 # ================================================================ 自检（含负向）
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1467,9 +1852,10 @@ def _stub_spec(tmp: Path, ctx: dict, *, phase: str, kind: str, marker: Path,
 def mode_selftest(args, ctx: dict) -> tuple[int, dict]:
     """自检 —— **必须含负向**（正向自检只能证明"会通过"，证明不了"该拒时真的拒"）。
 
-    六条：① 未知 kind/phase ⇒ 拒（fail closed）· ② 探针取不到数据 ⇒ FAIL · ③ 闸门不过 ⇒
+    九条：① 未知 kind/phase ⇒ 拒（fail closed）· ② 探针取不到数据 ⇒ FAIL · ③ 闸门不过 ⇒
     **一条命令都不打**（真起子进程，用桩的 marker 文件作证）· ④ 两文件都缺的比较 ⇒ **必红**
-    （假绿守卫）· ⑤ `--chunk` / 预算 `<= 0` 的语义 · ⑥ 收尸后"半成品确实消失"（+ 删不掉 ⇒ exit 5）。
+    （假绿守卫）· ⑤ `--chunk` / 预算 `<= 0` 的语义 · ⑥ 收尸后"半成品确实消失"（+ 删不掉 ⇒ exit 5）·
+    ⑦ 枚举瞎了 ⇒ 也 fail-closed · ⑧ 相失败/`own_wall` · ⑨ **蹦床真身解析**（判据 ⑤，含三条负向）。
     """
     import tempfile
     cases: list[dict] = []
@@ -1597,6 +1983,10 @@ def mode_selftest(args, ctx: dict) -> tuple[int, dict]:
                 and final_exit_code(rm={"removed": False, "verified_gone": False},
                                     failures=[["primary", 1]], contaminated=True) == 5
                 and final_exit_code(fell_back=False) == 5
+                # ⚠ **闸门真的动了手**（`gate_enforced`）必须与"相非 0 退出"同级 ⇒ 7，
+                #   ⛔ 不许被 6（污染）/0 吃掉（AGENTS §6.5 判据①⑦）
+                and final_exit_code(failures=[], contaminated=False, gate_enforced=True) == 7
+                and final_exit_code(failures=[], contaminated=True, gate_enforced=True) == 7
                 and phase_failures({"primary": {"code": 1}, "other": {"code": 0}}) == [["primary", 1]]
                 and phase_failures({"primary": {"code": 1}, "other": {"code": 0}},
                                    ignore={"primary"}) == [])
@@ -1626,24 +2016,107 @@ def mode_selftest(args, ctx: dict) -> tuple[int, dict]:
         }, ensure_ascii=False), encoding="utf-8")
         r8 = subprocess.run([sys.executable, str(Path(__file__).resolve()), "pair",
                              "--driver", str(sp2), "--overlap", "--allow-busy",
+                             "--resolve-timeout", "2",
                              "--data-root", str(d2), "--compact-root", str(d2 / "c"),
                              "--raw-root", str(d2 / "r"),
                              "--out", str(d2 / "r8.json")],
                             capture_output=True, text=True, encoding="utf-8", errors="replace")
         j8 = json.loads((d2 / "r8.json").read_text(encoding="utf-8")) if (d2 / "r8.json").is_file() else {}
+        # ⚠ **环境前提**：G7 的枚举自检在**受限令牌**的上下文里会 fail-closed ⇒ 那次 `pair` 会以
+        #   exit=4 **拒跑**（这是**正确行为**，见 ⑦），端到端那半就不可能跑到 7。这里先量一次
+        #   "本上下文能不能枚举"，量到受限就**显式标 skip**（⛔ 不是静默放过、也不改判据）。
+        probe_reset()
+        env_scan = g7_scan()
+        env_limited = bool(env_scan["fail_closed"])
+        out["env_enumeration"] = {"limited": env_limited,
+                                  "selfcheck_ok": env_scan["selfcheck"]["ok"],
+                                  "n_rows": env_scan["selfcheck"]["n_rows"],
+                                  "system_seen": env_scan["selfcheck"]["system_seen"]}
+        if env_limited:
+            print(f"  ⚠ 本上下文枚举受限（看见 {env_scan['selfcheck']['n_rows']} 个进程 · 系统进程 "
+                  f"{env_scan['selfcheck']['system_seen']}）⇒ 端到端那半 **skip**（G7 会正确拒跑，"
+                  f"⛔ 不是失败）；纯函数判据照跑。")
         pw = ((j8.get("phases") or {}).get("primary") or {}).get("own_wall_s")
         ow = ((j8.get("phases") or {}).get("other") or {}).get("own_wall_s")
-        ok8 = (pure and r8.returncode == 7 and j8.get("phase_failures") == [["primary", 3]]
-               and pw is not None and pw < 2.0 and ow is not None and ow >= 2.5
-               # primary 0.5 s 就死了 ⇒ 重叠区间只有 ~0.1 s。⛔ 旧实现这里会报 ~2.6 s（= other 的时长）
-               and (j8.get("overlap_interval_s") or 99) < 1.5)
+        e2e_ok = (r8.returncode == 7 and j8.get("phase_failures") == [["primary", 3]]
+                  and pw is not None and pw < 2.0 and ow is not None and ow >= 2.5
+                  # primary 0.5 s 就死了 ⇒ 重叠区间只有 ~0.1 s。⛔ 旧实现这里会报 ~2.6 s（= other 的时长）
+                  and (j8.get("overlap_interval_s") or 99) < 1.5)
+        ok8 = pure and (e2e_ok or (env_limited and r8.returncode == 4
+                                   and j8.get("exit_code") == 4))
         case("⑧ 相失败 / own_wall", ok8,
              "`final_exit_code` 优先级 5>7>6>0；primary 退 3 且 other 睡 3 s ⇒ exit=7 且 "
              "primary 的 own_wall **≈0 s**、重叠区间 **≈0 s**（⛔ 不被 other 的 3 s 虚大）",
-             f"纯函数={pure} · 端到端 exit={r8.returncode}（期望 7）"
+             f"纯函数={pure} · 端到端 exit={r8.returncode}"
+             f"（期望 7"
+             f"{'；⚠ 本上下文枚举受限 ⇒ 端到端 skip，exit=4 是 G7 的**正确拒绝**' if env_limited else ''}）"
              f" phase_failures={j8.get('phase_failures')} · "
              f"primary own_wall={pw}s（期望 <2） · other own_wall={ow}s（期望 ≥2.5） · "
              f"重叠区间={j8.get('overlap_interval_s')}s（期望 <1.5；⛔ 旧实现会虚大成 ~2.6）")
+        # ---- ⑨ 「蹦床」解析与资源纪律线**真的动手**（新增；判据 ⑤ + ①⑦）
+        print("\n=== ⑨ `Popen.pid` 是 venv 蹦床 ⇒ 必须按「镜像 ∧ 命令行特征」认真身；"
+              "串行闸门必须**真杀相** ===")
+        # 桩树：1000（蹦床，python）→ 1001（真身，python，带我们的命令行）
+        #         2000（别人的 python，带别人的命令行）
+        #         3000（蹦床，python）→ 3001（trainer.exe，带我们的命令行）
+        fake_tree = {1000: (4, "python.exe"), 1001: (1000, "python.exe"),
+                     2000: (4, "python.exe"), 2001: (2000, "python.exe"),
+                     3000: (4, "python.exe"), 3001: (3000, "trainer.exe")}
+        cl = {1000: r'"C:\...\Scripts\python.exe" -u -m mahjong_ml.v4.pretrain --data x',
+              1001: r'"C:\...\.uv-python\python.exe" -u -m mahjong_ml.v4.pretrain --data x',
+              2000: r'"python.exe" -m http.server 8080',
+              2001: r'"python.exe" -m http.server 8080',
+              3001: r'"trainer.exe" selfplay 1000 --out x'}
+        kw = dict(tree=lambda: fake_tree, cmdline_impl=lambda p: cl.get(p, ""),
+                  alive_check=lambda p: True, timeout_s=1.0, poll_s=0.05, allow_self=False)
+        ok_pos = resolve_real_pid(1000, ["Scripts\\python.exe", "-u", "-m", "mahjong_ml.v4.pretrain"], **kw)
+        # 负向①：后代镜像像，但命令行**取不到** ⇒ fail-closed（⛔ 不回落到蹦床读数）
+        ok_nocmd = resolve_real_pid(1000, ["x", "-u", "-m", "mahjong_ml.v4.pretrain"],
+                                    tree=lambda: fake_tree, cmdline_impl=lambda p: "",
+                                    alive_check=lambda p: True, timeout_s=0.4, poll_s=0.05,
+                                    allow_self=False)
+        # 负向②：没有后代且本 pid **已退出** ⇒ 立刻 fail-closed（⛔ 不白等到超时）
+        t_orphan = time.time()
+        ok_orphan = resolve_real_pid(9999, ["x", "-u", "-m", "mahjong_ml.v4.pretrain"],
+                                     tree=lambda: fake_tree, cmdline_impl=lambda p: cl.get(p, ""),
+                                     alive_check=lambda p: False, timeout_s=8.0, poll_s=0.05,
+                                     allow_self=False)
+        orphan_s = time.time() - t_orphan
+        # 负向③：只有别人的 python（命令行不含我们的特征）⇒ 不许认领
+        ok_foreign = resolve_real_pid(2000, ["x", "-u", "-m", "mahjong_ml.v4.pretrain"],
+                                      tree=lambda: fake_tree, cmdline_impl=lambda p: cl.get(p, ""),
+                                      alive_check=lambda p: True, timeout_s=0.4, poll_s=0.05,
+                                      allow_self=False)
+        # trainer.exe 也认（本仓自对弈/前向入口），且它自己也是蹦床的后代
+        ok_trainer = resolve_real_pid(3000, ["trainer.exe", "selfplay", "1000"], **kw)
+        # 正向④（**生产口径** `allow_self=True`）：活着且**没有后代** ⇒ 本 pid 就是真身
+        #   （"直起真身"那条路 —— ⛔ 不许把它误判成"读不到"）
+        ok_self = resolve_real_pid(4000, ["x", "-u", "-m", "mahjong_ml.v4.pretrain"],
+                                   tree=lambda: fake_tree, cmdline_impl=lambda p: "x -m y",
+                                   alive_check=lambda p: True, timeout_s=0.4, poll_s=0.05)
+        # 负向④：同样的输入但在**标定/自检口径**（`allow_self=False`）⇒ 必须 fail-closed
+        ok_self_off = resolve_real_pid(4000, ["x", "-u", "-m", "mahjong_ml.v4.pretrain"],
+                                       tree=lambda: fake_tree, cmdline_impl=lambda p: "x -m y",
+                                       alive_check=lambda p: True, timeout_s=0.4, poll_s=0.05,
+                                       allow_self=False)
+        ok9 = (ok_pos.get("ok") is True and ok_pos.get("pid") == 1001
+               and ok_nocmd.get("ok") is False and "取不到" in str(ok_nocmd.get("why"))
+               and ok_orphan.get("ok") is False and orphan_s < 2.0
+               and ok_foreign.get("ok") is False and ok_trainer.get("ok") is True
+               and ok_trainer.get("pid") == 3001
+               and ok_self.get("ok") is True and ok_self.get("pid") == 4000
+               and ok_self.get("is_spawn_itself") is True and ok_self_off.get("ok") is False)
+        case("⑨ 蹦床真身解析 fail-closed", ok9,
+             "蹦床 pid 必须被解析成**真身**（镜像 ∧ 命令行特征）；取不到命令行 / 没有后代且已退出 / "
+             "只有别人的 python ⇒ fail-closed；**没有后代且活着** ⇒ 本 pid 即真身（直起真身，"
+             "生产口径认、标定口径不认）",
+             f"正向：ok={ok_pos.get('ok')} pid={ok_pos.get('pid')}（期望 1001）image={ok_pos.get('image')} · "
+             f"命令行取不到：ok={ok_nocmd.get('ok')} why={ok_nocmd.get('why')} · "
+             f"无后代且已退出：ok={ok_orphan.get('ok')} 用时 {orphan_s:.2f}s（期望 <2s，⛔ 不白等） · "
+             f"别人的 python：ok={ok_foreign.get('ok')} · "
+             f"trainer.exe：ok={ok_trainer.get('ok')} pid={ok_trainer.get('pid')}（期望 3001） · "
+             f"直起真身：ok={ok_self.get('ok')} pid={ok_self.get('pid')}（期望 4000）"
+             f"how={ok_self.get('how')} · 标定口径下同一输入：ok={ok_self_off.get('ok')}（期望 False）")
 
         # ---- ③ 闸门不过 ⇒ 一条命令都不打（真起子进程，桩的 marker 作证）
         print("\n=== ③ 闸门不过 ⇒ **一条命令都不打**（桩命令一旦执行就会写 marker）===")
@@ -1791,6 +2264,9 @@ def add_common(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--out", default=None, help="机器可读 JSON 输出路径")
     ap.add_argument("--evidence-dir", default=None, help="账本/日志目录（缺省 <data-root>/w-ladder/_overlap/tool）")
     ap.add_argument("--no-fallback", action="store_true", help="内存闸门触发时只停不回退")
+    ap.add_argument("--resolve-timeout", type=float, default=8.0,
+                    help="每相起跑时**蹦床真身解析**的最长等待秒（⛔ 解析不到 ⇒ 该相内存/CPU 读数"
+                         "记 `unresolved`，⛔ 不回落到蹦床的假读数）")
 
 
 def _arg_of(cmd: list, name: str) -> str | None:
@@ -1938,12 +2414,28 @@ def main(argv=None) -> int:
     st.add_argument("--workers", type=int, default=8)
     st.add_argument("--timeout", type=float, default=0.0)
     st.add_argument("--chunk", type=int, default=100000)
+    st.add_argument("--resolve-timeout", type=float, default=4.0,
+                    help="自检里 `pair` 子进程的蹦床解析上限（桩命令很短，必须快速 fail-closed）")
     cm = sub.add_parser("calibrate-mem")
     cm.add_argument("--anon-gb", type=float, default=2.0)
     cm.add_argument("--file-gb", type=float, default=1.0)
     cm.add_argument("--out", default=None)
     cm.add_argument("--evidence-dir", default=None)
     cm.add_argument("--data-root", default=None)
+    # 判据 ⑤ 的标定：同一条命令分别用 venv **蹦床** 与 **真身** 起，比采样口径（零训练、已知负载）
+    ct = sub.add_parser("calibrate-trampoline")
+    ct.add_argument("--load-gb", type=float, default=0.35, help="已知负载（GiB；⛔ 别拿它跑训练）")
+    ct.add_argument("--load-secs", type=float, default=6.0, help="负载持续秒数")
+    ct.add_argument("--warmup-s", type=float, default=2.0, help="起跑后等多久再取读数")
+    ct.add_argument("--resolve-timeout", type=float, default=8.0,
+                    help="蹦床解析的最长等待秒（解析失败要 fail-closed，但别等到本相跑完）")
+    ct.add_argument("--trampoline-python", default=None,
+                    help="缺省 <repo>/python/.venv/Scripts/python.exe（47 KB 蹦床）")
+    ct.add_argument("--real-python", default=None,
+                    help="缺省 <repo>/.uv-python/cpython-3.12.13-windows-x86_64-none/python.exe（真身）")
+    ct.add_argument("--out", default=None)
+    ct.add_argument("--evidence-dir", default=None)
+    ct.add_argument("--data-root", default=None)
     a = ap.parse_args(argv)
 
     try:
@@ -1962,6 +2454,11 @@ def main(argv=None) -> int:
         result["override"] = ctx
         emit(result, a.out)
         return code
+    if a.mode == "calibrate-trampoline":
+        code, result = mode_calibrate_trampoline(a, ctx)
+        result["override"] = ctx
+        emit(result, a.out)
+        return code
 
     if not a.driver:
         print("⛔ `pair`/`check` 需要 `--driver <spec.json>`（两条臂的命令/写目录/冻结输入在里面）")
@@ -1969,7 +2466,8 @@ def main(argv=None) -> int:
     try:
         spec = load_spec(Path(a.driver), ctx, {
             "workers": a.workers, "timeout": a.timeout,
-            "min_commit_free_gb": a.min_commit_free_gb, "no_fallback": a.no_fallback})
+            "min_commit_free_gb": a.min_commit_free_gb, "no_fallback": a.no_fallback,
+            "resolve_timeout_s": getattr(a, "resolve_timeout", 8.0)})
     except (OSError, ValueError, json.JSONDecodeError) as e:
         print(f"⛔ 驱动规格读不了/坏了：{type(e).__name__}: {e}")
         return 2

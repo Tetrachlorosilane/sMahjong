@@ -1022,6 +1022,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十四轮 | 2026-10-13 | BL-12 便宜前置探针（观测/目标改进第一步）—— 四条候选全「in 弱/出局」（零训练 · 零采集） |
 | 第八十五轮 | 2026-10-13 | 权重归档首版「静默取错副本」两条 —— 按目录名索引 vs 按"解析后真实路径 + sha256" |
 | 第八十六轮 | 2026-10-13 | Java↔v4 接口审计收尾 —— 零 gate 判据 + 五处盲区补断言（零训练 · 零采集） |
+| 第八十七轮 | 2026-10-16 | 下一阶段预备（**目标侧**）—— 便宜前置探针筛出唯一候选 `own_win`（合法上限 ×2.10）+ 两条前置修复标定（零训练 · 零采集） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6362,6 +6363,19 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - 盲区③（**定策 = 保留 fail-open，但不许静默**）：`enumerate` 的输出就是 `obs.legal`，fail-closed 会把"服务端多下发一个 option 类型"变成**整场半庄静默死亡**（§6.5）⇒ 改为逐 option 记数（`droppedOptionCount/Types`）+ 6 条断言（未知 type 不产出动作、也不进 `legal`、计数与类型被点名、全已知时计数恒 0）。
 - 盲区④ `seq_delta` 恒缺省：三端读取口径 = `min(缺省 1, 8)/8`、末槽宽 1（`v4-derived-check` 跨端钉）；`SelfTest` 加 6 条（缺省 == 显式 1 / 非缺省只改一个通道 / 下标 95 / 0.125 / 0.5 / 夹到 1.0）+ 「观测**从不**发 `seq_delta`」。
 - 盲区⑤ `cand` ⑨⑩⑪ 恒 0：`tools/v4-derived-check.mjs` 钉 88+11+29=128 · 已实现 8 维 · 比例尺 8 值 · `blocks.py` 按 `DERIVED_CANDIDATE` 截断 · 文档 §4.3 同数同句；`SelfTest.candDerivedTests()` 钉行为（①–⑧ 非 0 正向对照、列 96–98 恒 0）。**副产品**：把 `cand[96]` 置 1 ⇒ 4 条 golden 逐位判据一起红 ⇒ 这 3 列**确实被前向读取**，「三端同改」是真承重。
+
+**第八十七轮：下一阶段预备（**目标侧**）—— 便宜前置探针筛出唯一候选 `own_win` + 两条前置修复标定（零训练 · 零采集）（2026-10-16）**
+> 预注册 `lab/nextphase/NEXTPHASE-PLAN.md`（跑前冻写，跑后只在 §7 追加偏离）；结果 `lab/nextphase/NEXTPHASE-SCREEN.md`；探针 `tools/lab/nextphase-probe.py`；原始件 `lab/nextphase/evidence/**` + `tmp/nextphase/**`。判据行仍在 `AGENTS.md` §6.5。
+- ⭐ **目标侧主判决 = "换了 y 之后合法信息上限升不升"**（不是"能不能学"）：同一份冻结件（`ov-A-s00\val` 33,615 行 / 50 场 / 563 手）、**同一表示只换因变量**、闭式岭回归 + 按手 5 折。标定：本数据集上 `delta` 的合法列 R²（= `value-audit.CEIL_GROUPS['legit_full']` 同组成 91 列）= **0.06643** vs 文档 **0.0693** ⇒ **同一把尺子**。实测：**自家和了 `own_win` 0.13939（×2.10）** · `own_win_delta` 0.09984（×1.50，但本表示上不可学：配对 ΔR² CI[−0.0034,+0.0246] 含 0）· `hand_agg` 0.0345 · `winner_delta` 0.0045 · `hand_norm` 0.0488 · `dealin` −0.0073 ⇒ **只有 `own_win` 真的抬高了上限**。
+- ⚠ **本批最重要的缺口（可行动）**：**"自家本小局打点"这一列在紧凑集里根本不存在**（`aux_win_flag` 只有二值核、`delta` 是含立直棒的收支、`value` 是整场终值）⇒ 真正的"自家手牌价值"目标**必须先扩列 + 重采**；本批筛出的是**"该扩哪一列"**，⛔ 不是"该开哪条臂"。
+- **E2 辅助重加权整族不可用（免探针论证 + 逐头实测）**：`placement` 合法列 R² 0.3236 ≈ 自身 0.3183（上限=自身）· `shanten` **1.0000**（与 `effect`/`cand.derived` **同源**，构造性）· `danger` 合法列 R² **−0.0073**（信息不在）；且这三头 `contract=False`（`model.py:56/61`）**不在推理路径** ⇒ 重配权不改任何信息上限。
+- **E3 奖励/优势口径整族不可用**：`hand_norm` 合法列 R² **0.0488 < 0.0664**（上限反降）；`--rank-weight` 与任何尺度变换都在 `pretrain.py:353` 的**学生行优势归一化** `(adv−μ)/σ` 之后被消掉 ⇒ 结构上不改可学份额。
+- **可证伪性成立（真的出局了）**：`hand_agg`/`winner_delta`/`hand_norm`/`dealin` 与两条阴性对照逐条出局；阴性对照 = `NEG_opp_delta_shift`（前一行收支，ΔR² −0.0079 CI[−0.0227,+0.0059]）+ `NEG_neg_delta`（y 取负 ⇒ 配对 ΔR² **恒 0，CI[0,0]**，证明管道不自造假增益）+ `NEG_constant_zero`（常数因变量 ⇒ R² 无定义 ⇒ **判出局且不炸整轮**，fail-closed 可读）。安慰剂：打乱标签 R² −0.00495 · 只用动作键 **+0.03122**（⚠ 高于 base 0.02747 ⇒ 本表示里 `tile/evt` 粗聚合对 `delta` 是噪声）。
+- ⭐ **前置修复 ①：`commit_free` 8 GB 纪律线原先"没被工具真正执行"** —— 两处漏：`overlap-orchestrator` **串行路径只记账不动作**（第八十三轮"最低 5.00 GB 仍在跑"就是它），`ceiling-gate.collect_run` 只在 `subprocess.run` **起跑前**查一次。接线规格：① 串行路径现在 `gate_serial_action=True` ⇒ 采样线程越线即 **kill 进程树**（`kill_tree`）+ 记账 + 强制 **exit 7**（`final_exit_code(..., gate_enforced=True)`，优先级 5>7>6>0，判据⑥⑦）；② `ceiling-gate` 采集改成 `Popen` + **1 s 栅格**校验（`--mem-poll-sec`），越线 **树杀 + 停剩余相**；③ 树杀在 `ceiling-gate` 里用**纯 ctypes**（`CreateToolhelp32Snapshot` 后序 + `TerminateProcess`）实现 —— ⛔ 不加子进程落点（该文件 AST 自检 ⑫ 数着"子进程只有两处"）。回归：`overlap-orchestrator selftest` **9/9**（新增 ⑨）、`ceiling-gate --selftest` **PASS**。
+- ⭐ **前置修复 ②：训练相内存/CPU 取不到的根因与正确口径** —— 根因 = 采样器钉住 `python\.venv\Scripts\python.exe`（**47,104 B 的蹦床**，真身 = `.uv-python\cpython-3.12.13-windows-x86_64-none\python.exe` 91,648 B）。正确口径 = **镜像 ∧ 命令行特征**两个条件同时成立（`resolve_real_pid`，后代闭包 + `Win32_Process.CommandLine`；退化情形"本 pid 活着且无后代" ⇒ 本 pid 即真身）。**实测标定一次**（`overlap-orchestrator calibrate-trampoline`，已知负载 0.35 GiB / 6 s，⛔ 零训练）：蹦床臂 `Popen.pid` = **1.3 MB / ws 7.4 MB / cpu 0.016 s**（**假读数**）· 解析真身 = **365.0 MB / 370.1 MB / cpu 1.0 s** · 真身臂直起 = **364.9 MB / 370.0 MB**（名义 358 MB，±25% 内）⇒ **全部通过**。⚠ 同一坑在本轮**现场复现**：台账那次工具把 pid 解成"直起真身"，8 s 采到 1.3 MB / 7.4 MB，而探针**自报**峰值 **2657.0 / 2016.1 MB** ⇒ 同一秒差 **2000×**。
+- **零训练 / 零采集证明**：`commit_free` 最低 **10.63 GB**（3 时点：11.56 → 10.63 → 12.97，纪律线 8 GB 未触及）· 探针峰值 **committed 2,657.0 MB / ws 2,016.1 MB**（**自报** `PeakPagefileUsage`）· 唯一起的子进程 = 探针脚本 + 标定的 0.35 GiB 已知负载；`python selfcheck.py` **923 / 0**（改前后同条数）· `overlap-orchestrator selftest` 9/9 · `ceiling-gate --selftest` PASS ⇒ ⛔ 未起 `pretrain`/`v4 loop`/正式 `selfplay`/闸门，⛔ 未发布。
+- ⚠ **偏离（照实）**：① 探针初版用"配对 ΔMSE" ⇒ 跨目标**量纲不可比**，改成方差归一的**配对 ΔR²**；② 主判决从"in 强/弱"改成"合法上限是否升高"，并对 4 个高 R² 目标加**恒等式嫌疑**标注（`value_final`/`rank_pts`/`placement` 的 R² 主要来自 `ctx` 里的**当前点数**，`shanten` 与 `effect` 同源）；③ **测量脚本自己的两个坑**（都不是探针的问题）：`p.stdout.read()` 在蹦床下等不到 EOF（祖先进程持有管道）⇒ 改 `communicate()`；外部采样在 1 s 轮询里做 `np.where`（50 场索引）把探针从 **17.8 s 拖到 ≈10 min** ⇒ 改成 3 时点 + 探针自报。
+- **残留**：`tmp/nextphase/**`（探针 JSON/日志/诊断脚本 < 1 MB）**用完即删**；保留 `lab/nextphase/**` + `tools/lab/nextphase-probe.py`；⛔ 未动 `raw/**`、`style-reward/**`、`compact\v4-heads-g01`、`traces\v4-wl-fold-c1-g01`、`tools\build\**` 端点、`compact\ov-A-s00`（全程只读）；⛔ 未改 `powercfg`/页面文件、⛔ 未用 junction、⛔ 未重启。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 

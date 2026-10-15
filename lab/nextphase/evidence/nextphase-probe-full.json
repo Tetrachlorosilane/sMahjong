@@ -1,0 +1,332 @@
+{
+  "tag": "full",
+  "root": "E:\\mahjong-training\\compact\\ov-A-s00",
+  "split": "val",
+  "n": 33615,
+  "n_features": 195,
+  "n_games": 50,
+  "n_hands": 563,
+  "lam": 1.0,
+  "k_folds": 5,
+  "seed": 20261014,
+  "mde_declared": 0.002,
+  "legit_ceiling": 0.0693,
+  "base": {
+    "name": "REF_delta",
+    "r2": 0.027471517402044454
+  },
+  "targets": {
+    "E1_own_win": {
+      "r2": 0.06342661733131172,
+      "r2_gain_vs_base": 0.035955099929267265,
+      "paired_dr2_mean": 0.03645617703863826,
+      "paired_ci95": [
+        0.020957917102215784,
+        0.051420834414003684
+      ],
+      "se_paired": 0.00822078010825191,
+      "mde_paired": 0.02303462586332185,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.4153814309738119,
+      "y_over_ceiling": false,
+      "y_mean": 0.2216867469879518,
+      "r2_legit_full": 0.1393897255080907,
+      "learnable_on_this_representation": true,
+      "ceiling_up": true,
+      "identity_suspect": null,
+      "verdict": "**可用**（合法上限升 ×2.10）",
+      "ceiling_relation": "✅ 合法列 R²=+0.13939 > 现状 +0.06643（×2.10）⇒ 该目标**不受**现状天花板约束"
+    },
+    "E1_own_win_delta": {
+      "r2": 0.03849393735814566,
+      "r2_gain_vs_base": 0.011022419956101204,
+      "paired_dr2_mean": 0.010935582025562616,
+      "paired_ci95": [
+        -0.0033748287969856904,
+        0.024603377596678425
+      ],
+      "se_paired": 0.00715255448977338,
+      "mde_paired": 0.02004145768034501,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 3.713418192954839,
+      "y_over_ceiling": false,
+      "y_mean": 1.6466101442808272,
+      "r2_legit_full": 0.09984029477596057,
+      "learnable_on_this_representation": false,
+      "ceiling_up": true,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "✅ 合法列 R²=+0.09984 > 现状 +0.06643（×1.50）⇒ 该目标**不受**现状天花板约束"
+    },
+    "E1_hand_agg": {
+      "r2": -0.08517877582811906,
+      "r2_gain_vs_base": -0.11265029323016351,
+      "paired_dr2_mean": -0.11362203396161473,
+      "paired_ci95": [
+        -0.22557431479696352,
+        -0.009203979389275311
+      ],
+      "se_paired": 0.05341971208633262,
+      "mde_paired": 0.149682033265904,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.34419833403593286,
+      "y_over_ceiling": false,
+      "y_mean": 0.004997768853190546,
+      "r2_legit_full": 0.03454427630333301,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=+0.03454 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "E1_winner_delta": {
+      "r2": -0.08304006027915212,
+      "r2_gain_vs_base": -0.11051157768119657,
+      "paired_dr2_mean": -0.1115791970259794,
+      "paired_ci95": [
+        -0.17088036011497074,
+        -0.05982687716913272
+      ],
+      "se_paired": 0.02875243803080178,
+      "mde_paired": 0.08056433136230659,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 4.7896333430040015,
+      "y_over_ceiling": false,
+      "y_mean": 6.481392235609103,
+      "r2_legit_full": 0.004451420653757809,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=+0.00445 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "E3_hand_norm": {
+      "r2": 0.020417840802202436,
+      "r2_gain_vs_base": -0.007053676599842018,
+      "paired_dr2_mean": -0.00781862559198904,
+      "paired_ci95": [
+        -0.01971785845543528,
+        0.003914114907647544
+      ],
+      "se_paired": 0.005980650026491836,
+      "mde_paired": 0.016757781374230125,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 2.30789609984422,
+      "y_over_ceiling": false,
+      "y_mean": 0.0027829865438056185,
+      "r2_legit_full": 0.04876865585279844,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=+0.04877 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "E3_value_final": {
+      "r2": 0.5155574099119465,
+      "r2_gain_vs_base": 0.4880858925099021,
+      "paired_dr2_mean": 0.47687968905099637,
+      "paired_ci95": [
+        0.3855531182163493,
+        0.5468001470472454
+      ],
+      "se_paired": 0.04128979493228684,
+      "mde_paired": 0.11569400540026774,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.21136928362468804,
+      "y_over_ceiling": true,
+      "y_mean": 0.0009493682454973936,
+      "r2_legit_full": 0.5197042913797044,
+      "learnable_on_this_representation": true,
+      "ceiling_up": true,
+      "identity_suspect": "`value = final_scores[seat] − 起点`，而 `ctx` 里就有**当前点数** ⇒ 恒等式",
+      "verdict": "**可用**（合法上限升 ×7.82）",
+      "ceiling_relation": "✅ 合法列 R²=+0.51970 > 现状 +0.06643（×7.82）⇒ 该目标**不受**现状天花板约束；⚠ 恒等式嫌疑：`value = final_scores[seat] − 起点`，而 `ctx` 里就有**当前点数** ⇒ 恒等式"
+    },
+    "E3_rank_pts": {
+      "r2": 0.4198250887066205,
+      "r2_gain_vs_base": 0.39235357130457604,
+      "paired_dr2_mean": 0.3860824653652004,
+      "paired_ci95": [
+        0.3015221891650982,
+        0.46130302908512544
+      ],
+      "se_paired": 0.04081457136027849,
+      "mde_paired": 0.11436242895150033,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.4840355446867393,
+      "y_over_ceiling": true,
+      "y_mean": 0.002274668849863926,
+      "r2_legit_full": 0.4240374267363952,
+      "learnable_on_this_representation": true,
+      "ceiling_up": true,
+      "identity_suspect": "`rank_points` 由终局点数决定，`ctx` 里就有当前点数 ⇒ 主要是恒等式",
+      "verdict": "**可用**（合法上限升 ×6.38）",
+      "ceiling_relation": "✅ 合法列 R²=+0.42404 > 现状 +0.06643（×6.38）⇒ 该目标**不受**现状天花板约束；⚠ 恒等式嫌疑：`rank_points` 由终局点数决定，`ctx` 里就有当前点数 ⇒ 主要是恒等式"
+    },
+    "E2_shanten": {
+      "r2": 0.5407905654410219,
+      "r2_gain_vs_base": 0.5133190480389774,
+      "paired_dr2_mean": 0.5129687923977123,
+      "paired_ci95": [
+        0.49325166945545657,
+        0.535015875912812
+      ],
+      "se_paired": 0.010475618329508638,
+      "mde_paired": 0.029352682559283205,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.13872404192574178,
+      "y_over_ceiling": true,
+      "y_mean": 0.21197010263275323,
+      "r2_legit_full": 0.9999999999999837,
+      "learnable_on_this_representation": true,
+      "ceiling_up": true,
+      "identity_suspect": "`afterDiscard` 向听与 `effect`/`cand.derived` **同源** ⇒ 合法列 R²=1.0 是构造性的",
+      "verdict": "**可用**（合法上限升 ×15.05）",
+      "ceiling_relation": "✅ 合法列 R²=+1.00000 > 现状 +0.06643（×15.05）⇒ 该目标**不受**现状天花板约束；⚠ 恒等式嫌疑：`afterDiscard` 向听与 `effect`/`cand.derived` **同源** ⇒ 合法列 R²=1.0 是构造性的"
+    },
+    "E2_dealin_sum": {
+      "r2": -0.026236622198550608,
+      "r2_gain_vs_base": -0.05370813960059506,
+      "paired_dr2_mean": -0.05405968781459256,
+      "paired_ci95": [
+        -0.07394150658644186,
+        -0.03446969372742163
+      ],
+      "se_paired": 0.010077885097712156,
+      "mde_paired": 0.028238234043789463,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 0.3633358093596509,
+      "y_over_ceiling": false,
+      "y_mean": 0.15650751152759185,
+      "r2_legit_full": -0.007334502698470358,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=-0.00733 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "E2_placement": {
+      "r2": 0.3182657056189372,
+      "r2_gain_vs_base": 0.29079418821689273,
+      "paired_dr2_mean": 0.2884071138234039,
+      "paired_ci95": [
+        0.21717003997633205,
+        0.36459181883763964
+      ],
+      "se_paired": 0.037593547564889175,
+      "mde_paired": 0.10533712027681948,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 1.1203802963835088,
+      "y_over_ceiling": true,
+      "y_mean": 1.4963260449204225,
+      "r2_legit_full": 0.32360387399804924,
+      "learnable_on_this_representation": true,
+      "ceiling_up": true,
+      "identity_suspect": "顺位由终局点数决定，`ctx` 里就有当前点数 ⇒ 主要是恒等式",
+      "verdict": "**可用**（合法上限升 ×4.87）",
+      "ceiling_relation": "✅ 合法列 R²=+0.32360 > 现状 +0.06643（×4.87）⇒ 该目标**不受**现状天花板约束；⚠ 恒等式嫌疑：顺位由终局点数决定，`ctx` 里就有当前点数 ⇒ 主要是恒等式"
+    }
+  },
+  "negatives": {
+    "NEG_opp_delta_shift": {
+      "r2": 0.020031277893093336,
+      "r2_gain_vs_base": -0.007440239508951119,
+      "paired_dr2_mean": -0.007900632856343077,
+      "paired_ci95": [
+        -0.022696898143645217,
+        0.005939814580712799
+      ],
+      "se_paired": 0.007128042803252678,
+      "mde_paired": 0.019972775934714006,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 5.305949053231767,
+      "y_over_ceiling": false,
+      "y_mean": 0.004997768853190542,
+      "r2_legit_full": 0.02564739287059037,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=+0.02565 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "NEG_neg_delta": {
+      "r2": 0.027471517402044454,
+      "r2_gain_vs_base": 0.0,
+      "paired_dr2_mean": 0.0,
+      "paired_ci95": [
+        0.0,
+        0.0
+      ],
+      "se_paired": 0.0,
+      "mde_paired": 0.0,
+      "n_boot_eff": 400,
+      "n_eff": 33615,
+      "y_std": 5.305949053231767,
+      "y_over_ceiling": false,
+      "y_mean": -0.004997768853190543,
+      "r2_legit_full": 0.06642858970907184,
+      "learnable_on_this_representation": false,
+      "ceiling_up": false,
+      "identity_suspect": null,
+      "verdict": "出局",
+      "ceiling_relation": "⛔ 被同一条信息天花板压住（合法列 R²=+0.06643 ≤ 现状 +0.06643）⇒ 换它不解锁 0.069"
+    },
+    "NEG_constant_zero": {
+      "r2": NaN,
+      "r2_gain_vs_base": null,
+      "paired_dr2_mean": null,
+      "paired_ci95": [
+        null,
+        null
+      ],
+      "n_boot_eff": 0,
+      "y_std": 0.0,
+      "verdict": "出局（无定义 · 管道对照）",
+      "why": "常数因变量 ⇒ R² 与配对 ΔR² 均无定义（分母 0）"
+    }
+  },
+  "placebo_shuffle": {
+    "r2": -0.004954538556359855,
+    "y_std": 5.305949053231767
+  },
+  "placebo_action_key": {
+    "r2": 0.03121918002706625
+  },
+  "ceiling": {
+    "reference_doc": 0.0693,
+    "per_target": {
+      "REF_delta": 0.06642858970907184,
+      "E1_own_win": 0.1393897255080907,
+      "E1_own_win_delta": 0.09984029477596057,
+      "E1_hand_agg": 0.03454427630333301,
+      "E1_winner_delta": 0.004451420653757809,
+      "E3_hand_norm": 0.04876865585279844,
+      "E3_value_final": 0.5197042913797044,
+      "E3_rank_pts": 0.4240374267363952,
+      "E2_shanten": 0.9999999999999837,
+      "E2_dealin_sum": -0.007334502698470358,
+      "E2_placement": 0.32360387399804924,
+      "NEG_opp_delta_shift": 0.02564739287059037,
+      "NEG_neg_delta": 0.06642858970907184,
+      "NEG_constant_zero": NaN
+    },
+    "calibration_delta": 0.06642858970907184,
+    "calibration_ok": true
+  },
+  "self_mem": {
+    "peak_committed_mb": 2657.0,
+    "peak_ws_mb": 2016.1,
+    "note": "本进程自报（⛔ 不是蹦床那条路的读数）"
+  }
+}

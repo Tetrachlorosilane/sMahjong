@@ -1,0 +1,120 @@
+{
+ "tool": "overlap-orchestrator",
+ "mode": "calibrate-trampoline",
+ "ts": "2026-10-16 00:28:07",
+ "load_gb": 0.35,
+ "load_secs": 6.0,
+ "trampoline_python": "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe",
+ "real_python": "C:\\Users\\HP\\source\\games\\mahjong\\.uv-python\\cpython-3.12.13-windows-x86_64-none\\python.exe",
+ "exists": {
+  "trampoline": true,
+  "real": true
+ },
+ "rows": [
+  {
+   "arm": "trampoline",
+   "spawn_exe": "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe",
+   "popen_pid": 42236,
+   "trampoline_alive": true,
+   "popen_alive_now": true,
+   "popen_mem": {
+    "committed_mb": 1.3,
+    "peak_committed_mb": 1.3,
+    "ws_mb": 7.4,
+    "peak_ws_mb": 7.4
+   },
+   "popen_cpu_s": 0.016,
+   "read_tries": 1,
+   "read_fail": false,
+   "resolve": {
+    "ok": true,
+    "pid": 38604,
+    "image": "python.exe",
+    "cmdline": "\"C:\\Users\\HP\\source\\games\\mahjong\\.uv-python\\cpython-3.12-windows-x86_64-none\\python.exe\"  -u tmp\\nextphase\\ev\\_ov_trampoline_child.py 0.35 6.0 1 tmp\\nextphase\\ev\\_ov_tramp_trampoline.ready",
+    "how": "后代闭包 + 镜像 ∧ 命令行特征",
+    "trampoline_pid": 42236,
+    "descendants": 1,
+    "tries": 1
+   },
+   "system": {
+    "commit_free_gb": 10.61,
+    "commit_limit_gb": 34.89,
+    "committed_gb": 24.29,
+    "free_phys_gb": 12.83
+   },
+   "real_pid": 38604,
+   "real_alive": true,
+   "real_mem": {
+    "committed_mb": 365.0,
+    "peak_committed_mb": 365.0,
+    "ws_mb": 370.1,
+    "peak_ws_mb": 370.2
+   },
+   "real_cpu_s": 1.0
+  },
+  {
+   "arm": "real",
+   "spawn_exe": "C:\\Users\\HP\\source\\games\\mahjong\\.uv-python\\cpython-3.12.13-windows-x86_64-none\\python.exe",
+   "popen_pid": 27556,
+   "trampoline_alive": true,
+   "popen_alive_now": true,
+   "popen_mem": {
+    "committed_mb": 364.9,
+    "peak_committed_mb": 364.9,
+    "ws_mb": 370.0,
+    "peak_ws_mb": 370.0
+   },
+   "popen_cpu_s": 0.75,
+   "read_tries": 1,
+   "read_fail": false,
+   "resolve": {
+    "ok": false,
+    "pid": null,
+    "why": "还没有后代（蹦床尚未 re-exec）",
+    "tries": 10,
+    "feature": "_ov_trampoline_child.py",
+    "descendants_seen": 0,
+    "last_seen": null
+   },
+   "system": {
+    "commit_free_gb": 10.82,
+    "commit_limit_gb": 34.89,
+    "committed_gb": 24.07,
+    "free_phys_gb": 13.0
+   }
+  }
+ ],
+ "checks": [
+  {
+   "id": "trampoline-is-fake",
+   "ok": true,
+   "detail": "蹦床 pid=42236 alive=True committed=1.3 MB（名义 358） ⇒ 假读数/已退（符合预期）"
+  },
+  {
+   "id": "real-body-committed",
+   "ok": true,
+   "detail": "真身臂 pid=27556 committed=364.9 MB（名义 358；读数尝试 1 次）⇒ 对得上；后代解析=无后代（直起真身，本就该没有）"
+  },
+  {
+   "id": "resolved-real-body",
+   "ok": true,
+   "detail": "蹦床臂解析：ok=True pid=38604（蹦床 42236）committed=365.0 MB（名义 358）⇒ 解析到了真身 ✅"
+  },
+  {
+   "id": "cpu-visible",
+   "ok": true,
+   "detail": "真身臂 cpu_s=0.75（期望 >0）"
+  }
+ ],
+ "ok": true,
+ "override": {
+  "DATA_ROOT": "S:\\mahjong-training",
+  "COMPACT_ROOT": "E:\\mahjong-training\\compact",
+  "RAW_ROOT": "S:\\mahjong-training\\raw",
+  "WORKERS": 8,
+  "CHUNK": 100000,
+  "TIMEOUT": 0.0,
+  "REPO": "C:\\Users\\HP\\source\\games\\mahjong",
+  "PY": "C:\\Users\\HP\\source\\games\\mahjong\\python\\.venv\\Scripts\\python.exe"
+ }
+}
