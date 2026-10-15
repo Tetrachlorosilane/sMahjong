@@ -88,6 +88,8 @@
 | `tools/ceiling-gate.py --selftest` | **PASS** |
 | 蹦床标定（`calibrate-trampoline`） | **全部通过**：蹦床臂 `Popen.pid` = 1.3 MB / 7.4 MB / cpu 0.016 s；解析真身 = **365.0 MB** / 370.1 MB / cpu 1.0 s；真身臂直起 = **364.9 MB** / 370.0 MB（名义 358 MB，±25% 内） |
 
-原始件：`lab/nextphase/evidence/{nextphase-probe-full.json, trampoline-calibration.json}` ·
-`tmp/nextphase/{probe-stdout.txt, peakmem-probe.txt, tramp-cal.log, probe-full.log}` ·
-`tmp/nextphase/ev/ov-selftest.json`。
+原始件（**入库**）：`lab/nextphase/evidence/{nextphase-probe-full.json, trampoline-calibration.json}`
+（两份 JSON 已含全部逐目标读数/判决与标定的逐次读数）。
+⚠ **`tmp/nextphase/**` 已按纪律「用完即删」删除**（**284.79 MB** 的过程日志 + 诊断脚本 + 临时 venv 树）：
+其中 `probe-stdout.txt` / `peakmem-probe.txt` / `tramp-cal.log` / `probe-full.log` / `ev/ov-selftest.json`
+的内容已被上面两份 JSON 与本文表格逐字收录；删前大小见本轮 NOTES 第八十七轮「残留」行。
