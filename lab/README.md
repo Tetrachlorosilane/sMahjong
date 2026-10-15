@@ -30,6 +30,7 @@ lab/
 ├── style-vector-per-gen/          风格向量逐代读数（76 份 md）
 ├── gpu/                           GPU 自对弈与迁移（未投）
 ├── housekeeping/   (+evidence/)   清理 / 轮次表 / 复算 / 稳定性
+├── research/                      自对弈逃逸 · 文献综合（无人类数据主线；含 2026-10-15 主线裁决原文）
 └── backlog/        (+evidence/)   想法与待办（catch-all）
 ```
 

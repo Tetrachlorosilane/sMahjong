@@ -417,6 +417,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 
 > ⛔ **本节只留判据**：**实测数字 / 红证 / 原始输出 / 事故经过**已逐字搬进 **`NOTES.md` §6.5 附录 C/E**。
 
+- ⛔ **主线裁决（2026-10-15 项目方批准）**：命题 = 无人类数据、只靠训练策略分配；**特权/完美信息只进 critic（MV-2）**、⛔ 不走强特权→policy 蒸馏；PSRO/QD 在四人非零和下排除；顺序 MV-1→MV-2→MV-3。见 `NOTES.md` §6.5。
 - **只有一个决策漏斗**：`Table.decideBot(seat, Decision)`。自家摸打（`Round.ask`）与鸣牌段都汇到它；
   `policy[seat] == null` 时走内置 `Bot`。**不要再往第三个地方直接调 `Bot.decide`**。
 - ⚠ **鸣牌段不走 `Round.ask()`** → `debugAskTap` **看不到鸣牌**；任何"每次询问都要做的事"都挂在漏斗上

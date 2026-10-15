@@ -939,6 +939,29 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 
 ## 6.5 训练接口（机器学习 / 自对弈）
 
+### 6.5 主线裁决（2026-10-15 项目方批准）
+
+> ⚠ **本节不编号为"第 N 轮"** —— 它记的是**项目方已批准的四条主线裁决**，不是一次训练轮次
+> （⛔ 不动 `tools/round-index.mjs` 的轮次索引）。全文与依据出处 = `lab/research/SELFPLAY-ESCAPE-LIT.md`（§1 / §2 / §5）。
+
+1. **命题（主线定义）** = **无大规模人类牌局数据**下、**仅靠「训练策略分配」**（目标拆分 / 群体·对手分配 /
+   课程与算力预算 / 评价指标）**能否训出可用模型**。⛔ **依赖人类牌局数据的外部模型**（**Mortal** 等）
+   **仅列备选、不进主线**（依据 `SELFPLAY-ESCAPE-LIT.md` §1-①、§2 的三分区说明）。
+2. ⭐ **特权 / 完美信息只许进 critic（PTIE，MV-2）**，⛔ **不走"强特权模型 → policy 蒸馏"**。
+   依据：**Suphx 明文否定简单蒸馏**（[arXiv:2003.13590](https://arxiv.org/abs/2003.13590)）+ **PerfectDou
+   的 actor/critic 不对称**（[arXiv:2203.16406](https://arxiv.org/abs/2203.16406)）—— 见 `SELFPLAY-ESCAPE-LIT.md` §2-B1。
+3. ⛔ **群体 / 联赛（PSRO 系）与 QD / MAP-Elites 在四人非零和下排除**：**理论有解、实践不成立**
+   （n 人一般和的精确 NE 是 **PPAD-完全**、payoff tensor 难扩展、archive 随维度**指数**膨胀）。
+   依据 `SELFPLAY-ESCAPE-LIT.md` §1-⑥⑦、§3、§5-⑥：[JPSRO 2401.05133](https://arxiv.org/abs/2401.05133) ·
+   [PSRO 综述 2403.02227](https://arxiv.org/abs/2403.02227) · [QD 2407.17515](https://arxiv.org/abs/2407.17515)。
+4. **主线顺序** = **MV-1（辅助子目标多头）→ MV-2（特权只进 critic）→ MV-3（预算 / 对手分配；最后一次作证伪）**。
+   依据 `SELFPLAY-ESCAPE-LIT.md` §1-③⑩、§4、§5b：[KataGo 1902.10565](https://arxiv.org/abs/1902.10565)
+   Table 2（去掉 aux owner+score 头 = **1.65×** 训练时间，最大单项消融）。
+
+> ⚠ **全部消融来自围棋 / 纸牌类**（KataGo = 围棋、PerfectDou = 斗地主、Suphx = 麻将但**依赖人类牌谱**）——
+> **跨域到四人立直麻将必须我们自证**：MV-1 / MV-2 / MV-3 的收益一律按 `AGENTS.md` §6.5 的**配对闸门 +
+> 预注册 MDE** 自测，⛔ **不许拿跨域数字当结论**。
+
 > **轮次索引**（75 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
 > ⚠ **编号不单调是历史事实**：第六十七轮物理上在第六十六轮**之前**；**1–4 / 48–54 没有独立小节**
 > （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
