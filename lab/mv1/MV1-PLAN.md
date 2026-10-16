@@ -78,3 +78,19 @@
 - ⚠ **偏离 ④**：`selfcheck` **929/0 → 935/0**（+6 条：把 FEASIBILITY §4.2 第 6 条改写成"**开关关 ⇒ 不喂**"+正向对照，并新增 `state` 键、`loss_weights()` 逐字对照、**辅助头 BCE 梯度真到主干**及其负向"输入换常数 ⇒ 主干梯度恒 0"）。
 - ⏭ **仍未做（属下一批）**：§2 的两臂正式训练（含 §2 的 `KL(step)` 标定曲线）、§4 的 24,000 场闸门、§7 的 `ceiling-gate`。本批只到"管线可证"。
 
+**训练相第二步（2026-10-16，`NOTES.md` §6.5 第九十一轮）—— MV-1 第一刀的「两臂正式训练」（`base` vs `aux`，600 步）；⛔ 未跑闸门、未采集、未发布：**
+
+- **本批冻写的 base 配方（逐字；两臂只差一个开关）**：`python\.venv\Scripts\python.exe -u -m mahjong_ml.v4.pretrain --data E:\mahjong-training\compact\ov-A-s00 --label mv1-s91-<臂> --epochs 12 --max-steps 50 --batch 512 --lr 1e-3 --head-lr-mult 3.0 --seed 20260927 --init <仓库>\tools\build\v4-expert-defrep-g10\net.bin --objective ppo --behaviour <同一份> --behaviour-temp 0.5 --value-target delta --advantage hand --rank-weight 0.2 --baseline-fit scale --stage-a 0 --stage-b 0 --ref-beta 0.5 --grad-clip 0.5 --kl-early-stop 1 --kl-min-steps 100 --threads 8`；`aux` 臂**只多** `--aux-own-win-weight 0.3`（head lr = 缺省 3.0 ⇒ 3e-3；⛔ 未用上批 smoke 的 `--head-lr-mult 20`）。**两臂总步数 = 600**（50 步/轮 × 12 轮，落在 §2 的 400–600 内且取上限）；顺序跑、⛔ 不并发。
+- ⚠ **偏离 ⑤（KL 阈值标定，照实）**：按 §2 用**同配方短跑**量 `KL(step)`（`--kl-early-stop 0`、12 个 50 步窗口、`total_steps` 与两臂同为 600）：KL(π_old‖π_new) **在第一个窗口即达峰**（窗口均值 **0.1061**），随后**衰减**（0.0675 / 0.0765 / 0.0640 / 0.0567 / 0.0414 / 0.0259 / 0.0295 / 0.0327 / 0.0257 / 0.0223 / **0.0236**；`ref_kl` 0.0841→0.0187）⇒ **§2 倾向的 0.10 会在 600 步内被越过（两臂都会被截断 ⇒ 按 §6 该臂作废）**，不可用。再以 `--kl-early-stop 0.30` **同配方跑满 600 步**：**未触发**（`stop_reason` 空）⇒ **实测峰值 ≤ 0.30** ⇒ 取 **T = 1.0**（= 实测窗口均值峰的 **9.4×**、= 实测峰值上界的 **≥3.3×**、= §2 倾向值的 10×）⇒ 两臂均**跑满 600 步**、`stop_reason` 皆空。⚠ 这**不是**"关掉早停"（T 是正的、且实测不绑定）；"别乱动"由 `--ref-beta 0.5` 的**现任锚**承担 —— 那正是 W3 的既有设计（放宽 KL 预算 + 对现任加锚）。
+- ⚠ **偏离 ⑥**：`--kl-min-steps 100` 对 50 步/轮**够不着** ⇒ 被 `effective_kl_min_steps` 钳到 **10**（轮长的 1/5）—— 与第八十二轮 BL-13 同一现象（那里 120→24）。两臂**同一份**，不构成不等算力。
+- ⚠ **偏离 ⑦（配方来源）**：第九十轮的负向对照**没有归档命令行**（`.tmp/mv1/**` 已按纪律删除）⇒ 本批的 base 配方**由本批自行冻写**（取值 = BL-13 冻结配方 + 本批的 `--batch 512` 与定步方式）；⛔ 因此**不声称"与今天逐字节相同的那条路径"**（那需要上一批的命令行）。
+- ⚠ **偏离 ⑧**：`--stage-a 0 --stage-b 0`（= 全程阶段 c、余弦降 lr，与 BL-13 冻结配方同）**覆盖了 CLI 缺省的 0.25/0.35** —— 理由：缺省阶段 b 会**冻结主干**，而本刀的判据 ①(c) 正是"辅助头的梯度真到主干"，冻结段会让该读数在 100–240 步上人为归零。
+- **操作检查（逐条原文见 `NOTES.md` 第九十一轮；§6：缺一条即该臂作废）**：
+  - ①(a) `aux` 臂 `parts["own_win"]` 12 个窗口**逐窗落在 0.4437–0.5225 并整体下行**，**末窗 0.4437 < 边缘 BCE 0.5291**（val 边缘率 0.221687 的常数预测子 BCE），**且** < train 切分更严的 **0.523745** ⇒ 过。
+  - ①(b) 头参数非退化（逐张量）：`own_win_head.proj.weight` shape **[1,192]**、**max|W| = 0.497751**（‖W‖₂ = 1.6363、非零比 1.0）· `bias` max|b| = 0.050049 ⇒ 过（⛔ 非表级常量）。
+  - ①(c) **梯度真到主干**：base vs aux 的 `state_dict()` **78/78 张量全不同**（主干 **62/62**、‖Δ‖₂ = **13.562**；头 16/16、‖Δ‖₂ = 6.772；最大 `event.cell.weight_hh` ‖Δ‖₂ = 7.183 / max|Δ| = 0.1238）⇒ 主干**确实被辅助头推动** ⇒ 过。
+  - ② 两臂 `stop_reason` **均为空**（`metrics.json` 里 = `null`）· `epochs=12` · `steps_per_epoch=50` ⇒ **跑满 600 步**（无段末早停存档）⇒ 过。
+  - ③ 两臂**都写出权重**：`tools\build\mv1-s91-base\net.bin` **5,594,680 B** sha256 **A8D4CA76D274B3784743001F8BDB63EDF8D8AEE65F65340109219A638148DCF2**；`aux` **5,594,680 B** sha256 **317EB2C25A8A5E3CAB548AF450B43499059CF3DB39C04438C24F1AC98D3B93F5**（⛔ `own_win_head` **不进** `net.bin`：两臂字节数相同，差异全在主干/在线头权重上）⇒ 过。
+- ⚠ **偏离 ⑨（采样口径）**：`overlap-orchestrator.resolve_real_pid(allow_self=True)` 在本机**抢跑**（第一个 0.4 s 探针看不到后代 ⇒ 判"本 pid 即真身"）⇒ 把 47,104 B 的 **venv 蹦床**当成训练真身，读出 **1.3 MB / 7.4 MB** 的假峰值；本批改为**扫描全部 `python*` 镜像取 committed 最大者**，并先用**已知负载标定**（名义 500 MB ⇒ 实测 **506.8 MB**，+1.4%）。⚠ 另：`Win32_OperatingSystem.FreeVirtualMemory` 本机读数为 **0.01 / TotalVirtualMemorySize 0.03 GB**（明显坏值）⇒ 本批一律用 `GlobalMemoryStatusEx.ullAvailPageFile`（= Commit Limit − Committed）。
+- ⏭ **仍未做（属下一批）**：§4 的 24,000 场闸门（3 族 × 4,000/臂 = n 12,000 配对）与 §7 的 `ceiling-gate` 硬前置（**它吃两臂的 net.bin ⇒ 本批产出后才跑得动**）。
+

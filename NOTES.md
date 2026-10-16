@@ -1049,6 +1049,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第八十八轮 | 2026-10-16 | MV-1 第一刀**预注册**（辅助子目标头 `own_win`）+ 零训练可判性核查 —— **标签已在手 ⇒ 零扩列/零重采** · MDE 对账 · 管线改动清单（⛔ 本批未实现 flag） |
 | 第八十九轮 | 2026-10-16 | 过度删除判据化 —— 一次 `Remove-Item -Recurse -Force .tmp` 删掉整个共享目录 |
 | 第九十轮 | 2026-10-16 | MV-1 第一刀**训练相第一步** —— `own_win` 辅助头实现（缺省关）+ 负向对照（`weight=0` ≡ base：`net.bin` sha256 / 逐字日志 / 数据顺序指纹）+ 正向冒烟五条 |
+| 第九十一轮 | 2026-10-16 | MV-1 第一刀**两臂正式训练**（`base` vs `aux`，600 步，唯一差异 = `--aux-own-win-weight 0.3`）+ KL(step) 标定（实测 0.10 会截断 ⇒ 取 T=1.0）—— 操作检查三组全过；⛔ 未跑闸门/未采集/未发布 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6429,6 +6430,17 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **资源读数**：`commit_free` 最低 **13.70 GB**（纪律线 8 GB **未触及**、0 次越线、**未触发 exit 7**）；真身峰值 **committed 3,583.8 MB / ws 7,822.6 MB**（判据 = 91,648 B 解释器镜像 ∧ 命令行含 `mahjong_ml`；⚠ 同秒 venv **蹦床** 47,104 B 自报 **1.3 MB / 7.4 MB** = 复现第八十七轮的假读数）；墙钟：负向两跑各 32.5/32.7 s、+0.3 四步 32.9 s、lr 抬档四跑 33.3/55.5/93.7/140.3 s（`--threads 8`，一次一个重负载）。
 - ⛔ **未跑**正式两臂训练 · ⛔ **未跑** 24,000 场闸门 · ⛔ **未采集/未评测/未发布**；临时件 `.tmp/mv1/**`（采样器/探针/日志/ckpt/net.bin）**逐项 `-LiteralPath` 删除**（⛔ 无 `-Recurse -Force`）。
 - **偏离（照实，逐字进 `MV1-PLAN.md` §10）**：① 正向冒烟的 ①(a) 阈值跨过用了 **smoke-only** 的 `--head-lr-mult 20`（预注册配方头 lr = 3e-3，4 步只有 0.6453 ⇒ 阈值的**步数预算**约 300+ 步；正式两臂仍用缺省 3.0）；② `save_checkpoint` 多了一个 `own_win_head=None` 关键字参数（关着时不写这个键）；③ 判据落在 `net.bin` sha256 + `_state_sha256` + 逐张量逐位，⛔ 不落在 `model.pt` 文件哈希上。
+
+**第九十一轮：MV-1 第一刀「两臂正式训练」（`base` vs `aux`，600 步）（2026-10-16）**
+> 预注册 `lab/mv1/MV1-PLAN.md`（§10 追加偏离⑤–⑨，§1–§9 一字不改）；判据行仍在 `AGENTS.md` §6.5（第 17 条）。
+- ⭐ **唯一自变量 = `--aux-own-win-weight`**（`base` 不传 / `aux` **0.3**，head lr = 缺省 **3.0**）：数据 `E:\mahjong-training\compact\ov-A-s00` · `--init` = `--behaviour` = `tools\build\v4-expert-defrep-g10\net.bin`（sha256 `167A7002…87DF`）· seed 20260927 · batch 512 · **600 步 = `--epochs 12 --max-steps 50`** · `--kl-early-stop 1` · `--threads 8`；**顺序跑（⛔ 不并发）**。
+- ⭐ **KL 标定（同配方短跑）**：`--kl-early-stop 0` 的 12×50 窗口曲线**第 1 窗即达峰 0.1061**、随后衰减到 **0.0236**（`ref_kl` 0.0841→0.0187）⇒ **PLAN 倾向的 0.10 会在 600 步内触发（按 §6 两臂都作废）**；`--kl-early-stop 0.30` **同配方跑满 600 步未触发** ⇒ 峰值 ≤0.30 ⇒ 取 **T = 1.0**（9.4× / ≥3.3×）⇒ 两臂均跑满。
+- **操作检查三组（全过）**：①(a) `own_win` BCE 12 窗 **0.5225→0.4732→0.4666→0.4588→0.4600→0.4605→0.4598→0.4453→0.4455→0.4458→0.4563→0.4437**（**末窗 0.4437 < 0.5291**，且 < train 边缘 **0.523745**）；①(b) `own_win_head.proj.weight` **[1,192] max|W|=0.497751**（‖W‖=1.6363）· bias 0.050049 ⇒ 非退化；①(c) base vs aux **78/78 张量全不同**（**主干 62/62**、‖Δ‖₂ **13.562**；头 16/16、6.772；最大 `event.cell.weight_hh` ‖Δ‖₂ 7.183 / max|Δ| 0.1238）⇒ **梯度真到主干**；② 两臂 `stop_reason` **皆空**（`null`）· `epochs=12` · `spe=50`（600 步）；③ `tools\build\mv1-s91-{base,aux}\net.bin` 各 **5,594,680 B**，sha256 **A8D4CA76…DCF2** / **317EB2C2…93F5**（⛔ `own_win_head` 不进 `net.bin`）。
+- **资源读数**：`commit_free` 最低 **10.88 GB**（五跑，纪律线 8 GB **未触及**、0 次越线、**未触发 exit 7**）；真身峰值 **committed 4,371.2 MB / ws 17,192.5 MB**（口径 = **扫描全部 `python*` 镜像取 committed 最大者**；⚠ 本机 `resolve_real_pid(allow_self=True)` **抢跑** ⇒ 把 47,104 B venv 蹦床判成真身、读出 **1.3 MB / 7.4 MB** 假峰值（第八十七轮同款，本批现场复现）；⚠ 先做**已知负载标定**：名义 500 MB ⇒ 实测 **506.8 MB**（+1.4%））；墙钟 base **301.4 s** / aux **302.4 s** / 标定 0.30 **304.4 s**（+ 两个短跑 197.4 s / 203.4 s；每步 ≈0.21 s，训练相 `wall_seconds` 126.7/127.1 s），`--threads 8`、一次一个重负载。
+- ⛔ **未跑**闸门（`tools\ceiling-gate.py` + 24,000 场留到下一批，硬前置是"先用两臂 net.bin 跑 ceiling-gate"）· ⛔ 未采集/未评测/未发布 · ⛔ 未改 `AGENTS.md`（无需新判据；一条口径建议见下）。
+- **残留与清理**：证据 + 权重留在 **gitignored** 的 `tools\build\mv1-s91-{base,aux}\`（net.bin + metrics.json + model.pt）与 `tools\build\mv1-s91-evidence\`（逐跑 run.json 含**逐字命令行** + stdout + 分析件 + 采样器标定）—— 刻意不再重蹈第九十轮"删了 `.tmp` 就丢了命令行"；自建临时件 `.tmp/mv1-s91/**` **逐项 `-LiteralPath`** 删除（⛔ 无 `-Recurse -Force`）。
+- **偏离（照实）**：① **T=1.0 ≠ PLAN 倾向的 0.10**（实测 0.10 会截断）；② `--kl-min-steps 100`→钳到 10；③ base 配方**由本批冻写**（第九十轮未归档命令行）；④ `--stage-a 0 --stage-b 0` 覆盖缺省 0.25/0.35（缺省阶段 b 冻主干 ⇒ 会让 ①(c) 人为归零）；⑤ **采样口径**：改用"全 `python*` 镜像扫描"（`resolve_real_pid` 抢跑）；⑥ `Win32_OperatingSystem.FreeVirtualMemory` 本机坏值（0.01 GB / Total 0.03 GB）⇒ 一律用 `GlobalMemoryStatusEx.ullAvailPageFile`。
+- **建议入档行（⛔ 本批未改 `AGENTS.md`）**：`⛔ 真身内存采样不许只用 resolve_real_pid(allow_self=True)：它会在"蹦床刚起、后代未生"的窗口里把蹦床判成真身（1.3 MB 假峰值）；判据 = 同一时刻**扫描全部 python*/trainer* 镜像取 committed 最大者**，并先用已知负载标定。`
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
