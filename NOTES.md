@@ -962,7 +962,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 > **跨域到四人立直麻将必须我们自证**：MV-1 / MV-2 / MV-3 的收益一律按 `AGENTS.md` §6.5 的**配对闸门 +
 > 预注册 MDE** 自测，⛔ **不许拿跨域数字当结论**。
 
-> **轮次索引**（75 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
+> **轮次索引**（81 个小节；正文按**写入时间**排列）—— 找"第 N 轮做了什么"先看这张表。
 > ⚠ **编号不单调是历史事实**：第六十七轮物理上在第六十六轮**之前**；**1–4 / 48–54 没有独立小节**
 > （前四轮与 48–54 见 `docs/TRAINING-V4.md` 的对应章节）。⛔ **不要为了顺号重排正文** ——
 > 编号被 `docs/TRAINING-V4.md` / `docs/HANDOVER.md` / 代码注释大量引用。
@@ -1051,6 +1051,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第九十轮 | 2026-10-16 | MV-1 第一刀**训练相第一步** —— `own_win` 辅助头实现（缺省关）+ 负向对照（`weight=0` ≡ base：`net.bin` sha256 / 逐字日志 / 数据顺序指纹）+ 正向冒烟五条 |
 | 第九十一轮 | 2026-10-16 | MV-1 第一刀**两臂正式训练**（`base` vs `aux`，600 步，唯一差异 = `--aux-own-win-weight 0.3`）+ KL(step) 标定（实测 0.10 会截断 ⇒ 取 T=1.0）—— 操作检查三组全过；⛔ 未跑闸门/未采集/未发布 |
 | 第九十二轮 | 2026-10-17 | MV-1 **闸门前置 A**（`ceiling-gate --collect`，3 族 × 500 场/族/臂 = **n 1,500 配对**，零训练）—— 判 **`测不出`（exit 4）**、实测 MDE **3.734**；三条护栏全 `usable_as_veto=false`；⛔ 未跑 B（24,000 场）/未训练/未发布 |
+| 第九十三轮 | 2026-10-17 | MV-1 **正式闸门 B**（`ceiling-gate --collect`，3 族 × 4,000 场/臂 = **24,000 场 / n 12,000 配对**，零训练）—— 判 **`测不出`（exit 4）**（主口径 Δ=+0.2570 CI[−0.6357,+1.1531]、`MDE_Bonf` **1.104>1.0**、逐族**不同号**、安慰剂**显著** ⇒ §5④）；⛔ 未训练/未发布 |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6450,6 +6451,18 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - ⚠ **A 的能力边界（照实）**：n=1,500/臂 的实测 MDE = **3.734 顺位点** = §3 预注册 B（n=12,000）`MDE_95` **0.973** 的 **3.84×**（同 sd 外推 B 的 MDE_95 = 51.618/√12000×1.960 = **0.924**；工具 `MDE_80` 口径 = **1.320**）⇒ A **只能当"有没有大问题"的哨兵**，⛔ **不许读成"过/有效"**。§7 写"只有 `verdict == "过"`（退出码 0）才放行" ⇒ 本轮**不放行**：A 的唯一授权结论 = **没发现大问题**（点估计为正、3/3 逐族为正、安慰剂不显著、ρ 可识别、无护栏越界、两臂权重 sha256 钉住、零训练自证干净、墙钟 952.13 s ≤ 1800 s）⇒ **既不构成开 B 的正当理由，也不构成对 B 的拦阻**（判决在 B）。
 - **资源读数**：`commit_free` 最低 **8.94 GB**（1 s 栅格、两段采样；纪律线 8 GB **未触及**、0 次越线、**未触发**内存树杀）；峰值 **committed 1,207.2 MB / ws 524.6 MB** —— 按⑨那句"全部 `python*` 取 committed 最大"命中 **`ceiling-gate.py` 自己那条 python**，而本相真重负载 **`trainer.exe` 只有 committed 149.8 MB / ws 153.7 MB** ⇒ 三种口径（`python*` / `trainer*` / 闸门工具链）都照报；墙钟 **954.1 s**（工具自报 952.13 s ≤ 1800 s 预算）；6 条采集各 246.1/130.1/162.1/137.1/138.1/137.1 s、`--workers 8`、**一次一个重负载**。
 - **纪律**：只跑了 A —— ⛔ 未跑 §4 的 24,000 场 B、⛔ 未训练、⛔ 未发布、⛔ 未采集本次 A 以外任何数据、⛔ 未改 `AGENTS.md`/校验器/`raw/**`（采集落私有 `.tmp/mv1-s91-precheck/collect/**`）；证据（逐字命令行 + stdout + dry-run + 采样器 + 6 条采集日志 + `verdict.json`）留在 gitignored 的 `tools\build\mv1-s91-evidence\`，自建临时件**逐项 `-LiteralPath`** 删除（⛔ 无 `-Recurse -Force`）。
+
+**第九十三轮：MV-1 正式闸门 B（`tools\ceiling-gate.py --collect` · 3 族 × 4,000 场/臂 = 24,000 场 · n 12,000 配对，2026-10-17）**
+> 预注册 `lab/mv1/MV1-PLAN.md` §10 追加 B 段（§1–§9 一字不改）；判据行 = `AGENTS.md` §6.5 第七十六轮⑥ + §5 四出口。
+- ⭐ **逐字命令行**（与 A **同源**：只换 `--tag/--games/--budget-min/--collect-out/--out`；⛔ `--table`/`--trainer`/三族 `--wall`/`--workers 8` 一字不改）：`python\.venv\Scripts\python.exe tools\ceiling-gate.py --collect --tag mv1-s91 --wall 53610001 --wall 53610002 --wall 53610003 --games 4000 --workers 8 --budget-min 220 --base-net tools\build\mv1-s91-base\net.bin --cand-net tools\build\mv1-s91-aux\net.bin --table tools\build\v4-expert-def7-g10\net.bin,tools\build\v4-expert-win2-g10\net.bin,tools\build\v4-expert-atk3-g10\net.bin --trainer S:\mahjong-training\tools\trainer\trainer.exe --collect-out .tmp\mv1-s91-B\collect --out tools\build\mv1-s91-evidence\mv1-s91-verdict.json`。前置 `--selftest` **PASS**（exit 0，含 8 条故意红）+ `--dry-run` **DRY-RUN OK**（6 条采集命令行）；两臂权重 sha256 与第九十一轮逐位相同。
+- **读数（`verdict.json` 原文）**：`verdict="测不出"` · `exit_code=4` · 主口径 `rank_points` Δ=**+0.2569583**（SE 0.4612062、t 0.5571442、CI **[−0.6357188, 1.1530690]**、n=12000、sd 50.5226050、5807/5716/477）· **`mde.value`=1.2921084** · `MDE_95`=**0.903946** · `MDE_Bonf`(z=2.394)=**1.104118** · 3 族 Δ=**[+0.0438500, +1.2181500, −0.4911250]**（`spread`=1.7092750、`ci_half_width`=0.8943939、`spread_over_ci_half`=1.9110988、**`all_same_sign=false`**、`positive_every_wall=false`、`arm_pair_consistent=true`；随机效应 μ=0.2664437 CI[−0.7283218, 1.2612091] **τ=0.3671819** q=2.4226321 df=2）· **`crosscheck`=null**（该口径只在 `--gate-dir` 复算模式下跑；本轮 `--collect` ⇒ **真的没有这个读数**，⛔ 不当"对上了"）· `errors=[]`。
+- ⭐ **判决 = PLAN §5 的 ④「测不出」**：①有效不成立（CI 下界 −0.6357<0 **且**逐族不同号）· ②反向不成立（CI 上界 1.1531>0）· ③无效**不成立**（`MDE_Bonf` **1.104 > 1.0** ⇒ 分辨率不足）· ④成立（`MDE_Bonf`>1.0 **∨** 逐族符号翻转 **∨** 安慰剂不排除 0，**三条独立命中**；ρ 反而可识别）。⛔ 条件于 seed `53610001/53610002/53610003` **这三套牌山**、**不跨族外推**；⛔ 不许写成"接近显著"。
+- **§3 对账**：实测 sd **50.5226** < 预测量 54.4084（×0.929）⇒ 实际 `MDE_95` **0.904** 比 §3 的 **0.973** **更低**（分辨率比预期**好**）；⚠ 但 §5 锚在 `MDE_Bonf`=**1.104**（vs §3 预登记 1.189），**仍 >1.0** ⇒ 结论不变。
+- **护栏**：`wins` tol 0.10 / Δ=−0.0043333 CI[−0.0318333, 0.0232500] / MDE **0.0393846** / `tol_over_mde` **2.5390667** ⇒ **`usable_as_veto=true`**（✅ 与 §4 预测一致）`ok=true` 未越带；`deals` 0.10 / +0.0089167 CI[−0.0201667, 0.0370833] / MDE **0.0404890** / **2.4698091** ⇒ **`usable_as_veto=true`**、`ok=true`；⚠ `win_points` 150 / +53.4 CI[−184.3640, 296.5919] / MDE **344.2912773** / 0.4356776 ⇒ **`usable_as_veto=false` 且 `ok=false` 越带** ⇒ 按第七十一轮判据**只记账、⛔ 不得作否决依据**（两条可用护栏**确未破** ⇒ 不触发 §6 否决）。
+- **安慰剂**：`significant=true`、Δ=**−1.2682667** CI[**−2.1666788, −0.3565567**]（最不利 = `def7-g10`）；逐条 def7 −1.2682667**显著** · win2 **+1.0198000 显著** · atk3 −0.0084917 不显著；⚠ `|安慰剂 Δ| 1.2683 ≥ |主口径 Δ| 0.2570` ⇒ **主口径不高于对照**。`mean_reversion.identified=true`、ρ=**−0.5546764**（剔尾 drop_base_worst_5% 起转**显著负** −1.9002105 —— 只照报、不作判据）。
+- **墙钟与资源（按角色分开报）**：`wall_clock_s`=**5905.68** ≤ 13200（220 min）· `wall_clock_ok=true`（实际 **98.5 min** = §8 预测量 2.7 h 的 0.61×）；6 条采集 **988.4/974.4/982.4/968.4/970.4/968.4 s**、各**退出码 0**（⛔ **未触发 exit 7**、无树杀）。`commit_free` 最低 **10.89 GB**（1 s 栅格 2178 点、`trips=[]`；纪律线 8 GB 未触及）；峰值 **`python*`（= 闸门工具自身）committed 2987.9 MB / ws 1791.5 MB** · **`trainer*`（真负载）committed 189.2 MB / ws 190.2 MB** · `gate_tool` 2987.9 MB ⇒ **按角色分开报**（第九十二轮教训：单报 `python*` 会把闸门工具当成本相峰值）。
+- **纪律**：只跑了 B —— ⛔ 未训练、⛔ 未发布、⛔ 未采集本次 B 以外数据、⛔ 未改 `AGENTS.md`/校验器/`raw/**`（采集落私有 `.tmp/mv1-s91-B/collect/**`）；证据（`precheck-B.{cmd.txt,dryrun.log}` + stdout + 采样器 + 6 条采集日志 + `verdict.json`）留在 gitignored 的 `tools\build\mv1-s91-evidence\`，自建临时件**逐项 `-LiteralPath`** 删除（⛔ 无 `-Recurse -Force`）。
+- **建议入档行（⛔ 本批未改 `AGENTS.md`）**：`⛔ 长期采集相的内存峰值必须按角色分开报（python*/trainer*/gate_tool/workload chain）：单报「python* 最大」会把闸门工具自身当成本相峰值（n=12,000 实测 python*=闸门工具 2987.9 MB，而真负载 trainer*=189.2 MB）；判据 = 同一次采样里对每个镜像族各报一行 committed/ws。`
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
