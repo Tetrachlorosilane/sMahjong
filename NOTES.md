@@ -6463,6 +6463,7 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **墙钟与资源（按角色分开报）**：`wall_clock_s`=**5905.68** ≤ 13200（220 min）· `wall_clock_ok=true`（实际 **98.5 min** = §8 预测量 2.7 h 的 0.61×）；6 条采集 **988.4/974.4/982.4/968.4/970.4/968.4 s**、各**退出码 0**（⛔ **未触发 exit 7**、无树杀）。`commit_free` 最低 **10.89 GB**（1 s 栅格 2178 点、`trips=[]`；纪律线 8 GB 未触及）；峰值 **`python*`（= 闸门工具自身）committed 2987.9 MB / ws 1791.5 MB** · **`trainer*`（真负载）committed 189.2 MB / ws 190.2 MB** · `gate_tool` 2987.9 MB ⇒ **按角色分开报**（第九十二轮教训：单报 `python*` 会把闸门工具当成本相峰值）。
 - **纪律**：只跑了 B —— ⛔ 未训练、⛔ 未发布、⛔ 未采集本次 B 以外数据、⛔ 未改 `AGENTS.md`/校验器/`raw/**`（采集落私有 `.tmp/mv1-s91-B/collect/**`）；证据（`precheck-B.{cmd.txt,dryrun.log}` + stdout + 采样器 + 6 条采集日志 + `verdict.json`）留在 gitignored 的 `tools\build\mv1-s91-evidence\`，自建临时件**逐项 `-LiteralPath`** 删除（⛔ 无 `-Recurse -Force`）。
 - **建议入档行（⛔ 本批未改 `AGENTS.md`）**：`⛔ 长期采集相的内存峰值必须按角色分开报（python*/trainer*/gate_tool/workload chain）：单报「python* 最大」会把闸门工具自身当成本相峰值（n=12,000 实测 python*=闸门工具 2987.9 MB，而真负载 trainer*=189.2 MB）；判据 = 同一次采样里对每个镜像族各报一行 committed/ws。`
+- ⭐ **入档指针（第九十三轮）**：上条「建议入档行」已逐字入 `AGENTS.md` §6.5 编号列表**第 20 条**；⛔ 本节读数一字未改，上式「本批未改 `AGENTS.md`」只描述第九十三轮当时状态。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 

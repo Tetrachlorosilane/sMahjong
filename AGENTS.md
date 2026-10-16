@@ -366,6 +366,7 @@ client\dist\mahjong-client.exe --autoplay 127.0.0.1 10086 --name 联调 --timeou
 17. ⛔ **头"上线"= 前向实际读取 且带非退化 `policy_gate`**：`heads.policy_gate.weight` 全 0（或缺张量）⇒ 该 ckpt 的 `belief_tenpai` 不在推理路径（`gate ≡ 1+tanh(bias)`，与 `bt` 无关 ⇒ 退化为 `{policy}`）。逐 ckpt 量：`node tools/policy-gate-check.mjs`（⛔ 表级常量不算）。（NOTES §6.5 第八十六轮）
 18. ⛔ **自更新脚本不许用 `releases/latest` + 按 tag 拼资产名**：只认非 draft（prerelease 缺省跳过）、**按资产名模式**匹配服务端包、**语义版本**排序取最大；⛔ 解析 JSON 别用 sed/grep 扫全文（release body 里有同名文字）；⛔ **别用 `cp` 覆盖正在运行的脚本**（bash 读到错位 ⇒ 半装静默退出 0）。（NOTES §9.5）
 19. ⛔ **清理临时/共享目录必须逐项白名单，⛔ 不许 `-Recurse -Force` 整个共享目录**：删前先列清单 + 逐项 `-LiteralPath` + 复核解析后的绝对路径；⚠ **被 gitignore 的目录也是别人的财产**，删错不可恢复。（NOTES §6.5 第八十九轮）
+20. ⛔ **长期采集/训练相的内存峰值必须按角色分开报**（`python*` / `trainer*` / 闸门工具自身 / 工作负载链）：单报"`python*` 取 committed 最大"会把**闸门工具自身**当成本相峰值（实测 n=12,000 相：`python*`=闸门工具 **2987.9 MB**，真负载 `trainer*` 仅 **189.2 MB**）；判据 = **同一次采样里对每个镜像族各报一行 committed/ws**。（NOTES §6.5 第九十三轮）
 
 **第七十六轮新增的判据 ①–⑦**（红证 / 实测 / 原始输出逐字见 `NOTES.md` §6.5 附录 E；批次工具见
 `tools/overlap-orchestrator.py` 与 `tools/AUTOMATION.md` §8）：
