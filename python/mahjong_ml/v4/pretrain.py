@@ -48,6 +48,7 @@ from .. import guard, paths
 from . import adv as v4adv
 from . import dataset as v4ds
 from . import model as M
+from . import refcache as _refcache
 from . import spec
 #: **风格奖励塑形**：这里只借它的**列名常量**（`style_bonus`）——
 #: ⛔ 训练端**不**自己算风格量（那是 `dataset build` 的活），也不 import 判据侧
@@ -2155,7 +2156,7 @@ def train(args) -> dict:
     ref_np: np.ndarray | None = None
     if ref_model is not None:
         t_ref = time.perf_counter()
-        ref_np = _ref_logits(ref_model, train_data, device, args.eval_batch, ablate=ablate or None)
+        ref_np = _cached_ref_logits(args, ref_model, train_data, device, ablate or None)
         print(f"KL 锚：π_ref 的 logits 已冻结预算（{ref_np.shape[0]} 行 × {ref_np.shape[1]} 候选，"
               f"{ref_np.nbytes / 2**20:.1f} MiB，用时 {time.perf_counter() - t_ref:.1f}s）"
               f"—— 冻结量算一次就够（每 batch 现算是 `epochs ×` 的浪费）")
@@ -2361,8 +2362,7 @@ def train(args) -> dict:
         beh_model = _load_behaviour(beh, device)
         t_v = time.perf_counter()
         print(f"小局级优势（{mode}）：用行为策略 {beh} 重算 V_old（train {n} / val {nv} 条）…")
-        v_old = _behaviour_values(beh_model, train_data, device, args.eval_batch)
-        v_old_va = _behaviour_values(beh_model, val_data, device, args.eval_batch)
+        v_old, v_old_va = _cached_behaviour_values(args, beh_model, train_data, val_data, device)
         del beh_model
         res = _hand_advantage(train_data, v_old, gamma=float(getattr(args, "gae_gamma", 1.0) or 1.0),
                               lam=float(getattr(args, "gae_lambda", 0.9) or 0.0),
@@ -2740,13 +2740,21 @@ def train(args) -> dict:
             # ★ BL-04：`--stop-after-steps` 命中在 epoch 中间 ⇒ **不产出**半个 epoch 的读数行，
             # 直接带着累加器去落盘（续跑那一段会把这一轮补完 ⇒ 日志与一口气跑逐字相同）
             break
-        ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
-                      mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
-                      extra=val_extra, il_target=il_va)
-        ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
-                           value_key=value_key, ablate=ablate or None, extra=val_extra,
-                           il_target=il_va)
-                  if keep_va is not None else None)
+        if getattr(args, "skip_val_eval", False):
+            # ⚠ **只给冒烟**（省 ~4.3 s/次）：val 读数全 = nan，epoch 行与 metrics 逐字段都变 ——
+            #   ⛔ 正式跑不许开（开了就没有 val 读数的可比性）。缺省 False ⇒ 下面那段一行不变。
+            ev = {"n": 0, "top1": float("nan"), "first_legal_acc": float("nan"),
+                  "loss": float("nan"), "by_type": {}}
+            ev_stu = None
+            print(f"  ⚠ `--skip-val-eval`：epoch {epoch} 末的 val 评估被跳过（读数 = nan）")
+        else:
+            ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
+                          mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
+                          extra=val_extra, il_target=il_va)
+            ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
+                               value_key=value_key, ablate=ablate or None, extra=val_extra,
+                               il_target=il_va)
+                      if keep_va is not None else None)
         row = {"epoch": epoch, "stage_at_end": cur_stage, "train_loss": run / max(1, seen),
                "train_parts": {k: v / max(1, seen) for k, v in run_parts.items()},
                "train_student_frac": frac_tr, "val_student_frac": frac_va,
@@ -2758,11 +2766,13 @@ def train(args) -> dict:
                "val_engine_random": ev.get("engine_random"),
                "il_init_engine_top1_student": il_init,
                **{f"val_{k}": v for k, v in ev.items() if k != "by_type"},
-               "val_by_type": ev["by_type"]}
+               "val_by_type": ev.get("by_type", {})}
         history.append(row)
         print(f"epoch {epoch:>3} [{cur_stage}]: train {row['train_loss']:.4f} | val top1(教师一致) "
-              f"{ev['top1']:.3f} | 首合法基线 {ev['first_legal_acc']:.3f} | "
-              f"policy {ev['loss_policy']:.3f} value {ev.get('loss_value', float('nan')):.3f} "
+              f"{ev.get('top1', float('nan')):.3f} | 首合法基线 "
+              f"{ev.get('first_legal_acc', float('nan')):.3f} | "
+              f"policy {ev.get('loss_policy', float('nan')):.3f} "
+              f"value {ev.get('loss_value', float('nan')):.3f} "
               f"place {ev.get('loss_placement', float('nan')):.3f} "
               f"bh {ev.get('loss_belief_hand', float('nan')):.3f} "
               f"bt {ev.get('loss_belief_tenpai', float('nan')):.3f} "
@@ -2953,6 +2963,125 @@ def train(args) -> dict:
     return result
 
 
+import functools   # 只给下面两个 lru_cache 用（放这里是为了**前面一行都不动**）
+
+# ================================================================ 零算力跨臂缓存（MV-1 效率包 ①）
+#
+# π_ref 的 logits（`_ref_logits`）与 V_old（`_behaviour_values`）**只取决于「数据 + 权重 +
+# 前向口径」**，与臂名 / 训练步数 / 辅助头无关 ⇒ 两臂共用同一份时可以把它们读回来。
+# ⛔ **缺省关闭**（`--cache-ref-logits` 不传 ⇒ 下面这些函数一个都不进，缺省路径逐字节不变）；
+# 打开后**键不匹配/文件损坏一律拒用并重算**（fail-closed），写走 `.tmp` + `os.replace`（原子）。
+# 实现与判据见 `python/mahjong_ml/v4/refcache.py` 与 `lab/mv1/EFFICIENCY-AUDIT.md`「实现结果」。
+
+
+def _cache_dir(args) -> Path | None:
+    """`--cache-ref-logits <dir>` 的目录；**不传 ⇒ `None`**（= 缺省路径，一行缓存逻辑都不走）。"""
+    d = getattr(args, "cache_ref_logits", None)
+    if not d:
+        return None
+    return Path(str(d)).expanduser().resolve()
+
+
+@functools.lru_cache(maxsize=16)
+def _manifest_cached(data_dir: str, split: str) -> str:
+    """切分的数据指纹（同一进程里只算一次；两次臂共用时省掉一次 ~0.6 s 的读盘）。"""
+    return _refcache.split_manifest_sha256(data_dir, split)
+
+
+@functools.lru_cache(maxsize=4)
+def _code_fingerprint_cached() -> str:
+    here = Path(__file__).resolve().parent
+    return _refcache.code_fingerprint(Path(__file__).resolve(), here / "model.py",
+                                      here / "dataset.py", here / "spec.py", here / "export.py")
+
+
+def _artifact_key(args, kind: str, *, weights_sha: str, data_dir: str, splits: tuple[str, ...],
+                  device: str, batch: int, extra: dict | None = None) -> tuple[str, dict]:
+    """键字典（逐字段钉死）。⛔ `--label` **刻意不进来**（它只决定 ckpt 目录名）。
+
+    字段清单：`data_sha256`（逐切分的数据指纹）· `init_sha256`（`--init` 文件 sha256）·
+    `weights_sha256`（**真正产生它的那份网**的 state 指纹）· `temp`（`--behaviour-temp`）·
+    `seed` · `code_sha256`（pretrain/model/dataset/spec/export 五份源码）· `torch` · `device` ·
+    `batch`（批大小会改 CPU 归约顺序 ⇒ 必须钉住）· `n`/`lmax` · `extra`（消融块等）。
+    """
+    init_spec = getattr(args, "init", None)
+    fields = {
+        "data_sha256": {s: _manifest_cached(data_dir, s) for s in splits},
+        "init_sha256": (_sha256_file(resolve_weight_path(str(init_spec))) if init_spec else None),
+        "weights_sha256": str(weights_sha),
+        "temp": float(getattr(args, "behaviour_temp", 1.0) or 1.0),
+        "seed": int(getattr(args, "seed", 0) or 0),
+        "code_sha256": _code_fingerprint_cached(),
+        "torch": torch.__version__,
+        "device": str(device),
+        "batch": int(batch),
+        "n": {s: int(_n_of_split(data_dir, s)) for s in splits},
+        "extra": extra or {},
+    }
+    return _refcache.make_key(kind, fields)
+
+
+def _n_of_split(data_dir: str, split: str) -> int:
+    p = Path(data_dir) / f"{split}.nlegal.npy"
+    return int(np.load(p, mmap_mode="r", allow_pickle=False).shape[0])
+
+
+def _cached_ref_logits(args, model, data: dict, device: str,
+                       ablate: dict[str, list[tuple[int, int]]] | None) -> np.ndarray:
+    """`_ref_logits()` 的缓存壳：命中就读回（**逐位等于现算**），否则现算并原子落盘。"""
+    cache_dir = _cache_dir(args)
+    if cache_dir is None:
+        return _ref_logits(model, data, device, args.eval_batch, ablate=ablate)
+    n = int(data["nlegal"].shape[0])
+    lmax = int(data["cand"].shape[1])
+    key, kd = _artifact_key(args, "pi_ref_logits", weights_sha=_state_sha256(model.state_dict()),
+                            data_dir=str(Path(args.data).resolve()), splits=("train",),
+                            device=device, batch=args.eval_batch,
+                            extra={"ablate": {k: [list(x) for x in v]
+                                              for k, v in (ablate or {}).items()},
+                                   "lmax": lmax, "rows": n})
+    got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
+    if got is not None:
+        arr = got.get("logits")
+        if isinstance(arr, np.ndarray) and arr.shape == (n, lmax) and arr.dtype == np.float32:
+            return np.ascontiguousarray(arr)
+        print(f"[cache] ⛔ 形状/dtype 对不上（要 ({n}, {lmax}) float32，"
+              f"给的是 {None if arr is None else (arr.shape, arr.dtype)}）⇒ 拒用并重算")
+    arr = _ref_logits(model, data, device, args.eval_batch, ablate=ablate)
+    _refcache.store(cache_dir, "pi_ref_logits", key, kd, {"logits": np.ascontiguousarray(arr)})
+    return arr
+
+
+def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, device: str
+                             ) -> tuple[np.ndarray, np.ndarray]:
+    """`_behaviour_values()`（train+val）的缓存壳：一文件两数组，逐位等于现算。"""
+    cache_dir = _cache_dir(args)
+    if cache_dir is None:
+        return (_behaviour_values(model, train_data, device, args.eval_batch),
+                _behaviour_values(model, val_data, device, args.eval_batch))
+    n = int(train_data["nlegal"].shape[0])
+    nv = int(val_data["nlegal"].shape[0])
+    key, kd = _artifact_key(args, "v_old", weights_sha=_state_sha256(model.state_dict()),
+                            data_dir=str(Path(args.data).resolve()), splits=("train", "val"),
+                            device=device, batch=args.eval_batch,
+                            extra={"value_bins": int(M.VALUE_BINS),
+                                   "value_range": float(M.VALUE_RANGE),
+                                   "rows": [n, nv]})
+    got = _refcache.load(cache_dir, "v_old", key, kd)
+    if got is not None:
+        tr, va = got.get("train"), got.get("val")
+        if all(isinstance(a, np.ndarray) and a.shape == (m,) and a.dtype == np.float64
+               for a, m in ((tr, n), (va, nv))):
+            return np.ascontiguousarray(tr), np.ascontiguousarray(va)
+        print(f"[cache] ⛔ 形状/dtype 对不上（要 ({n},) / ({nv},) float64）⇒ 拒用并重算")
+    tr = _behaviour_values(model, train_data, device, args.eval_batch)
+    va = _behaviour_values(model, val_data, device, args.eval_batch)
+    _refcache.store(cache_dir, "v_old", key, kd,
+                    {"train": np.ascontiguousarray(tr), "val": np.ascontiguousarray(va)})
+    return tr, va
+
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="v4 教师预训练（P1/P2 冷启动）")
     ap.add_argument("--data", required=True, help="v4 数据集目录（`python -m mahjong_ml.v4.dataset`）")
@@ -3096,6 +3225,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="早停读哪个头的 CE：`policy`（缺省 = 行为标签，与 W3 逐位一致）/ "
                          "`il`（**引擎标签**，配合 `--il-weight > 0` 时必须用它 —— 行为 CE 在 IL 臂上"
                          "必然抬高，见 `docs/TRAINING-V4.md` §14.12 的实测）")
+    # ---- ★ MV-1 效率包（⛔ 两个开关**缺省全关**；关着时下面两条一行都不走）----------------
+    ap.add_argument("--cache-ref-logits", default=None, metavar="DIR",
+                    help="★ 把 π_ref 的冻结 logits 与 V_old **缓存到 DIR** 并在同参数下复用"
+                         "（同数据/同权重/同温度/同 seed/同代码指纹才命中；不匹配即拒用重算）。"
+                         "⛔ 缺省不传 = 关闭 = 与加这个开关之前**逐字节相同**")
+    ap.add_argument("--skip-val-eval", action="store_true",
+                    help="⚠ **只给冒烟**：跳过每个 epoch 末的全 val 评估（省 ~4.3 s，但那个 epoch 的"
+                         "`val_*` 读数全变 nan）⇒ **正式跑不许开**（开了就没有 val 读数的可比性）")
     # ⚠ 缺省 False = **硬闸门**：紧凑集没有 `h0` 列（长程 carry）就报错退出。
     #   为什么不是"缺了就退化"：上线端喂整手 carry、训练端喂窗口 —— 两边不是同一个量，
     #   而那种不一致**不报错**（训练照跑、指标照出）。见 `train()` 里的三态说明。

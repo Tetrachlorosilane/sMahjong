@@ -1053,6 +1053,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第九十二轮 | 2026-10-17 | MV-1 **闸门前置 A**（`ceiling-gate --collect`，3 族 × 500 场/族/臂 = **n 1,500 配对**，零训练）—— 判 **`测不出`（exit 4）**、实测 MDE **3.734**；三条护栏全 `usable_as_veto=false`；⛔ 未跑 B（24,000 场）/未训练/未发布 |
 | 第九十三轮 | 2026-10-17 | MV-1 **正式闸门 B**（`ceiling-gate --collect`，3 族 × 4,000 场/臂 = **24,000 场 / n 12,000 配对**，零训练）—— 判 **`测不出`（exit 4）**（主口径 Δ=+0.2570 CI[−0.6357,+1.1531]、`MDE_Bonf` **1.104>1.0**、逐族**不同号**、安慰剂**显著** ⇒ §5④）；⛔ 未训练/未发布 |
 | 第九十五轮 | 2026-10-17 | MV-1 静态审计后的工具/纪律修复（安慰剂零和口径 + 闸门证据归档判据）+ `MV1-AMENDMENT.md` 冻写（零训练 · 零采集） |
+| 第九十六轮 | 2026-10-18 | MV-1 **零算力效率包**：① `--cache-ref-logits`（π_ref/V_old 跨臂缓存，省 **115.9 s**，键钉死 + fail-closed + 原子写）· ② **26→13 证否**（`ssl_head/mask_frac` 让两对不是同一次前向）· ③ `--skip-val-eval`（零采集 · 零闸门 · 不改训练语义） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6471,6 +6472,13 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **安慰剂口径修复**（`tools/ceiling-gate.py`）：实测主口径 `rank_points`/`score` 每场四席恒和 0（`place` 恒 −10）⇒ 非学生席对照 Δ ≡ −Δ_student；新口径写 `placebo.usable_for_veto=false` + `why_zero_sum`（只记账），改用非零和指标 `wins`/`deals` 做零假设；⛔ 零和下禁用 `|placebo|≥|primary|`；`--legacy-placebo` 回退旧口径（placebo/判决逐字节不变）。selftest 新增 ⑮-a…g、⑯（红证：同一合成数据新=过/旧=测不出）。
 - **B 的 6 份 summary 不可恢复**：`--collect-out` = `.tmp\mv1-s91-B\collect`，会话开始时 `.tmp` 存在但为 0 项；collect 日志只留聚合表（日志原文"[删轨迹] … 保留 summary.json"指当时目录）、sampler 只有资源采样、全仓 `*.summary.json` 只有 A、git 从未提交（`.gitignore:51 *.tmp`）⇒ 24,000 场逐场不可复核；下次按上条归档。
 - **修订案**：`lab/mv1/MV1-AMENDMENT.md`（≤40 行，跑前冻写；R1/R4/R5 标"需授权"）；⛔ 本批零训练/零采集/未发布、未改 `MV1-PLAN.md` §1–§9。
+
+**第九十六轮：MV-1 零算力效率包（2026-10-18，⛔ 不改训练语义 · 零采集 · 零闸门）**
+- ① `--cache-ref-logits <dir>`（缺省关）= `python/mahjong_ml/v4/refcache.py` + `pretrain.py:2159/2365`：π_ref logits 与 V_old 跨臂复用；键 = `data_sha256`（逐切分清单：name/dtype/shape/字节数/内容指纹 + meta.json 全量 sha256）+ `--init` sha256 + **产生它的那份网的 state 指纹** + 温度 + seed + 五份源码指纹 + torch/device/batch（**`--label` 不进键**）；未命中/键不匹配/内容 sha 不符/截断 ⇒ **fail-closed 重算并打印原因**，写 `.tmp`+`fsync`+`os.replace`。实测 **67.2→0.2 s、49.5→0.6 s = 省 115.9 s**（= 审计预测，偏差 0；整跑 187.22→91.71 s）。
+- ② **26→13 未做（证否）**：epoch 末 `ev`（`pretrain.py:2751`，带 `ssl_head` + `--mask-frac 0.15` ⇒ **掩码后的 evt**）与 `ev_stu`（`:2754`，不掩码）**不是同一次前向** —— 4096 行实测 top1 **0.778320 vs 0.777100**、loss_policy **0.759722 vs 0.765249** ⇒ 合并必改读数；真重复只有开训前 `:2478`/`:2480` 那一对（只值 2.17 s/臂）⇒ 按"只合并真正重复的"不合并。审计 B5 的前提漏了 `ssl_head/mask_frac` ⇒ **新投影 602.8→486.9 s（−19.2%）**，不是 430.5。
+- ③ `--skip-val-eval`（缺省关、只给冒烟，省 ~4.3 s/次）；缺省路径把 `ev['x']` 改 `.get('x', nan)`（键都在 ⇒ 逐字节不变）。
+- **逐位不变**（同一命令 `--epochs 2 --max-steps 5`，cache 关）：`net.bin` sha256 = `BC43C272…89FB8`、`_state_sha256` = `782971da…32e51`、`metrics.json` 除 `wall_seconds/label/args.label` **逐字段相同**、`perm_sha256(epoch1)` = `f05b2010…25c0`；stdout **只归一 5 类与内容无关的 token 后逐字节相同**（⚠ 原始 stdout 里本来就有 `用时 67.3s` ⇒ 两次同代码跑也不同）。
+- ⚠ 纪律照实：某一跑的 `commit_free` 最低 **6.13 GB**（< 8 GB 线）—— 该跑峰值 committed 4.35 GB + 当时空闲基线 10.5 GB；后两跑基线回升后最低 13.15 / 12.65 GB。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 
