@@ -1052,6 +1052,7 @@ checkEq(QString::number(nSide), QStringLiteral("1"), QStringLiteral("一人牌�
 | 第九十一轮 | 2026-10-16 | MV-1 第一刀**两臂正式训练**（`base` vs `aux`，600 步，唯一差异 = `--aux-own-win-weight 0.3`）+ KL(step) 标定（实测 0.10 会截断 ⇒ 取 T=1.0）—— 操作检查三组全过；⛔ 未跑闸门/未采集/未发布 |
 | 第九十二轮 | 2026-10-17 | MV-1 **闸门前置 A**（`ceiling-gate --collect`，3 族 × 500 场/族/臂 = **n 1,500 配对**，零训练）—— 判 **`测不出`（exit 4）**、实测 MDE **3.734**；三条护栏全 `usable_as_veto=false`；⛔ 未跑 B（24,000 场）/未训练/未发布 |
 | 第九十三轮 | 2026-10-17 | MV-1 **正式闸门 B**（`ceiling-gate --collect`，3 族 × 4,000 场/臂 = **24,000 场 / n 12,000 配对**，零训练）—— 判 **`测不出`（exit 4）**（主口径 Δ=+0.2570 CI[−0.6357,+1.1531]、`MDE_Bonf` **1.104>1.0**、逐族**不同号**、安慰剂**显著** ⇒ §5④）；⛔ 未训练/未发布 |
+| 第九十五轮 | 2026-10-17 | MV-1 静态审计后的工具/纪律修复（安慰剂零和口径 + 闸门证据归档判据）+ `MV1-AMENDMENT.md` 冻写（零训练 · 零采集） |
 
 **权威描述在 `docs/PROTOCOL.md` §8**（字段表、动作键文法、CLI、数据格式）。这里只列"改代码时必须守"的几条。
 
@@ -6464,6 +6465,12 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **纪律**：只跑了 B —— ⛔ 未训练、⛔ 未发布、⛔ 未采集本次 B 以外数据、⛔ 未改 `AGENTS.md`/校验器/`raw/**`（采集落私有 `.tmp/mv1-s91-B/collect/**`）；证据（`precheck-B.{cmd.txt,dryrun.log}` + stdout + 采样器 + 6 条采集日志 + `verdict.json`）留在 gitignored 的 `tools\build\mv1-s91-evidence\`，自建临时件**逐项 `-LiteralPath`** 删除（⛔ 无 `-Recurse -Force`）。
 - **建议入档行（⛔ 本批未改 `AGENTS.md`）**：`⛔ 长期采集相的内存峰值必须按角色分开报（python*/trainer*/gate_tool/workload chain）：单报「python* 最大」会把闸门工具自身当成本相峰值（n=12,000 实测 python*=闸门工具 2987.9 MB，而真负载 trainer*=189.2 MB）；判据 = 同一次采样里对每个镜像族各报一行 committed/ws。`
 - ⭐ **入档指针（第九十三轮）**：上条「建议入档行」已逐字入 `AGENTS.md` §6.5 编号列表**第 20 条**；⛔ 本节读数一字未改，上式「本批未改 `AGENTS.md`」只描述第九十三轮当时状态。
+
+**第九十五轮：MV-1 静态审计后的工具/纪律修复 + 修订案冻写（2026-10-17，零训练 · 零采集）**
+- ⛔ **判据（闸门证据归档）**：闸门跑完必须把 6 份 `summary.json` 与 `verdict.json` **同目录归档**（`--collect-out` 与 `--out` 同级，或采集毕即复制 `summaries/`）；`crosscheck=null` 时必须写明"无旧读数"而不是留空；⛔ 归档不得重采（重采=新实验）。已入 `AGENTS.md` §6.5 第 21 条。
+- **安慰剂口径修复**（`tools/ceiling-gate.py`）：实测主口径 `rank_points`/`score` 每场四席恒和 0（`place` 恒 −10）⇒ 非学生席对照 Δ ≡ −Δ_student；新口径写 `placebo.usable_for_veto=false` + `why_zero_sum`（只记账），改用非零和指标 `wins`/`deals` 做零假设；⛔ 零和下禁用 `|placebo|≥|primary|`；`--legacy-placebo` 回退旧口径（placebo/判决逐字节不变）。selftest 新增 ⑮-a…g、⑯（红证：同一合成数据新=过/旧=测不出）。
+- **B 的 6 份 summary 不可恢复**：`--collect-out` = `.tmp\mv1-s91-B\collect`，会话开始时 `.tmp` 存在但为 0 项；collect 日志只留聚合表（日志原文"[删轨迹] … 保留 summary.json"指当时目录）、sampler 只有资源采样、全仓 `*.summary.json` 只有 A、git 从未提交（`.gitignore:51 *.tmp`）⇒ 24,000 场逐场不可复核；下次按上条归档。
+- **修订案**：`lab/mv1/MV1-AMENDMENT.md`（≤40 行，跑前冻写；R1/R4/R5 标"需授权"）；⛔ 本批零训练/零采集/未发布、未改 `MV1-PLAN.md` §1–§9。
 
 ## 11 长链自动续跑（`tools\run-chain.ps1`）—— 为什么是这么设计的
 

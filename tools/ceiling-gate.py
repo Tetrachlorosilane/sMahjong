@@ -16,6 +16,11 @@
   安慰剂对照；③ 拼成一份带**判决**与**口径声明**的 `verdict.json`。
   ⚠ **方向**不另立表：`eval.seat_values` 已把所有指标折成「正 = 更好」（`deals` 取负）⇒
   护栏一律走 `gate.guard_row` 的单侧规则（`ok ⇔ CI 下界 ≥ −tol`）。
+  ⚠ **安慰剂口径**（2026-10-17 据 `MV1-STATIC-AUDIT.md` §1-5 修）：主口径若**结构性加和**
+  （每场四席求和恒定，`rank_points`/`score` 为 0、`place` 为 −10）⇒ "非学生席同策略对照"
+  的 Δ **≡ −Δ_student**，它量的是**再分配**而不是零假设 ⇒ `placebo.usable_for_veto=false`
+  （只记账 `why_zero_sum`），并改用**非零和指标**（`wins`/`deals`）上的同类对照做零假设。
+  旧口径可显式回退：`--legacy-placebo`（该开关打开时 `placebo` 与判决理由**逐字节不变**）。
 
 三种口径（选一个）：
 
@@ -658,6 +663,143 @@ def placebo_null_contrast(families: list, mode: str, metric: str) -> dict:
             "significant": bool(float(res.lo) * float(res.hi) > 0), "per_row": per_row}
 
 
+#: 主口径结构性加和时可用的**非零和**替代指标（实测：`wins`/`deals` 的四席求和不恒定）。
+#: ⚠ `score` **不是**非零和 —— 2026-10-17 实测 3,000 场 `final_scores` 四席合计恒为 100000
+#: （⇒ `score` = `final_scores − 25000` 四席合计恒为 0），与 `rank_points` 同一条结构恒等式。
+PLACEBO_FALLBACK_METRICS = ("wins", "deals")
+ZERO_SUM_TOL = 1e-9
+
+
+def _all_seat_values(row: dict, metric: str) -> list[float]:
+    """一场里**四席**的指标值（下标 = 座位，与 `eval.seat_values` 同一套口径）。
+
+    ⛔ 这里刻意不复用 `eval.seat_values`：它按**策略标签**过滤（只返回该策略占的席），
+    而"每场四席求和"要的是**全部四席**。两者口径必须一致，所以逐指标照抄它的折向规则。
+    """
+    try:
+        if metric == "rank_points":
+            return [float(x) for x in row["rank_points"]]
+        if metric == "score":
+            return [float(x) - ml_eval.START_SCORE for x in row["final_scores"]]
+        if metric == "place":
+            return [-float(x) for x in row["placement"]]
+        if metric == "wins":
+            return [float(x) for x in row["wins"]]
+        if metric == "deals":
+            return [-float(x) for x in row["deals"]]
+        if metric == "win_points":
+            return [float(x) for x in row["win_points"]]
+    except (KeyError, TypeError):
+        return []
+    return []
+
+
+def _family_runs(f: dict):
+    for key in ("_run", "_base_run", "_cand_run"):
+        run = f.get(key)
+        if run is not None:
+            yield run
+
+
+def zero_sum_probe(families: list, metric: str) -> dict:
+    """实测主口径是否**结构性加和**（每场四席求和恒定）。
+
+    判据（审计 §1-5 的"实测"口径）：
+      · `zero_sum` = 每场 `max|Σ四席| ≤ 1e-9`（`rank_points`/`score` 是这一种）；
+      · `sum_constant` = 每场求和**恒定**（含 `place`：四席合计恒为 −10，Δ 恒为 0）。
+    两者都意味着 `Σ三名对手 Δ ≡ −Δ_student` ⇒ "非学生席同策略对照"量的是**再分配**。
+    ⚠ 取不到逐场数据 ⇒ `checked=false`（fail-closed：⛔ 不许当"非零和"）。
+    """
+    sums: list[float] = []
+    seen: set[int] = set()
+    for f in families:
+        for run in _family_runs(f):
+            if id(run) in seen:
+                continue
+            seen.add(id(run))
+            for g in run.per_game:
+                vals = _all_seat_values(g, metric)
+                if len(vals) < 4:
+                    continue
+                sums.append(float(sum(vals)))
+    if not sums:
+        return {"metric": metric, "checked": False, "zero_sum": False, "sum_constant": False,
+                "n_games": 0, "max_abs_sum": float("nan"), "max_abs_dev": float("nan"),
+                "tolerance": ZERO_SUM_TOL,
+                "why": "取不到逐场数据 ⇒ 不能判结构性加和（fail-closed：不当作非零和）"}
+    mx = max(abs(x) for x in sums)
+    mean = sum(sums) / len(sums)
+    mdev = max(abs(x - mean) for x in sums)
+    return {"metric": metric, "checked": True,
+            "zero_sum": bool(mx <= ZERO_SUM_TOL),
+            "sum_constant": bool(mx <= ZERO_SUM_TOL or mdev <= ZERO_SUM_TOL),
+            "n_games": len(sums), "max_abs_sum": float(mx), "max_abs_dev": float(mdev),
+            "sum_mean": float(mean), "tolerance": ZERO_SUM_TOL}
+
+
+def attach_placebo(res: dict, families: list, mode: str, metric: str, *, legacy: bool = False) -> dict:
+    """算安慰剂并**按主口径的结构性质**决定它能不能作否决依据（本文件的唯一入口）。
+
+    · `legacy=True`（`--legacy-placebo`）：完全照旧 —— `placebo` 就是 `placebo_null_contrast()`
+      的返回值（不加任何新字段）、`zero_sum` 不写进 `res` ⇒ 旧路径的产物/判决理由不变。
+    · 缺省（新口径）：主口径结构性加和（非 `gate-dir` 的"非学生席同策略对照"）⇒
+      `usable_for_veto=false` + `why_zero_sum` + `redistribution_ratio`（只记账），
+      并附一条**非零和指标**上的同类对照 `fallback`（作零假设否决用）。
+    · `gate-dir` 的假臂对照（同一臂两席互比之差）真值**本就恒 0**，不受这条结构恒等式影响
+      ⇒ 仍可作否决依据。
+    """
+    if legacy:
+        res.pop("zero_sum", None)
+        res["placebo"] = placebo_null_contrast(families, mode, metric)
+        return res["placebo"]
+
+    zs = zero_sum_probe(families, metric)
+    res["zero_sum"] = zs
+    pl = placebo_null_contrast(families, mode, metric)
+    structural = mode != "gate-dir" and zs["checked"] and zs["sum_constant"]
+    if mode != "gate-dir" and not zs["checked"]:
+        pl["usable_for_veto"] = False
+        pl["why_zero_sum"] = ("取不到逐场数据 ⇒ 无法判定主口径是否结构性加和"
+                              "（fail-closed：该指标下安慰剂不作否决依据）")
+        res["placebo"] = pl
+        return pl
+    if not structural:
+        pl["usable_for_veto"] = True
+        res["placebo"] = pl
+        return pl
+
+    pl["usable_for_veto"] = False
+    prim = res.get("primary") or {}
+    pd = abs(float(prim.get("delta", float("nan"))))
+    pld = abs(float(pl.get("delta", float("nan"))))
+    ratio = (pld / pd) if (math.isfinite(pd) and pd > 0 and math.isfinite(pld)) else float("nan")
+    pl["redistribution_ratio"] = float(ratio) if math.isfinite(ratio) else None
+    if zs["zero_sum"]:
+        how = f"每场四席恒和 0（max|Σ|={zs['max_abs_sum']:.3g} ≤ {ZERO_SUM_TOL:g}，{zs['n_games']} 场）"
+    else:
+        how = (f"每场四席求和恒为 {zs.get('sum_mean', float('nan')):.6g}"
+               f"（max|Σ−均值|={zs['max_abs_dev']:.3g} ≤ {ZERO_SUM_TOL:g}，{zs['n_games']} 场）")
+    pl["why_zero_sum"] = (
+        f"主口径 {metric} {how} ⇒ Σ三名对手 Δ ≡ −Δ_student；安慰剂量的是**再分配**"
+        f"（|安慰剂|/|主口径|={ratio:.3f}），不是零假设 ⇒ 该指标下安慰剂**不可用**")
+    pl["fallback"] = None
+    pl["fallback_metric"] = None
+    for m in PLACEBO_FALLBACK_METRICS:
+        if m == metric:
+            continue
+        z2 = zero_sum_probe(families, m)
+        if z2["checked"] and not z2["sum_constant"]:
+            fb = placebo_null_contrast(families, mode, m)
+            fb["metric"] = m
+            fb["why"] = (f"主口径 {metric} 结构性加和 ⇒ 改用非零和指标 {m} 做安慰剂零假设"
+                         f"（{m} 实测 max|Σ|={z2['max_abs_sum']:.3g} > {ZERO_SUM_TOL:g}）")
+            pl["fallback"] = fb
+            pl["fallback_metric"] = m
+            break
+    res["placebo"] = pl
+    return pl
+
+
 # ---------------------------------------------------------------------------
 # 判决
 # ---------------------------------------------------------------------------
@@ -680,18 +822,44 @@ def judge(res: dict, args, elapsed: float, *, no_training: bool, quiet_ok: bool,
                        f"SE={prim['se']:.4g}")
     lo, hi = prim["ci"]
     pl = res["placebo"]
+    legacy_pl = bool(getattr(args, "legacy_placebo", False))
+    #: ★ 2026-10-17：零和/结构性加和主口径下，`pl`（非学生席同策略对照）的 Δ ≡ −Δ_student
+    #: ⇒ 它不能当"零假设"用。新口径改用 `fallback`（非零和指标）来判；旧口径走 `--legacy-placebo`。
+    pl_usable = pl.get("usable_for_veto", True) is not False
+    veto_pl = pl if pl_usable else (pl.get("fallback") or {})
+    if legacy_pl:
+        veto_available = pl.get("available", True) is not False
+    else:
+        veto_available = (bool(veto_pl) and veto_pl.get("available", True) is not False
+                          and math.isfinite(float(veto_pl.get("delta", float("nan")))))
     single = walls["n_walls"] < int(args.min_walls)
     if not walls.get("arm_pair_consistent", True):
         reasons.append("族间不是同一对权重 ⇒ 套间散布混了臂差（读作上界）⇒ 不许判「过」")
     if single:
         reasons.append(f"族数 {walls['n_walls']} < --min-walls {args.min_walls}"
                        f"⇒ 套间散布未测 ⇒ 不许判「过」")
+    if not legacy_pl and not pl_usable:
+        reasons.append(f"安慰剂口径：{pl.get('why_zero_sum')}"
+                       + (f"；已改用非零和指标 `{pl['fallback_metric']}` 做零假设对照"
+                          if pl.get("fallback") else "；且取不到非零和替代"))
     if pl.get("available", True) is False:
         reasons.append("安慰剂对照取不到 ⇒ 不许判「过」")
-    elif pl["significant"]:
-        reasons.append(f"安慰剂**显著**（Δ={pl['delta']:+.3f} CI[{pl['ci'][0]:+.2f},{pl['ci'][1]:+.2f}]）"
-                       f"⇒ 主口径那点差有对照级别的解释 ⇒ 测不出")
-    if pl.get("available", True) is not False and abs(pl["delta"]) >= abs(prim["delta"]):
+    elif not veto_available:
+        reasons.append("主口径结构性加和 ⇒ 该指标下安慰剂不可用，且取不到非零和替代"
+                       " ⇒ 不许判「过」")
+    elif veto_pl["significant"]:
+        if veto_pl is pl:
+            reasons.append(f"安慰剂**显著**（Δ={pl['delta']:+.3f} CI[{pl['ci'][0]:+.2f},{pl['ci'][1]:+.2f}]）"
+                           f"⇒ 主口径那点差有对照级别的解释 ⇒ 测不出")
+        else:
+            reasons.append(f"安慰剂**显著**（替代口径 {pl.get('fallback_metric')}："
+                           f"Δ={veto_pl['delta']:+.3f} "
+                           f"CI[{veto_pl['ci'][0]:+.2f},{veto_pl['ci'][1]:+.2f}]）"
+                           f"⇒ 主口径那点差有对照级别的解释 ⇒ 测不出")
+    #: ⛔ 零和主口径下这条近似**必须禁用**（审计 §1-5：`|placebo| ≥ |primary|` 在零和下近似必触发，
+    #: 量的不是效应而是再分配）。非零和/旧口径下它仍是有效的"效应不超过对照"判据。
+    if (pl_usable and pl.get("available", True) is not False
+            and abs(pl["delta"]) >= abs(prim["delta"])):
         reasons.append(f"|安慰剂 Δ| {abs(pl['delta']):.3f} ≥ |主口径 Δ| {abs(prim['delta']):.3f}"
                        f"⇒ 主口径不高于对照 ⇒ 测不出")
     rho = res["mean_reversion"]["rho"]
@@ -715,8 +883,9 @@ def judge(res: dict, args, elapsed: float, *, no_training: bool, quiet_ok: bool,
     if bad:
         reasons.append("可用护栏在坏方向确凿越界 ⇒ 这笔账不该投（不是「测不出」）")
         return "不过", reasons, 3
-    ok_pass = (lo > 0 and (not pl["significant"]) and pl.get("available", True) is not False
-               and abs(pl["delta"]) < abs(prim["delta"]) and not single
+    ok_pass = (lo > 0 and veto_available and (not veto_pl["significant"])
+               and pl.get("available", True) is not False
+               and (not pl_usable or abs(pl["delta"]) < abs(prim["delta"])) and not single
                and walls["positive_every_wall"] and walls.get("arm_pair_consistent", True)
                and not (rho_ok and math.isfinite(rho) and abs(rho) >= 0.9)
                and res["wall_clock_ok"])
@@ -941,13 +1110,17 @@ def build_collect_specs(args) -> list:
 # ---------------------------------------------------------------------------
 def _synth_run(d: Path, seeds: list, delta: float, *, student_net: str, opp_nets: list,
                rng, sd_w: float = 50.0, sd_n: float = 3.0, deal_bias: float = 0.0,
-               w_list: list = None) -> None:
+               w_list: list = None, zero_sum: bool = False, redistribute: bool = False,
+               seat_offset: float = 0.0, sum_jitter: float = 0.0) -> None:
     """造一份 `summary.json`（**学生席口径**的形状：学生串带 `@`，三席对手同序）。
 
     `per_game[]` 必须带 `rank_points` / `wins` / `deals` / `win_points`（`eval.seat_values` 要它们）；
     学生席在最前（与 `style-vector.py --policy net:<学生>@0#0.5,<对手>…` 的写法一致）。
     ⚠ `w_list`：**同一族两条采集要共用同一份"牌山运气"**（真配对的前提）—— 给了就用它，
     ⛔ 别让两条采集各自抽一份（那样"配对"就退化成两个独立样本了）。
+    ⚠ `redistribute`：把学生席的位移**全部**记到 1 号对手头上（`[x,−x,0,0]` ⇒ 每场恒和 0，
+    且"安慰剂 Δ ≡ −主口径 Δ"）—— 复现审计 §1-5 的结构性失效；`sum_jitter` 只给 2 号席加逐场噪声
+    （四席求和不再是常数 ⇒ **非结构性加和**，用来证明新口径只在结构性加和时降级、否则判决照旧）。
     """
     d.mkdir(parents=True, exist_ok=True)
     stu = f"net:{student_net}@0#0.5"
@@ -957,6 +1130,17 @@ def _synth_run(d: Path, seeds: list, delta: float, *, student_net: str, opp_nets
         w = float(w_list[i]) if w_list is not None else float(rng.normal(0, sd_w))
         rp = [w + delta + float(rng.normal(0, sd_n))] + [w + float(rng.normal(0, sd_n))
                                                          for _ in ops]
+        if redistribute:
+            x = rp[0]
+            rp = [x, -x, 0.0, 0.0]                 # 四席恒和 0，且再分配只落在 1 号对手
+        elif zero_sum:
+            m = sum(rp) / len(rp)
+            rp = [v - m for v in rp]               # 只去均值（各席仍带独立噪声）
+        if seat_offset:
+            rp = [v + float(seat_offset) for v in rp]
+        if sum_jitter:
+            #: 只给 2 号席加逐场噪声 ⇒ 四席求和**不再是常数**（与"结构性加和"脱钩）
+            rp[2] += float(rng.normal(0, sum_jitter))
         wins = [float(rng.integers(0, 5)) for _ in range(1 + len(ops))]
         #: 学生席刻意多加放铳 ⇒ 用来造一条"真越界"的护栏（`deals` 取负 ⇒ Δ = −bias）
         deals = [float(rng.integers(0, 2)) + deal_bias] + [float(rng.integers(0, 2))
@@ -1028,26 +1212,28 @@ def selftest() -> int:
     a = A()
     a.min_walls, a.budget_min, a.metric = 2, 30.0, "rank_points"
     a.guards = [("deals", 0.10), ("wins", 0.10)]
+    a.legacy_placebo = False
 
-    def mk(prefix, delta, n_games, sd_n=3.0, deal_bias=0.0, student=None):
+    def mk(prefix, delta, n_games, sd_n=3.0, deal_bias=0.0, student=None, **kw):
         seeds = [int(x) for x in rng.integers(1 << 40, 1 << 60, n_games)]
         #: ★ 两条采集共用同一份"牌山运气" w（真配对的前提）
         w_list = [float(rng.normal(0, 50.0)) for _ in range(n_games)]
         b = tmp / f"{prefix}-base"
         c = tmp / f"{prefix}-cand"
         _synth_run(b, seeds, 0.0, student_net=str(net_b), opp_nets=opp, rng=rng,
-                   sd_n=sd_n, w_list=w_list)
+                   sd_n=sd_n, w_list=w_list, **kw)
         _synth_run(c, seeds, delta, student_net=str(student or net_c), opp_nets=opp, rng=rng,
-                   sd_n=sd_n, deal_bias=deal_bias, w_list=w_list)
+                   sd_n=sd_n, deal_bias=deal_bias, w_list=w_list, **kw)
         return f"{prefix}={b};{c}"
 
-    def run_case(specs, metric="rank_points", guards=(("deals", 0.10), ("wins", 0.10))):
+    def run_case(specs, metric="rank_points", guards=(("deals", 0.10), ("wins", 0.10)),
+                 legacy=False):
         pr = Probes()
         fam, _meta = _read_family_specs(list(specs), metric, list(guards), pr)
         a.guards = list(guards)
         res = eval_from_series_per_family(fam, metric, list(guards), a)
         res["metric"] = metric
-        res["placebo"] = placebo_null_contrast(fam, "family", metric) if fam else {}
+        attach_placebo(res, fam, "family", metric, legacy=legacy)
         dz, base = [], []
         for f in fam:
             for s in sorted(set(f["a"]) & set(f["b"])):
@@ -1105,6 +1291,57 @@ def selftest() -> int:
         "③零信号时安慰剂与 ρ 照样给得出",
         f"安慰剂 Δ={res0['placebo']['delta']:+.3f} significant={res0['placebo']['significant']}"
         f" · ρ={res0['mean_reversion']['rho']:+.3f}")
+    # ⑮ ★ 零和主口径：安慰剂（非学生席同策略对照）结构性 ≡ −主口径 ⇒ **不可作否决**；
+    #    新口径只记账 why_zero_sum，并改用非零和指标（wins/deals）上的对照。
+    #    （审计 §1-5 的红证：`rank_points` 每场四席恒和 0 ⇒ Σ三名对手 Δ ≡ −Δ_student。）
+    specs_zs = [mk("zs0", 8.0, 600, redistribute=True),
+                mk("zs1", 8.0, 600, redistribute=True)]
+    pr15, res15, fam15 = run_case(specs_zs)
+    pl15 = res15["placebo"]
+    say(res15["zero_sum"]["zero_sum"] is True and res15["zero_sum"]["max_abs_sum"] <= 1e-9,
+        "⑮-a 零和判据**实测**：每场四席 max|Σ| ≤ 1e-9 ⇒ 主口径结构性加和",
+        f"max|Σ|={res15['zero_sum']['max_abs_sum']:.3g} n={res15['zero_sum']['n_games']} 场")
+    say(pl15.get("usable_for_veto") is False and bool(pl15.get("why_zero_sum")),
+        "⑮-b 零和指标下 `placebo.usable_for_veto=false` + `why_zero_sum`（只记账，不判否决）",
+        f"fallback={pl15.get('fallback_metric')} ratio={pl15.get('redistribution_ratio')}")
+    say(abs(abs(pl15["delta"]) - abs(res15["primary"]["delta"])) < 0.5
+        and pl15.get("fallback") is not None,
+        "⑮-c 安慰剂 Δ ≈ −主口径 Δ（结构性再分配）⇒ 已切到非零和替代口径",
+        f"主口径 {res15['primary']['delta']:+.3f} · 安慰剂 {pl15['delta']:+.3f}")
+    v15, why15, c15 = judge(res15, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
+    say(v15 == "过" and not any(("|安慰剂 Δ|" in w) or ("安慰剂**显著**" in w) for w in why15),
+        "⑮-d **新口径**：安慰剂≈−主口径**不触发**否决（合成红证：旧口径会判死）",
+        f"verdict={v15} exit={c15}")
+    #: 旧口径复现：`--legacy-placebo` 下 placebo 字段**不带任何新键**（逐字节同旧）
+    pr15L, res15L, fam15L = run_case(specs_zs, legacy=True)
+    pl15L = res15L["placebo"]
+    old_pl = placebo_null_contrast(fam15L, "family", "rank_points")
+    say("usable_for_veto" not in pl15L and "zero_sum" not in res15L
+        and json.dumps(pl15L, sort_keys=True, ensure_ascii=False)
+        == json.dumps(old_pl, sort_keys=True, ensure_ascii=False),
+        "⑮-e `--legacy-placebo`：placebo 字段与旧实现**逐字节相同**（无新键）",
+        f"键={sorted(pl15L)}")
+    a.legacy_placebo = True
+    v15L, why15L, c15L = judge(res15L, a, 60.0, no_training=True, quiet_ok=True,
+                               crosscheck_ok=True)
+    a.legacy_placebo = False
+    say(v15L == "测不出" and any("|安慰剂 Δ|" in w for w in why15L)
+        and any("安慰剂**显著**" in w for w in why15L),
+        "⑮-f **旧口径**：同一份合成数据 ⇒ 判否决（红证：`|placebo|≥|primary|` + 显著）",
+        f"verdict={v15L} exit={c15L}")
+    say(v15 != v15L, "⑮-g 红证成立：同一份「安慰剂≈−主口径」数据，新口径放行、旧口径判死",
+        f"新={v15} vs 旧={v15L}")
+    # ⑯ 非零和指标：同样的再分配，但四席求和**逐场有波动**（≠0 且≠常数）
+    #    ⇒ 安慰剂仍是有效零假设，判决照旧否决
+    specs_ns = [mk("ns0", 8.0, 600, redistribute=True, sum_jitter=1.0),
+                mk("ns1", 8.0, 600, redistribute=True, sum_jitter=1.0)]
+    pr16, res16, fam16 = run_case(specs_ns)
+    v16, why16, _ = judge(res16, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
+    say(res16["zero_sum"]["zero_sum"] is False
+        and res16["placebo"].get("usable_for_veto") is True
+        and v16 == "测不出" and any("|安慰剂 Δ|" in w for w in why16),
+        "⑯ 非零和指标：安慰剂照常判（`usable_for_veto=true` 且 |placebo|≥|primary| 仍否决）",
+        f"max|Σ|={res16['zero_sum']['max_abs_sum']:.3g} verdict={v16}")
     # ④ 负向：单族不许判「过」
     pr4, res1, _ = run_case(specs2[:1])
     v1, why1, _ = judge(res1, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
@@ -1310,6 +1547,9 @@ def main(argv=None) -> int:
                     help="--collect：机器上有别人的负载也跑（⛔ 计时会被污染）")
     ap.add_argument("--dry-run", action="store_true", help="只打印采集命令行，不真跑、不判定")
     ap.add_argument("--selftest", action="store_true", help="离线自检（含负向红证）")
+    ap.add_argument("--legacy-placebo", action="store_true",
+                    help="回退旧安慰剂口径（零和主口径下也按 |placebo|≥|primary| 否决；"
+                         "该开关下 placebo 字段与判决理由逐字节不变）")
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -1396,7 +1636,7 @@ def main(argv=None) -> int:
     # ---- 判定 -------------------------------------------------------------------
     if families and not res["errors"]:
         res.update(eval_from_series_per_family(families, args.metric, guards, args))
-        res["placebo"] = placebo_null_contrast(families, mode, args.metric)
+        attach_placebo(res, families, mode, args.metric, legacy=bool(args.legacy_placebo))
         res["mean_reversion"] = mean_reversion(families, mode, args.metric)
     elif not families:
         res["errors"].append("没有可用的族（一族的读数都没取到）⇒ fail-closed")
@@ -1481,6 +1721,14 @@ def main(argv=None) -> int:
         "verdict": verdict,
         "exit_code": code,
     }
+    if not args.legacy_placebo:
+        #: ⛔ 只在**新口径**下写这两处：`--legacy-placebo` 的产物必须与旧版逐字节一致。
+        payload["caliber"]["安慰剂口径"] = (
+            "主口径若**结构性加和**（每场四席求和恒定 ⇒ Σ三名对手 Δ ≡ −Δ_student）"
+            "⇒ `placebo.usable_for_veto=false`（只记账 `why_zero_sum`/`redistribution_ratio`），"
+            "改用非零和指标（wins/deals）上的同类对照；⛔ 零和下不再用 `|安慰剂|≥|主口径|` 否决"
+            "（2026-10-17 据 `lab/mv1/MV1-STATIC-AUDIT.md` §1-5）")
+        payload["zero_sum"] = res.get("zero_sum")
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _say(f"\n[ceiling-gate] 判决 **{verdict}**（退出码 {code}）· 墙钟 {elapsed:.1f} s"
          f"（预算 {args.budget_min:g} min）")
