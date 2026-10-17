@@ -82,12 +82,44 @@ from mahjong_ml import eval as ml_eval                                # noqa: E4
 from mahjong_ml.v4 import arena as v4arena                            # noqa: E402
 from mahjong_ml.v4 import gate as v4gate                              # noqa: E402
 
+
+def _load_r2():
+    """**复用** `overlap-orchestrator.py` 的同一份 R-2 准入判据（⛔ 不在这里写第二套口径）。
+
+    `overlap-orchestrator.py` 没有 import 副作用（`main()` 在 `__main__` 守卫里）⇒ 直接加载。
+    取不到就**抛**（fail-closed：没有准入判据的门 **不许** 退回"越线即杀"的绝对口径）。
+    """
+    import importlib.util
+    p = Path(__file__).with_name("overlap-orchestrator.py")
+    spec = importlib.util.spec_from_file_location("_ov_orch_r2", p)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"⛔ 载不到 {p}（R-2 准入判据的唯一实现）")
+    mod = importlib.util.module_from_spec(spec)
+    old = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True          # ⛔ 不在 tools/ 里留 __pycache__
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = old
+    for k in ("admission_check", "AdmissionGate", "IDLE_BASELINE_GB",
+              "HARD_FLOOR_GB", "ADMISSION_MARGIN"):
+        if not hasattr(mod, k):
+            raise RuntimeError(f"⛔ {p} 里没有 {k}（R-2 判据被改名/删了）")
+    return mod
+
+
+_R2 = _load_r2()
+admission_check = _R2.admission_check
+IDLE_BASELINE_GB = _R2.IDLE_BASELINE_GB
+HARD_FLOOR_GB = _R2.HARD_FLOOR_GB
+ADMISSION_MARGIN = _R2.ADMISSION_MARGIN
+
 SCHEMA = "ceiling-gate/1"
 DEFAULT_BUDGET_MIN = 30.0            # BL-03 的硬判据：墙钟 ≤30 min
 DEFAULT_METRIC = "rank_points"       # 与闸门主口径/护栏同一个指标名（`eval.METRICS` 之一）
 DEFAULT_GUARDS = "wins:0.10,deals:0.10,win_points:150"   # = `gate.QUALITY_TOL`（预注册容忍带）
 MAX_WORKERS = 8                      # 本任务纪律：`--workers ≤8`
-MIN_COMMIT_FREE_GB = 8.0             # 本任务纪律：commit_free < 8 GB 立即停
+MIN_COMMIT_FREE_GB = 8.0             # **旧口径**（只在 `--mem-kill` 打开时用；R-2 起缺省=准入控制）
 QUIET_MIN_MB = 200.0                 # G7 静窗：python/java 只算"重"的（b1-overlap 既有判据）
 
 #: ★ **零训练进程**的判据 = **引擎/解释器镜像 ∧ 命令行特征**（两个条件同时成立才命中）。
@@ -1043,12 +1075,14 @@ def kill_tree(pid: int) -> dict:
 
 
 def collect_run(args, specs: list, probes: Probes) -> None:
-    """真跑采集：**串行**（一次一个重负载）+ **跑之前与跑期间都查提交余量**（< 8 GB 立即停）。
+    """真跑采集：**串行**（一次一个重负载）+ **起跑前与跑期间都查提交余量**。
 
-    ⚠ 为什么必须**跑期间**也查：原先只有 `subprocess.run` **起跑前**那一次检查
-    （`commit_free >= 8 GB` 才起）⇒ 采集涨起来把提交吃穿之后**没有人再看**，纪律线只写在
-    文档里而没有工具执行（NOTES §6.5 第八十三轮的"4 个相瞬时 <8 GB、最低 5.00 GB"就是这么来的）。
-    现在：1 s 栅格轮询 + 越线 **kill 进程树** + `SystemExit`（退出码 1，与其它闸门一致）。
+    **缺省 = R-2 准入控制**（项目方裁定）：
+      · 每相起跑前：`commit_free` vs **该相预期峰值 × 1.5** 与**空闲基线**；不达 ⇒ **拒绝起跑**；
+        跑中越线后再要起新相 ⇒ **拒绝新增负载**（⛔ 不因此杀已跑完的相）；
+      · 跑中 1 s 栅格：越线**只记账 + 关闭新增负载**，⛔ **不杀当前相**；
+      · 只有 `commit_free` 跌到**硬地板**（`HARD_FLOOR_GB = 2.0`，文档里写定）才 kill 进程树。
+    `--mem-kill` ⇒ **旧绝对口径逐字保留**：`commit_free < 8 GB`（起跑前或跑中）⇒ 立即停 + 树杀。
     """
     env = dict(os.environ)
     env["MAHJONG_DATA_ROOT"] = str(DATA)
@@ -1057,12 +1091,35 @@ def collect_run(args, specs: list, probes: Probes) -> None:
     env["OMP_NUM_THREADS"] = str(min(args.workers, MAX_WORKERS))
     env["MKL_NUM_THREADS"] = str(min(args.workers, MAX_WORKERS))
     poll = float(getattr(args, "mem_poll_sec", 1.0) or 1.0)
+    mem_kill = bool(getattr(args, "mem_kill", False))
+    peak = getattr(args, "adm_peak_gb", None)
+    state = {"closed": False, "trip": None}
     for s in specs:
         free = commit_free_gb()
-        probes.add(f"collect:mem:{s['wall']}-{s['arm']}", free >= MIN_COMMIT_FREE_GB,
-                   f"commit_free={free:.2f} GB（闸门 {MIN_COMMIT_FREE_GB:g} GB）")
-        if free < MIN_COMMIT_FREE_GB:
-            raise SystemExit(f"⛔ commit_free {free:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 立即停")
+        if mem_kill:
+            probes.add(f"collect:mem:{s['wall']}-{s['arm']}", free >= MIN_COMMIT_FREE_GB,
+                       f"commit_free={free:.2f} GB（闸门 {MIN_COMMIT_FREE_GB:g} GB）")
+            if free < MIN_COMMIT_FREE_GB:
+                raise SystemExit(f"⛔ commit_free {free:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 立即停")
+        else:
+            if state["closed"]:
+                probes.add(f"collect:admission_new_load:{s['wall']}-{s['arm']}", False,
+                           f"跑中已于 {state['trip']} 越线 ⇒ **拒绝新增负载**（⛔ 不杀已跑完的相）")
+                raise SystemExit(f"⛔ R-2 准入：前序相跑中越线（{state['trip']}）⇒ "
+                                 f"**拒绝起跑 {s['wall']}-{s['arm']}**（⛔ 不许再加新负载）")
+            adm = admission_check(free, peak, idle_baseline_gb=IDLE_BASELINE_GB,
+                                  margin=ADMISSION_MARGIN, hard_floor_gb=HARD_FLOOR_GB)
+            probes.add(f"collect:admission:{s['wall']}-{s['arm']}", adm["ok"],
+                       f"commit_free={adm['commit_free_gb']:.2f} GB / 预期峰值 "
+                       f"{adm['expected_peak_gb']} GB × {adm['margin']:g} = {adm['need_gb']} GB"
+                       f"（空闲基线 {adm['idle_baseline_gb']:g} GB）"
+                       + ("" if adm["ok"] else " ⇒ " + "；".join(adm["reasons"])))
+            _say(f"[collect][R-2 准入] {s['wall']}-{s['arm']}：commit_free={adm['commit_free_gb']:.2f} GB"
+                 f" · 预期峰值 {adm['expected_peak_gb']} GB × {adm['margin']:g} = {adm['need_gb']} GB"
+                 f" ⇒ {'起跑' if adm['ok'] else '**拒绝起跑**'}")
+            if not adm["ok"]:
+                raise SystemExit("⛔ R-2 准入拒绝起跑："
+                                 + "；".join(adm["reasons"]))
         _say(f"[collect] {s['wall']}-{s['arm']} ⇒ {s['out']}\n          $ {' '.join(s['cmd'])}")
         Path(s["out"]).mkdir(parents=True, exist_ok=True)
         log = Path(s["out"]).parent / f"{s['wall']}-{s['arm']}.collect.log"
@@ -1074,12 +1131,33 @@ def collect_run(args, specs: list, probes: Probes) -> None:
             while p.poll() is None:
                 time.sleep(poll)
                 free = commit_free_gb()
-                if free < MIN_COMMIT_FREE_GB:
-                    trip = free
-                    break
+                if mem_kill:
+                    if free < MIN_COMMIT_FREE_GB:
+                        trip = free
+                        break
+                else:
+                    adm = admission_check(free, peak, idle_baseline_gb=IDLE_BASELINE_GB,
+                                          margin=ADMISSION_MARGIN, hard_floor_gb=HARD_FLOOR_GB)
+                    if (not adm["ok"]) and (not state["closed"]):
+                        state["closed"] = True
+                        state["trip"] = (f"{s['wall']}-{s['arm']} commit_free={free:.2f} GB < "
+                                         f"{adm['need_gb']} GB")
+                        probes.add(f"collect:admission_midrun:{s['wall']}-{s['arm']}", True,
+                                   f"跑中越线 commit_free={free:.2f} GB ⇒ **只记账 + 关闭新增负载**"
+                                   f"（⛔ 不杀当前相）")
+                        _say(f"⚠ [R-2 准入] 跑中越线 commit_free={free:.2f} GB ⇒ "
+                             f"只记账 + 拒绝新增负载（⛔ 不杀本相）")
+                    if adm["below_hard_floor"]:
+                        trip = free
+                        break
+            gate_gb = MIN_COMMIT_FREE_GB if mem_kill else HARD_FLOOR_GB
             if trip is not None:
-                _say(f"⛔ [采集期内存闸门] commit_free={trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB "
-                     f"（跑动中）⇒ kill 进程树、本相作废")
+                if mem_kill:
+                    _say(f"⛔ [采集期内存闸门] commit_free={trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB "
+                         f"（跑动中）⇒ kill 进程树、本相作废")
+                else:
+                    _say(f"⛔ [采集期内存闸门] commit_free={trip:.2f} GB < {gate_gb:g} GB "
+                         f"（硬地板）⇒ kill 进程树")
                 probes.add(f"collect:kill_tree:{s['wall']}-{s['arm']}",
                            bool(kill_tree(p.pid).get("killed")),
                            f"taskkill /T /F /PID {p.pid}（崩床/真身两层都要杀）")
@@ -1089,8 +1167,8 @@ def collect_run(args, specs: list, probes: Probes) -> None:
                 except subprocess.TimeoutExpired:
                     pass
                 probes.add(f"collect:mem_kill:{s['wall']}-{s['arm']}", False,
-                           f"跑动中 commit_free={trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 杀相并停")
-                raise SystemExit(f"⛔ 采集跑动中 commit_free {trip:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB "
+                           f"跑动中 commit_free={trip:.2f} GB < {gate_gb:g} GB ⇒ 杀相并停")
+                raise SystemExit(f"⛔ 采集跑动中 commit_free {trip:.2f} GB < {gate_gb:g} GB "
                                  f"⇒ 已杀相并停（⛔ 不把越线读数当合格，也不继续跑剩下的相）")
             rc = p.returncode
             wall = round(time.time() - t0, 1)
@@ -1499,6 +1577,27 @@ def selftest() -> int:
         _say(f"  （采集前置不全的拒绝理由：{str(e)[:80]}）")
     say(plans is None, "⑬采集前置不全（无 trainer / 无权重）⇒ 拒绝、不给计划（fail-closed）",
         f"红探针 {[r['id'] for r in prB.failures()]}")
+    # ⑰ R-2 准入（起跑前）：commit_free vs 预期峰值×1.5 **与** 空闲基线
+    a_ok = admission_check(10.5, 4.0)          # 4×1.5 = 6 ≤ 10.5 且 ≤ 空闲基线
+    a_low = admission_check(5.0, 4.0)          # 5 < 6 ⇒ 拒
+    a_none = admission_check(10.5, None)       # 未声明预期峰值 ⇒ fail-closed 拒
+    a_inf = admission_check(12.0, 8.0)         # 12 > 空闲基线 10.5 ⇒ 配方不可行，拒
+    say(a_ok["ok"] and not a_low["ok"] and not a_none["ok"] and not a_inf["ok"]
+        and admission_check is _R2.admission_check,
+        "⑰ R-2 准入拒绝（缺省口径；与 overlap-orchestrator 是**同一份**实现）",
+        f"准={a_ok['ok']} need={a_ok['need_gb']} · 不足={a_low['ok']} · 未声明={a_none['ok']}"
+        f" · 不可行={a_inf['ok']} · 同一实现={admission_check is _R2.admission_check}")
+    # ⑱ 跑中越线：只记账 + 拒绝新增负载（⛔ 不杀）；只有硬地板才 kill
+    g = _R2.AdmissionGate(4.0)
+    o1 = g.observe(10.0)
+    o2 = g.observe(5.0)
+    allow_after, _why = g.allow_new_load()
+    o3 = g.observe(1.5)
+    say((not o1["kill"]) and (not o1["closed"]) and o2["closed_now"] and (not o2["kill"])
+        and o2["closed"] and (allow_after is False) and o3["kill"],
+        "⑱ 跑中越线 ⇒ 只记账 + 拒绝新增负载（⛔ 不杀当前相）；硬地板才 kill",
+        f"正常 kill={o1['kill']} · 越线 kill={o2['kill']} closed={o2['closed']} "
+        f"新负载={allow_after} · 硬地板 kill={o3['kill']}")
     _say(f"  临时目录：{tmp}（自检结束即删）")
     try:
         import shutil
@@ -1541,7 +1640,11 @@ def main(argv=None) -> int:
     ap.add_argument("--python", default="", help="--collect：跑 style-vector.py 的解释器")
     ap.add_argument("--trainer", default="", help="--collect：trainer.exe")
     ap.add_argument("--mem-poll-sec", type=float, default=1.0,
-                    help="--collect：采集**跑动期**的提交余量轮询间隔（秒）；越线即树杀 + 停（⛔ 不可关）")
+                    help="--collect：跑动期轮询间隔（秒）；缺省=准入控制（越线只记账+拒绝新增负载）")
+    ap.add_argument("--adm-peak-gb", type=float, default=None,
+                    help="R-2 准入：该相**预期峰值**（GB）。缺省 = 不声明 ⇒ **拒绝起跑**（fail-closed）")
+    ap.add_argument("--mem-kill", action="store_true",
+                    help="退回**旧绝对口径**：commit_free < 8 GB ⇒ 立即停 + kill 进程树（缺省=准入控制）")
     ap.add_argument("--collect-out", default=str(COLLECT_ROOT), help="--collect：采集落点根")
     ap.add_argument("--allow-busy", action="store_true",
                     help="--collect：机器上有别人的负载也跑（⛔ 计时会被污染）")
@@ -1582,12 +1685,24 @@ def main(argv=None) -> int:
                           "静窗（无别人的 trainer / 重 python / 重 java）" if not foreign
                           else f"有 {len(foreign)} 个竞争负载：{[(p['name'], p['pid']) for p in foreign]}")
     free0 = commit_free_gb()
-    probes.add("commit_free", (not math.isfinite(free0)) or free0 >= MIN_COMMIT_FREE_GB,
-               f"commit_free={free0:.2f} GB（闸门 {MIN_COMMIT_FREE_GB:g} GB）")
+    adm0 = None
+    if bool(getattr(args, "mem_kill", False)):
+        probes.add("commit_free", (not math.isfinite(free0)) or free0 >= MIN_COMMIT_FREE_GB,
+                   f"commit_free={free0:.2f} GB（闸门 {MIN_COMMIT_FREE_GB:g} GB）")
+        if args.collect and math.isfinite(free0) and free0 < MIN_COMMIT_FREE_GB:
+            res["errors"].append(f"commit_free {free0:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 立即停")
+    else:
+        adm0 = admission_check(free0, getattr(args, "adm_peak_gb", None),
+                               idle_baseline_gb=IDLE_BASELINE_GB, margin=ADMISSION_MARGIN,
+                               hard_floor_gb=HARD_FLOOR_GB)
+        probes.add("commit_free", bool(adm0["ok"]),
+                   f"R-2 准入：commit_free={free0:.2f} GB / 预期峰值 {adm0['expected_peak_gb']} GB "
+                   f"× {ADMISSION_MARGIN:g} = {adm0['need_gb']} GB（空闲基线 {IDLE_BASELINE_GB:g} GB）"
+                   + ("" if adm0["ok"] else " ⇒ " + "；".join(adm0["reasons"])))
+        if args.collect and not adm0["ok"]:
+            res["errors"].append("R-2 准入不过：" + "；".join(adm0["reasons"]))
     if args.collect and foreign and not args.allow_busy:
         res["errors"].append("G7 静窗不满足（--collect 的计时会被污染）⇒ 先等安静，或显式 --allow-busy")
-    if args.collect and math.isfinite(free0) and free0 < MIN_COMMIT_FREE_GB:
-        res["errors"].append(f"commit_free {free0:.2f} GB < {MIN_COMMIT_FREE_GB:g} GB ⇒ 立即停")
 
     # ---- 取数 -------------------------------------------------------------------
     guards = [v4gate.parse_guard_metric(s) for s in args.guard_metric.split(",") if s.strip()]
@@ -1705,6 +1820,11 @@ def main(argv=None) -> int:
                                             "training_hits": training_hits(procs_end, skip)}
                                            if args.collect else None)},
         "resource_gate": {"commit_free_gb_start": free0, "quiet_window_ok": quiet_ok,
+                          "mode": "mem-kill" if bool(getattr(args, "mem_kill", False))
+                                  else "admission",
+                          "admission_start": adm0,
+                          "idle_baseline_gb": IDLE_BASELINE_GB, "hard_floor_gb": HARD_FLOOR_GB,
+                          "admission_margin": ADMISSION_MARGIN,
                           "foreign_load": [{"name": p["name"], "pid": p["pid"], "ws_mb": p["ws_mb"]}
                                            for p in foreign],
                           "workers_requested": args.workers, "workers_max": MAX_WORKERS},

@@ -140,6 +140,115 @@ def mem() -> dict:
             "free_phys_gb": round(m.ullAvailPhys / G, 2)}
 
 
+# ================================================================ R-2 准入控制
+#: 本机**实测空闲基线**（`commit_free`，GB）：第九十六轮记录 = 峰值 committed 4.35 GB 时仍剩 6.13 GB
+#: ⇒ 空闲基线 ≈ 4.35 + 6.13 = 10.5 GB。绝对线 8 GB 与它自相矛盾（只剩 2.5 GB 给负载）。
+IDLE_BASELINE_GB = 10.5
+#: **硬地板**：只有 `commit_free` 跌到这里才允许杀当前相（此前的 R-2 口径 = 只记账 + 拒绝新增负载）。
+HARD_FLOOR_GB = 2.0
+#: 准入余量：起跑前要求 `commit_free ≥ 该相预期峰值 × 1.5`。
+ADMISSION_MARGIN = 1.5
+
+
+def admission_check(commit_free_gb: float, expected_peak_gb: float | None, *,
+                    idle_baseline_gb: float = IDLE_BASELINE_GB,
+                    margin: float = ADMISSION_MARGIN,
+                    hard_floor_gb: float = HARD_FLOOR_GB) -> dict:
+    """**纯函数**：这一相现在准不准起跑（R-2 准入控制）。
+
+    判据两条，缺一即拒：
+      ① 容量：`commit_free ≥ 该相预期峰值 × 1.5`；
+      ② 基线一致性：`预期峰值 × 1.5 ≤ 空闲基线`（否则该配方在**空机**上也跑不动 ⇒ 拒的是配方不是时点）。
+    `expected_peak_gb` 缺失/非正 ⇒ **拒**（fail-closed：没有预期峰值的准入检查等于没有检查）。
+
+    返回值带 `below_hard_floor`：跑中越线时，只有它为真才允许杀当前相。
+    """
+    reasons: list[str] = []
+    try:
+        cf = float(commit_free_gb)
+    except (TypeError, ValueError):
+        cf = float("nan")
+    peak = None
+    if expected_peak_gb is not None:
+        try:
+            peak = float(expected_peak_gb)
+        except (TypeError, ValueError):
+            peak = None
+    if peak is None or not (peak > 0):
+        reasons.append("未声明该相预期峰值（`--adm-peak-gb` / spec 的 `gate.adm_peak_gb`）⇒ fail-closed")
+        need = None
+    else:
+        need = round(peak * float(margin), 3)
+        if cf != cf:                                    # NaN
+            reasons.append("commit_free 读不到（fail-closed）")
+        elif cf < need:
+            reasons.append(f"提交余量不足：commit_free={cf:.2f} GB < 预期峰值 × {margin:g} = {need:.2f} GB")
+        if need > float(idle_baseline_gb):
+            reasons.append(f"配方本身不可行：需要 {need:.2f} GB > 空闲基线 {float(idle_baseline_gb):.2f} GB")
+    below = (cf == cf) and cf < float(hard_floor_gb)
+    if below:
+        reasons.append(f"commit_free={cf:.2f} GB < 硬地板 {float(hard_floor_gb):g} GB")
+    return {"ok": not reasons, "reasons": reasons, "commit_free_gb": cf,
+            "expected_peak_gb": peak, "need_gb": need, "margin": margin,
+            "idle_baseline_gb": float(idle_baseline_gb),
+            "hard_floor_gb": float(hard_floor_gb), "below_hard_floor": below}
+
+
+class AdmissionGate:
+    """**准入控制**的状态机（缺省口径；`--mem-kill` 时退回旧的"越线即杀"）。
+
+    · `precheck()`  = 起跑前（或加新负载前）判一次；不过 ⇒ **拒绝起跑/拒绝新增负载**；
+    · `observe()`   = 跑中每 1 s 判一次；越线只**记账并关闭新增负载**，⛔ 不因此杀当前相；
+      只有 `commit_free < HARD_FLOOR_GB` 才返回 `kill=True`（这时才允许杀）。
+    """
+
+    def __init__(self, expected_peak_gb: float | None, *, mem_kill: bool = False,
+                 idle_baseline_gb: float = IDLE_BASELINE_GB,
+                 margin: float = ADMISSION_MARGIN,
+                 hard_floor_gb: float = HARD_FLOOR_GB) -> None:
+        self.peak = expected_peak_gb
+        self.mem_kill = bool(mem_kill)
+        self.idle = idle_baseline_gb
+        self.margin = margin
+        self.hard_floor = hard_floor_gb
+        self.closed = False
+        self.trip: dict | None = None
+        self.readings: list[dict] = []
+
+    def precheck(self, commit_free_gb: float, *, what: str = "") -> dict:
+        r = admission_check(commit_free_gb, self.peak, idle_baseline_gb=self.idle,
+                            margin=self.margin, hard_floor_gb=self.hard_floor)
+        r["what"] = what
+        self.readings.append({"when": "precheck", "what": what, **r})
+        if not r["ok"] and self.trip is None:
+            self.trip = {"reason": "准入拒绝：" + "；".join(r["reasons"]),
+                         "commit_free_gb": r["commit_free_gb"], "need_gb": r["need_gb"],
+                         "kind": "refused_start"}
+        return r
+
+    def observe(self, commit_free_gb: float, *, what: str = "") -> dict:
+        """跑中读数。返回 `{"closed_now":…, "kill":…, "detail":…}`；closed 一旦置位不再复位。"""
+        r = admission_check(commit_free_gb, self.peak, idle_baseline_gb=self.idle,
+                            margin=self.margin, hard_floor_gb=self.hard_floor)
+        closed_now = (not r["ok"]) and (not self.closed) and (not r["below_hard_floor"])
+        if (not r["ok"]) and self.closed is False:
+            self.closed = True
+            if self.trip is None:
+                self.trip = {"reason": "跑中越线（只记账 + 关闭新增负载）",
+                             "why": r["reasons"], "commit_free_gb": r["commit_free_gb"],
+                             "need_gb": r["need_gb"], "kind": "midrun_closed"}
+        kill = bool(r["below_hard_floor"])
+        self.readings.append({"when": "observe", "what": what, "kill": kill, **r})
+        return {"closed_now": closed_now, "kill": kill, "closed": self.closed, "detail": r}
+
+    def allow_new_load(self) -> tuple[bool, str]:
+        if self.mem_kill:                     # 旧口径：由 `_sampler` 的越线树杀负责，不在这里拦
+            return True, "mem-kill 模式（旧口径）"
+        if self.closed:
+            return False, "准入已关闭（跑中越线只记账，但 ⛔ 不许再加新负载）"
+        return True, "准入开着"
+
+
 class _PMC(ctypes.Structure):
     _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
                 ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
@@ -1028,6 +1137,18 @@ class Runner:
         self._stop_run: bool = False
         self.lock: dict = {}
         self.gate_trip = None
+        #: R-2 准入控制（缺省）；`--mem-kill` ⇒ 旧口径（越线树杀）逐字保留
+        self.mem_kill = bool(getattr(args, "mem_kill", False))
+        self.adm = AdmissionGate(
+            getattr(args, "adm_peak_gb", None) if getattr(args, "adm_peak_gb", None) is not None
+            else (self.gate.get("adm_peak_gb")),
+            mem_kill=self.mem_kill,
+            idle_baseline_gb=float(getattr(args, "idle_baseline_gb", IDLE_BASELINE_GB)
+                                   or IDLE_BASELINE_GB),
+            hard_floor_gb=float(getattr(args, "hard_floor_gb", HARD_FLOOR_GB)
+                                or HARD_FLOOR_GB))
+        #: 跑中越线后**拒绝新增负载**（新的相没起跑）——记账面
+        self.refused_new_load: list[dict] = []
         self.commands_run = 0
         self._stop = threading.Event()
         self.ledger_p = self.ev / f"{self.tag}.{TOOL_NAME}.jsonl"
@@ -1098,32 +1219,86 @@ class Runner:
             self.ledger_fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             self.ledger_fh.flush()
             trip = None
-            if row["commit_free_gb"] < float(self.gate["min_commit_free_gb"]):
-                trip = {"reason": "commit_free 低于阈值",
-                        "commit_free_gb": row["commit_free_gb"],
-                        "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
-            elif abort_file.exists():
-                trip = {"reason": f"外部采样器写了 {abort_file.name}（同一闸门）",
-                        "commit_free_gb": row["commit_free_gb"],
-                        "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
-            if trip:
-                first = self.gate_trip is None
-                self.gate_trip = trip
-                if first:
-                    self.rec("gate_trip", **trip, serial=self.gate_serial_action)
-                if self.gate_serial_action:
-                    # **串行也要真执行**（原先只记账 ⇒ 8 GB 纪律线形同不存在）：采样线程负责杀当前相
-                    # —— 编排器主线程此刻正阻塞在 `wait_phase` 上，只有采样线程能动手。
-                    # kill **进程树**（相常是 venv 蹦床 + 真身两层 ⇒ 只杀蹦床会留下孤儿真身继续吃内存）。
+            if self.mem_kill:
+                # ---- 旧口径（`--mem-kill`）：越线即杀。逐字保留，供需要"跑到一半杀"的场景 ----
+                if row["commit_free_gb"] < float(self.gate["min_commit_free_gb"]):
+                    trip = {"reason": "commit_free 低于阈值",
+                            "commit_free_gb": row["commit_free_gb"],
+                            "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
+                elif abort_file.exists():
+                    trip = {"reason": f"外部采样器写了 {abort_file.name}（同一闸门）",
+                            "commit_free_gb": row["commit_free_gb"],
+                            "threshold": self.gate["min_commit_free_gb"], "ts": row["ts"]}
+                if trip:
+                    first = self.gate_trip is None
+                    self.gate_trip = trip
+                    if first:
+                        self.rec("gate_trip", **trip, serial=self.gate_serial_action)
+                    if self.gate_serial_action:
+                        # **串行也要真执行**（原先只记账 ⇒ 8 GB 纪律线形同不存在）：采样线程负责杀当前相
+                        # —— 编排器主线程此刻正阻塞在 `wait_phase` 上，只有采样线程能动手。
+                        # kill **进程树**（相常是 venv 蹦床 + 真身两层 ⇒ 只杀蹦床会留下孤儿真身继续吃内存）。
+                        for n, p in list(procs.items()):
+                            if p.poll() is None and n not in self.gate_killed:
+                                self.rec("gate_kill_tree", name=n, pid=p.pid, **kill_tree(p.pid))
+                                p.kill()
+                                self.gate_killed.add(n)
+                    # ⚠ **不 return**：闸门响了这一相作废，但采样必须继续到"看到它真的退出"为止，
+                    #   否则 `commit_free` 最低值与真退出时刻都会缺（AGENTS §6.5 判据⑦）。
+            else:
+                # ---- R-2 缺省口径：**准入控制**。跑中越线只记账 + 关闭"新增负载"，
+                #      ⛔ 不因此杀当前相；只有跌到硬地板才许杀（唯一允许杀的地方）。
+                obs = self.adm.observe(row["commit_free_gb"], what="sampler")
+                if obs["closed_now"]:
+                    self.rec("admission_closed", **self.adm.trip)
+                    self.say(f"  ⚠ [R-2 准入] 跑中越线（commit_free={row['commit_free_gb']} GB）"
+                             f"⇒ **只记账 + 拒绝新增负载**，⛔ 不杀当前相")
+                if abort_file.exists() and self.gate_trip is None:
+                    self.gate_trip = {"reason": f"外部采样器写了 {abort_file.name}（同一闸门）",
+                                      "commit_free_gb": row["commit_free_gb"],
+                                      "threshold": None, "ts": row["ts"], "kind": "external_abort"}
+                    self.rec("gate_trip", **self.gate_trip)
+                if obs["kill"]:
+                    self.gate_trip = {"reason": f"commit_free 低于硬地板 {self.adm.hard_floor:g} GB",
+                                      "commit_free_gb": row["commit_free_gb"],
+                                      "threshold": self.adm.hard_floor, "ts": row["ts"],
+                                      "kind": "hard_floor"}
+                    self.rec("gate_trip", **self.gate_trip)
                     for n, p in list(procs.items()):
                         if p.poll() is None and n not in self.gate_killed:
                             self.rec("gate_kill_tree", name=n, pid=p.pid, **kill_tree(p.pid))
                             p.kill()
                             self.gate_killed.add(n)
-                # ⚠ **不 return**：闸门响了这一相作废，但采样必须继续到"看到它真的退出"为止，
-                #   否则 `commit_free` 最低值与真退出时刻都会缺（AGENTS §6.5 判据⑦）。
             if self.gate_killed:
                 return                         # 串行已杀 ⇒ 不再需要新采样点
+
+    # -- R-2 准入（起跑前 / 加新负载前）------------------------------------
+    def _admit(self, what: str) -> bool:
+        """**R-2 准入**：准 ⇒ 记读数并放行；不准 ⇒ 记 `refused_new_load` 并拒绝。
+
+        `--mem-kill`（旧口径）⇒ 直接放行（旧行为里起跑前的检查只有 `min_commit_free_gb`，
+        那段逻辑在 `mode_pair` 的旧路径上原样保留；本函数只对新口径生效）。
+        """
+        if self.mem_kill:
+            return True
+        ok, why = self.adm.allow_new_load()
+        if not ok:
+            self.refused_new_load.append({"what": what, "why": why})
+            self.rec("refused_new_load", what=what, why=why)
+            self.say(f"  ⛔ [R-2 准入] 拒绝起跑 {what}：{why}")
+            return False
+        r = self.adm.precheck(mem()["commit_free_gb"], what=what)
+        self.rec("admission_precheck", what=what, ok=r["ok"], reasons=r["reasons"],
+                 commit_free_gb=r["commit_free_gb"], expected_peak_gb=r["expected_peak_gb"],
+                 need_gb=r["need_gb"], idle_baseline_gb=r["idle_baseline_gb"])
+        self.say(f"  [R-2 准入] {what}：commit_free={r['commit_free_gb']} GB · 预期峰值 "
+                 f"{r['expected_peak_gb']} GB × {r['margin']:g} = {r['need_gb']} GB ⇒ "
+                 f"{'起跑' if r['ok'] else '**拒绝**'}")
+        if not r["ok"]:
+            self.refused_new_load.append({"what": what, "why": "；".join(r["reasons"])})
+            self.rec("refused_new_load", what=what, why="；".join(r["reasons"]))
+            return False
+        return True
 
     # -- 跑一条命令 ---------------------------------------------------------
     def _spawn(self, name: str, cmd: list, cwd) -> subprocess.Popen:
@@ -1288,6 +1463,11 @@ class Runner:
                 name = {"primary": "primary", "compact": "primary", "readings": "primary",
                         "train": "primary", "other": "other", "collect": "other"}.get(self.only, self.only)
                 self.say(f"\n--- 单相模式：只跑 {name} ---")
+                if not self._admit(f"{name}（单相）"):
+                    result.update({"exit_code": 3, "commands_run": 0,
+                                   "refuse_reason": "R-2 准入拒绝",
+                                   "note": "准入控制拒绝起跑 ⇒ 一条命令都没打"})
+                    return 3, result
                 t0 = time.time()
                 th = threading.Thread(target=self._sampler, args=(procs,), daemon=True)
                 th.start()
@@ -1305,6 +1485,11 @@ class Runner:
                 #   退出码 7（判据 ⑥⑦：资源纪律违规是一条**看得见的失败**，⛔ 不许被 6/0 吃掉）。
                 #   优先级沿用 `final_exit_code`：5（收尸失败）> 7（有相非 0 / 闸门杀）> 6（污染）> 0。
                 self.gate_serial_action = True
+                if not self._admit("primary（串行首发）"):
+                    result.update({"exit_code": 3, "commands_run": 0,
+                                   "refuse_reason": "R-2 准入拒绝",
+                                   "note": "准入控制拒绝起跑 ⇒ 一条命令都没打"})
+                    return 3, result
                 th = threading.Thread(target=self._sampler, args=(procs,), daemon=True)
                 th.start()
                 t0 = time.time()
@@ -1312,22 +1497,28 @@ class Runner:
                 procs["primary"] = pp
                 phase_start["primary"] = t0
                 res["primary"] = wait_phase("primary", pp, t0)
-                if self.gate_trip:
+                if self.mem_kill and self.gate_trip:
                     self.gate_killed.add("primary")
                     self.rec("gate_trip", **self.gate_trip, action="kill primary（串行）")
                     self._stop_run = True
+                elif (not self.mem_kill) and self.gate_trip:
+                    self.say(f"  ⚠ [R-2 准入] primary 跑中越线（commit_free="
+                             f"{self.gate_trip.get('commit_free_gb')} GB）⇒ 只记账、⛔ **不杀已跑完的相**")
                 t1 = time.time()
                 if not self._stop_run:
-                    po = self._spawn("other", ocmd, None)
-                    procs["other"] = po
-                    phase_start["other"] = t1
-                    res["other"] = wait_phase("other", po, t1)
-                    if self.gate_trip:
-                        self.gate_killed.add("other")
-                        self.rec("gate_trip", **self.gate_trip, action="kill other（串行）")
+                    if not self._admit("other（串行第二相）"):
+                        self._stop_run = True
+                    else:
+                        po = self._spawn("other", ocmd, None)
+                        procs["other"] = po
+                        phase_start["other"] = t1
+                        res["other"] = wait_phase("other", po, t1)
+                        if self.mem_kill and self.gate_trip:
+                            self.gate_killed.add("other")
+                            self.rec("gate_trip", **self.gate_trip, action="kill other（串行）")
                 self._stop.set()
                 th.join(timeout=5)
-                if self.gate_trip:
+                if self.gate_trip and (self.mem_kill or self.gate_killed):
                     self.say(f"  ⛔ [内存闸门·串行] {self.gate_trip['reason']}："
                              f"commit_free={self.gate_trip['commit_free_gb']} GB < "
                              f"{self.gate_trip['threshold']} GB ⇒ **已杀当前相**（不再只是记账），"
@@ -1335,6 +1526,11 @@ class Runner:
             else:
                 self.say(f"\n--- 重叠：{self.spec['phase']}（primary）‖ {self.spec['other']['kind']}（other）---")
                 self.gate_trip = None
+                if not (self._admit("other（重叠首发）") and self._admit("primary（重叠）")):
+                    result.update({"exit_code": 3, "commands_run": 0,
+                                   "refuse_reason": "R-2 准入拒绝",
+                                   "note": "准入控制拒绝起跑 ⇒ 一条命令都没打"})
+                    return 3, result
                 po = self._spawn("other", ocmd, None)
                 t_o = time.time()
                 phase_start["other"] = t_o
@@ -1346,7 +1542,7 @@ class Runner:
                 th.start()
                 res["other"] = wait_phase("other", po, t_o)
                 tripped = self.gate_trip
-                if tripped and pp.poll() is None:
+                if tripped and pp.poll() is None and (self.mem_kill or self.gate_killed):
                     self.say(f"\n[内存闸门] {tripped['reason']}：commit_free={tripped['commit_free_gb']} GB "
                              f"< {tripped['threshold']} GB ⇒ 杀主相（派生相，可重建）")
                     self.rec("gate_trip", **tripped, action="kill primary")
@@ -1362,7 +1558,7 @@ class Runner:
                 self._stop.set()
                 th.join(timeout=5)
                 tripped = self.gate_trip
-                if tripped and self.gate["fallback"] == "serial":
+                if tripped and (self.mem_kill or self.gate_killed) and self.gate["fallback"] == "serial":
                     out = self.spec["primary"].get("out")
                     if out:
                         rm = rm_safe(Path(out), "内存闸门中止后的半成品主相产物", self.allow_rm_roots)
@@ -1452,12 +1648,16 @@ class Runner:
 
         contaminated = any(e["ev"] == "contaminated" for e in self.events)
         failures = phase_failures(res, ignore=self.gate_killed)
-        gate_enforced = bool(self.gate_serial_action and self.gate_trip)
+        # `--mem-kill` ⇒ 旧口径的 gate_enforced 表达式逐字不变；缺省（R-2）⇒ 只有**真的杀了**才算动手
+        gate_enforced = (bool(self.gate_serial_action and self.gate_trip) if self.mem_kill
+                         else bool(self.gate_killed))
         code = final_exit_code(rm=result.get("reap"),
                                fell_back=bool(res.get("fell_back", True)),
                                fell_back_ok=bool(res.get("fell_back_ok", True)),
                                failures=failures, contaminated=contaminated,
                                gate_enforced=gate_enforced)
+        if self.refused_new_load and code == 0:
+            code = 7
         if failures:
             self.say(f"\n⛔ **有相非 0 退出**：{failures} ⇒ exit=7"
                      f"（⛔ 不许当成'跑过了'；主相/从相的产物都可能是半成品）")
@@ -1465,6 +1665,10 @@ class Runner:
             self.say(f"\n⛔ **资源纪律线（串行）真的动了手**：commit_free "
                      f"{self.gate_trip['commit_free_gb']} GB < {self.gate_trip['threshold']} GB "
                      f"⇒ 杀掉 {sorted(self.gate_killed)} ⇒ exit=7（该相读数作废）")
+        if self.refused_new_load:
+            self.say(f"\n⛔ [R-2 准入] 拒绝新增负载 {len(self.refused_new_load)} 次："
+                     f"{[r['what'] for r in self.refused_new_load]} ⇒ exit=7"
+                     f"（⛔ 已跑完的相**没有被杀**，只是没再起新负载）")
         result.update({"exit_code": code, "phase_failures": failures, "phases": {
             "primary": res.get("primary"), "other": res.get("other"),
             "primary_serial_fallback": res.get("primary_serial_fallback")},
@@ -1482,6 +1686,12 @@ class Runner:
             "gate_killed": sorted(self.gate_killed),
             "gate_enforced": gate_enforced,
             "gate_trip": self.gate_trip,
+            "admission": {"mode": "mem-kill" if self.mem_kill else "admission",
+                          "expected_peak_gb": self.adm.peak, "margin": self.adm.margin,
+                          "idle_baseline_gb": self.adm.idle, "hard_floor_gb": self.adm.hard_floor,
+                          "closed": self.adm.closed, "trip": self.adm.trip,
+                          "readings": self.adm.readings[-8:],
+                          "refused_new_load": self.refused_new_load},
             "real_pid": {k: v for k, v in self.real_pid.items()},
             "real_pid_unresolved": {k: v.get("why") for k, v in self.real_pid_fail.items()},
             "timing_reliable": (not contaminated) and (not failures) and (not gate_enforced),
@@ -2016,7 +2226,7 @@ def mode_selftest(args, ctx: dict) -> tuple[int, dict]:
         }, ensure_ascii=False), encoding="utf-8")
         r8 = subprocess.run([sys.executable, str(Path(__file__).resolve()), "pair",
                              "--driver", str(sp2), "--overlap", "--allow-busy",
-                             "--resolve-timeout", "2",
+                             "--resolve-timeout", "2", "--mem-kill",
                              "--data-root", str(d2), "--compact-root", str(d2 / "c"),
                              "--raw-root", str(d2 / "r"),
                              "--out", str(d2 / "r8.json")],
@@ -2218,6 +2428,50 @@ def mode_selftest(args, ctx: dict) -> tuple[int, dict]:
              f"verified_gone={rm2.get('verified_gone')} exit={exit_for_fallback(rm=rm2)} · "
              f"释放后重删={release_ok}")
 
+        # ---- ⑩ R-2 准入：预期峰值 × 1.5 / 空闲基线 ⇒ 拒绝起跑
+        print("\n=== ⑩ R-2 准入：commit_free vs 预期峰值×1.5 **与** 空闲基线 ⇒ 不达即**拒绝起跑** ===")
+        a_ok = admission_check(10.5, 4.0)          # 4×1.5 = 6 ≤ 10.5，且 6 ≤ 空闲基线 10.5 ⇒ 准
+        a_low = admission_check(5.0, 4.0)          # 5 < 6 ⇒ 拒
+        a_none = admission_check(10.5, None)       # 未声明预期峰值 ⇒ fail-closed 拒
+        a_infeasible = admission_check(12.0, 8.0)  # 8×1.5 = 12 > 空闲基线 10.5 ⇒ 配方不可行，拒
+        g10 = AdmissionGate(4.0)
+        pr = g10.precheck(5.0, what="primary")
+        ok10 = (a_ok["ok"] is True and a_low["ok"] is False and a_none["ok"] is False
+                and a_infeasible["ok"] is False and pr["ok"] is False
+                and pr["need_gb"] == 6.0 and g10.trip is not None
+                and g10.trip["kind"] == "refused_start")
+        case("⑩ R-2 准入拒绝", ok10,
+             "准：free 10.5 / 峰值 4（need 6）· 拒：free 5 < 6 · 拒：未声明峰值（fail-closed）"
+             " · 拒：need 12 > 空闲基线 10.5（配方不可行）",
+             f"ok={a_ok['ok']}·不足={a_low['ok']}（{a_low['reasons']}）· 未声明={a_none['ok']}"
+             f"（{a_none['reasons']}）· 不可行={a_infeasible['ok']}（{a_infeasible['reasons']}）"
+             f" · precheck(5.0,need 6)={pr['ok']} trip={g10.trip}")
+
+        # ---- ⑪ 跑中越线：只记账 + 拒绝新增负载，**不杀**；只有硬地板才杀
+        print("\n=== ⑪ R-2 跑中越线 ⇒ 只记账 + 拒绝新增负载（⛔ 不杀当前相）；硬地板才杀 ===")
+        g11 = AdmissionGate(4.0)                   # need = 6 GB；硬地板 2 GB
+        o1 = g11.observe(10.0)                     # 正常
+        o2 = g11.observe(5.0)                      # 越线（5 < 6）但 5 > 2 ⇒ 只记账、不杀
+        allow_after, why_after = g11.allow_new_load()
+        o3 = g11.observe(1.5)                      # 硬地板以下 ⇒ kill
+        g11b = AdmissionGate(4.0)
+        o4 = g11b.observe(1.5)                     # 一上来就低于硬地板 ⇒ kill
+        g11c = AdmissionGate(4.0, mem_kill=True)
+        allow_mk, _ = g11c.allow_new_load()
+        ok11 = (o1["kill"] is False and o1["closed"] is False
+                and o2["closed_now"] is True and o2["kill"] is False and o2["closed"] is True
+                and allow_after is False
+                and o3["kill"] is True and o3["closed"] is True
+                and o4["kill"] is True and o4["closed"] is True
+                and allow_mk is True)              # mem-kill：不过准入，旧口径由采样器杀
+        case("⑪ 跑中越线不杀但拒绝新增", ok11,
+             "越线（5<6，>硬地板 2）⇒ closed=True、kill=False、allow_new_load=False；"
+             "低于硬地板（1.5）⇒ kill=True；`--mem-kill` ⇒ 准入不拦（旧口径）",
+             f"正常={o1['kill']}/{o1['closed']} · 越线 closed_now={o2['closed_now']} kill={o2['kill']} "
+             f"closed={o2['closed']} · 新负载允许={allow_after}（{why_after}） · "
+             f"硬地板 kill={o3['kill']} · 一步到硬地板 kill={o4['kill']} closed={o4['closed']} · "
+             f"mem-kill 允许新负载={allow_mk}")
+
     bad = [c for c in cases if not c["ok"]]
     out["cases"] = cases
     out["ok"] = not bad
@@ -2261,6 +2515,15 @@ def add_common(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--chunk", type=int, default=100000,
                     help="分块上限（行）；**<=0 是坏值 ⇒ exit 2**（⛔ 不是'不限'）")
     ap.add_argument("--min-commit-free-gb", type=float, default=None, help="覆盖内存闸门阈值（缺省 8.0）")
+    ap.add_argument("--adm-peak-gb", type=float, default=None,
+                    help="R-2 准入：该相**预期峰值**（GB）。缺省读 spec 的 `gate.adm_peak_gb`；"
+                         "两者都没有 ⇒ **拒绝起跑**（fail-closed）")
+    ap.add_argument("--idle-baseline-gb", type=float, default=None,
+                    help=f"R-2 准入：本机空闲基线（缺省 {IDLE_BASELINE_GB:g} GB，实测值）")
+    ap.add_argument("--hard-floor-gb", type=float, default=None,
+                    help=f"R-2 硬地板（缺省 {HARD_FLOOR_GB:g} GB）：只有跌到这里才允许杀当前相")
+    ap.add_argument("--mem-kill", action="store_true",
+                    help="退回**旧口径**：越线即 kill 进程树（缺省 = 准入控制：只记账 + 拒绝新增负载）")
     ap.add_argument("--out", default=None, help="机器可读 JSON 输出路径")
     ap.add_argument("--evidence-dir", default=None, help="账本/日志目录（缺省 <data-root>/w-ladder/_overlap/tool）")
     ap.add_argument("--no-fallback", action="store_true", help="内存闸门触发时只停不回退")
