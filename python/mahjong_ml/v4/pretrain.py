@@ -1781,7 +1781,9 @@ def _recorded_args(args) -> dict:
     for k, default in (("save_optimizer", False), ("resume_optimizer", None),
                        ("stop_after_steps", 0),
                        # ★ MV-1：新开关在缺省值时一个键都不进（与上面三条同一个做法）
-                       ("aux_own_win_weight", 0.0), ("aux_own_win_rows", "all")):
+                       ("aux_own_win_weight", 0.0), ("aux_own_win_rows", "all"),
+                       # ★ MV-1 第九十九轮：lr 调度（缺省 = 现行 cosine ⇒ 台账里一个键都不进）
+                       ("lr_schedule", "cosine"), ("lr_floor_frac", 0.1)):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -2111,6 +2113,24 @@ def train(args) -> dict:
     n = int(train_data["nlegal"].shape[0])
     steps = max(1, min(args.max_steps or 10 ** 9, n // args.batch))
     total_steps = steps * args.epochs
+    # ---- ★ MV-1 第九十九轮：lr 调度（唯一旋钮；缺省 `cosine` = 老表达式，一个浮点都不改）----
+    # ⚠ `cosine` 的 floor **写死 0.1**（= 老代码里的 `0.1 + 0.9·½(1+cos)`）：这样"旧路径逐字节不变"
+    #   不依赖任何新参数的取值。要改 floor 必须显式选 `floored-cosine`（⛔ 不许静默忽略旋钮）。
+    lr_sched = str(getattr(args, "lr_schedule", "cosine") or "cosine")
+    lr_floor = float(getattr(args, "lr_floor_frac", 0.1))
+    if lr_sched not in ("cosine", "constant", "floored-cosine"):
+        raise SystemExit(f"`--lr-schedule {lr_sched}` 不认识；可选 cosine / constant / floored-cosine")
+    if not (0.0 <= lr_floor <= 1.0):
+        raise SystemExit(f"`--lr-floor-frac {lr_floor:g}` 越界：必须 ∈ [0,1]（1.0 = 恒定 lr）")
+    if lr_sched == "cosine" and lr_floor != 0.1:
+        raise SystemExit(f"`--lr-schedule cosine` 的 floor 固定 0.1（老表达式）；"
+                         f"要 floor={lr_floor:g} 请显式用 `--lr-schedule floored-cosine`")
+    if lr_sched != "cosine" and getattr(args, "resume_optimizer", None):
+        raise SystemExit("⛔ 换了 `--lr-schedule` 不许续跑：续跑指纹（`_resume_recipe`）里没有这一项，"
+                         "接着跑出来的不是同一条轨迹；要换调度请从 `--init` 重新起一段")
+    print(f"lr 调度：{lr_sched}"
+          + (f"（floor = {lr_floor:g}·base）" if lr_sched == "floored-cosine" else "")
+          + "；c 段之外的阶段照旧保持常数 lr")
     # ⚠ **KL 早停必须够得着**（第二十五轮实测的坑）：`--max-steps 100` 配 `--kl-min-steps 100`
     #   ⇒ 判据只在 step ≥100 时才看，而一轮最多 100 步 ⇒ 早停永不触发（三代 `stop_reason` 全 None）。
     kl_min_eff = effective_kl_min_steps(steps, int(getattr(args, "kl_min_steps", 100) or 0))
@@ -2627,13 +2647,23 @@ def train(args) -> dict:
                 for p in trunk:
                     p.requires_grad = (not freeze_trunk) and stage != "b"
                 print(f"  -- 进入阶段 {stage}（step {gstep}/{total_steps}）")
-            # c 段余弦降 lr（a/b 段保持常数）；`--stage-c-lr-mult` 再整体缩一档
+            # c 段 lr 调度（a/b 段保持常数）；`--stage-c-lr-mult` 再整体缩一档。
+            # ⚠ 缺省 `cosine` 分支**逐字保留老表达式**（0.1 + 0.9·½(1+cos)）⇒ 旧路径逐字节不变。
             if stage == "c":
-                c_start = int(total_steps * (args.stage_a + args.stage_b))
-                prog = max(0.0, min(1.0, (gstep - c_start) / max(1, total_steps - c_start)))
-                for pg, base in zip(opt.param_groups, base_lrs):
-                    pg["lr"] = base * args.stage_c_lr_mult * (
-                        0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog)))
+                if lr_sched == "constant":
+                    for pg, base in zip(opt.param_groups, base_lrs):
+                        pg["lr"] = base * args.stage_c_lr_mult
+                else:
+                    c_start = int(total_steps * (args.stage_a + args.stage_b))
+                    prog = max(0.0, min(1.0, (gstep - c_start) / max(1, total_steps - c_start)))
+                    if lr_sched == "cosine":
+                        for pg, base in zip(opt.param_groups, base_lrs):
+                            pg["lr"] = base * args.stage_c_lr_mult * (
+                                0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog)))
+                    else:                                   # floored-cosine
+                        shape = lr_floor + (1.0 - lr_floor) * 0.5 * (1 + math.cos(math.pi * prog))
+                        for pg, base in zip(opt.param_groups, base_lrs):
+                            pg["lr"] = base * args.stage_c_lr_mult * shape
             idx = np.sort(perm[step * args.batch:(step + 1) * args.batch])
             if idx.size == 0:
                 break
@@ -3109,6 +3139,15 @@ def main(argv: list[str] | None = None) -> int:
     #   所以 c 段的主干 lr 必须再降一档：这个倍率乘在 a/c 的基准 lr 上（缺省 1.0 = 老行为）。
     ap.add_argument("--stage-c-lr-mult", type=float, default=1.0,
                     help="阶段 c（联合微调）学习率相对 --lr 的倍率（塌了就调小，例如 0.1）")
+    # ★ MV-1 第九十九轮：**唯一旋钮 = lr 调度**（缺省 = 老行为；⛔ 不改 lr 数值本身）
+    # `cosine` 的 floor 写死 0.1（= 老表达式），`floored-cosine` 才读 `--lr-floor-frac`。
+    ap.add_argument("--lr-schedule", choices=["cosine", "constant", "floored-cosine"], default="cosine",
+                    help="c 段的 lr 形状：cosine（缺省 = 0.1+0.9·½(1+cos πx)，老行为）/ "
+                         "constant（恒定 = --lr，去掉退火）/ "
+                         "floored-cosine（F+(1−F)·½(1+cos πx)，F = --lr-floor-frac）")
+    ap.add_argument("--lr-floor-frac", type=float, default=0.1, metavar="F",
+                    help="`--lr-schedule floored-cosine` 的 lr 下限（占 --lr 的比例，缺省 0.1）；"
+                         "⚠ `--lr-schedule cosine` 下必须留缺省（0.1），否则报错")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"
