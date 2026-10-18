@@ -461,3 +461,99 @@ tile 感受野：k=5×3 层 ⇒ **半径 7 牌种**（覆盖 15/34，够到搭�
 - ⛔ **三端预期红**：`--golden` 会红（Java/C++ 不认识 A− 的张量名）；⛔ **未同步前不得上线/进闸门**。
 - 段 2（`format` 2→3 + arch 段 + G1 夹具）的前置已就绪：`arch_of()` 已是唯一 arch 判据，
   张量表在 `export.expected_shapes(d, arch)` 一处集中。
+
+## 11 段 2 已实现（`net.bin` format 2→3 + arch 段，**Python 侧**）+ 读数（第一百零八轮，2026-10-19）
+
+> 本节只**追加**，⛔ 未改 §0–§10 的任何结论。依据 = `A-REFACTOR-IMPL-PLAN.md` §3（字段表/硬切/
+> fail-loud/冻结快照/golden 三档）。实现只动训练侧（`python/mahjong_ml/v4/export.py` +
+> `python/selfcheck.py`），⛔ **Java/C++ 未动** ⇒ 本节产出的 net/夹具**不得**上线/上闸门；
+> 证据 = gitignored `.tmp/mv1-s28/`（probe 输出 / selfcheck 日志 / 三份 golden）。
+
+### 11.1 落地与 §3 对账（**实际偏移 / 长度**）
+
+format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同）+ **arch 段 2,048 B** + 块表 + 张量表。
+`archLen`（arch 段首 u32）= **2,048（整段）** ⇒ 块表偏移 = `64 + archLen`（§3 原文）；
+段内 = **96 B 核心**（下表）+ **1,952 B 保留尾**（必须全 0；非 0 ⇒ 报错）。
+
+| 偏移（相对 arch 段首） | 字段 | 类型 | 实测（v4 真权重 / a-） | 备注 |
+| ---: | --- | --- | --- | --- |
+| 0 | `archLen` | u32 | **2,048 / 2,048** | ⚠ 见下"两处必要出入"① |
+| 4 | `archVersion` | u16 | 1 / 1 | `>1` ⇒ 报错（⛔ 不猜新字段） |
+| 6 | `topoId` | u16 | **2 / 3** | ⚠ 见下②（2 = v4、3 = A−/T1） |
+| 8/10/12/14/16/18 | `dTile/dEvt/dFuse/dHead/dCand/headDim` | u16×6 | 64/192/192/192/128/16 · 160/128/128/128/128/40 | `headDim = dTile/nHeads` |
+| 20/21/22 | `nTileConv/nTileAttn/nJointLayer` | u8×3 | 0/1/0 · 4/1/1 | v4 的 tile 塔没有 conv |
+| 23/24 | `actId/normId` | u8×2 | 0/0（ReLU/post-LN）· 1/1（GELU/pre-LN） | 未注册 ⇒ 报错 |
+| 25/26 | `segEmbMode/memTokenMode` | u8×2 | 0/0（无段嵌入/mem 门）· 1/1（3 段相加/`h_evt`=第 95 token） | |
+| 27 | `flags` | u8 | **0x0B**（B3+#0+mem 门）· **0x03**（B3+#0） | bit0 B3 · bit1 #0 · bit2 FiLM(0) · bit3 mem 门；bit4–7 必须 0 |
+| 28/30 | `valueBins/nHeads` | u16×2 | 51/4 · 81/4 | 与头部、`heads.value.weight` 行数三处相等 |
+| 32/36 | `valueRange/lnEps` | f32×2 | 30.0/1e-5 · 60.0/1e-5 | 与 arch 声明不符 ⇒ 报错 |
+| 40–43 | `tileKernel[4]` | u8×4 | 0,0,0,0 · 5,5,3,3 | |
+| 44/45（+46/47 pad） | `nSeg`/pad | u8×2 | 0/0 · 3/0 | `segEmbMode=1` 时 `nSeg` 必须 = 3 |
+| 48/52/56 | `featVersion/obsVersion/derivedVersion` | u32×3 | 4/3/3（两处都有） | 与头部**必须相等**（文件不许自相矛盾） |
+| 60–68 | `cTile/cEvt/kEvt/cCtx/cCand` | u16×5 | 48/96/60/64/128（两种 arch 相同） | 与 `spec` 常量不等 ⇒ 报错 |
+| 70–95 | reserved | 26 B | 全 0 | 非 0 ⇒ 报错 |
+| 96–2047 | reserved tail | 1,952 B | 全 0 | 非 0 ⇒ 报错 |
+
+**与 §3 的两处必要出入（在此钉死，⛔ 不回改 §3 的正文）**：
+1. §3 表里 `archLen = 96`，但同节又要求"arch 段 96 + 1,952 = 2,048 B"且"块表偏移 = `64+archLen`"
+   —— 两者**只有在 `archLen=2,048` 时同时成立**（96 时块表会落进保留尾）。本文取 **`archLen=2,048`**
+   （核心仍 96 B、`archVersion=1`），⛔ 不改"2,048 B 上限"这条。
+2. §3 只命名 `topoId=3`（A−/T1），但段 2 要求 **v4 图也写 format 3** ⇒ 注册表加 `topoId=2 = v4`
+   （= 格式 2 时代的旧图顺延；§3 的 `3 = A−` 一个字节不动）。未注册的 `topoId` ⇒ 报错。
+
+### 11.2 硬切 + fail-loud（逐条落地）
+
+- **`format==2` ⇒ 专用错误**：文案点名"**这是 A− 之前的老包**（format 2，没有 arch 段）—— 只有**旧二进制**
+  能读它：冻结快照 `lab/mv1/frozen-format2`（jar `3E7D0ADC…` / `trainer.exe` `F6AAA307…`）"，
+  并明写"⛔ 不会自动升级 / 不补 0 / 不猜 arch"。⛔ 没有任何升级分支。
+- `format==1` ⇒ 仍走 v3 `NeuralPolicy`（本模块**不解析、不猜**，只报"这是 v3 的定长 MLP"）；其它 ⇒ 报版本号。
+- **读端 arch 判据 = arch 段**（`topoId`）；`arch_of(张量表)` 只当**一致性断言**（不一致 ⇒ 报"自相矛盾"）。
+- fail-loud 六条（全部报错，⛔ 补 0）：① `valueBins`（头/arch/`heads.value` 行数三处）与
+  `valueRange`（与 arch 声明）② `hasB3=1` 但缺 `fusion.u_norm.*`/`u_res`（反之有但 flag=0 也报）
+  ③ `segEmbMode=1` 但缺 `fusion.seg`（PE 是 **0 参数非持久 buffer**，net.bin 里没有它的位置 ⇒
+  "PE 缺失"不可表达，由 golden 的 logits 对拍钉住）④ 张量名/形状 ≠ `expected_shapes(d,arch)`
+  ⑤ `params` ≠ 张量表实算（**校验位**：C++/Java 以前"读了不用"）⑥ 截断/越界（带边界检查的游标，
+  ⛔ 不让 `struct` 裸抛）+ 附加：`archLen∉[96,2048]`/`%4`、保留区/保留尾非 0、保留位、`archVersion>1`、
+  未知 `topoId`、头↔arch 三版本不等、块/张量数 >10,000、张量名重复。
+- `normalize_state` **按 arch 分流**：v4 缺 B3/#0 ⇒ 补恒等（旧包前向逐位不变）；**a- 缺 B3/`policy_gate`
+  ⇒ 报错**（那是 T1 参数账的一部分，补 0 = 静默换语义）；a- 的 `tile.tile_id` 仍可缺（`--legacy-tile-id`
+  构造期开关 ⇒ 0 = `tile+0`）。
+
+### 11.3 读数（逐位判据）
+
+| 项 | 读数 |
+| --- | --- |
+| **v4 真权重** `bot-ai/wl-dama`（format 2，1,397,992 参数 / 5,594,680 B）→ format 3 | **5,596,728 B = 5,594,680 + 2,048（差 +0）**；张量 **82/82 逐位相同**；前向 **policy/value/belief_tenpai/danger max|Δ| = 0**、argmax 3/3 行同 |
+| 同上，走 `normalize_state` 后（补 `tile.tile_id`+B3） | params **1,397,992 → 1,400,200（+2,208）**、5,605,654 B ⇒ 多出的字节是**补的张量**，不是 format 3 的开销 |
+| **a- 图**往返 | params **959,078** · **3,841,261 B**（= 3,839,213 + 2,048）· 张量 **93/93 逐位** · 前向 **max|Δ| = 0** |
+| 字节预算 | a- **3,841,261 B < 8,010,904 B** ✓（§0）；format 2 口径 3,839,213 B 与 §10.2 记的一致 |
+| `selfcheck` | **992/0 → 1,028/0**（新增 36 条：字段表/往返/硬切/fail-loud 六条/normalize 分流/golden 三档映射） |
+| 资源（判据 20 按角色） | 本批**无训练/采集相**：只有 selfcheck 与探针两个 Python 负载。`python*` committed 峰 **4,053.5 MB** / ws **2,312.5 MB**（每 1.5 s 采样、按进程求和）；`trainer*` **0**（未启动）；闸门工具 **0**（未跑） |
+
+### 11.4 golden 三档（本批**只做 Python 侧生成**）
+
+`export golden --fixture-semantics {c2|current|a-}` ⇒ `(arch, semantics)` = `(v4,c2) / (v4,current) / (a-,current)`。
+三份都在 `.tmp/mv1-s28/golden/`（⛔ 未覆盖仓库夹具 `python/tests/golden/forward-v4.bin`）：
+
+| 档 | 命令要点 | 字节 | sha256 | arch / semantics | 用途 |
+| --- | --- | ---: | --- | --- | --- |
+| **G0** | `--trace raw\v4-golden --fixture-semantics c2` | 633,599 | `1C75ADACA4BDEDDF2C72AFBE99B4ABD6DE288F09E480997856A65AB9BEBA0476` | v4 / **c2**（冻结 C2 语义） | 冻结 jar/exe 的**同语义**参照（容器是 format 3 ⇒ 仍只给新读端） |
+| **G1** | 同上 `--fixture-semantics current` | 640,605 | `3AB357833B6CB17588037C14A0838AF43D5AF594D4D8FFB3ADB4D620B26C82E5` | v4 / current | format 3 **新图**；⚠ **跨端一致待段 3** |
+| **G2** | `--trace raw\v4-wl-p301-A-g01 --scan-files 5 --cases 24 --fixture-semantics a-` | 646,695 | `12A1A1CF6839816DACC4186804A743C4B7FA95ACE28497E9D0C61AD685E505E2` | **a-** / current | A− 图 + **R-4 语料**（g0–g4 = 3,083 决策） |
+
+- G0 的内嵌 net = **215,296 B = 213,248（仓库冻结夹具的 net 段）+ 2,048** ⇒ 与冻结夹具同源（只多了 arch 段）。
+- ⚠ `_iter_cases` 是**覆盖贪心**（按标签/kind/长 carry 挑），三档都嵌入 **11** 个用例 —— G2 的"3,083 决策"
+  指**语料**（R-4 的 g0–g4），全量 3,083 行的三端对拍属于段 3 的 R-4 流程，⛔ 不是"夹具里塞 3,083 条"。
+- ⚠ **G1/G2 的跨端一致必须留到段 3**：C++/Java 读不了 format 3（也读不了内嵌 format 3 的夹具）；
+  G0 在冻结二进制下的对拍仍用仓库里的 **format 2** 夹具（`407BBE21…`），本批**没有**动它。
+
+### 11.5 后果与段 3 交接
+
+- **所有 Python 写出的 `net.bin` 现在是 format 3**（`save_net`/`net_blob` 缺省）⇒ `packbot`、`export weights`、
+  selfcheck 的临时网都变了；**Java/C++ 现在读不了**（预期，段 3 才同步）。`bot-ai/` 的 9 个 format 2 包
+  **一字节没动**，但新端读不了它们 ⇒ 冻结快照仍是 `wl-*` 回归的唯一入口（§3）。
+- `tools/policy-gate-check.mjs` 现在会把 format 3 记成"`3(非 v4)`、跳过"（**不报错也不判退化**）——
+  本批 ⛔ 不改校验器，记作**段 3 的第一件事**（否则新包会静默绕过门控判据）。
+- 段 3 待办（照 §3/§4）：C++ `v4LoadPolicyBytes` 读 arch 段 + `v4WeightFormatOf` 返回 3 + `format==2` 专用错误；
+  Java `loadBytes`/`FORMAT_VERSION`/`NetWeights` 分派；`policy-gate-check.mjs` 认 3（`2` 标冻结快照）；
+  `trainer-v4-parity.mjs --golden` 换 G1；R-4 的 3,083 行三端对拍。

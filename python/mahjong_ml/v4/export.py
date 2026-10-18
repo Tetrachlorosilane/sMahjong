@@ -1,9 +1,12 @@
 """v4 权重导出 + golden 对拍夹具（P5：Java / C++ 手写 v4 前向的**唯一输入格式**）。
 
     python -m mahjong_ml.v4.export weights --ckpt <model.pt> --out <net.bin> [--label <名字>]
-       训练好的 v4 checkpoint → 服务端/C++ 能直读的 **`net.bin` 格式 2**（小端 float32，
-       **带块清单与张量表**）。Java `mahjong.ai.V4Policy` 与 C++ `trainer` 各自手写前向，
-       服务端仍是零第三方依赖。
+       训练好的 v4 checkpoint → 服务端/C++ 能直读的 **`net.bin` 格式 3**（小端 float32，
+       **带 2,048 B arch 段 / 块清单 / 张量表**）。Java `mahjong.ai.V4Policy` 与 C++ `trainer`
+       各自手写前向，服务端仍是零第三方依赖。
+
+    python -m mahjong_ml.v4.export info --net <net.bin>
+       只读打印头部 + arch 段（段 3 对账用）；`format==2` ⇒ 专用错误、退出码 2。
 
     python -m mahjong_ml.v4.export golden --trace <轨迹目录> --out <夹具> [--cases N]
        真实轨迹 → **golden 夹具**（magic `MJ4G`）：固定种子的**小** v4 + 若干真实决策的
@@ -11,30 +14,34 @@
        Java 的 `SelfTest.v4ForwardTests` 与 C++ 的 `trainer v4net` 都读它，
        **逐元素**核对"特征拼装 + 前向"三端一致（容差 1e-4）。
 
-## 二进制格式（`docs/FEATURES-V4.md` §6「net.bin 格式 2」逐字段）
+## 二进制格式（`docs/FEATURES-V4.md` §6.1「net.bin 格式 2/3」逐字段）
 
 ⚠ **魔数与 v3 相同（`MJNN`），靠 `format` 区分**：v3 是 `format=1`（定长 MLP，无块清单），
-v4 是 `format=2`。这样 v3 的 `NeuralPolicy` 见到 v4 权重会报**格式版本 2 != 本服务端 1**
-（构造期拒绝），反之 v4 加载器见到 `format=1` 也会拒 —— 两侧都不会"尽力而为"。
+**v4 与 A− 都是 `format=3`**（64 B 头 + **2,048 B arch 段** + 块清单 + 张量表）。
+`format=2`（A− 之前的老包）**已硬切退役**：读到就报专用错误（指向冻结快照），
+⛔ 不自动升级、不补 0、不猜 arch —— 见 `read_net` 的 `_RETIRED_FORMAT2`。
 
-    头部（64 B）：
-      magic u32 "MJNN" · format u32 = 2 · featureVersion u32 = 4 · obsVersion u32 = 3
+    头部（64 B，偏移与格式 2 完全一致，只有 `format` 变 3）：
+      magic u32 "MJNN" · format u32 = 3 · featureVersion u32 = 4 · obsVersion u32 = 3
       · derivedVersion u32 = 3 · dModel u32 · tileD u32 · nHeads u32 · valueBins u32
       · nBlocks u32 · nTensors u32 · fingerprint 16 B（ASCII 的 16 个十六进制字符）
-      · params u32
+      · params u32（**校验位**：必须等于张量表实算的元素数）
+    arch 段（**总长固定 2,048 B** = 96 B 核心 + 1,952 B 保留尾，全 0；`archLen` 写在首 4 B）：
+      见 `_ARCH_FIELDS` / `arch_profile`（§3 字段表；写端与读端共用同一张表）
     块清单（nBlocks 条，按注册表顺序；**子集 = 消融**）：
       idLen u16 · id(utf8) · width u32
     张量表（nTensors 条，**名字升序**，名字 = PyTorch `state_dict()` 的键）：
       nameLen u16 · name(utf8) · ndim u8 · dims u32×ndim · 数据 f32（行主序、紧凑、无对齐）
 
-    ⚠ 头部**不带**隐层宽度之外的结构信息：三塔 + 融合 + 多头这套**拓扑是固定的**，
-    只有 `dModel / tileD / nHeads / valueBins` 四个宽度可变（与 v3 的 `hidden/head/trunk_layers`
-    同一个思路）—— 这样 golden 夹具能用**小网络**（几十 KB，能进仓库），
-    而真权重照跑（`dModel=192 / tileD=64 / nHeads=4 / valueBins=51`）。
+    ⚠ **两套拓扑共用 format 3**（`arch=v4` / `arch=a-`）：头部只写四个宽度，**拓扑由 arch 段
+    表达**（`topoId/actId/normId/flags` 决定前向分支）。这样 golden 夹具仍能用**小网络**
+    （几十 KB，能进仓库），而真权重照跑（v4 `192/64/4/51`、A− `128/160/4/81`）。
+    ⚠ 段 2 只做 Python 侧：Java/C++ 仍认 `format=2` ⇒ **format 3 的包现在两端都读不了**，
+    要等段 3（本批 ⛔ 不动 C++/Java）。
 
 ## golden 夹具布局
 
-    magic u32 "MJ4G" · format u32 = 2 · nCases u32 · netLen u32 · net（上面那个格式 2）
+    magic u32 "MJ4G" · format u32 = 2 · nCases u32 · netLen u32 · net（**format 3** 的 net.bin）
     每个 case：obsLen u32 · obs(utf8 JSON) · nLegal u16 · (keyLen u16 · key)×n
       · **h0 f32[dModel]**（W1 起：**窗口之前**的 GRU carry，三端都拿它当递推初值）
       · tile f32[34×C_TILE] · evt f32[K_EVT×C_EVT] · ctx f32[C_CTX] · cand f32[n×C_CAND]
@@ -60,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -71,15 +79,43 @@ from . import blocks, cache as _cache, model as M, spec, traces
 
 #: 与 v3 同一个魔数（`mahjong_ml.export.WEIGHT_MAGIC`），用 `format` 区分代号。
 NET_MAGIC = 0x4D4A4E4E          # "MJNN"
-NET_FORMAT = 2                  # v4 = 格式 2（带块清单）
+#: 段 2（第一百零八轮）：`v4` 与 `a-` 都写 **格式 3**（64 B 头 + 2,048 B arch 段 + 块表 + 张量表）。
+NET_FORMAT = 3
+#: 格式 1 = v3 的定长 MLP（`mahjong_ml.export.NeuralPolicy` 路径）—— 本模块不解析、但**保留**。
+NET_FORMAT_V3 = 1
+#: 格式 2 = A− 之前的老包 —— **硬切退役**（读到 ⇒ `NetFormatError` + 指向冻结快照）。
+NET_FORMAT_RETIRED = 2
 GOLDEN_MAGIC = 0x4D4A3447       # "MJ4G"
+#: 夹具**容器**格式（用例布局）：2 = 每用例带 `h0`/`h_evt`。⚠ 与**内嵌 net 的**格式解耦。
 GOLDEN_FORMAT = 2
 
-#: 格式 2 的头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32 = 64）
+#: 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32 = 64）；格式 3 的偏移一个字节没动。
 HEADER_BYTES = 64
 
-#: 夹具缺省用**小网络**（能进仓库；真权重是 192/64/4/51）
+#: arch 段：**总长固定 2,048 B** = 96 B 核心 + 1,952 B 保留尾（全 0）。`_ARCH_FIELDS` 是唯一规格。
+ARCH_SEG_BYTES = 2048
+ARCH_CORE_BYTES = 96
+#: `archVersion`：1 = 本表。>1 ⇒ 报错（⛔ 不猜新版本字段的含义）。
+ARCH_VERSION = 1
+#: `topoId` 注册表（§3 只命名 3 = A−/T1；v4 在格式 3 里顺延为 2，段 2 起 v4 也写格式 3）
+TOPO_IDS: dict[int, str] = {2: M.ARCH_V4, 3: M.ARCH_A}
+ARCH_TOPO_IDS: dict[str, int] = {v: k for k, v in TOPO_IDS.items()}
+#: `actId` / `normId` / `segEmbMode` / `memTokenMode` 的注册值（未注册 ⇒ 报错）
+ACT_IDS: dict[int, str] = {0: "relu", 1: "gelu"}
+NORM_IDS: dict[int, str] = {0: "post-ln", 1: "pre-ln"}
+SEG_EMB_MODES: dict[int, str] = {0: "none", 1: "three-seg-sum"}
+MEM_TOKEN_MODES: dict[int, str] = {0: "mem-gate", 1: "h_evt-token-95"}
+#: `flags` 的位定义（§3）：bit0 `hasB3` · bit1 `hasTileId` · bit2 `hasFiLM` · bit3 `hasMemGate`
+FLAG_B3 = 1 << 0
+FLAG_TILE_ID = 1 << 1
+FLAG_FILM = 1 << 2
+FLAG_MEM_GATE = 1 << 3
+
+#: 夹具缺省用**小网络**（能进仓库；真权重是 v4 192/64/4/51 · A− 128/160/4/81）
 GOLDEN_DIMS: dict[str, int] = {"d_model": 32, "tile_d": 16, "n_heads": 2, "value_bins": 5}
+#: A− 夹具的小网：`32/16/2/81`（`A-REFACTOR-IMPL-PLAN` §3 的 G1 口径；81 = value ±60）
+GOLDEN_DIMS_A: dict[str, int] = {"d_model": 32, "tile_d": 16, "n_heads": 2,
+                                 "value_bins": M.A_VALUE_BINS}
 #: 上线架构（`model.py` 的缺省值）
 FULL_DIMS: dict[str, int] = {"d_model": M.D_MODEL, "tile_d": M.TILE_D,
                              "n_heads": M.N_HEADS, "value_bins": M.VALUE_BINS}
@@ -93,6 +129,230 @@ class NetFormatError(RuntimeError):
     """权重文件/夹具不合格 —— 一律**报错**，不猜、不降级。"""
 
 
+#: `format==2` 的**硬切**文案（§3）：要让用户一眼看出"这是老包、需要旧二进制"，
+#: 而不是"文件坏了"。⛔ 不许在这里**自动升级**（补 0 / 猜 arch 都会静默换掉前向语义）。
+_RETIRED_FORMAT2 = (
+    "权重格式版本 2 已退役：format 3 起是 v4 新拓扑（64 B 头 + arch 段）。"
+    "**这是 A− 之前的老包**（format 2，没有 arch 段）—— 只有**旧二进制**能读它："
+    "冻结快照 `lab/mv1/frozen-format2`（`mahjong-server.jar` sha 3E7D0ADC…、`trainer.exe` "
+    "F6AAA307…）。⛔ 本加载器不会自动升级 / 不补 0 / 不猜 arch；要转格式请用冻结快照里的"
+    "旧工具重新导出，或按段 3 的新端重训。"
+)
+
+
+# ------------------------------------------------------------------ arch 段（格式 3）
+
+#: §3 字段表 = **唯一规格**（写端 `_pack_arch_segment` 与读端 `_read_arch_segment` 共用；
+#: 自检逐字段对账）。`(偏移, 名字, 类型, 字节数)`，偏移相对 **arch 段首**。
+#: ⚠ 核心 = 96 B（含首 4 B 的 `archLen`）；`archLen` 之外的部分是**保留尾**，必须全 0。
+_ARCH_FIELDS: tuple[tuple[int, str, str, int], ...] = (
+    (0, "archLen", "u32", 4),
+    (4, "archVersion", "u16", 2),
+    (6, "topoId", "u16", 2),
+    (8, "dTile", "u16", 2),
+    (10, "dEvt", "u16", 2),
+    (12, "dFuse", "u16", 2),
+    (14, "dHead", "u16", 2),
+    (16, "dCand", "u16", 2),
+    (18, "headDim", "u16", 2),
+    (20, "nTileConv", "u8", 1),
+    (21, "nTileAttn", "u8", 1),
+    (22, "nJointLayer", "u8", 1),
+    (23, "actId", "u8", 1),
+    (24, "normId", "u8", 1),
+    (25, "segEmbMode", "u8", 1),
+    (26, "memTokenMode", "u8", 1),
+    (27, "flags", "u8", 1),
+    (28, "valueBins", "u16", 2),
+    (30, "nHeads", "u16", 2),
+    (32, "valueRange", "f32", 4),
+    (36, "lnEps", "f32", 4),
+    (40, "tileKernel0", "u8", 1),
+    (41, "tileKernel1", "u8", 1),
+    (42, "tileKernel2", "u8", 1),
+    (43, "tileKernel3", "u8", 1),
+    (44, "nSeg", "u8", 1),
+    (45, "pad", "u8", 1),
+    (46, "pad2", "u8", 1),
+    (47, "pad3", "u8", 1),
+    (48, "featVersion", "u32", 4),
+    (52, "obsVersion", "u32", 4),
+    (56, "derivedVersion", "u32", 4),
+    (60, "cTile", "u16", 2),
+    (62, "cEvt", "u16", 2),
+    (64, "kEvt", "u16", 2),
+    (66, "cCtx", "u16", 2),
+    (68, "cCand", "u16", 2),
+    # 70..95 = 26 B 保留（archVersion=1 时非 0 ⇒ 报错）
+)
+
+
+def arch_profile(arch: str, d: Mapping[str, int], *, have: Any = ()) -> dict[str, Any]:
+    """该 arch 在**这份宽度**下的 arch 段字段（§3 字段表；写端/读端共用的**唯一规格**）。
+
+    `have` = 实际存在的张量名（只用来定 `flags` 里那三位"可缺张量在不在"）。
+    ⚠ 字段值**全部由代码常量推出**（`topoId/actId/normId/...`）；读端拿同一函数算出期望值
+    逐字段比对 ⇒ 文件里写了别的值就是"文件在说谎"，当场报错。
+    """
+    a = str(arch)
+    if a not in ARCH_TOPO_IDS:
+        raise NetFormatError(f"未注册的 arch {a!r}（可选：{sorted(ARCH_TOPO_IDS)}）")
+    names = set(have or ())
+    dm, td, nh, vb = (int(d["d_model"]), int(d["tile_d"]),
+                      int(d["n_heads"]), int(d["value_bins"]))
+    if nh <= 0 or td % nh or dm % nh:
+        raise NetFormatError(f"n_heads={nh} 必须同时整除 tile_d={td} 与 d_model={dm}")
+    common = {"topoId": ARCH_TOPO_IDS[a], "archVersion": ARCH_VERSION,
+              "dCand": int(spec.C_CAND), "headDim": td // nh,
+              "valueBins": vb, "nHeads": nh, "lnEps": 1e-5,
+              "featVersion": int(spec.FEATURE_VERSION_V4),
+              "obsVersion": int(spec.OBS_VERSION_V4),
+              "derivedVersion": int(spec.DERIVED_VERSION_V4),
+              "cTile": int(spec.C_TILE), "cEvt": int(spec.C_EVT), "kEvt": int(spec.K_EVT),
+              "cCtx": int(spec.C_CTX), "cCand": int(spec.C_CAND)}
+    if a == M.ARCH_A:
+        return {**common,
+                "dTile": td, "dEvt": dm, "dFuse": dm, "dHead": dm,
+                "nTileConv": 4, "nTileAttn": 1, "nJointLayer": 1,
+                "actId": 1, "normId": 1,                      # 1 = GELU / pre-LN
+                "segEmbMode": 1, "memTokenMode": 1,           # 1 = 3 段相加 / h_evt 第 95 token
+                "valueRange": float(M.A_VALUE_RANGE),
+                "tileKernel0": 5, "tileKernel1": 5, "tileKernel2": 3, "tileKernel3": 3,
+                "nSeg": int(M.N_SEG), "pad": 0, "pad2": 0, "pad3": 0,
+                "flags": (FLAG_B3 if all(k in names for k in _B3_KEYS) else 0)
+                         | (FLAG_TILE_ID if "tile.tile_id" in names else 0)}
+    return {**common,
+            "dTile": td, "dEvt": dm, "dFuse": dm, "dHead": dm,
+            "nTileConv": 0, "nTileAttn": 1, "nJointLayer": 0,   # v4 的 tile 塔没有 conv
+            "actId": 0, "normId": 0,                            # 0 = ReLU / post-LN
+            "segEmbMode": 0, "memTokenMode": 0,                 # 0 = 无段嵌入 / 走 mem 门
+            "valueRange": float(M.VALUE_RANGE),
+            "tileKernel0": 0, "tileKernel1": 0, "tileKernel2": 0, "tileKernel3": 0,
+            "nSeg": 0, "pad": 0, "pad2": 0, "pad3": 0,
+            "flags": (FLAG_B3 if all(k in names for k in _B3_KEYS) else 0)
+                     | (FLAG_TILE_ID if "tile.tile_id" in names else 0)
+                     | (FLAG_MEM_GATE if "fusion.mem.weight" in names else 0)}
+
+
+def _arch_segment_fields(prof: Mapping[str, Any]) -> dict[str, Any]:
+    """补上 `archLen`（= 整段 2,048 B）后的完整字段（写端/读端报错都用它）。"""
+    out = dict(prof)
+    out["archLen"] = ARCH_SEG_BYTES
+    return out
+
+
+def _pack_arch_segment(prof: Mapping[str, Any]) -> bytes:
+    """arch 段 = 96 B 核心 + 1,952 B **全 0** 保留尾（§3）。"""
+    f = _arch_segment_fields(prof)
+    core = bytearray(ARCH_CORE_BYTES)
+    for off, name, kind, size in _ARCH_FIELDS:
+        v = f[name]
+        if kind == "u8":
+            struct.pack_into("<B", core, off, int(v))
+        elif kind == "u16":
+            struct.pack_into("<H", core, off, int(v))
+        elif kind == "u32":
+            struct.pack_into("<I", core, off, int(v))
+        elif kind == "f32":
+            struct.pack_into("<f", core, off, float(v))
+        else:                                            # pragma: no cover
+            raise AssertionError(f"未知字段类型 {kind}")
+    return bytes(core) + bytes(ARCH_SEG_BYTES - ARCH_CORE_BYTES)
+
+
+def _unpack_arch_segment(raw: bytes, *, feat: int, obs: int, derived: int,
+                         dm: int, td: int, nh: int, vb: int) -> tuple[str, dict[str, Any], int]:
+    """解析 `[64, 64+archLen)` 的 arch 段 ⇒ `(arch, 字段, 块表偏移)`；不合格一律报错。
+
+    判据（§3 fail-loud 清单，逐条对应）：
+      · `archLen ∉ [96, 2048]` / `%4` / **截断** ⇒ 报错（⑥）；
+      · `archVersion != 1` / `topoId` 未注册 / `actId/normId/segEmbMode/memTokenMode` 未注册；
+      · 保留尾（`96..archLen`，含 46/47 两个 pad）非 0；
+      · **头 ↔ arch 段**的 `feat/obs/derived` 与 `valueBins`/`nHeads` 必须相等（①）；
+      · `dFuse/dTile` 与头部 `dModel/tileD` 必须相等；
+      · 其余结构字段（层数/卷积核/`nSeg`/五常量）必须等于**同一函数算出的期望值**（「文件在说谎」）。
+    ⚠ 块表偏移 = `64 + archLen`（§3 原文）；`archLen` 写的是**整段** 2,048 B，
+      所以 96 B 核心之后的 1,952 B 保留尾在块表**之前**，不会漏读。
+    """
+    if len(raw) < HEADER_BYTES + 4:
+        raise NetFormatError(f"权重文件被截断：{len(raw)} B，连 arch 段的 `archLen` 都读不到")
+    (alen,) = struct.unpack_from("<I", raw, HEADER_BYTES)
+    if alen < ARCH_CORE_BYTES or alen > ARCH_SEG_BYTES or alen % 4:
+        raise NetFormatError(
+            f"archLen={alen} 越界：必须在 [{ARCH_CORE_BYTES}, {ARCH_SEG_BYTES}] 且为 4 的倍数"
+            f"（§3：arch 段 96 B 核心 + 1,952 B 保留尾）")
+    if len(raw) < HEADER_BYTES + alen:
+        raise NetFormatError(
+            f"权重文件被截断：arch 段声明 {alen} B，文件只剩 {len(raw) - HEADER_BYTES} B")
+    seg = raw[HEADER_BYTES:HEADER_BYTES + alen]
+    got: dict[str, Any] = {}
+    for off, name, kind, _size in _ARCH_FIELDS:
+        if kind == "u8":
+            got[name] = seg[off]
+        elif kind == "u16":
+            got[name] = struct.unpack_from("<H", seg, off)[0]
+        elif kind == "u32":
+            got[name] = struct.unpack_from("<I", seg, off)[0]
+        else:
+            got[name] = struct.unpack_from("<f", seg, off)[0]
+    got["archLen"] = alen
+    if int(got["archVersion"]) != ARCH_VERSION:
+        raise NetFormatError(
+            f"archVersion={got['archVersion']} 不支持（本实现只认 {ARCH_VERSION}）")
+    topo = int(got["topoId"])
+    if topo not in TOPO_IDS:
+        raise NetFormatError(
+            f"topoId={topo} 未注册（已注册：{ {k: v for k, v in TOPO_IDS.items()} }）")
+    arch = TOPO_IDS[topo]
+    # 枚举字段：**先查"注册没注册"**（未注册 ⇒ 报错），再查"与拓扑一致"（见下面的 check 列表）
+    for name, table in (("actId", ACT_IDS), ("normId", NORM_IDS),
+                        ("segEmbMode", SEG_EMB_MODES), ("memTokenMode", MEM_TOKEN_MODES)):
+        if int(got[name]) not in table:
+            raise NetFormatError(
+                f"arch 段的 `{name}`={got[name]} 未注册（已注册：{sorted(table)}）")
+    # 头 ↔ arch 段：三版本号 + 两个宽度必须相等（§3「头与 arch 两处必须相等」）
+    for name, hv in (("featVersion", feat), ("obsVersion", obs), ("derivedVersion", derived)):
+        if int(got[name]) != int(hv):
+            raise NetFormatError(
+                f"头与 arch 段的 `{name}` 不一致：头 {hv} / arch {got[name]}（文件自相矛盾）")
+    if int(got["valueBins"]) != int(vb):
+        raise NetFormatError(
+            f"`valueBins` 三处不一致：头 {vb} / arch {got['valueBins']}"
+            f" / 期望按 arch 的 value_bins（读端会在张量表再核 heads.value.weight 行数）")
+    if int(got["nHeads"]) != int(nh):
+        raise NetFormatError(f"头与 arch 段的 `nHeads` 不一致：头 {nh} / arch {got['nHeads']}")
+    prof = arch_profile(arch, {"d_model": dm, "tile_d": td, "n_heads": nh, "value_bins": vb})
+    if int(got["dFuse"]) != int(dm) or int(got["dTile"]) != int(td):
+        raise NetFormatError(
+            f"arch 段的 `dFuse/dTile` = {got['dFuse']}/{got['dTile']} 与头部 `dModel/tileD` = "
+            f"{dm}/{td} 不一致")
+    if int(got["flags"]) & ~(FLAG_B3 | FLAG_TILE_ID | FLAG_FILM | FLAG_MEM_GATE):
+        raise NetFormatError(
+            f"arch 段的 `flags`={got['flags']:#04x} 用了**保留位**（bit4–7 必须为 0）")
+    # 其余"由拓扑决定"的字段：必须逐字段等于期望值（⛔ 不许出现"文件说 GELU、代码建 ReLU"）
+    check = ("nTileConv", "nTileAttn", "nJointLayer", "actId", "normId", "segEmbMode",
+             "memTokenMode", "tileKernel0", "tileKernel1", "tileKernel2", "tileKernel3",
+             "nSeg", "cTile", "cEvt", "kEvt", "cCtx", "cCand")
+    bad = [f"{n}={got[n]}（应 {prof[n]}）" for n in check if int(got[n]) != int(prof[n])]
+    if bad:
+        raise NetFormatError(
+            f"arch 段与 `{arch}` 拓扑不符（{len(bad)} 条）：" + "；".join(bad))
+    if abs(float(got["valueRange"]) - float(prof["valueRange"])) > 0.0:
+        raise NetFormatError(
+            f"`valueRange`={got['valueRange']} 与 arch `{arch}` 的声明 "
+            f"{prof['valueRange']} 不符（① fail-loud）")
+    # 保留：核心 70..95（26 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+    if seg[46] or seg[47]:
+        raise NetFormatError(f"arch 段的 pad 字节非 0（{seg[46]}/{seg[47]}）")
+    if any(seg[70:ARCH_CORE_BYTES]):
+        raise NetFormatError("arch 段的保留区（偏移 70–95，26 B）非 0（§3：archVersion=1 必须全 0）")
+    if alen > ARCH_CORE_BYTES and any(seg[ARCH_CORE_BYTES:alen]):
+        raise NetFormatError(
+            f"arch 段的保留尾（偏移 96–{alen - 1}）非 0 —— 写端必须全 0")
+    got["topoName"] = arch
+    return arch, got, HEADER_BYTES + alen
+
+
 # ------------------------------------------------------------------ 形状审计
 
 def expected_shapes(d: Mapping[str, int], arch: str = M.ARCH_V4) -> dict[str, tuple[int, ...]]:
@@ -102,8 +362,7 @@ def expected_shapes(d: Mapping[str, int], arch: str = M.ARCH_V4) -> dict[str, tu
     两者之间的任何漂移（改名、换层、少一个 bias）都必须在这里**当场**变成错误。
 
     ⚠ **两套拓扑**（`arch`）：`v4` = 现有图（**逐字节不变**）；`a-` = T1 新图
-    （`ARCH-REDESIGN` §2.2）。`net.bin` 的**格式**没变 —— 只是张量集不同，读端用
-    `arch_of()` 按张量名反推（`format` 3 是段 2 的事）。
+    （`ARCH-REDESIGN` §2.2）。段 2 起两者的 `net.bin` 都是**格式 3**（arch 段判拓扑）。
     """
     if arch == M.ARCH_A:
         return _expected_shapes_a(d)
@@ -250,10 +509,12 @@ def _expected_shapes_a(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
 
 
 def arch_of(sd: Mapping[str, torch.Tensor]) -> str:
-    """按**张量名**反推拓扑（`net.bin` 格式没变 ⇒ 不靠头部字段）。
+    """按**张量名**反推拓扑（`format 3` 起这只当**交叉复核**，判据在 arch 段）。
 
     判据是 `tile.stem.weight`：只有 A− 的 tile 塔有 34 轴卷积；v4 的 tile 塔是 `tile.enc.*`。
     ⚠ 两种都不是 ⇒ **报错**（不许猜成 v4 —— 猜错会让 `_check_shapes` 报一堆"缺 tile.enc.0"）。
+    ⚠ **段 2 起 `read_net` 的判据是 arch 段的 `topoId`**，本函数只做一致性断言
+      （`read_net` 里 `by_names != arch` ⇒ 报"arch 段与张量表自相矛盾"）。
     """
     if "tile.stem.weight" in sd:
         return M.ARCH_A
@@ -311,7 +572,7 @@ def dims_from_state(sd: Mapping[str, torch.Tensor]) -> dict[str, int]:
             "n_heads": M.N_HEADS, "value_bins": int(sd["heads.value.weight"].shape[0])}
 
 
-# ------------------------------------------------------------------ 权重：torch → 格式 2
+# ------------------------------------------------------------------ 权重：torch → 格式 3
 
 def _block_table(bl: tuple[spec.Block, ...] = spec.BLOCKS) -> list[tuple[str, int]]:
     return [(b.bid, int(b.width)) for b in bl]
@@ -325,9 +586,11 @@ def fingerprint_of(bl: tuple[spec.Block, ...] = spec.BLOCKS) -> str:
 def net_blob(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], *,
              blocks_: tuple[spec.Block, ...] = spec.BLOCKS,
              arch: str | None = None) -> bytes:
-    """权重 state_dict → `net.bin` 格式 2（**确定性**：同输入两次导出逐字节相同）。
+    """权重 state_dict → `net.bin` **格式 3**（**确定性**：同输入两次导出逐字节相同）。
 
-    ⚠ `arch` 缺省 = 按张量名反推（`arch_of`）；**格式一个字节没动**（A− 只换张量集）。
+    布局 = **64 B 头**（`format=3`，其余偏移与格式 2 相同）+ **arch 段（2,048 B）** + 块表 + 张量表。
+    ⚠ `arch` 缺省 = 按张量名反推（`arch_of`）；写端**必写全** arch 段（`arch_profile`），
+      并且先把 `params` 用张量表实算一遍再写进头部（读端会复核同一件事）。
     """
     d = {k: int(v) for k, v in dims.items()}
     a = arch_of(sd) if arch is None else str(arch)
@@ -336,11 +599,13 @@ def net_blob(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], *,
     tensors = sorted(((k, v.detach().cpu().numpy().astype("<f4", copy=False))
                       for k, v in sd.items()), key=lambda kv: kv[0])
     params = int(sum(int(np.prod(t.shape)) for _, t in tensors))
+    arch_bytes = _pack_arch_segment(arch_profile(a, d, have=[k for k, _ in tensors]))
     parts = [struct.pack("<9I", NET_MAGIC, NET_FORMAT, spec.FEATURE_VERSION_V4,
                          spec.OBS_VERSION_V4, spec.DERIVED_VERSION_V4,
                          d["d_model"], d["tile_d"], d["n_heads"], d["value_bins"]),
              struct.pack("<2I", len(bl), len(tensors)),
-             fingerprint_of(blocks_).encode("ascii"), struct.pack("<I", params)]
+             fingerprint_of(blocks_).encode("ascii"), struct.pack("<I", params),
+             arch_bytes]
     for bid, width in bl:
         b = bid.encode("utf-8")
         parts.append(struct.pack("<H", len(b)) + b + struct.pack("<I", width))
@@ -361,9 +626,13 @@ def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str |
     a = arch_of(sd) if arch is None else str(arch)
     blob = net_blob(sd, d, blocks_=blocks_, arch=a)
     p.write_bytes(blob)
+    prof = _arch_segment_fields(arch_profile(a, d, have=list(sd)))
     meta: dict[str, Any] = {
         "kind": "v4", "format": NET_FORMAT, "bytes": len(blob),
         "arch": a,
+        # ★ 段 2：arch 段逐字段落盘（读端 `read_net` 用同一张表复核）
+        "arch_segment": {"bytes": ARCH_SEG_BYTES, "core_bytes": ARCH_CORE_BYTES,
+                         "fields": dict(sorted(prof.items()))},
         "feature_version": spec.FEATURE_VERSION_V4, "obs_version": spec.OBS_VERSION_V4,
         "derived_version": spec.DERIVED_VERSION_V4,
         "dims": d, "params": int(struct.unpack_from("<I", blob, 60)[0]),
@@ -384,45 +653,200 @@ def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str |
     return p
 
 
+def _check_shapes_f3(sd: Mapping[str, Any], d: Mapping[str, int], arch: str, flags: int,
+                     what: str) -> None:
+    """格式 3 读端的形状/张量集审计：**可缺组由 arch 段的 flags 决定**。
+
+    与 `_check_shapes` 的区别（这是 §3 fail-loud ②③④ 的落点）：
+      · `flags` 说"有" ⇒ 该组**必须存在**（缺 ⇒ 报"arch 声称有 … 但缺"）；
+      · `flags` 说"没有" ⇒ 该组**必须不存在**（在 ⇒ 报"arch 没声明 … 但包里有"）；
+      · 除这些组之外，名字/形状必须与 `expected_shapes(d, arch)`**逐条相等**（多/缺/形状不符都报）。
+    ⚠ 不许退化成"可缺张量缺了就补 0"：补 0 会让前向跑一个 arch 没声明的分支。
+    """
+    want = dict(expected_shapes(d, arch))
+    required: list[tuple[str, int, tuple[str, ...], str]] = [
+        ("hasB3", FLAG_B3, _B3_KEYS, "B3（`fusion.u_norm.*`/`fusion.u_res`）"),
+        ("hasTileId", FLAG_TILE_ID, _TILE_ID_KEYS, "#0 身份嵌入（`tile.tile_id`）"),
+        ("hasMemGate", FLAG_MEM_GATE, ("fusion.mem.weight", "fusion.mem.bias"),
+         "长程记忆门（`fusion.mem.*`）"),
+    ]
+    got = {k: tuple(np.asarray(v).shape) for k, v in sd.items()}
+    bad: list[str] = []
+    for label, bit, keys, human in required:
+        claimed = bool(int(flags) & bit)
+        for k in keys:
+            spec_ = want.get(k)
+            alts = _shape_alts(spec_) if spec_ is not None else ()
+            concrete = tuple(a for a in alts)
+            if claimed:
+                if not concrete:
+                    raise NetFormatError(
+                        f"arch 段声明 {label}=1（{human}）但 `{arch}` 的期望表里没有 `{k}` —— "
+                        f"拓扑与 arch 段自相矛盾")
+                want[k] = concrete[0]
+                if k not in got:
+                    raise NetFormatError(
+                        f"arch 段声明 {label}=1（{human}），但包里**缺** `{k}`"
+                        f"（⛔ 不补 0：那等于让前向跑一个 arch 没声明的分支）")
+            else:
+                if spec_ is not None:
+                    want.pop(k, None)
+                    if k in got:
+                        raise NetFormatError(
+                            f"arch 段声明 {label}=0（无{human}），但包里**有** `{k}` —— "
+                            f"文件与水印（flags）不符")
+    for k, s in want.items():
+        alts = _shape_alts(s)
+        if k not in got:
+            bad.append(f"缺 {k}{alts[0] if alts else ''}")
+        elif got[k] not in alts:
+            bad.append(f"{k} 形状 {got[k]} != " + " 或 ".join(str(x) for x in alts))
+    for k in got:
+        if k not in want:
+            bad.append(f"多 {k}{got[k]}")
+    # ③ 段嵌入：arch 要求（`segEmbMode=1`）时**必须有** `fusion.seg`；不要求时必须没有。
+    #    ⚠ PE（sin/cos 相对位置）是 **0 参数非持久 buffer**，net.bin 里根本没有它的位置 ⇒
+    #    "PE 缺失"不可表达；它的三端一致性由 golden 的 logits 对拍钉住（段 3）。
+    if arch == M.ARCH_A:
+        if "fusion.seg" not in got:
+            raise NetFormatError("arch 声明 `segEmbMode=1`（3 段嵌入）但缺 `fusion.seg`")
+    if bad:
+        raise NetFormatError(
+            f"{what}：张量表与 `{arch}` 契约不符（{len(bad)} 条）：" + "；".join(bad[:8]))
+
+
+def _shape_alts(spec_: Any) -> tuple[tuple[int, ...], ...]:
+    """把 `expected_shapes` 的一项解成候选形状串（`(None,(dm,))` ⇒ 单元素串）。"""
+    if isinstance(spec_, tuple) and spec_ and all(
+            isinstance(a, tuple) or a is None for a in spec_):
+        return tuple(a for a in spec_ if isinstance(a, tuple))
+    return (tuple(int(x) for x in spec_),)
+
+
+def _cursor(raw: bytes, off: int):
+    """带**边界检查**的读游标：越界一律 `NetFormatError`（⑥ 截断/越界），⛔ 不许 struct 裸抛。"""
+    class _C:
+        def __init__(self) -> None:
+            self.off = int(off)
+
+        def need(self, n: int, what_: str) -> None:
+            if self.off + n > len(raw):
+                raise NetFormatError(
+                    f"权重文件被截断/越界：读 {what_} 需要 {n} B（偏移 {self.off}），"
+                    f"文件只有 {len(raw)} B")
+
+        def u8(self, what_: str) -> int:
+            self.need(1, what_)
+            v = raw[self.off]
+            self.off += 1
+            return int(v)
+
+        def u16(self, what_: str) -> int:
+            self.need(2, what_)
+            (v,) = struct.unpack_from("<H", raw, self.off)
+            self.off += 2
+            return int(v)
+
+        def u32(self, what_: str) -> int:
+            self.need(4, what_)
+            (v,) = struct.unpack_from("<I", raw, self.off)
+            self.off += 4
+            return int(v)
+
+        def text(self, n: int, what_: str) -> str:
+            self.need(n, what_)
+            b = raw[self.off:self.off + n]
+            self.off += n
+            try:
+                return b.decode("utf-8")
+            except UnicodeDecodeError as e:
+                raise NetFormatError(f"读 {what_} 时 UTF-8 解码失败：{e}") from None
+
+    return _C()
+
+
 def read_net(path: str | Path) -> dict[str, Any]:
-    """读 `net.bin`（格式 2）→ 头部 + 块清单 + 张量表（`{名字: np.ndarray}`）。"""
+    """读 `net.bin` **格式 3** → 头部 + arch 段 + 块清单 + 张量表（`{名字: np.ndarray}`）。
+
+    **硬切**（§3）：`format==1` ⇒ v3 的定长 MLP（仍走 `NeuralPolicy`，本函数不解析）；
+    `format==2` ⇒ **专用错误**（A− 之前的老包，需要旧二进制/冻结快照）；其它 ⇒ 报版本号。
+    ⛔ 三种都**不**自动升级、不补 0、不猜 arch。
+
+    arch 的判据 = **arch 段**（`topoId`），不再是"按张量名反推"；
+    `arch_of(张量表)` 只当**一致性断言**（两者不一致 ⇒ 文件在说谎）。
+    """
     raw = Path(path).read_bytes()
     if len(raw) < HEADER_BYTES:
         raise NetFormatError(f"权重文件太短（{len(raw)} B < {HEADER_BYTES} B）")
-    h = struct.unpack_from("<9I", raw, 0)
-    magic, fmt, feat, obs, derived, dm, td, nh, vb = h
+    magic, fmt, feat, obs, derived, dm, td, nh, vb = struct.unpack_from("<9I", raw, 0)
     if magic != NET_MAGIC:
         raise NetFormatError(f"权重魔数不对：{magic:#x}（期望 {NET_MAGIC:#x}）")
+    if fmt == NET_FORMAT_V3:
+        raise NetFormatError(
+            "权重格式版本 1 = v3 的定长 MLP（`magic` 相同、无块清单/无 arch 段）—— "
+            "那是 `mahjong_ml.export.NeuralPolicy` 的路径，本模块不解析（⛔ 不猜）")
+    if fmt == NET_FORMAT_RETIRED:
+        raise NetFormatError(_RETIRED_FORMAT2)
     if fmt != NET_FORMAT:
-        raise NetFormatError(f"权重格式版本 {fmt} != {NET_FORMAT}（v3 的格式 1 走 NeuralPolicy）")
-    n_blocks, n_tensors = struct.unpack_from("<2I", raw, 36)
+        raise NetFormatError(
+            f"权重格式版本 {fmt} 未知（本模块只认 {NET_FORMAT}；1 = v3、2 = 已退役）")
+    arch, arch_info, off = _unpack_arch_segment(raw, feat=feat, obs=obs, derived=derived,
+                                               dm=dm, td=td, nh=nh, vb=vb)
+    n_blocks = int(struct.unpack_from("<I", raw, 36)[0])
+    n_tensors = int(struct.unpack_from("<I", raw, 40)[0])
     fp = raw[44:60].decode("ascii", "replace")
-    params = struct.unpack_from("<I", raw, 60)[0]
-    off = HEADER_BYTES
+    params = int(struct.unpack_from("<I", raw, 60)[0])
+    if n_blocks > 10_000 or n_tensors > 10_000:
+        raise NetFormatError(
+            f"块/张量数越界：nBlocks={n_blocks} / nTensors={n_tensors}（上限 10,000）")
+    cur = _cursor(raw, off)
     bl: list[tuple[str, int]] = []
     for _ in range(n_blocks):
-        (ln,) = struct.unpack_from("<H", raw, off); off += 2
-        bid = raw[off:off + ln].decode("utf-8"); off += ln
-        (w,) = struct.unpack_from("<I", raw, off); off += 4
+        ln = cur.u16("块 id 长度")
+        bid = cur.text(ln, "块 id")
+        w = cur.u32("块宽")
         bl.append((bid, w))
     tensors: dict[str, np.ndarray] = {}
-    for _ in range(n_tensors):
-        (ln,) = struct.unpack_from("<H", raw, off); off += 2
-        name = raw[off:off + ln].decode("utf-8"); off += ln
-        nd = raw[off]; off += 1
-        shape = struct.unpack_from("<" + "I" * nd, raw, off); off += 4 * nd
+    for i in range(n_tensors):
+        ln = cur.u16(f"第 {i} 个张量的名字长度")
+        name = cur.text(ln, f"第 {i} 个张量的名字")
+        nd = cur.u8(f"`{name}` 的维数")
+        if nd > 8:
+            raise NetFormatError(f"`{name}` 的维数 {nd} 不合理（>8）")
+        shape: list[int] = []
+        for _k in range(nd):
+            shape.append(cur.u32(f"`{name}` 的形状"))
         n = int(np.prod(shape)) if shape else 1
-        arr = np.frombuffer(raw, dtype="<f4", count=n, offset=off).reshape(shape).copy()
-        off += 4 * n
+        cur.need(4 * n, f"`{name}` 的数据")
+        arr = np.frombuffer(raw, dtype="<f4", count=n, offset=cur.off).reshape(shape).copy()
+        cur.off += 4 * n
+        if name in tensors:
+            raise NetFormatError(f"张量名重复：`{name}`（张量表必须是映射，⛔ 不许后者覆盖前者）")
         tensors[name] = arr
-    if off != len(raw):
-        raise NetFormatError(f"权重文件尾部多了 {len(raw) - off} 字节（张量表与头部不符）")
+    if cur.off != len(raw):
+        raise NetFormatError(
+            f"权重文件尾部多了 {len(raw) - cur.off} 字节（张量表与头部/arch 段不符）")
+    # ⑤ `params` 是**校验位**：必须等于张量表实算（⛔ 三端"读了不用"的时代结束）
+    actual = int(sum(int(np.prod(np.asarray(v).shape)) for v in tensors.values()))
+    if actual != params:
+        raise NetFormatError(
+            f"头部的 `params`={params:,} 与张量表实算 {actual:,} 不符（差 {actual - params:+,}）")
+    # ④ 名字/形状 ↔ arch；②③ 可缺组与段嵌入
+    _check_shapes_f3(tensors, {"d_model": dm, "tile_d": td, "n_heads": nh,
+                              "value_bins": vb}, arch, int(arch_info["flags"]), "read_net")
+    # ⚠ 双路一致性断言：arch 段是**判据**，`arch_of` 只做交叉复核（⛔ 不许靠反推决定前向分支）
+    by_names = arch_of({k: torch.from_numpy(np.ascontiguousarray(v))
+                        for k, v in tensors.items()})
+    if by_names != arch:
+        raise NetFormatError(
+            f"arch 段说 `{arch}`（topoId={arch_info['topoId']}），但张量名反推是 `{by_names}` "
+            f"—— arch 段与张量表自相矛盾")
     return {"magic": magic, "format": fmt, "feature_version": feat, "obs_version": obs,
             "derived_version": derived,
             "dims": {"d_model": dm, "tile_d": td, "n_heads": nh, "value_bins": vb},
-            "arch": arch_of(tensors),
+            "arch": arch, "arch_info": arch_info, "flags": int(arch_info["flags"]),
             "blocks": bl, "fingerprint": fp, "params": params, "tensors": tensors,
-            "bytes": len(raw)}
+            "arch_segment_bytes": int(arch_info["archLen"]), "bytes": len(raw)}
 
 
 def normalize_state(sd: Mapping[str, torch.Tensor], arch: str | None = None
@@ -438,6 +862,12 @@ def normalize_state(sd: Mapping[str, torch.Tensor], arch: str | None = None
        ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等（不给旧权重强加新行为，`strict=True` 也不会红）；
     3. `fusion.mem.{weight,bias}`（W1 加的长程记忆门控，第六十轮）同上：**可能不存在** ⇒ 补 **0**
        ⇒ `g_mem = 1 + tanh(0) = 1` ⇒ 恒等（旧网的前向**逐位不变**）。
+
+    ★ **段 2 起按 arch 分流**（第一百零八轮）：
+      · `arch=v4` ⇒ 上面三条"缺 ⇒ 补恒等"（旧包照旧能载）；
+      · `arch=a-` ⇒ **必须是全套**：`fusion.u_norm.*`/`fusion.u_res`/`heads.policy_gate.*` 缺任一
+        ⇒ **报错**（⛔ 不补 0：B3/门控是 T1 参数账的一部分，补 0 等于静默换掉前向语义）。
+        只有 `tile.tile_id` 仍可缺（`--legacy-tile-id` 的**构造期**开关，缺 ⇒ 0 = `tile + 0` 恒等）。
 
     ⚠ 别把这段逻辑抄到各处：`state_from_net`（net.bin）与 `value_audit.load_model`（ckpt）
     都必须走它 —— 抄漏一处就是"某些旧权重能载入、某些不能"的鬼故事（实测踩过两次：
@@ -455,7 +885,17 @@ def normalize_state(sd: Mapping[str, torch.Tensor], arch: str | None = None
                                  f"也不是旧版 {dm + 3}")
     dtype = out["tile.proj.weight"].dtype
     if a == M.ARCH_A:
-        # A−：**只有 `tile.tile_id` 是可缺**（`--legacy-tile-id`）；`policy_gate` 恒在（T1 账里有）。
+        # ★ 段 2：**补 0 规则按 arch 分流**。
+        #   A− 的 B3（`u_norm`/`u_res`）与 `policy_gate` 是 T1 拓扑的一部分（参数账里算着），
+        #   **缺了不许补 0** —— 补 0 等于把 B3 静默降级成恒等、换掉前向语义。
+        missing = [k for k in _B3_KEYS if k not in out]
+        missing += [k for k in ("heads.policy_gate.weight", "heads.policy_gate.bias")
+                    if k not in out]
+        if missing:
+            raise NetFormatError(
+                f"`a-` 的权重缺 {len(missing)} 个**拓扑必需**张量：{missing[:6]} —— "
+                f"a- 必须是全套（B3 = `u_norm`/`u_res`、`policy_gate`）；⛔ 不补 0 / 不猜")
+        # `tile.tile_id` 是 `--legacy-tile-id` 的**构造期**开关：缺 ⇒ 0 = 恒等（`tile + 0`）
         if "tile.tile_id" not in out:
             out["tile.tile_id"] = torch.zeros(34, spec.C_TILE, dtype=dtype)
         return out
@@ -617,28 +1057,54 @@ def _tags(obs: Mapping[str, Any]) -> set[str]:
     return tags
 
 
+#: **golden 三档**（`A-REFACTOR-IMPL-PLAN` §3）：`--fixture-semantics` 的取值 → `(arch, semantics)`。
+#: · `c2`      = **G0**：冻结 C2 语义（部署端 `fusion.out` 仍带 ReLU）——只给冻结快照/`wl-*` 回归；
+#: · `current` = **G1**：当前 v4 图 + 当前语义，**format 3**（跨端要等段 3）；
+#: · `a-`      = **G2**：A−（T1）图，**format 3**，配真实 3,083 决策语料（R-4）。
+FIXTURE_SEMANTICS: dict[str, tuple[str, str]] = {
+    "c2": (M.ARCH_V4, "c2"),
+    "current": (M.ARCH_V4, "current"),
+    "a-": (M.ARCH_A, "current"),
+}
+
+
 def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
                  dims: Mapping[str, int] | None = None, seed: int = 20260928,
-                 scan_files: int = 8, semantics: str = "current") -> Path:
-    """真实轨迹 → golden 夹具（小 v4 + 四张量 + 四个推理头输出）。
+                 scan_files: int = 8, semantics: str = "current",
+                 fixture_semantics: str = "current") -> Path:
+    """真实轨迹 → golden 夹具（小网 + 四张量 + 四个推理头输出）。
 
-    `semantics` = **显式语义档**（`c2|c2b3|c1|c3|b3|current`，见 `model.SEMANTICS`）：夹具的权重与
-    Python 参考输出必须按**指定**语义生成，⛔ 不许"生成时恰好是缺省语义"就当对拍通过。
-    仓库夹具 `407BBE21…` 是 `c2`（部署端 `fusion.out` 仍带 ReLU）；`current` 重生会**故意 FAIL**
-    （Java/C++ 未同步 C1）—— 那正是本开关要能区分的东西。
+    `fixture_semantics` = **三档之一**（`c2|current|a-`，见 `FIXTURE_SEMANTICS`）：
+    它同时决定 **arch**（v4 / a-）与**语义档**（`model.SEMANTICS`）。夹具的权重与 Python 参考
+    输出必须按**指定**档生成，⛔ 不许"生成时恰好是缺省语义"就当对拍通过。
+    · G0（`c2`）：仓库夹具 `407BBE21…`（**format 2**）的语义来源；本函数重生的是 **format 3** 版，
+      只给新读端用（冻结 jar/exe 仍读旧文件）。
+    · G1（`current`）：当前 v4 图；`net.bin` 是 format 3 ⇒ **跨端一致要等段 3**。
+    · G2（`a-`）：A− 图（value ±60/81 bin）；配 R-4 的 3,083 决策语料，同样 format 3。
+    ⚠ `dims` 缺省按档取小网：v4 = `GOLDEN_DIMS`（32/16/2/5）、a- = `GOLDEN_DIMS_A`（32/16/2/81）；
+      给 `dims` 就以它为准（`--full` 用上线宽度）。
+    ⚠ `semantics`（旧参数）只在 `fixture_semantics` 是缺省值时生效，供消融档（`c1|c3|b3|...`）用。
     """
-    d = dict(dims or GOLDEN_DIMS)
-    saved = (M.LEGACY_OUT_RELU, M.LEGACY_ZERO_INIT, M.LEGACY_U_RES)
-    M.apply_semantics(semantics)
+    if fixture_semantics not in FIXTURE_SEMANTICS:
+        raise NetFormatError(
+            f"未知 fixture-semantics {fixture_semantics!r}（可选：{sorted(FIXTURE_SEMANTICS)}）")
+    arch, sem = FIXTURE_SEMANTICS[fixture_semantics]
+    if semantics != "current":
+        sem = semantics                       # 旧口子：显式语义档（只对 v4 有意义）
+    d = dict(dims or (GOLDEN_DIMS_A if arch == M.ARCH_A else GOLDEN_DIMS))
+    saved = (M.LEGACY_OUT_RELU, M.LEGACY_ZERO_INIT, M.LEGACY_U_RES, M.ARCH)
+    M.apply_semantics(sem)
+    M.set_arch(arch)
     try:
         torch.manual_seed(seed)
-        net = M.build(seed, **d)
+        net = M.build(seed, arch=arch, **d)
     finally:
         # 只影响**构造**：`Fusion`/`V4Model` 在 __init__ 里已把开关存成实例属性，
         # 后续前向（夹具的参考输出）不受进程级全局影响 ⇒ 立刻还原，避免污染同进程的别的网。
         M.set_legacy_out_relu(saved[0])
         M.set_legacy_zero_init(saved[1])
         M.set_legacy_u_res(saved[2])
+        M.set_arch(saved[3])
     # ⚠ **夹具必须显式扰动"零初始化"的张量**，否则那条路径根本没被测到（"假接入"的温床）。
     #   第五十七轮的手写版只扰动了 `policy_gate`；W1 起改成**通用规则**（`VALVES-AND-FIXTURES`
     #   §2.1 铁律①）：凡 `state_dict()` 里 `max|·| == 0` 的参数一律 `normal_(0, 0.5)` ——
@@ -670,11 +1136,18 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
         #   ⚠ 别贪大：再放大（60×/150×）softmax 会**饱和成硬 argmax** ⇒ 所有候选查到的
         #   都是同一个 key ⇒ `u` 重新变成与候选无关（实测 60× 时极差回落到 7e-7、150× 为 0）。
         #   20× 是实测的峰值（组内极差 1e-4~1e-3，比不放大的 1e-7 高三个数量级）。
-        for name in ("fusion.q_tile.in_proj_weight", "fusion.q_tile.in_proj_bias",
-                     "fusion.q_evt.in_proj_weight", "fusion.q_evt.in_proj_bias"):
-            pr[name] *= 20.0
+        if arch == M.ARCH_A:
+            # A− 的融合是 joint(95 token) + cross(cand→95)；「候选 → 注意力 → 策略」这条路上
+            # 两处注意力都要变尖（`q_tile`/`q_evt` 在 A− 里不存在 ⇒ 不能照抄 v4 的名字）。
+            for name in ("fusion.joint.in_proj_weight", "fusion.joint.in_proj_bias",
+                         "fusion.cross.in_proj_weight", "fusion.cross.in_proj_bias"):
+                pr[name] *= 20.0
+        else:
+            for name in ("fusion.q_tile.in_proj_weight", "fusion.q_tile.in_proj_bias",
+                         "fusion.q_evt.in_proj_weight", "fusion.q_evt.in_proj_bias"):
+                pr[name] *= 20.0
     sd = net.state_dict()
-    blob = net_blob(sd, d)
+    blob = net_blob(sd, d, arch=arch)
 
     rows = _iter_cases(Path(trace_dir), cases, scan_files=scan_files)
     if not rows:
@@ -725,16 +1198,31 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             # 单条用例的 L 就是真实候选数 ⇒ 与旧的 `u.mean(1)` 逐位相同（夹具字节不变）。
             full_kw = {"mask": torch.ones(1, t.cand.shape[0], dtype=torch.bool)}
             o = net(*args, h=h0[None], **full_kw)
-            # 红证①（**夹具必须能测到 `fusion.mem`**）：把 `fusion.mem.weight` 归零 ⇒ 策略头
-            #   必须变。零初始化只保证"起步恒等"，不保证"这条接线真的在算"。
-            if float(net.fusion.mem.weight.abs().sum()) == 0.0:
-                raise NetFormatError("夹具空转：`fusion.mem.weight` 全 0（零初始化没被扰动）")
-            saved = net.fusion.mem.weight.detach().clone()
-            net.fusion.mem.weight.zero_()
-            o0 = net(*args, h=h0[None], **full_kw)
-            net.fusion.mem.weight.copy_(saved)
-            fin = torch.isfinite(o["policy"] - o0["policy"])
-            mem_probe = max(mem_probe, float((o["policy"] - o0["policy"])[fin].abs().max()))
+            # 红证①（**夹具必须能测到"事件隐状态真的进决策"**）：
+            #   · v4：把 `fusion.mem.weight` 归零 ⇒ 策略头必须变；
+            #   · A−：没有 `fusion.mem` 门（`h_evt` 是第 95 个 token）⇒ 归零 `fusion.seg[SEG_MEM]`
+            #     那一行段嵌入，该 token 的"记忆身份"消失 ⇒ 策略头必须变。
+            if arch == M.ARCH_A:
+                seg_p = net.fusion.seg
+                if float(seg_p.detach().abs().sum()) == 0.0:
+                    raise NetFormatError("夹具空转：`fusion.seg` 全 0（段嵌入没被扰动）")
+                seg_row = seg_p[M.SEG_MEM].detach().clone()
+                with torch.no_grad():
+                    seg_p[M.SEG_MEM].zero_()
+                o0 = net(*args, h=h0[None], **full_kw)
+                with torch.no_grad():
+                    seg_p[M.SEG_MEM].copy_(seg_row)
+                fin = torch.isfinite(o["policy"] - o0["policy"])
+                mem_probe = max(mem_probe, float((o["policy"] - o0["policy"])[fin].abs().max()))
+            else:
+                if float(net.fusion.mem.weight.abs().sum()) == 0.0:
+                    raise NetFormatError("夹具空转：`fusion.mem.weight` 全 0（零初始化没被扰动）")
+                saved = net.fusion.mem.weight.detach().clone()
+                net.fusion.mem.weight.zero_()
+                o0 = net(*args, h=h0[None], **full_kw)
+                net.fusion.mem.weight.copy_(saved)
+                fin = torch.isfinite(o["policy"] - o0["policy"])
+                mem_probe = max(mem_probe, float((o["policy"] - o0["policy"])[fin].abs().max()))
             # ③ 策略头组内极差（>1 个候选时才有意义）：太小 ⇒ argmax 判据是噪声（见下面的闸门）
             if len(legal) > 1:
                 pol = o["policy"][0]
@@ -771,8 +1259,10 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     # 的 `h0` 非 0**（否则"忽略 h0"的三端也能全绿 —— 判据必须能测到那条路，不是"看起来全绿"）。
     if not (mem_probe > 1e-4):
         raise NetFormatError(
-            f"夹具空转：归零 `fusion.mem.weight` 只让策略头动了 {mem_probe:.3g}（应 >1e-4）—— "
-            f"`fusion.mem.*` 是否被随机化？`Fusion` 是否真的消费了 `h_evt`？")
+            f"夹具空转：归零「事件隐状态那条接线」只让策略头动了 {mem_probe:.3g}（应 >1e-4）—— "
+            + ("A−：`fusion.seg` 是否被随机化？joint attention 是否真的消费了第 95 个 token？"
+               if arch == M.ARCH_A else
+               "`fusion.mem.*` 是否被随机化？`Fusion` 是否真的消费了 `h_evt`？"))
     if n_long == 0:
         raise NetFormatError(
             "夹具覆盖不足：没有任何用例的事件流长于窗口 K_EVT ⇒ 每个用例的 `h0` 都是全 0，"
@@ -786,12 +1276,16 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     if not (spread_min > 1e-4):
         raise NetFormatError(
             f"夹具空转：策略头 logits 的**组内极差**只有 {spread_min:.3g}（应 >1e-4）—— "
-            f"注意力太接近均匀（`fusion.q_*` 的 in_proj 没放大？），候选差异没有进 logits")
+            f"注意力太接近均匀（融合两处 in_proj 没放大？），候选差异没有进 logits")
     head_b = struct.pack("<4I", GOLDEN_MAGIC, GOLDEN_FORMAT, len(rows), len(blob))
     p.write_bytes(head_b + blob + bytes(body))
-    meta = {"cases": len(rows), "format": GOLDEN_FORMAT, "dims": d, "net_bytes": len(blob),
+    meta = {"cases": len(rows), "format": GOLDEN_FORMAT,
+            "fixture_semantics": fixture_semantics, "arch": arch, "semantics": sem,
+            # ⚠ 内嵌 net 的格式与夹具**容器**格式是两件事：容器 2 = 用例带 h0/h_evt；
+            #   内嵌 net 段 2 起是 **3**（旧 C++/Java 读不了 ⇒ G1 的跨端一致留到段 3）。
+            "net_format": NET_FORMAT, "net_arch_segment_bytes": ARCH_SEG_BYTES,
+            "dims": d, "net_bytes": len(blob),
             "bytes": p.stat().st_size, "trace": str(trace_dir), "seed": seed,
-            "semantics": semantics,
             "blocks_fingerprint": fingerprint_of(),
             "case_kinds": [f"{r[2].get('kind')}" for r in rows],
             "coverage": sorted(covered), "required_tags": list(REQUIRED_TAGS),
@@ -811,22 +1305,41 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="v4 权重导出 / golden 夹具（P5 的 Java+C++ 前向输入）")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    w = sub.add_parser("weights", help="v4 checkpoint → net.bin 格式 2")
+    w = sub.add_parser("weights", help="v4 checkpoint → net.bin 格式 3（含 arch 段）")
     w.add_argument("--ckpt", required=True)
     w.add_argument("--out", required=True)
     w.add_argument("--label", default="")
     w.add_argument("--n-heads", type=int, default=0, help="缺省从 checkpoint 的 config.dims 读，再缺省 4")
-    g = sub.add_parser("golden", help="真实轨迹 → golden 对拍夹具")
+    g = sub.add_parser("golden", help="真实轨迹 → golden 对拍夹具（G0/G1/G2 三档）")
     g.add_argument("--trace", required=True)
     g.add_argument("--out", required=True)
     g.add_argument("--cases", type=int, default=8)
     g.add_argument("--scan-files", type=int, default=8, help="最多扫几个轨迹文件来找齐覆盖面")
-    g.add_argument("--full", action="store_true", help="用上线架构（192/64/4/51）而不是小网络")
+    g.add_argument("--full", action="store_true", help="用上线架构（v4 192/64/4/51；a- 128/160/4/81）")
     g.add_argument("--seed", type=int, default=20260928)
+    g.add_argument("--fixture-semantics", choices=sorted(FIXTURE_SEMANTICS), default="current",
+                   help="三档：c2 = G0（冻结 C2 语义）· current = G1（format 3 新图）· "
+                        "a- = G2（A− 图 + 真实 3,083 决策语料）")
     g.add_argument("--semantics", choices=sorted(M.SEMANTICS), default="current",
-                   help="夹具按哪一档语义重生成（C2 = 部署端 ReLU 语义；缺省 current = 当前训练侧）")
+                   help="（旧口子）显式语义档；只在 `--fixture-semantics` 用缺省值时覆盖语义部分")
+    i = sub.add_parser("info", help="只读打印 net.bin 的头部 + arch 段（format==2 ⇒ 专用错误、退出码 2）")
+    i.add_argument("--net", required=True)
     a = ap.parse_args(argv)
 
+    if a.cmd == "info":
+        try:
+            p = read_net(a.net)
+        except NetFormatError as e:
+            print(f"读不了 {a.net}：{e}", file=sys.stderr)
+            return 2
+        fi = p["arch_info"]
+        print(f"{a.net}：format={p['format']} · arch={p['arch']}（topoId={fi['topoId']}）· "
+              f"params={p['params']:,} · {p['bytes']:,} B")
+        print(f"  dims={p['dims']} · arch 段 {p['arch_segment_bytes']} B · flags={p['flags']:#04x} · "
+              f"blocks={len(p['blocks'])} · tensors={len(p['tensors'])}")
+        print("  arch 字段：" + " ".join(f"{k}={fi[k]}" for _o, k, _t, _s in _ARCH_FIELDS
+                                       if k not in ("archLen",)))
+        return 0
     if a.cmd == "weights":
         ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
         sd = ck["model"]
@@ -835,20 +1348,31 @@ def main(argv: list[str] | None = None) -> int:
         if a.n_heads:
             d["n_heads"] = a.n_heads
         p = save_net(sd, d, a.out, label=a.label or Path(a.ckpt).parent.name,
-                     source=str(a.ckpt))
-        print(f"已导出 v4 权重：{p}（{p.stat().st_size} 字节，格式 2，"
+                     source=str(a.ckpt), arch=cfg.get("arch"))
+        print(f"已导出 v4 权重：{p}（{p.stat().st_size} 字节，格式 {NET_FORMAT}，"
+              f"arch={json.loads(p.with_suffix('.json').read_text(encoding='utf-8'))['arch']}，"
               f"{json.loads(p.with_suffix('.json').read_text(encoding='utf-8'))['params']:,} 参数，"
               f"dims={d}）")
-        print(f"  ↓ 服务端用法：java -jar mahjong-server.jar --selfplay 100 "
-              f"--policy net:{p},teacher,teacher,teacher --out <dir>")
+        # ⚠ 段 2 只做 Python 侧：C++/Java 仍认 format 2 ⇒ 这份包现在两端都读不了（段 3 才同步）
+        print("  ⚠ format 3：C++/Java 尚未同步（段 3）⇒ 这份包现在**不能**给 server/trainer 用")
     else:
+        arch = FIXTURE_SEMANTICS[a.fixture_semantics][0]
+        dims = ((FULL_DIMS if arch == M.ARCH_V4 else
+                 {"d_model": M.A_D_MODEL, "tile_d": M.A_TILE_D,
+                  "n_heads": M.A_N_HEADS, "value_bins": M.A_VALUE_BINS})
+                if a.full else None)
         p = build_golden(a.trace, a.out, cases=a.cases, scan_files=a.scan_files,
-                         dims=FULL_DIMS if a.full else GOLDEN_DIMS, seed=a.seed,
-                         semantics=a.semantics)
+                         dims=dims, seed=a.seed, semantics=a.semantics,
+                         fixture_semantics=a.fixture_semantics)
         # ⚠ 用例数可能**多于** `--cases`：`_iter_cases` 要凑齐覆盖闸门（含"事件流长于窗口"那条）
         #   才会停 ⇒ 报数从写出的 meta 读，别报 `--cases`（那会与实际不符）。
-        n = json.loads(p.with_suffix(".json").read_text(encoding="utf-8"))["cases"]
-        print(f"已写出 v4 golden 夹具：{p}（{p.stat().st_size} 字节，{n} 个用例）")
+        m = json.loads(p.with_suffix(".json").read_text(encoding="utf-8"))
+        print(f"已写出 golden 夹具：{p}（{p.stat().st_size} 字节，{m['cases']} 个用例，"
+              f"fixture_semantics={m['fixture_semantics']}，arch={m['arch']}，"
+              f"内嵌 net format {m['net_format']}，{m['net_bytes']} B）")
+        print("  ⚠ 内嵌 net 是 format 3 ⇒ 跨端（Java/C++）一致要等段 3；"
+              "G0 的冻结二进制仍读仓库里的 format-2 夹具。")
+    return 0
     return 0
 
 

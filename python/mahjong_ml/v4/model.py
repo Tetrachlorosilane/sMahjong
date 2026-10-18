@@ -122,10 +122,10 @@ def set_legacy_tile_id(flag: bool) -> None:
 # 开关 = `--arch {v4|a-}`，**缺省 `v4` = 现有图，逐位不变**（`ARCH` 只被 `build()`/`V4Model`
 # 读一次；不传就是旧图，连一个分支都不多）。
 #
-# ⚠ **`net.bin` 格式一个字节都没动**（仍是格式 2、64 B 头 + 块表 + 张量表）。A− 只是**换张量集**
-#   （`format` 3 是段 2 的事，本批不做）；读端的 arch 由**张量名**反推（`export.arch_of`），
-#   所以旧包照旧、新包也只多一组名字。
-# ⚠ 三端未同步 ⇒ A− 的网**不得**上线/上闸门（Java/C++ 不认识这些张量名）。
+# ⚠ **段 2（第一百零八轮）起 `net.bin` 是格式 3**（64 B 头 + 2,048 B arch 段 + 块表 + 张量表），
+#   拓扑由 arch 段判（`export.read_net`）；`arch_of`（按张量名反推）只当一致性断言。
+#   见 `A-REFACTOR-IMPL-PLAN.md` §3 与 `ARCH-REDESIGN.md` §11。
+# ⚠ 三端未同步 ⇒ A− 的网**不得**上线/上闸门（Java/C++ 不认识这些张量名，也读不了 format 3）。
 ARCH_V4 = "v4"
 ARCH_A = "a-"
 #: 进程级 arch（`pretrain --arch a-` 在 `train()` 开头设一次；缺省 v4 = 旧图，逐位不变）

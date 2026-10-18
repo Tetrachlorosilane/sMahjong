@@ -340,7 +340,7 @@ v4 的轮次**不再手敲命令**：一条命令跑完一轮的八个相（计�
 | 紧凑集 | Python | `v4.dataset --aux --student "<与采集逐字相同的串>"`（`is_student` 靠字符串相等判定） |
 | **值头先行**（可选） | Python | `--critic-steps N > 0` 时先跑 `v4.pretrain --only-heads value --freeze-trunk --objective bc --value-target <同>`：主干与**策略头都不动** ⇒ KL 恒 0、不占 KL 预算；产物当 PPO 的 `--init` |
 | 训练 | Python | `v4.pretrain --objective ppo --behaviour <采集那份> --behaviour-temp T`（**口径闸门** `KL(π_old‖π_new)≈0`）+ 数值口径（grad-clip / KL 早停 / 双口径 KL） |
-| 导出 | Python | `v4.export weights` → 格式 2 `net.bin`（下一轮的 `--init`/`--behaviour` 就是它） |
+| 导出 | Python | `v4.export weights` → **格式 3** `net.bin`（段 2 起；格式 2 已硬切退役，见 `ARCH-REDESIGN.md` §11）——下一轮的 `--init`/`--behaviour` 就是它 |
 | **判据** | Python | `v4 value-audit --strict --ev-ref legit`（**EV ≥ 0.7 × 合法天花板 + 覆盖率 ≤3pp**）→ `league/<label>-audit.json`；`--strict-gate` 时不过就**停整条回路** |
 | 评测+判据 | **C++**（`trainer selfplay`）+ Python | 2+2 同牌山（`net,net,teacher,teacher`）→ `eval.paired_test`（按 seed 配对 + bootstrap + `required_n`）→ 台账 `league/<label>-v4.json` |
 

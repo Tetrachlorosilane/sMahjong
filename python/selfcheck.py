@@ -2221,13 +2221,15 @@ eq("A− tie-break：进张数也并列 ⇒ 牌码小的（5 < 9）",
    int(_v4pol.choose_index(_lg, mask=_mk, cand=_cd, effect=_ef_tie)[0]), 0)
 ok(bool(_torch2.equal(_v4pol.choose_index(_lg), _lg.argmax(dim=-1))),
    "A− tie-break：**不给 cand/effect ⇒ 逐位等于 argmax**（旧路径一个数都不动）")
-# ⑧ net.bin 往返回环（格式仍是 2；arch 由张量名反推）
+# ⑧ net.bin 往返回环（★ 段 2：格式 3，arch 判据 = **arch 段**、张量名只做交叉复核）
 import tempfile as _tf                                            # noqa: E402
 with _tf.TemporaryDirectory() as _td:
     _np = _v4ex.save_net(_a.state_dict(), _a.dims(), f"{_td}/net.bin")
     _pr = _v4ex.read_net(_np)
-eq("A−：net.bin 的 arch 由张量名反推", _pr["arch"], v4_model.ARCH_A)
-eq("A−：net.bin 格式仍是 2（⛔ 本批不动 format）", _pr["format"], 2)
+eq("A−：net.bin 的 arch 判据 = arch 段（topoId=3）",
+   (_pr["arch"], _pr["arch_info"]["topoId"]), (v4_model.ARCH_A, 3))
+eq("A−：net.bin 格式 = 3（段 2 硬切后的唯一格式）", _pr["format"], 3)
+eq("A−：arch 段总长 2,048 B（96 B 核心 + 1,952 B 保留尾）", _pr["arch_segment_bytes"], 2048)
 eq("A−：net.bin 头里的 params == 959,078", _pr["params"], 959078)
 eq("A−：net.bin 张量数（93 = 92 + 可缺的 tile.tile_id）", len(_pr["tensors"]), 93)
 eq("A−：A− 期望张量表条数", len(_v4ex.expected_shapes(_a.dims(), v4_model.ARCH_A)), 93)
@@ -3022,6 +3024,212 @@ ok({"fusion.mem.weight", "fusion.mem.bias"} <= set(_gmeta.get("perturbed_zero_pa
    "W1：夹具把零初始化的 `fusion.mem.*` 显式扰动了（铁律①：零初始化路径必须被扰动）",
    f"perturbed={_gmeta.get('perturbed_zero_params')}")
 eq("P5 夹具：格式号 == 2（W1 起每用例带 h0/h_evt）", v4_export.GOLDEN_FORMAT, 2)
+
+# ---- 段 2（第一百零八轮）：`net.bin` format 2 → 3（arch 段）+ 硬切 + fail-loud 六条 -----------
+# 判据出处：`lab/mv1/A-REFACTOR-IMPL-PLAN.md` §3（字段表 / 硬切 / fail-loud 清单）+ `ARCH-REDESIGN`
+# §0/§0.1（≤2M / 8,010,904 B）。⛔ 每条负向都必须**报错** —— "能读出来"就是 FAIL：
+# 补 0 / 猜 arch 会让前向**静默**换语义，而这正是硬切要防的事。
+print("== 段 2：net.bin 格式 3（arch 段 + 硬切 + fail-loud）==")
+import struct                                                         # noqa: E402,F401
+_f3dir = scratch("v4-f3")
+
+
+def _f3_offsets(blob: bytes) -> dict[str, tuple[int, int]]:
+    """扫描格式 3 的块表/张量表 ⇒ `{名字: (维数区偏移, 数据偏移)}`（用来**精确改一个字段**）。"""
+    if struct.unpack_from("<I", blob, 4)[0] != v4_export.NET_FORMAT:
+        raise AssertionError("不是格式 3")
+    off = struct.unpack_from("<I", blob, 64)[0] + 64
+    nb = struct.unpack_from("<I", blob, 36)[0]
+    nt = struct.unpack_from("<I", blob, 40)[0]
+    for _ in range(nb):
+        off += 2 + struct.unpack_from("<H", blob, off)[0] + 4
+    out: dict[str, tuple[int, int]] = {}
+    for _ in range(nt):
+        ln = struct.unpack_from("<H", blob, off)[0]
+        off += 2
+        name = blob[off:off + ln].decode("utf-8")
+        off += ln
+        nd = blob[off]
+        off += 1
+        dims_off = off
+        shape = struct.unpack_from("<" + "I" * nd, blob, off)
+        off += 4 * nd
+        out[name] = (dims_off, off)
+        off += 4 * int(np.prod(shape))
+    return out
+
+
+def _f3_rename(blob: bytes, old: str, new: str) -> bytes:
+    """把张量表里某个**等长**名字改掉（偏移不变 ⇒ 用来构造"缺某个必需张量"）。"""
+    assert len(old) == len(new), (old, new)
+    _dims_off = _f3_offsets(blob)[old][0]
+    _start = _dims_off - 1 - len(old)                    # 名字字段 = [nameLen u16][name]
+    assert blob[_start:_start + len(old)].decode("utf-8") == old, old
+    b = bytearray(blob)
+    b[_start:_start + len(old)] = new.encode("ascii")
+    return bytes(b)
+
+
+def _f3_expect_error(blob: bytes, needles: tuple[str, ...], name: str) -> None:
+    p = _f3dir / "bad.bin"
+    p.write_bytes(blob)
+    try:
+        v4_export.read_net(p)
+    except v4_export.NetFormatError as e:
+        ok(all(n in str(e) for n in needles), name, str(e)[:120])
+        return
+    ok(False, name, "⛔ 坏包被读出来了 —— 必须报错")
+
+
+# ① 字段表本身：首尾相接、总长 96 B；arch 段总长 2,048 B（96 核心 + 1,952 保留尾）
+_f3_walk, _f3_gaps = 0, []
+for _off, _nm, _kind, _size in v4_export._ARCH_FIELDS:
+    if _off != _f3_walk:
+        _f3_gaps.append(f"{_nm}@{_off}!={_f3_walk}")
+    _f3_walk = _off + _size
+# 命名字段走到 70，剩下 70–95 的 26 B 是**保留区**（必须全 0）⇒ 70 + 26 = 96
+eq("段 2：arch 字段表首尾相接，命名字段 70 B + 26 B 保留 == 96 B",
+   (_f3_gaps, _f3_walk, v4_export.ARCH_CORE_BYTES - _f3_walk), ([], 70, 26))
+eq("段 2：arch 段总长 = 96 B 核心 + 1,952 B 保留尾",
+   (v4_export.ARCH_CORE_BYTES, v4_export.ARCH_SEG_BYTES), (96, 2048))
+# ② 写端：v4 小网也写 format 3，且**字节账** = 64 + 2048 + 块表 + 张量表（独立公式复算）
+_f3v4sd = v4_model.build(20260928, **v4_export.GOLDEN_DIMS).state_dict()
+_f3v4 = v4_export.save_net(_f3v4sd, dict(v4_export.GOLDEN_DIMS), _f3dir / "v4.bin",
+                           arch=v4_model.ARCH_V4)
+_f3p = v4_export.read_net(_f3v4)
+eq("段 2：v4 图也写 format 3（arch 判据 = arch 段）",
+   (_f3p["format"], _f3p["arch"], _f3p["arch_info"]["topoId"]), (3, "v4", 2))
+eq("段 2：archLen == 2,048（整段；块表偏移 = 64 + archLen）", _f3p["arch_segment_bytes"], 2048)
+_f3_f2 = 64
+for _bid, _w in _f3p["blocks"]:
+    _f3_f2 += 2 + len(_bid.encode("utf-8")) + 4
+for _nm, _arr in _f3p["tensors"].items():
+    _shape = np.asarray(_arr).shape
+    _f3_f2 += 2 + len(_nm.encode("utf-8")) + 1 + 4 * len(_shape) + 4 * int(np.prod(_shape))
+eq("段 2：format 3 字节 = （格式 2 的同一份内容）+ 2,048 B",
+   _f3v4.stat().st_size - v4_export.ARCH_SEG_BYTES, _f3_f2)
+# ③ 读端 arch 判据 = arch 段；`arch_of`（张量名）只做交叉复核
+eq("段 2：读端 arch 来自 arch 段（topoId 注册表）",
+   v4_export.TOPO_IDS, {2: v4_model.ARCH_V4, 3: v4_model.ARCH_A})
+_a_f3 = v4_export.save_net(_a.state_dict(), _a.dims(), _f3dir / "a.bin", arch=v4_model.ARCH_A)
+_pa_f3 = v4_export.read_net(_a_f3)
+eq("段 2：a- 的 params == 959,078", _pa_f3["params"], 959078)
+eq("段 2：a- 的 net.bin 字节 = 3,839,213 + 2,048", _a_f3.stat().st_size, 3841261)
+ok(_a_f3.stat().st_size < 8010904,
+   "段 2：a- 的 net.bin < 8,010,904 B（ARCH-REDESIGN §0 的硬上限）",
+   f"{_a_f3.stat().st_size:,} B")
+eq("段 2：a- 的 arch 段字段（值域/段数/卷积核）",
+   (_pa_f3["arch_info"]["valueRange"], _pa_f3["arch_info"]["nSeg"],
+    (_pa_f3["arch_info"]["tileKernel0"], _pa_f3["arch_info"]["tileKernel3"])),
+   (60.0, 3, (5, 3)))
+eq("段 2：v4 的 arch 段字段（ReLU/post-LN/无段嵌入/51 bin）",
+   (_f3p["arch_info"]["actId"], _f3p["arch_info"]["normId"],
+    _f3p["arch_info"]["segEmbMode"], _f3p["arch_info"]["valueBins"]), (0, 0, 0, 5))
+
+# ④ ⭐ 硬切：`format==2` ⇒ **专用错误**（点名"A− 之前的老包" + 冻结快照），⛔ 不许自动升级
+_f3_v4raw = _f3v4.read_bytes()
+_f3_old = bytearray(_f3_v4raw)
+struct.pack_into("<I", _f3_old, 4, v4_export.NET_FORMAT_RETIRED)
+_f3_expect_error(bytes(_f3_old), ("A− 之前的老包", "冻结快照"), "段 2 硬切：format==2 ⇒ 专用错误（指向冻结快照）")
+_f3_v3 = bytearray(_f3_v4raw)
+struct.pack_into("<I", _f3_v3, 4, v4_export.NET_FORMAT_V3)
+_f3_expect_error(bytes(_f3_v3), ("NeuralPolicy",), "段 2：format==1 仍走 v3 路径（本模块不解析、也不猜）")
+_f3_v9 = bytearray(_f3_v4raw)
+struct.pack_into("<I", _f3_v9, 4, 9)
+_f3_expect_error(bytes(_f3_v9), ("未知",), "段 2：未注册的 format ⇒ 报版本号")
+
+# ⑤ fail-loud 六条（§3 清单）—— 逐条**改一个字段**，每条都必须报错
+_f3_offs = _f3_offsets(_f3_v4raw)
+_f3_offs_a = _f3_offsets(_a_f3.read_bytes())
+# ① `value_bins`/`value_range` 与 arch 声明不符（三处：头 / arch / heads.value 行数）
+_b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 28, 81)
+_f3_expect_error(bytes(_b), ("valueBins",), "fail-loud①：arch 的 valueBins 与头部不符 ⇒ 报错")
+_b = bytearray(_a_f3.read_bytes()); struct.pack_into("<f", _b, 64 + 32, 30.0)
+_f3_expect_error(bytes(_b), ("valueRange",), "fail-loud①：a- 的 value_range 写成 30（应 60）⇒ 报错")
+_b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 28, 7)
+_f3_expect_error(bytes(_b), ("valueBins",), "fail-loud①：arch 的 valueBins 与 heads.value 行数不符 ⇒ 报错")
+# ② arch 声称有 B3 张量但缺（等长改名 ⇒ 偏移不变，只少了 `fusion.u_res`）
+_f3_expect_error(_f3_rename(_a_f3.read_bytes(), "fusion.u_res", "fusion.x_res"),
+                 ("hasB3", "fusion.u_res"),
+                 "fail-loud②：flags.hasB3=1 但缺 `fusion.u_res` ⇒ 报错（⛔ 不补 0）")
+# ③ 段嵌入缺失但 arch 要求（`segEmbMode=1` ⇒ 必须有 `fusion.seg`）
+_f3_expect_error(_f3_rename(_a_f3.read_bytes(), "fusion.seg", "fusion.sag"),
+                 ("segEmbMode=1", "fusion.seg"),
+                 "fail-loud③：arch 要求 3 段嵌入但缺 `fusion.seg` ⇒ 报错")
+# ④ 张量名/形状与 `expected_shapes(d, arch)` 不符（`fusion.seg` 两维**互换**，元素数不变）
+_f3_seg_shape = tuple(np.asarray(_pa_f3["tensors"]["fusion.seg"]).shape)
+_b = bytearray(_a_f3.read_bytes()); _dd = _f3_offs_a["fusion.seg"][0]
+struct.pack_into("<I", _b, _dd, _f3_seg_shape[1])
+struct.pack_into("<I", _b, _dd + 4, _f3_seg_shape[0])
+_f3_expect_error(bytes(_b), ("形状", "fusion.seg"), "fail-loud④：张量形状与契约不符 ⇒ 报错")
+# ⑤ `params` 与实算不符（头里的校验位 +1）
+_b = bytearray(_f3_v4raw); _pp = struct.unpack_from("<I", _b, 60)[0]
+struct.pack_into("<I", _b, 60, _pp + 1)
+_f3_expect_error(bytes(_b), ("params",), "fail-loud⑤：头里的 params ≠ 张量表实算 ⇒ 报错")
+# ⑥ 截断 / 越界（砍掉尾巴 7 B）
+_f3_expect_error(_f3_v4raw[:-7], ("截断",), "fail-loud⑥：文件被截断 ⇒ 报错（不是 struct 裸抛）")
+# 附加：保留区/保留位/topoId/版本号四处（§3「archVersion=1 时非 0 ⇒ 报错」等）
+_b = bytearray(_f3_v4raw); _b[64 + 27] |= 0x80
+_f3_expect_error(bytes(_b), ("保留位",), "段 2：`flags` 用了 bit4–7 保留位 ⇒ 报错")
+_b = bytearray(_f3_v4raw); _b[64 + 70] = 1
+_f3_expect_error(bytes(_b), ("保留区",), "段 2：arch 核心的保留区（70–95）非 0 ⇒ 报错")
+_b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 6, 9)
+_f3_expect_error(bytes(_b), ("topoId",), "段 2：未注册的 topoId ⇒ 报错")
+_b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 4, 2)
+_f3_expect_error(bytes(_b), ("archVersion",), "段 2：archVersion>1 ⇒ 报错（⛔ 不猜新字段）")
+_b = bytearray(_f3_v4raw); struct.pack_into("<I", _b, 64 + 48, 3)
+_f3_expect_error(bytes(_b), ("不一致",), "段 2：头与 arch 段的 featureVersion 不一致 ⇒ 报错")
+
+# ⑥ 往返：导出 → 读回 → 载入 ⇒ 张量逐位相同 **且** 前向四个头逐位相同（v4 / a- 各一遍）
+def _f3_forward(sd, dims, arch):
+    net = v4_model.build(1, arch=arch, **dims)
+    net.load_state_dict(sd, strict=True)
+    net.eval()
+    g = _torch.Generator().manual_seed(4242)
+    args = (_torch.rand(1, 34, 48, generator=g), _torch.rand(1, 60, 96, generator=g),
+            _torch.rand(1, 64, generator=g), _torch.rand(1, 5, 128, generator=g))
+    with _torch.no_grad():
+        return net(*args, mask=_torch.ones(1, 5, dtype=_torch.bool))
+
+
+for _arch, _sd, _dims, _path in (
+        (v4_model.ARCH_V4, _f3v4sd, dict(v4_export.GOLDEN_DIMS), _f3v4),
+        (v4_model.ARCH_A, _a.state_dict(), dict(_a.dims()), _a_f3)):
+    _parsed = v4_export.read_net(_path)
+    _rt = v4_export.state_from_net(_parsed)
+    _same = all(_torch.equal(_sd[k], _rt[k]) for k in _sd if k in _rt)
+    ok(_same and set(_sd) == set(_rt),
+       f"段 2 往返（{_arch}）：导出→读回的**每个张量逐位相同**", f"{len(_rt)} 个张量")
+    _o1, _o2 = _f3_forward(_sd, _dims, _arch), _f3_forward(_rt, _dims, _arch)
+    _headdiff = {h: float((_o1[h] - _o2[h]).abs().max()) for h in
+                 ("policy", "value", "belief_tenpai", "danger")}
+    ok(all(x == 0.0 for x in _headdiff.values()) and
+       bool(_torch.equal(_o1["policy"], _o2["policy"])),
+       f"段 2 往返（{_arch}）：前向 logits **逐位相同**（max|Δ| = 0）", f"{_headdiff}")
+
+# ⑦ `normalize_state` 的补 0 按 arch 分流：v4 缺 B3 ⇒ 恒等；a- 缺 B3 ⇒ **报错**
+_f3_v4_norm = v4_export.normalize_state(
+    {k: v for k, v in _f3v4sd.items() if k not in ("fusion.u_norm.weight", "fusion.u_res")})
+ok(_f3_v4_norm["fusion.u_res"].abs().sum().item() == 0.0
+   and float(_f3_v4_norm["fusion.u_norm.weight"].mean()) == 1.0,
+   "段 2（v4）：缺 B3 ⇒ 补 (1,0)/0 = **恒等**（旧包前向逐位不变）")
+try:
+    v4_export.normalize_state({k: v for k, v in _a.state_dict().items()
+                               if k != "fusion.u_res"})
+    ok(False, "段 2（a-）：缺 B3 必须报错（a- 必须是全套，⛔ 不补 0）")
+except v4_export.NetFormatError as _e:
+    ok("a-" in str(_e) and "fusion.u_res" in str(_e),
+       "段 2（a-）：缺 B3 ⇒ 报错（⛔ 不补 0，B3 是 T1 参数账的一部分）", str(_e)[:90])
+
+# ⑧ golden 三档（G0/G1/G2）：档 → (arch, semantics) 的映射与 a- 小网宽度
+eq("段 2：golden 三档映射（c2→G0 · current→G1 · a-→G2）",
+   v4_export.FIXTURE_SEMANTICS,
+   {"c2": (v4_model.ARCH_V4, "c2"), "current": (v4_model.ARCH_V4, "current"),
+    "a-": (v4_model.ARCH_A, "current")})
+eq("段 2：a- 夹具小网 = 32/16/2/81（`A-REFACTOR-IMPL-PLAN` §3 的 G1 口径）",
+   v4_export.GOLDEN_DIMS_A,
+   {"d_model": 32, "tile_d": 16, "n_heads": 2, "value_bins": 81})
+
 
 # ② **同一把递推**：把 70 条事件"逐条推进"与"前缀 carry + 窗口推进"必须逐位一致。
 #    这是"离线端算 h0 的唯一算法"（`cache.CarryTracker` / `carry_prefix`）与

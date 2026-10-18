@@ -1003,6 +1003,13 @@ Java 权威实现 2026-09-27 落地（`docs/PROTOCOL.md` §8.2 · `NOTES.md` §6
 
 ### 6.22 v4 前向镜像（`net.bin` 格式 2，2026-09-27，已完成）
 
+> ⚠ **段 2（2026-10-19）起 Python 写出的是 `format=3`（64 B 头 + 2,048 B arch 段 + 块表 + 张量表）**，
+> 本节与 `v4policy.cpp` 的加载器仍只认 **`format=2`** ⇒ **新包现在读不了**（`v4WeightFormatOf` 返回 2，
+> 见 `A-REFACTOR-IMPL-PLAN.md` §3 的段 3 清单）。⛔ 这不是"尽力而为"的兼容层：format 3 的包在 C++ 侧
+> 必须**报错**，`format==2` 的旧包在 Python 侧也**报专用错误**（指向冻结快照 `lab/mv1/frozen-format2`）。
+> 段 3 的改动点：`v4LoadPolicyBytes` 先读 `archLen` 跳过 arch 段、`v4WeightFormatOf` 返回 3、
+> `format==2` 给专用错误。字段表见 `ARCH-REDESIGN.md` §11.1（`archLen=2,048` = 整段）。
+
 **为什么这一步是 P5 的"训练端"那一半**：v4 世代的采集席都是 `net:<上一代>`，训练端如果只会读
 v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个数量级）。镜像之后
 `--policy net:<v4 net.bin>,teacher,teacher,teacher` 在 C++ 生产者上直接可用。
