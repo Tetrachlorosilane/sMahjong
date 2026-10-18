@@ -1787,7 +1787,9 @@ def _recorded_args(args) -> dict:
                        ("lr_schedule", "cosine"), ("lr_floor_frac", 0.1),
                        # ★ C2（第一百轮）：池化口径（缺省 = mask-aware ⇒ 台账里一个键都不进，
                        #   于是"旧路径逐字节不变"不依赖任何新参数）
-                       ("legacy_pool", False)):
+                       ("legacy_pool", False),
+                       # ★ C1（第一百零一轮）：`fusion.out` 末端 ReLU（缺省 = 去掉 ⇒ 台账里一个键都不进）
+                       ("legacy_out_relu", False)):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -1900,6 +1902,15 @@ def train(args) -> dict:
         "**legacy**（`u.mean(1)`，分母 = Lmax，含 padding 槽；⛔ 只用于逐位复现改动前）"
         if _legacy_pool else
         "mask-aware（只对真实 `n_legal` 个合法槽求均值；与 Java/C++ 前向同一分母）"))
+    # ---- ★ C1（第一百零一轮）：`fusion.out` 末端 **去掉 ReLU**（0 参数，只这一处）----------------
+    # `--legacy-out-relu`（缺省关）：开 = 保留旧的 `nn.ReLU()` 末端，**逐位复现**改动前。
+    # ⚠ 同样进程级：主网 / `--init` / `π_ref` / 行为策略必须同一套前向语义，否则参照网口径不同。
+    _legacy_out_relu = bool(getattr(args, "legacy_out_relu", False))
+    M.set_legacy_out_relu(_legacy_out_relu)
+    print("fusion.out 末端：" + (
+        "**legacy ReLU**（`u ≥ 0`，候选表示被截断；⛔ 只用于逐位复现改动前）"
+        if _legacy_out_relu else
+        "**无 ReLU**（C1：`u` 可正可负，候选表示不再被截断）"))
     # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
     # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
     for _split, _data in (("train", train_data), ("val", val_data)):
@@ -3103,6 +3114,9 @@ def _cached_ref_logits(args, model, data: dict, device: str,
                                    # ★ C2：池化口径会改 state 级头（value/belief）的输出 ⇒ 必须进键，
                                    #   否则同一缓存目录下 `--legacy-pool` 与缺省会**静默混用**两份 logits。
                                    "legacy_pool": bool(M.LEGACY_POOL),
+                                   # ★ C1：`fusion.out` 去不去 ReLU 会改 **policy** 的 logits（以及
+                                   #   value）⇒ 同样必须进键，否则会静默复用旧口径算出的 π_ref。
+                                   "legacy_out_relu": bool(M.LEGACY_OUT_RELU),
                                    "lmax": lmax, "rows": n})
     got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
     if got is not None:
@@ -3132,6 +3146,8 @@ def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, devi
                                    "value_range": float(M.VALUE_RANGE),
                                    # ★ C2：`V_old` 读 value 头 ⇒ 池化口径必须进键（同源理由见 `_cached_ref_logits`）
                                    "legacy_pool": bool(M.LEGACY_POOL),
+                                   # ★ C1：value 头读 `state`（= 池化的 `u`）⇒ 同一理由，ReLU 口径进键
+                                   "legacy_out_relu": bool(M.LEGACY_OUT_RELU),
                                    "rows": [n, nv]})
     got = _refcache.load(cache_dir, "v_old", key, kd)
     if got is not None:
@@ -3189,6 +3205,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-pool", action="store_true",
                     help="⛔ 只用来自证/复现：state 级头退回旧 `u.mean(dim=1)`（分母 = Lmax，含 padding 槽）。"
                          "缺省 = mask-aware 池化（只对真实 n_legal 个合法槽求均值；与 Java/C++ 前向同口径）")
+    # ★ C1（第一百零一轮）：`fusion.out` 末端 ReLU。缺省 = **去掉**（`u` 可正可负）；
+    #   开这个开关才回到旧的 `nn.ReLU()` 末端（`u ≥ 0`）—— 只用于逐位复现改动前。
+    ap.add_argument("--legacy-out-relu", action="store_true",
+                    help="⛔ 只用来自证/复现：`fusion.out` 末端保留旧 ReLU（u ≥ 0）。"
+                         "缺省 = 去掉该 ReLU（C1；0 参数，net.bin 格式不变）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

@@ -6,7 +6,7 @@
 
 | # | 名称 | 级别 | 优先级 | 参数增量 | 重建数据 | 重训基线 |
 | --- | --- | --- | --- | ---: | --- | --- |
-| C1 | 去输出端 ReLU（只 `fusion.out`） | T1 | 建议 | 0 | 否 | 是 |
+| C1 | 去输出端 ReLU（只 `fusion.out`）（✅ **已实现（C1-a，仅训练侧）**：第一百零一轮，`v4/model.py: Mlp(final_relu)` + `Fusion.out` + `pretrain --legacy-out-relu`；⛔ Java/C++ 未同步、未跑闸门） | T1 | 建议 | 0 | 否 | 是 |
 | C2 | state 级头改 mask-aware 池化（✅ **已实现**：第一百轮，`v4/model.py: state_pool` + `pretrain --legacy-pool`） | **T0** | **必做** | 0 | 否 | 否（要变强才重训） |
 | C3 | `mem`/`policy_gate` 非零小初始化 | T0 | 可后做 | 0 | 否 | 是（否则验不到） |
 | C4 | value ±30→±60、51→81 bin | T1 | 建议 | +5,790（+0.41%） | 否 | 是 |

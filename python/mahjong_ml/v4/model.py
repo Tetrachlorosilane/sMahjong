@@ -41,6 +41,17 @@ VALUE_RANGE = 30.0
 #: max|Δ|=149.7，而自身 logit std 只有 5.74 ⇒ value/belief 主要由 padding 决定，不是状态。
 LEGACY_POOL = False
 
+#: `fusion.out` 末端的 ReLU（**C1**，第一百零一轮）：
+#:
+#: - `False`（缺省，新行为）= **去掉** `Mlp` 末端 ReLU ⇒ `u` 可正可负（候选表示不再被截断到 ≥0）；
+#: - `True` = legacy：保留旧的 `nn.ReLU()` 末端，**逐位复现**改动前（`pretrain --legacy-out-relu`）。
+#:
+#: ⚠ 只动 `Fusion.out` 这一处；`ctx`/`cand` 的 `Mlp`（无缺陷证据）保持 ReLU。
+#: ⚠ 这只是**训练侧**语义：`net.bin` 格式 / 张量名 / 形状 / 参数一个没变（0 参数），
+#: 但同一份权重在新旧语义下 logits **会变**（历史 `u` 有 78.5% 维恒 0、有效宽度 41/192，
+#: 曾有 ReLU 全死塌方 top1 0.165）⇒ ⛔ Java/C++ 前向尚未同步，C1-a 的网**不得**上线上闸门。
+LEGACY_OUT_RELU = False
+
 #: 非法/缺失的合法数在这里被抓住（fail-closed）：⛔ **绝不悄悄退回全槽均值**。
 class LegalCountError(ValueError):
     """`state_pool` 拿不到可用的 `n_legal`（缺失 / ≤0 / >Lmax / 与 mask 不一致）。"""
@@ -55,6 +66,16 @@ def set_legacy_pool(flag: bool) -> None:
     """
     global LEGACY_POOL
     LEGACY_POOL = bool(flag)
+
+
+def set_legacy_out_relu(flag: bool) -> None:
+    """**进程级** `fusion.out` 末端 ReLU 开关（`pretrain --legacy-out-relu` 在 `train()` 开头设一次）。
+
+    为什么也是进程级：一次训练里会建**好几张** V4Model（主网、`--init`、`π_ref`、行为策略）——
+    只设主网会让参照网的前向语义不同 ⇒ 旧轨迹复现不出来、KL 锚也对不上。
+    """
+    global LEGACY_OUT_RELU
+    LEGACY_OUT_RELU = bool(flag)
 
 
 @dataclass(frozen=True)
@@ -163,19 +184,33 @@ class EventTower(nn.Module):
 
 
 class Mlp(nn.Module):
-    def __init__(self, cin: int, cout: int, hidden: int | None = None) -> None:
+    """`Linear → ReLU → Linear`（+ 可选末端 ReLU）。
+
+    ⚠ **末端 ReLU 是 `final_relu` 开关**（C1，第一百零一轮）：`ctx`/`cand` 用缺省 `True`
+    （与改动前逐位相同）；只有 `Fusion.out` 传 `False` ⇒ `u` 不再被截断到 ≥0。
+    ⚠ 形状/张量名/参数**完全不变**：旧实现是 `Sequential(Linear, ReLU, Linear, ReLU)`，
+      末端 ReLU 没有参数 ⇒ `net.0.*` / `net.2.*` 两个键名在新旧两边相同，旧 `net.bin`
+      `strict=True` 照常加载。`F.relu` 与 `nn.ReLU()` 是同一个算子 ⇒ `final_relu=True`
+      逐位复现改动前（`--legacy-out-relu` 要的正是这条）。
+    """
+
+    def __init__(self, cin: int, cout: int, hidden: int | None = None, *,
+                 final_relu: bool = True) -> None:
         super().__init__()
         hidden = hidden or cout
-        self.net = nn.Sequential(nn.Linear(cin, hidden), nn.ReLU(), nn.Linear(hidden, cout), nn.ReLU())
+        self.final_relu = bool(final_relu)
+        self.net = nn.Sequential(nn.Linear(cin, hidden), nn.ReLU(), nn.Linear(hidden, cout))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        h = self.net(x)
+        return F.relu(h) if self.final_relu else h
 
 
 class Fusion(nn.Module):
     """关键张注意力 + 状态/增量**两轮双向**（设计 §5.2）。"""
 
-    def __init__(self, d: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS) -> None:
+    def __init__(self, d: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
+                 legacy_out_relu: bool | None = None) -> None:
         super().__init__()
         self.tile_proj = nn.Linear(tile_d, d)
         self.q_tile = nn.MultiheadAttention(d, n_heads, batch_first=True)
@@ -193,7 +228,11 @@ class Fusion(nn.Module):
         self.mem = nn.Linear(d, d)
         nn.init.zeros_(self.mem.weight)
         nn.init.zeros_(self.mem.bias)
-        self.out = Mlp(3 * d, d)
+        # ★ C1（第一百零一轮）：**这一处**去掉末端 ReLU（`legacy_out_relu=True` ⇒ 旧的 `nn.ReLU()`）。
+        #   理由：78.5% 的 `u` 维精确为 0、有效宽度只有 41/192（审计 §4），且有过一次 ReLU 全死
+        #   塌方（logits 常数、top1 0.165）。⛔ 其它 Mlp（ctx/cand）不动。
+        self.legacy_out_relu = LEGACY_OUT_RELU if legacy_out_relu is None else bool(legacy_out_relu)
+        self.out = Mlp(3 * d, d, final_relu=self.legacy_out_relu)
 
     def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor, e_tokens: torch.Tensor,
                 h_evt: torch.Tensor, ctx: torch.Tensor, cand: torch.Tensor) -> torch.Tensor:
@@ -326,19 +365,22 @@ class V4Model(nn.Module):
     """
 
     def __init__(self, *, d_model: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
-                 value_bins: int = VALUE_BINS, legacy_pool: bool | None = None) -> None:
+                 value_bins: int = VALUE_BINS, legacy_pool: bool | None = None,
+                 legacy_out_relu: bool | None = None) -> None:
         super().__init__()
         if d_model % n_heads or tile_d % n_heads:
             raise ValueError(f"n_heads={n_heads} 必须同时整除 d_model={d_model} 与 tile_d={tile_d}")
         # ⚠ `legacy_pool` **不是宽度**：不进 `dims_cfg`、不进 `net.bin` 头部（格式一个字节没动）。
         self.legacy_pool = LEGACY_POOL if legacy_pool is None else bool(legacy_pool)
+        # ⚠ `legacy_out_relu` 同理：0 参数、不改形状 ⇒ 也不进 `dims_cfg`（C1 不改 `net.bin` 格式）。
+        self.legacy_out_relu = LEGACY_OUT_RELU if legacy_out_relu is None else bool(legacy_out_relu)
         self.dims_cfg = {"d_model": int(d_model), "tile_d": int(tile_d),
                          "n_heads": int(n_heads), "value_bins": int(value_bins)}
         self.tile = TileTower(tile_d, n_heads, d_model)
         self.event = EventTower(d_model, n_heads)
         self.ctx = Mlp(C_CTX, d_model)
         self.cand = Mlp(C_CAND, d_model)
-        self.fusion = Fusion(d_model, tile_d, n_heads)
+        self.fusion = Fusion(d_model, tile_d, n_heads, legacy_out_relu=self.legacy_out_relu)
         self.heads = Heads(d_model, value_bins)
 
     # ---------------------------------------------------------------- 前向
