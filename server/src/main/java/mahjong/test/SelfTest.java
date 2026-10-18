@@ -109,6 +109,7 @@ public final class SelfTest {
         neuralForwardTests();
         v4ForwardTests();
         v4CacheTests();
+        v4AminusTests();
         teacherLabelTests();
         candDerivedTests();
         hybridPolicyTests();
@@ -3991,7 +3992,9 @@ public final class SelfTest {
         check("v4：obs v2 被硬拒（不静默降级）", rejected);
 
         java.nio.file.Path fx = null;
-        for (String cand : new String[]{"python/tests/golden/forward-v4.bin",
+        for (String cand : new String[]{"server/tests/golden/forward-v4.bin",
+                "../server/tests/golden/forward-v4.bin", "../../server/tests/golden/forward-v4.bin",
+                "python/tests/golden/forward-v4.bin",
                 "../python/tests/golden/forward-v4.bin", "../../python/tests/golden/forward-v4.bin"}) {
             if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
                 fx = java.nio.file.Path.of(cand);
@@ -4170,6 +4173,422 @@ public final class SelfTest {
         }
     }
 
+    /**
+     * **A−（段 3a）**：`net.bin` 格式 3 的解析 / 硬切 / fail-loud 六条 + **a- 前向**（G2 夹具）
+     * + **tie-break 规格**（与 `python/mahjong_ml/v4/policy.py:choose_index` 同义）。
+     *
+     * <p>为什么单开一组：v4 的 `v4ForwardTests` 钉的是**旧图**（G1），而 A− 换了拓扑
+     * （34 轴卷积/joint 95 token/danger 固定通道）——两者的红证与头表都不一样，混在一起就分不清
+     * "哪条判据在管哪条分支"。
+     */
+    private static void v4AminusTests() {
+        java.nio.file.Path fx = null;
+        for (String cand : new String[]{"server/tests/golden/forward-a.bin",
+                "../server/tests/golden/forward-a.bin",
+                "../../server/tests/golden/forward-a.bin"}) {
+            if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
+                fx = java.nio.file.Path.of(cand);
+                break;
+            }
+        }
+        if (fx == null) {
+            System.out.println("（提示）a- golden 夹具不在，跳过 A− 前向判据："
+                    + "server/tests/golden/forward-a.bin");
+        } else {
+            aMinusFixtureTests(fx);
+            format3FailLoudTests(fx);
+        }
+        tieBreakTests();
+    }
+
+    /** G2 夹具（a- / format 3 / R-4 语料）的逐用例前向对拍 + a- 特有红证与头表。 */
+    private static void aMinusFixtureTests(java.nio.file.Path fx) {
+        byte[] raw;
+        try {
+            raw = java.nio.file.Files.readAllBytes(fx);
+        } catch (java.io.IOException e) {
+            check("读 a- golden 夹具", false);
+            return;
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        eq("a- golden 夹具魔数（MJ4G）", bb.getInt(), V4_GOLDEN_MAGIC);
+        eq("a- golden 夹具格式版本", bb.getInt(), 2);
+        int nCases = bb.getInt();
+        byte[] netBytes = new byte[bb.getInt()];
+        bb.get(netBytes);
+        mahjong.ai.V4Policy net;
+        try {
+            net = mahjong.ai.V4Policy.loadBytes(netBytes, fx.toString());
+        } catch (java.io.IOException e) {
+            check("a- 权重能被 V4Policy 加载（" + e.getMessage() + "）", false);
+            return;
+        }
+        // ① arch 段是**判据**：拓扑/开关/值域只认它（⛔ 不靠张量名反推）
+        eq("a- format3：topoId", net.topoId(), 3);
+        eq("a- format3：flags（B3 + #0）", net.archFlags(), 0x03);
+        check("a- format3：valueRange = ±60", Math.abs(net.valueRange() - 60f) < 1e-6f);
+        eq("a- format3：value_bins", net.valueBins(), 81);
+        check("a- format3：块指纹 == Java 注册表", net.blockFingerprint()
+                .equals(mahjong.ai.V4Features.fingerprint()));
+        check("a- format3：#0 与 B3 张量都在", net.hasTensor("tile.tile_id")
+                && net.hasTensor("fusion.u_res") && net.hasTensor("fusion.u_norm.weight")
+                && net.hasTensor("fusion.seg"));
+        boolean dispatched = false;
+        try {
+            dispatched = mahjong.ai.NetWeights.loadBytes(netBytes, "fx")
+                    instanceof mahjong.ai.V4Policy;
+        } catch (java.io.IOException e) {
+            dispatched = false;
+        }
+        check("a- format3：由 NetWeights 分派到 V4Policy", dispatched);
+
+        // ② 逐用例：四张量 + 四个推理头 + h_evt + argmax
+        float worstFeat = 0f;
+        float worstHead = 0f;
+        float worstTower = 0f;
+        java.util.List<Object[]> cases = new java.util.ArrayList<>();
+        for (int c = 0; c < nCases; c++) {
+            int obsLen = bb.getInt();
+            byte[] ob = new byte[obsLen];
+            bb.get(ob);
+            java.util.Map<String, Object> obs = Json.asObj(
+                    Json.tryParse(new String(ob, java.nio.charset.StandardCharsets.UTF_8)));
+            int n = bb.getShort() & 0xFFFF;
+            for (int i = 0; i < n; i++) {
+                int kl = bb.getShort() & 0xFFFF;
+                bb.position(bb.position() + kl);
+            }
+            float[] h0 = v4ReadVec(bb, net.dims().get("d_model"));
+            float[][] tile = v4ReadMat(bb, mahjong.ai.V4Features.KIND_COUNT,
+                    mahjong.ai.V4Features.C_TILE);
+            float[][] evt = v4ReadMat(bb, mahjong.ai.V4Features.K_EVT,
+                    mahjong.ai.V4Features.C_EVT);
+            float[] ctx = v4ReadVec(bb, mahjong.ai.V4Features.C_CTX);
+            float[][] cand = v4ReadMat(bb, n, mahjong.ai.V4Features.C_CAND);
+            float[] logits = v4ReadVec(bb, n);
+            float[] value = v4ReadVec(bb, net.valueBins());
+            float[] belief = v4ReadVec(bb, 3);
+            float[][] danger = v4ReadMat(bb, n, 4);
+            float[] hEvt = v4ReadVec(bb, net.dims().get("d_model"));
+
+            mahjong.ai.V4Features.Tensors t = mahjong.ai.V4Features.assemble(obs);
+            worstFeat = Math.max(worstFeat, maxAbs(t.tile, tile));
+            worstFeat = Math.max(worstFeat, maxAbs(t.evt, evt));
+            worstFeat = Math.max(worstFeat, maxAbs(t.ctx, ctx));
+            worstFeat = Math.max(worstFeat, maxAbs(t.cand, cand));
+            java.util.Map<String, float[]> o;
+            try {
+                o = net.forwardAll(t, h0);
+            } catch (java.io.IOException e) {
+                check("a- 前向抛异常：" + e.getMessage(), false);
+                return;
+            }
+            worstHead = Math.max(worstHead, maxAbs(o.get("policy"), logits));
+            worstHead = Math.max(worstHead, maxAbs(o.get("value"), value));
+            worstHead = Math.max(worstHead, maxAbs(o.get("belief_tenpai"), belief));
+            worstHead = Math.max(worstHead, maxAbs(o.get("danger"), v4Flatten(danger)));
+            worstTower = Math.max(worstTower, maxAbs(o.get("h_evt"), hEvt));
+            cases.add(new Object[]{t, h0, o.get("policy"), logits});
+        }
+        check("a- golden：四张量逐元素一致（最大误差 " + worstFeat + "）", worstFeat < 1e-4f);
+        check("a- golden：四个推理头逐元素一致（最大误差 " + worstHead + "）", worstHead < 1e-4f);
+        check("a- golden：事件塔隐状态 h_evt 逐元素一致（最大误差 " + worstTower + "）",
+                worstTower < 1e-4f);
+        // argmax：按判据 22 分"一致 / 并列 / 真分歧"——夹具里有**精确并列**（gap=0 / 1.2e-7）的用例，
+        // 那几行由浮点末位决定，⛔ 不该被算成"前向不一致"。
+        int argmaxSame = 0;
+        int argmaxTie = 0;
+        float tieThr = Math.max(1e-5f, 2f * worstHead);
+        for (Object[] c : cases) {
+            float[] got = (float[]) c[2];
+            float[] want = (float[]) c[3];
+            if (v4Argmax(got) == v4Argmax(want)) {
+                argmaxSame++;
+                continue;
+            }
+            float[] s = want.clone();
+            java.util.Arrays.sort(s);
+            float gap = s.length >= 2 ? s[s.length - 1] - s[s.length - 2] : 0f;
+            if (gap <= tieThr) {
+                argmaxTie++;
+            }
+        }
+        eq("a- golden：argmax 与 Python 一致（真分歧 0；并列按 gap ≤ max(1e-5,2·maxΔ) 单列）",
+                argmaxSame + argmaxTie, nCases);
+        check("a- golden：argmax 一致 " + argmaxSame + "/" + nCases + "，并列行 " + argmaxTie
+                + "（gap 阈值 " + tieThr + "），**真分歧 0**", argmaxTie <= 2);
+
+        // ③ 红证：策略头偏置 +1 ⇒ 每条 logit 恰好 +1（对拍不是空转）
+        if (!cases.isEmpty()) {
+            mahjong.ai.V4Policy shifted = net.debugOutputBiasShift(1.0f);
+            float worstRed = 0f;
+            // 用第一个用例的张量做偏置红证
+            mahjong.ai.V4Features.Tensors t0 = (mahjong.ai.V4Features.Tensors) cases.get(0)[0];
+            float[] h00 = (float[]) cases.get(0)[1];
+            try {
+                float[] a = net.forwardAll(t0, h00).get("policy");
+                float[] b = shifted.forwardAll(t0, h00).get("policy");
+                for (int i = 0; i < a.length; i++) {
+                    worstRed = Math.max(worstRed, Math.abs((b[i] - a[i]) - 1f));
+                }
+            } catch (java.io.IOException e) {
+                check("a- 红证前向抛异常：" + e.getMessage(), false);
+            }
+            check("a- golden：红证 —— 策略头偏置 +1 后每条 logit 恰好 +1", worstRed <= 1e-3f);
+        }
+
+        // ④ h0 红证：**全用例取最大**（G2 的 case 0 事件少，单看它测不到 —— 实测 3.6e-7）
+        float worstH0 = 0f;
+        for (Object[] c : cases) {
+            mahjong.ai.V4Features.Tensors t = (mahjong.ai.V4Features.Tensors) c[0];
+            float[] h0 = (float[]) c[1];
+            float[] h1 = h0.clone();
+            for (int i = 0; i < h1.length; i++) {
+                h1[i] += 0.5f;
+            }
+            try {
+                float[] a = net.forwardAll(t, h0).get("policy");
+                float[] b = net.forwardAll(t, h1).get("policy");
+                worstH0 = Math.max(worstH0, maxAbs(a, b));
+            } catch (java.io.IOException e) {
+                check("a- h0 红证前向抛异常：" + e.getMessage(), false);
+                break;
+            }
+        }
+        check("a- golden 红证：扰动 h0 ⇒ 策略头确实变化（全用例 maxΔ=" + worstH0
+                + "，证明 h_evt 作第 95 token 被消费）", worstH0 > 1e-4f);
+
+        // ⑤ 头表（A−）：value/effect 离线（Δ=0）、danger 经 0 参数通道进 policy（Δ>0）、
+        //    belief_tenpai 经 policy_gate（Δ>0）、B3 真的在路径上（清零 ⇒ Δ>0）
+        if (!cases.isEmpty()) {
+            mahjong.ai.V4Features.Tensors t0 = (mahjong.ai.V4Features.Tensors) cases.get(0)[0];
+            float[] h00 = (float[]) cases.get(0)[1];
+            float dValue = 0f;
+            float dEffect = 0f;
+            float dDanger = 0f;
+            float dBelief = 0f;
+            float dGate = 0f;
+            float dB3 = 0f;
+            try {
+                float[] ref = net.forwardAll(t0, h00).get("policy");
+                dValue = maxAbs(ref, net.debugZeroHead("value").forwardAll(t0, h00).get("policy"));
+                dEffect = maxAbs(ref, net.debugZeroHead("effect").forwardAll(t0, h00).get("policy"));
+                dDanger = maxAbs(ref, net.debugZeroHead("danger").forwardAll(t0, h00).get("policy"));
+                dBelief = maxAbs(ref,
+                        net.debugZeroHead("belief_tenpai").forwardAll(t0, h00).get("policy"));
+                dGate = maxAbs(ref,
+                        net.debugZeroHead("policy_gate").forwardAll(t0, h00).get("policy"));
+                dB3 = maxAbs(ref,
+                        net.debugZeroPrefix("fusion.u_").forwardAll(t0, h00).get("policy"));
+            } catch (java.io.IOException e) {
+                check("a- 头表探针抛异常：" + e.getMessage(), false);
+            }
+            check("a- 头表：value 不在推理路径（Δ=" + dValue + "）", dValue == 0f);
+            check("a- 头表：effect 只服务 tie-break（Δ=" + dEffect + "）", dEffect == 0f);
+            check("a- 头表：danger 经**0 参数固定通道**进 policy（Δ=" + dDanger + "）", dDanger > 0f);
+            check("a- 头表：belief_tenpai 经 policy_gate 进 policy（Δ=" + dBelief + "）",
+                    dBelief > 0f);
+            check("a- 头表：policy_gate 本身在策略路径上（Δ=" + dGate + "）", dGate > 0f);
+            check("a- B3 红证：清零 u_norm/u_res ⇒ 策略头变化（Δ=" + dB3 + "）", dB3 > 0f);
+        }
+    }
+
+    /** 格式 3 的**硬切 + fail-loud 六条**（逐条构造坏包 ⇒ 每条都必须报错，⛔ 不许补 0）。 */
+    private static void format3FailLoudTests(java.nio.file.Path fx) {
+        eq("format3：V4Policy.FORMAT_VERSION", mahjong.ai.V4Policy.FORMAT_VERSION, 3);
+        eq("format3：NetWeights.FORMAT_V4", mahjong.ai.NetWeights.FORMAT_V4, 3);
+        byte[] good = v4FixtureNet(fx);
+        if (good == null) {
+            check("format3：从夹具取出内嵌权重", false);
+            return;
+        }
+        // ---- 硬切：**真** format 2 包（本机有就查；缺就只靠下面的合成负向）
+        for (String p : new String[]{"tools/build/v4-expert-defrep-g10/net.bin",
+                "bot-ai/wl-dama/net.bin"}) {
+            java.nio.file.Path q = java.nio.file.Path.of(p);
+            if (!java.nio.file.Files.isRegularFile(q)) {
+                continue;
+            }
+            String msg = null;
+            try {
+                mahjong.ai.V4Policy.load(q);
+            } catch (java.io.IOException e) {
+                msg = e.getMessage();
+            }
+            check("format2 硬切：真老包被拒（" + p + "）",
+                    msg != null && msg.contains("A− 之前的老包"));
+            check("format2 硬切：文案指向冻结快照", msg != null && msg.contains("冻结快照"));
+            break;
+        }
+        byte[] b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(4, 2);
+        expectWeightError("format2 硬切（合成）", b, "A− 之前的老包");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(4, 1);
+        expectWeightError("format1 ⇒ 指向 v3 的 NeuralPolicy", b, "v3");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(4, 9);
+        expectWeightError("未知 format ⇒ 报版本号", b, "未知");
+
+        // ---- fail-loud 六条（① valueBins/valueRange ② hasB3 缺 ③ seg 缺 ④ 形状 ⑤ params ⑥ 截断）
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(64 + 28, (short) 51);
+        expectWeightError("① valueBins 与 arch 不符（51，应 81）", b, "valueBins");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putFloat(64 + 32, 30.0f);
+        expectWeightError("① valueRange 与 arch 不符（30.0，应 60.0）", b, "valueRange");
+        expectWeightError("② arch 声称 hasB3 但缺 fusion.u_res", v4RenameTensor(good,
+                "fusion.u_res", "fusion.x_res"), "fusion.u_res");
+        expectWeightError("③ segEmbMode=1 但缺 fusion.seg", v4RenameTensor(good,
+                "fusion.seg", "fusion.sag"), "fusion.seg");
+        byte[] swapped = good.clone();
+        int segOff = v4TensorShapeOffset(good, "fusion.seg");
+        if (segOff > 0) {
+            java.nio.ByteBuffer sb = java.nio.ByteBuffer.wrap(swapped)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int d0 = sb.getInt(segOff);
+            int d1 = sb.getInt(segOff + 4);
+            sb.putInt(segOff, d1);
+            sb.putInt(segOff + 4, d0);
+        }
+        expectWeightError("④ 形状不符（fusion.seg 转置）", swapped, "fusion.seg");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putInt(60, java.nio.ByteBuffer.wrap(good)
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(60) + 1);
+        expectWeightError("⑤ params 与张量表实算不符", b, "params");
+        byte[] cut = java.util.Arrays.copyOf(good, good.length - 7);
+        expectWeightError("⑥ 截断 7 B", cut, "截断");
+        // 附加：保留区 / 保留位 / 未知 topoId / archVersion / 头↔arch 版本不等
+        b = good.clone();
+        b[64 + 70] = 1;
+        expectWeightError("附：arch 核心保留区非 0", b, "保留区");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(64 + 6, (short) 9);
+        expectWeightError("附：未知 topoId", b, "topoId");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(64 + 4, (short) 2);
+        expectWeightError("附：archVersion>1", b, "archVersion");
+        b = good.clone();
+        java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(64 + 48, 5);
+        expectWeightError("附：头 ↔ arch 段 featVersion 不等", b, "featVersion");
+    }
+
+    /** 从夹具容器里取出**内嵌的 `net.bin` 字节**（不解析用例）。 */
+    private static byte[] v4FixtureNet(java.nio.file.Path fx) {
+        try {
+            byte[] raw = java.nio.file.Files.readAllBytes(fx);
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            bb.getInt();
+            bb.getInt();
+            bb.getInt();
+            byte[] net = new byte[bb.getInt()];
+            bb.get(net);
+            return net;
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    /** 把张量名 `from` 原地改成等长的 `to`（造 fail-loud 负向用；⛔ 不改长度 = 不改布局）。 */
+    private static byte[] v4RenameTensor(byte[] raw, String from, String to) {
+        byte[] a = from.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] b = to.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (a.length != b.length) {
+            throw new IllegalArgumentException("rename 必须等长");
+        }
+        byte[] out = raw.clone();
+        for (int i = 0; i + a.length <= out.length; i++) {
+            boolean hit = true;
+            for (int j = 0; j < a.length; j++) {
+                if (out[i + j] != a[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) {
+                System.arraycopy(b, 0, out, i, b.length);
+                return out;
+            }
+        }
+        throw new IllegalStateException("找不到张量名：" + from);
+    }
+
+    /** 张量 `name` 的形状字段偏移（名字之后 1 B 的 `nd`，再后是 `nd` 个 u32）。 */
+    private static int v4TensorShapeOffset(byte[] raw, String name) {
+        byte[] a = name.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        for (int i = 0; i + a.length <= raw.length; i++) {
+            boolean hit = true;
+            for (int j = 0; j < a.length; j++) {
+                if (raw[i + j] != a[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) {
+                return i + a.length + 1;
+            }
+        }
+        return -1;
+    }
+
+    /** 期望**报错**：`mustContain == null` 时只要求抛；否则消息里必须含它（⛔ 不许"读出来了"）。 */
+    private static void expectWeightError(String name, byte[] raw, String mustContain) {
+        String msg = null;
+        try {
+            mahjong.ai.V4Policy.loadBytes(raw, name);
+        } catch (java.io.IOException e) {
+            msg = e.getMessage();
+        } catch (RuntimeException e) {
+            msg = e.toString();
+        }
+        boolean ok = msg != null && (mustContain == null || msg.contains(mustContain));
+        check(name + " ⇒ 报错（" + (msg == null ? "**读出来了**" : msg) + "）", ok);
+    }
+
+    /** 合成候选行：`type` one-hot + `tile` one-hot（与 `cand` 的槽位一致）。 */
+    private static float[] tieCandRow(int family, int tile) {
+        float[] c = new float[mahjong.ai.V4Features.C_CAND];
+        c[family] = 1f;
+        c[9 + tile] = 1f;
+        return c;
+    }
+
+    /** **tie-break 规格**（`v4/policy.py:choose_index` 的逐条同义）：无并列 ⇒ argmax；并列同族 ⇒
+     * 进张数 → 牌码 → 最小下标；不同族不参与；`τ≤0`/缺 `cand` ⇒ 退回 argmax。 */
+    private static void tieBreakTests() {
+        float tau = mahjong.ai.Logits.TAU;
+        check("tie-break：τ == 1e-3", Math.abs(tau - 1e-3f) < 1e-9f);
+        float[][] c3 = {tieCandRow(0, 5), tieCandRow(1, 3), tieCandRow(2, 7)};
+        float[] e3 = {0f, 1f, 0f, 9f, 0f, 3f};
+        eq("tie-break：无并列 ⇒ argmax",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{0.1f, 2f, 1f}, c3, e3, tau), 1);
+        float[][] c2 = {tieCandRow(0, 5), tieCandRow(0, 3), tieCandRow(1, 9)};
+        float[] e2 = {0f, 1f, 0f, 0f, 4f, 0f};
+        eq("tie-break：并列同族 ⇒ 进张数大者胜",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1.0001f, -5f}, c2, e2, tau), 1);
+        float[][] c4 = {tieCandRow(0, 7), tieCandRow(0, 2), tieCandRow(0, 9)};
+        float[] e4 = {0f, 2f, 0f, 0f, 2f, 0f, 0f, 2f};
+        eq("tie-break：进张数相同 ⇒ 牌码序（小者胜）",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1f, 1f}, c4, e4, tau), 1);
+        float[][] c5 = {tieCandRow(0, 4), tieCandRow(0, 4)};
+        float[] e5 = {0f, 1f, 0f, 0f, 1f, 0f};
+        eq("tie-break：牌码也同 ⇒ 最小合法下标",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1f}, c5, e5, tau), 0);
+        float[][] c6 = {tieCandRow(0, 9), tieCandRow(1, 0)};
+        float[] e6 = {0f, 0f, 0f, 99f, 0f, 0f};
+        eq("tie-break：不同动作族 ⇒ 不进并列",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1f}, c6, e6, tau), 0);
+        eq("tie-break：gap ≥ τ ⇒ argmax（进张数再大也不换）",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 0.998f}, c5, e6, tau), 0);
+        eq("tie-break：τ≤0 ⇒ 退回 argmax",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1f}, c5, e5, 0f), 0);
+        eq("tie-break：缺 cand ⇒ 退回 argmax",
+                mahjong.ai.Logits.argmaxTieBreak(new float[]{1f, 1f}, null, e5, tau), 0);
+    }
+
     private static float[][] v4ReadMat(java.nio.ByteBuffer bb, int rows, int cols) {
         float[][] m = new float[rows][cols];
         for (int r = 0; r < rows; r++) {
@@ -4200,7 +4619,9 @@ public final class SelfTest {
      */
     private static void v4CacheTests() {
         java.nio.file.Path fx = null;
-        for (String cand : new String[]{"python/tests/golden/forward-v4.bin",
+        for (String cand : new String[]{"server/tests/golden/forward-v4.bin",
+                "../server/tests/golden/forward-v4.bin", "../../server/tests/golden/forward-v4.bin",
+                "python/tests/golden/forward-v4.bin",
                 "../python/tests/golden/forward-v4.bin", "../../python/tests/golden/forward-v4.bin"}) {
             if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
                 fx = java.nio.file.Path.of(cand);
@@ -4421,7 +4842,71 @@ public final class SelfTest {
         }
         check("v4 缓存：两次改坏都记进了陈旧计数（"
                 + (net.cacheStale() - staleBefore) + " 次）", net.cacheStale() - staleBefore >= 2);
-        // ⑥ 红证：把缓存深度关掉（= 全量路径）时"命中"必须为 0 —— 否则上一条的 PASS 是假的
+        // ⑥ **A−** 的增量事件缓存（同一把尺子：三档都必须与无缓存**逐位**相同，且真的命中）。
+        //    a- 的塔尾没有 Transformer（2×Conv1d）⇒ level 3 只是"没有可复用的 in_proj"，
+        //    三档的输出仍必须逐位相同（这是"缓存不改变语义"的判据，不因拓扑而放宽）。
+        java.nio.file.Path afx = null;
+        for (String cand : new String[]{"server/tests/golden/forward-a.bin",
+                "../server/tests/golden/forward-a.bin",
+                "../../server/tests/golden/forward-a.bin"}) {
+            if (java.nio.file.Files.isRegularFile(java.nio.file.Path.of(cand))) {
+                afx = java.nio.file.Path.of(cand);
+                break;
+            }
+        }
+        if (afx != null) {
+            mahjong.ai.V4Policy anet = null;
+            try {
+                anet = mahjong.ai.V4Policy.loadBytes(v4FixtureNet(afx), afx.toString());
+            } catch (java.io.IOException e) {
+                check("a- 缓存：权重加载（" + e.getMessage() + "）", false);
+            }
+            java.util.List<java.util.Map<String, float[]>> abase = new java.util.ArrayList<>();
+            if (anet != null) {
+                anet.setCacheEnabled(false);
+                try {
+                    for (java.util.Map<String, Object> o : seq) {
+                        abase.add(anet.forwardAll(o));
+                    }
+                } catch (java.io.IOException e) {
+                    check("a- 缓存：基准前向（" + e.getMessage() + "）", false);
+                    abase.clear();
+                }
+            }
+            for (int level = 1; level <= 3 && !abase.isEmpty(); level++) {
+                anet.setCacheEnabled(true);
+                anet.setCacheLevel(level);
+                anet.resetCacheStats();
+                long bad = 0;
+                double worst = 0;
+                try {
+                    for (int i = 0; i < seq.size(); i++) {
+                        java.util.Map<String, float[]> got = anet.forwardCached(seq.get(i));
+                        for (String head : abase.get(i).keySet()) {
+                            float[] a = abase.get(i).get(head);
+                            float[] b = got.get(head);
+                            for (int j = 0; j < a.length; j++) {
+                                if (Float.floatToIntBits(a[j]) != Float.floatToIntBits(b[j])) {
+                                    bad++;
+                                    worst = Math.max(worst, Math.abs((double) a[j] - b[j]));
+                                }
+                            }
+                        }
+                    }
+                } catch (java.io.IOException e) {
+                    check("a- 缓存 level " + level + " 前向（" + e.getMessage() + "）", false);
+                    continue;
+                }
+                eq("a- 缓存 level " + level + "：增量 == 全量（逐位，n=" + seq.size() + "）"
+                        + (bad == 0 ? "" : "（最大 Δ=" + worst + "）"), bad, 0L);
+                check("a- 缓存 level " + level + "：真的命中（" + anet.cacheStats() + "）",
+                        anet.cacheHits() > 0 && (level < 2 || anet.cacheRowsReused() > 0));
+            }
+            if (anet != null) {
+                anet.setCacheEnabled(false);
+            }
+        }
+        // ⑦ 红证：把缓存深度关掉（= 全量路径）时"命中"必须为 0 —— 否则上面那些 PASS 是假的
         net.setCacheEnabled(false);
         net.resetCacheStats();
         check("v4 缓存红证：关掉缓存后命中数为 0", net.cacheHits() == 0);

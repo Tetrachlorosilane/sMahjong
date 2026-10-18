@@ -23,8 +23,10 @@ public final class NetWeights {
     public static final int MAGIC = 0x4D4A4E4E;
     /** v3 的格式号（定长 MLP）。 */
     public static final int FORMAT_V3 = 1;
-    /** v4 的格式号（带块清单）。 */
-    public static final int FORMAT_V4 = 2;
+    /** v4 的格式号（**格式 3**：64 B 头 + arch 段 + 块清单 + 张量表）。 */
+    public static final int FORMAT_V4 = 3;
+    /** 格式 2 = A− 之前的老包（硬切退役；见 {@link V4Policy#RETIRED_FORMAT2}）。 */
+    public static final int FORMAT_V2_RETIRED = 2;
 
     private NetWeights() {
     }
@@ -51,7 +53,10 @@ public final class NetWeights {
         if (ver == FORMAT_V4) {
             return V4Policy.loadBytes(raw, what);
         }
-        throw new IOException("权重格式版本 " + ver + " 不认识（v3 = 1，v4 = 2）—— 重新导出权重");
+        if (ver == FORMAT_V2_RETIRED) {
+            throw new IOException(V4Policy.RETIRED_FORMAT2);
+        }
+        throw new IOException("权重格式版本 " + ver + " 不认识（v3 = 1，v4 = 3；2 = 已退役）—— 重新导出权重");
     }
 
     /** 只读头部（日志/清单用，不做完整加载）。 */
@@ -67,7 +72,8 @@ public final class NetWeights {
         }
         return switch (ver) {
             case FORMAT_V3 -> "第三代定长 MLP（格式 1）";
-            case FORMAT_V4 -> "第四代三塔 + 多头（格式 2）";
+            case FORMAT_V4 -> "第四代三塔 + 多头（格式 3，带 arch 段）";
+            case FORMAT_V2_RETIRED -> "格式 2（A− 之前的老包，已退役）";
             default -> "未知格式 " + ver;
         };
     }

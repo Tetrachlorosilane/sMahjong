@@ -558,6 +558,60 @@ format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同�
   Java `loadBytes`/`FORMAT_VERSION`/`NetWeights` 分派；`policy-gate-check.mjs` 认 3（`2` 标冻结快照）；
   `trainer-v4-parity.mjs --golden` 换 G1；R-4 的 3,083 行三端对拍。
 
+## 12 段 3a 已实现（**Java 前向同步到 format 3 与 A− 新图**）+ 读数（第一百零九轮，2026-10-19）
+
+> 本节只**追加**，⛔ 未改 §0–§11 的任何结论。依据 = `A-REFACTOR-IMPL-PLAN.md` §2（Java 逐函数映射）/
+> §3（format 3 字段表）/ §4（回滚与验收）/ §5（风险）。本批只动**服务端 Java**：
+> ⛔ C++（段 3b，另一批次）、⛔ Python、⛔ 采集 / 闸门 / 发布。证据 = gitignored `.tmp/mv1-s29a/`
+> （探针对拍原文 / selftest 日志 / 内存采样）。
+
+### 12.1 落地与 §2 对账（`文件:行` + 行数增量）
+
+| # | §2 的项 | 实际落点 | 增量 | 与预估 |
+| --- | --- | --- | ---: | --- |
+| 1 | `loadBytes` + arch 段 | `V4Policy.java:177-396` + `readArch:398-557`（字段表/枚举/保留区/截断全在） | +300 | §2 估 +78/−8；多出的是**边界检查游标**与逐字段报错文案 |
+| 2 | `bindAll` 两套张量表 | `bindAll:778`（分派）· `bindAllV4:801` · `bindAllA:899` · `checkFlags:559` | +150 | ≈ +75/−15（多出 3D 卷积与 flags↔张量双向） |
+| 3 | `forwardWith` | 分派 `:1405` · `forwardWithV4:1409`（C1：`fusion.out` **去 ReLU**）· `forwardWithA:1649-1953` | +600 | ≈ +260/−140（A− 全部新增，含 B3/段嵌入/PE/cross/danger 通道） |
+| 4 | `mha` 复用 | 原样（三处注意力：axial 34 / joint 95 / cross cand→95） | 0 | 0 ✓ |
+| 5 | `mlp` 参数化 | `mlp(..., boolean finalRelu)` | +18 | ≈ +25/−5 ✓ |
+| 6 | `gelu`（erf 版） | `gelu` + `erf`（`:2406`，Taylor ≤3 / erfc 渐近 >3，实测 vs `math.erf` ≤1.8e-9） | +55 | ≈ +18（多出**双分支**精度实现） |
+| 7 | 算子：`conv1d` | `:1955`（time-major、固定 `ic→k` 累加序；**没有新 SIMD kernel**） | +30 | 原计划在 C++ 侧；Java 也需要 |
+| 8 | tie-break | `Logits.argmaxTieBreak:62` + `V4Policy.chooseIndex:2119`（caller 侧，带 `assert`） | +80 | ≈ +30（多出 `familyOf/tileCodeOf` 与规格注释） |
+| 9 | 分派 | `NetWeights.FORMAT_V4 2→3` + `FORMAT_V2_RETIRED` 专用错误 + `peek` | +10/−4 | ✓ |
+| 10 | 自检断言 | `SelfTest.v4AminusTests`（G2 前向/硬切/fail-loud 六条/tie-break）+ a- 缓存三档 | +488 | — |
+
+**合计**：`V4Policy.java` **+1,091/−49**、`Logits` +77、`NetWeights` +10/−4、`SelfTest` +488/−3、
+`policy-gate-check.mjs` +106/−17。⚠ 比 §2 的 ≈782 行多，原因是**全部塞在同一个文件**（服务端零依赖、
+按 §2 的"逐函数映射"落地）且绑定期形状表是**显式逐条**（没有另抄一份形状表——读一遍就是核对一遍）。
+
+### 12.2 读数（逐条原文在 `.tmp/mv1-s29a/`）
+
+| 项 | 读数 |
+| --- | --- |
+| 编译 | `pwsh -File server\build.ps1` 通过（jar 432.9 KB） |
+| **selftest** | **1,593 / 0 PASS**（基线 1,538 ⇒ **+55 条**：格式 3 解析、硬切、fail-loud 六条、a- 前向、tie-break、a- 缓存） |
+| ⭐ **G1（v4 / format 3 / current）** | `V4Probe --golden G1-current.bin --tol 1e-5` ⇒ **特征 maxΔ 5.96e-8 · 前向 maxΔ 5.01e-6 · argmax 11/11 PASS**（⚠ v4 必须按 **current** 语义：`format 2` 的 c2 旧包已被硬切，冻结快照才是它的入口） |
+| ⭐ **G2（a- / R-4 语料 3,083 决策）** | Java ↔ Python：**argmax 3,083/3,083（100%）**· **真分歧 0**；`max|Δlogits|`：短 carry（ev≤60，n=2,961）**5.63e-5** / 长 carry（ev>60，n=122）**1.53e-5**；中位 1.43e-5 |
+| G2 夹具（11 用例） | 特征 5.96e-8 · 前向 8.86e-5 · **argmax 10/11 + 1 行精确并列**（gap ≤ 2·maxΔ ⇒ 不算真分歧；该夹具把融合注意力放大 20×，是**最灵敏**的那把尺子） |
+| `format==2` 硬切 | 真旧包（`tools/build/v4-expert-defrep-g10/net.bin`）⇒ 专用错误 + 非 0 退出；文案点名冻结快照 |
+| fail-loud 六条 | ① valueBins/valueRange ② hasB3 缺 ③ seg 缺 ④ 形状 ⑤ params ⑥ 截断：**逐条报错**（+ 保留区/未知 topoId/archVersion/头↔arch 版本不等） |
+| `policy-gate-check.mjs` | 9 个 format 2 包 + 2 个 format 3 包（a- / v4）正确分类；负向：清零 a- 的 `policy_gate.weight` ⇒ **退化 + `--strict` 退出码 1** |
+| 资源（判据 20，按角色） | 本批**无训练/采集相**：Java 探针/自检 `java*` committed 峰见 §12.3；`python*`（参考前向）见同处；`trainer*` **0**（未启动） |
+
+### 12.3 三端现状与交接
+
+- **Java 端已同步**：`format 3`（arch 段判拓扑）+ `topoId=2/3` 两套前向 + tie-break。v4 图（`topoId=2`）
+  仍必须能跑（旧包转成 format 3 后照跑），实测 G1 与 v4 真权重（`.tmp/mv1-s28/wl-dama-format3.bin`）都能载入。
+- ⚠ **v4 的语义从 c2 变成 current**（`fusion.out` 末端无 ReLU）：这是 format 3 的**唯一**语义，
+  旧 c2 包是 format 2 ⇒ 只能由冻结快照读。⛔ 不要再给 v4 加回"按包选 c2/current"的分支。
+- **C++ 仍是 format 2**（段 3b）：`trainer-v4-parity.mjs --golden` 与三端真实语料对拍**还不能跑**；
+  本批的 G1/G2 是 **Java ↔ Python** 两端口径（夹具里的 Python 参考输出 + 独立 Python 前向）。
+- 服务端自检夹具：`server/tests/golden/forward-v4.bin`（= G1，sha256 `3AB35783…`）与
+  `forward-a.bin`（= G2，`12A1A1CF…`）**进仓库**（640,605 B / 646,695 B）——`python/tests/golden/forward-v4.bin`
+  是 format 2 的 c2 夹具，**没动**（它只给冻结快照用）。
+- `bot-ai/` 的 9 个 format 2 包**一字节未动**、新服务端**拒载**（硬切）⇒ 上线前必须先转 format 3
+  （§11.5 的冻结快照仍是 `wl-*` 回归的唯一入口）。
+
 ## 13 段 3b 已实现（**C++ 前向同步到 format 3 与 A− 新图**）+ 读数（第一百一十轮，2026-10-19）
 
 > 本节只**追加**，⛔ 未改 §0–§11 的任何结论（Java 端与本批**并行**，其读数由它自己的小节负责）。依据 = `A-REFACTOR-IMPL-PLAN.md`

@@ -315,7 +315,7 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | `obs v` | **obs 格式**版本（v4 起 = **3**：新增 `events[]`/`riichi_turn[]`/逐张属性） | obs JSON 的 `v` 字段 |
 | `FEATURE_VERSION` | 张量布局版本（v4 = **4**） | `features.py`、Java `Features`、C++ |
 | `derived_version` | 派生段版本（v4 = **3**） | sidecar 头部 |
-| `net.bin 格式` | 权重文件版本（v4 = **格式 2**：带**块清单**） | `net.json` + 头部 |
+| `net.bin 格式` | 权重文件版本（v4 = **格式 3**：64 B 头 + **arch 段** + 块清单；格式 2 已退役） | `net.json` + 头部 |
 
 **三条硬判据**（违反就报错退出，不许"尽力而为"）：
 
@@ -331,7 +331,9 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 > arch 段**（96 B 核心 + 1,952 B 保留尾）+ 块表 + 张量表`。arch 段承载 `topoId`（2 = v4、3 = A−）/
 > 宽度×6 / 层数 / `act`·`norm` / `seg`·`memToken` / `flags` / `valueBins`·`valueRange` / 三版本 / 五常量。
 > **`format==2` 已硬切退役**（读到 ⇒ 专用错误 + 指向冻结快照，⛔ 不自动升级）；`format==1` 仍是 v3。
-> 权威字段表与实际偏移见 `lab/mv1/ARCH-REDESIGN.md` §11.1；C++/Java 仍只认 2（段 3 才同步）。
+> 权威字段表与实际偏移见 `lab/mv1/ARCH-REDESIGN.md` §11.1。**Java 侧段 3a（2026-10-19）已认 3**：`V4Policy`
+> 读 arch 段（`topoId` 2=v4 / 3=a-）、支持 3D 卷积张量、`format==2` 给专用错误；**C++ 仍只认 2**（段 3b）。
+> `topoId=3` 的 `a-` 图另有 93 张量表（`expected_shapes(d, "a-")`）与 95-token 融合，见 §12.2。
 
 ⚠ **魔数与 v3 相同（`MJNN`），靠 `format` 区分**：v3 是 `format=1`（定长 MLP，无块清单），
 v4 是 `format=2`。拿错了两边都在**构造期**报错（不是对局里算出奇怪动作）。

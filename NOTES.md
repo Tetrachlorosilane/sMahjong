@@ -6656,6 +6656,21 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **资源/纪律**（判据 20）：本批**无训练/采集相** ⇒ 只有两个 Python 负载（selfcheck + 探针）。按角色：`python*` committed 峰 **4,053.5 MB** / ws **2,312.5 MB**（1.5 s 采样、按进程求和）；`trainer*` **0**；闸门工具 **0**。`--threads 8`（`OMP/MKL_NUM_THREADS=8`）、一次一个重负载；沙箱下子进程写不了 `S:`（连 `%TEMP%` 也不行）⇒ `MAHJONG_DATA_ROOT` 指到 `.tmp\mv1-s28\data-root`（数据只读 `S:`）。
 - **后果 / 段 3 交接**：Python 写出的 `net.bin` 全是 format 3 ⇒ **Java/C++ 现在读不了**（预期）；`bot-ai\` 9 个 format 2 包一字节未动；`tools\policy-gate-check.mjs` 会把 format 3 记成"`3(非 v4)`、跳过"（⛔ 本批不改校验器 ⇒ 记作段 3 第一件事）。⛔ 未动 C++/Java、未采集、未跑闸门、未发布、未改 `MV1-PLAN §1–§9`。
 
+**第一百零九轮：A− 段 3a = Java 前向同步到 format 3 与 A− 新图（2026-10-19，⛔ 未采集/未跑闸门/未发布）**
+> 判据行 = `A-REFACTOR-IMPL-PLAN.md` §2/§3/§4；读数落在 `ARCH-REDESIGN.md` §12；证据 = `.tmp\mv1-s29a\`（Java/Python 对拍原文、selftest 日志、内存采样）。
+- **实现**（`server/src/main/java/mahjong/ai/`）：`V4Policy.loadBytes` 读 **arch 段**（`topoId` 2/3、`archLen`=2,048、块表 `64+archLen`）+ 3D 卷积张量（`mats3`）；`readArch` 把 §3 字段表逐条落地（枚举/保留区/保留尾/头↔arch 三版本/五常量/`headDim`）；`format==2` 专用错误（点名冻结快照）、`format==1` 指回 v3；`checkFlags` 做 **flags↔张量双向**（B3/#0/mem，a- 缺 B3/`policy_gate`/`seg` ⇒ 报错）；`bindAllV4`/`bindAllA` 两套形状表 + `tile.tile_id`（v4 也加在 `enc` 前）。
+- **A− 前向**（`forwardWithA`）：`[34,48]→[48,34]` 只发生在卷积入口（数据布局不变）；stem `Conv1d(48→160,k=5)+LN+GELU` → 1×k=5 + 2×k=3 pre-LN 残差 → 轴向 MHA(pre-LN) → `Linear(160→128)+LN`；evt `Linear+GELU` → GRU（carry 契约不变）→ `2×Conv1d(k=3)+LN+GELU`；融合 = **95 token**（34 tile + 60 evt + `h_evt` 第 95）+ 3 段嵌入 + sin/cos PE（0 参数）→ joint self-attn → FFN → cross（q = 无参数 `layer_norm(candEnc)`）→ `LN(384)`+`Linear(384→128)` → **B3**；heads：`danger` 以 **0 参数固定通道** `logit += log(mean_k σ(danger_k)+ε)` 进 policy，value 81 bin/±60。
+- **GELU = erf 版**（⛔ 非 tanh 近似）：Java 无 `Math.erf` ⇒ 自带双精度实现（|x|≤3 Taylor、>3 用 erfc 渐近**在最小项处截断**——固定 30 项在 x≈3 会发散，实测 erf(3.01) 错 8.8e-3；修好后 vs `math.erf` ≤ **1.8e-9**）。
+- **tie-break 归 caller**：`Logits.argmaxTieBreak`（τ=1e-3 ∧ 同动作族 ⇒ 进张数降序 → 牌码升序 → 下标升序）+ `V4Policy.chooseIndex/sampleIndex`（带 `assert`），与 `v4/policy.py:choose_index` 逐条同义；⛔ 不用浮点末位。
+- ⭐ **G1（v4 / format3 / current）**：`V4Probe --golden G1-current.bin --tol 1e-5` ⇒ 特征 5.96e-8 · 前向 **5.01e-6** · argmax **11/11** · h0 红证 2.17e-3 · dValue=0/dBelief=1.12e-4/dGate=0.794。⚠ **v4 必须是 current 语义**（`fusion.out` 末端无 ReLU）：format 3 只有这一档，旧 c2 包是 format 2（冻结快照专读）。
+- ⭐ **G2（a- / R-4 语料 g0–g4 = 3,083 决策，`A3000b` 转 format 3）**：Java ↔ Python **argmax 3,083/3,083（100%）**、**真分歧 0**、并列行 0；`max|Δlogits|` 短 carry（ev≤60，n=2,961）**5.63e-5** / 长 carry（ev>60，n=122）**1.53e-5**，中位 1.43e-5（相对误差 ~2.5e-6，与 v4 真权重 2.26e-6 同量级）。
+- **G2 夹具（11 用例）**：特征 5.96e-8 / 前向 8.86e-5 / argmax 10/11 + 1 行精确并列（gap ≤ 2·maxΔ ⇒ 判据 22 下不算真分歧；该夹具把融合注意力放大 20×，是最灵敏的尺子）。a- 头表：value Δ=0、effect Δ=0（只服务 tie-break）、danger Δ>0、belief/gate Δ>0、B3 清零 Δ>0。
+- **硬切 + fail-loud 六条**（selftest 逐条 + 真包）：`format==2` ⇒ 专用错误（真 `v4-expert-defrep-g10\net.bin` 与合成各一）；① valueBins/valueRange ② hasB3 缺 ③ seg 缺 ④ 形状 ⑤ params ⑥ 截断 全报错；附加保留区/未知 topoId/archVersion>1/头↔arch 版本不等。
+- **`policy-gate-check.mjs`**：认 format 3（读 arch 段取 `topoId`）、format 2 仍解析但标"已退役"、a- 无 mem 门记"—"；9 个旧包 + a-/v4 两个新包分类正确；负向清零 `policy_gate.weight` ⇒ 退化 + `--strict` exit 1。
+- **selftest 1,538/0 → 1,593/0**（+55：格式 3 字段 / G2 前向 / 硬切 / fail-loud 六条 / a- 头表与 B3 红证 / tie-break 八例 / a- 缓存三档逐位）；夹具 `server/tests/golden/forward-v4.bin`（G1 `3AB35783…`）与 `forward-a.bin`（G2 `12A1A1CF…`）进仓库。
+- **资源（判据 20）**：本批无训练/采集相 ⇒ `java*`（探针+selftest）与 `python*`（参考前向）分角色报；`trainer*` **0**；闸门工具 **0**。
+- ⛔ **未动 C++**（段 3b 另一批次，工作区里 `trainer/**` 的改动不是本批）、⛔ 未动 Python、未采集、未跑闸门、未发布、未改 `MV1-PLAN §1–§9`。
+
 **第一百一十轮：A− 段 3b = C++ 前向同步到 format 3 与 A− 新图（2026-10-19，⛔ 未采集/未跑闸门/未发布）**
 > 判据行 = `A-REFACTOR-IMPL-PLAN.md` §1/§3/§5；读数落在 `ARCH-REDESIGN.md` §13；证据 = `.tmp\mv1-s29b\`（对拍原文 / 坏包 / 换网负向 / 内存采样）。
 - **实现**（`trainer/src/`）：`v4LoadPolicyBytes` 读 **arch 段**（`topoId` 2/3、`archLen` 2,048、块表 `64+archLen`）+ **3D 卷积张量** + `params` **校验位**；`v4WeightFormatOf` 返 3（2 ⇒ 专用错误、1 指回 v3）；`policies.hpp` 分派 `format==3`（⚠ 漏了会把新包送进 v3 的 `loadNet`）。`parseArchSegment` 逐字段复核（枚举 / 保留区 / 保留尾 / pad / 头↔arch 三版本与两宽度 / 拓扑派生字段 / `valueRange`）。`bindAllA` 93 张量 + flags↔张量**双向**（B3/#0/mem/FiLM）；v4 表补 `tile.tile_id`。

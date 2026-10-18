@@ -48,10 +48,33 @@ public final class V4Policy implements LogitPolicy {
 
     /** 与 v3 同一个魔数（`mahjong.ai.NeuralPolicy.MAGIC`），用 `format` 区分代号。 */
     public static final int MAGIC = 0x4D4A4E4E;
-    /** v4 = 格式 2（带块清单）；v3 = 1。 */
-    public static final int FORMAT_VERSION = 2;
+    /** v4 = 格式 **3**（64 B 头 + arch 段 + 块清单 + 张量表）；v3 = 1，格式 2 已退役。 */
+    public static final int FORMAT_VERSION = 3;
+    /** 格式 2 = A− 之前的老包（没有 arch 段）。读到 ⇒ **专用错误**（⛔ 不自动升级）。 */
+    public static final int FORMAT_RETIRED = 2;
     /** 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32）。 */
     public static final int HEADER_BYTES = 64;
+    /** arch 段：总长固定 2,048 B = 96 B 核心 + 1,952 B 保留尾（必须全 0）。 */
+    public static final int ARCH_SEG_BYTES = 2048;
+    /** arch 段核心（含首 4 B 的 `archLen`）。 */
+    public static final int ARCH_CORE_BYTES = 96;
+    /** `archVersion`：1 = 本表。>1 ⇒ 报错（⛔ 不猜新字段）。 */
+    public static final int ARCH_VERSION = 1;
+    /** `topoId`：2 = v4（格式 2 时代的旧图顺延）、3 = A−/T1。未注册 ⇒ 报错。 */
+    public static final int TOPO_V4 = 2;
+    public static final int TOPO_A = 3;
+    /** `flags` 的位定义（与 `v4/export.py` 同值）。 */
+    public static final int FLAG_B3 = 1;
+    public static final int FLAG_TILE_ID = 1 << 1;
+    public static final int FLAG_FILM = 1 << 2;
+    public static final int FLAG_MEM_GATE = 1 << 3;
+    /** A− 的 3 段嵌入（tile / evt / mem）与 `danger → policy` 的固定通道（0 参数）。 */
+    static final int N_SEG = 3;
+    static final float DANGER_COEF = 1.0f;
+    static final float DANGER_EPS = 1e-6f;
+    /** 死维/恒等维（`v4/model.py` 的 `CTX_DEAD_DIMS` / `CAND_DEAD_DIMS`；非持久 ⇒ 不在 net.bin 里）。 */
+    static final int[] CTX_DEAD_DIMS = {17, 35, 37, 58, 59, 60, 61, 62, 63};
+    static final int[] CAND_DEAD_DIMS = java.util.stream.IntStream.range(96, 128).toArray();
 
     /**
      * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）。
@@ -74,6 +97,11 @@ public final class V4Policy implements LogitPolicy {
 
     private static final float LN_EPS = 1e-5f;
 
+    /** 头部 + arch 段（格式 3 的判据）：拓扑与开关**只认 arch 段**，⛔ 不靠张量名反推。 */
+    private final int topoId;
+    private final int archFlags;
+    private final float valueRange;
+
     private final int dModel;
     private final int tileD;
     private final int nHeads;
@@ -85,6 +113,8 @@ public final class V4Policy implements LogitPolicy {
 
     private final Map<String, float[][]> mats = new HashMap<>();
     private final Map<String, float[]> vecs = new HashMap<>();
+    /** 三维张量（`Conv1d.weight` = `[out][in][k]`）。格式 3 新引入（A− 的卷积塔）。 */
+    private final Map<String, float[][][]> mats3 = new HashMap<>();
     private final Set<String> allNames = new HashSet<>();
     private final Set<String> used = new HashSet<>();
 
@@ -105,12 +135,18 @@ public final class V4Policy implements LogitPolicy {
     private float[] padTokRow;
     private float[] padEncRow;
     private float[] padQkvRow;
+    /** A− 的 sin/cos 相对位置编码（0 参数、非持久 ⇒ 不进 `net.bin`；按窗口形状缓存）。 */
+    private float[][] peCache;
 
     // ---------------------------------------------------------------- 加载
-    private V4Policy(int dModel, int tileD, int nHeads, int valueBins, String fingerprint,
+    private V4Policy(int topoId, int archFlags, float valueRange,
+                     int dModel, int tileD, int nHeads, int valueBins, String fingerprint,
                      List<String> blocks, Set<String> missingBlocks,
                      Map<String, float[][]> mats, Map<String, float[]> vecs,
-                     Set<String> allNames) throws IOException {
+                     Map<String, float[][][]> mats3, Set<String> allNames) throws IOException {
+        this.topoId = topoId;
+        this.archFlags = archFlags;
+        this.valueRange = valueRange;
         this.dModel = dModel;
         this.tileD = tileD;
         this.nHeads = nHeads;
@@ -120,8 +156,10 @@ public final class V4Policy implements LogitPolicy {
         this.missingBlocks = Set.copyOf(missingBlocks);
         this.mats.putAll(mats);
         this.vecs.putAll(vecs);
+        this.mats3.putAll(mats3);
         this.allNames.addAll(allNames);
         bindAll();
+        checkFlags();
         if (used.size() != allNames.size()) {
             List<String> unused = new ArrayList<>(allNames);
             unused.removeAll(used);
@@ -146,9 +184,16 @@ public final class V4Policy implements LogitPolicy {
         if (magic != MAGIC) {
             throw new IOException(String.format("权重文件魔数不对：%#x（期望 %#x）", magic, MAGIC));
         }
+        if (fmt == 1) {
+            throw new IOException("权重格式版本 1 = v3 的定长 MLP（同一个魔数、没有块清单/没有 arch 段）"
+                    + " —— 由 NeuralPolicy 加载；本加载器不解析、不猜");
+        }
+        if (fmt == FORMAT_RETIRED) {
+            throw new IOException(RETIRED_FORMAT2);
+        }
         if (fmt != FORMAT_VERSION) {
-            throw new IOException("权重格式版本 " + fmt + " != 本服务端 " + FORMAT_VERSION
-                    + "（格式 1 是 v3 的定长 MLP，由 NeuralPolicy 加载）");
+            throw new IOException("权重格式版本 " + fmt + " 未知（本服务端只认 " + FORMAT_VERSION
+                    + "；1 = v3、2 = A− 之前的老包已退役）");
         }
         int featVer = bb.getInt();
         int obsVer = bb.getInt();
@@ -175,14 +220,25 @@ public final class V4Policy implements LogitPolicy {
         byte[] fpB = new byte[16];
         bb.get(fpB);
         String fingerprint = new String(fpB, StandardCharsets.US_ASCII);
-        bb.getInt();                                            // params（日志用，不信它）
+        int declaredParams = bb.getInt();                       // 校验位（格式 3 起不再"读了不用"）
+        if (nBlocks < 0 || nTensors < 0 || nBlocks > 10_000 || nTensors > 10_000) {
+            throw new IOException("块/张量数越界：nBlocks=" + nBlocks + " / nTensors=" + nTensors
+                    + "（上限 10,000）");
+        }
+
+        // ---- arch 段（格式 3 的判据：拓扑/开关只认它）
+        Arch arch = readArch(raw, featVer, obsVer, derivedVer, dModel, tileD, nHeads, valueBins);
+        int off = HEADER_BYTES + arch.archLen;
+        bb.position(off);
 
         Map<String, Integer> registry = V4Features.blockWidths();
         List<String> blocks = new ArrayList<>();
         Set<String> missing = new HashSet<>(registry.keySet());
         int lastIndex = -1;
         for (int i = 0; i < nBlocks; i++) {
+            need(bb, 2, "第 " + i + " 个块 id 长度");
             int ln = bb.getShort() & 0xFFFF;
+            need(bb, ln + 4, "块 " + i + "（id + 宽度）");
             byte[] idb = new byte[ln];
             bb.get(idb);
             String bid = new String(idb, StandardCharsets.UTF_8);
@@ -216,43 +272,322 @@ public final class V4Policy implements LogitPolicy {
 
         Map<String, float[][]> mats = new HashMap<>();
         Map<String, float[]> vecs = new HashMap<>();
+        Map<String, float[][][]> mats3 = new HashMap<>();
         Set<String> names = new HashSet<>();
+        long actualParams = 0;
         for (int i = 0; i < nTensors; i++) {
+            need(bb, 2, "第 " + i + " 个张量的名字长度");
             int ln = bb.getShort() & 0xFFFF;
+            need(bb, ln, "第 " + i + " 个张量的名字");
             byte[] nb = new byte[ln];
             bb.get(nb);
             String name = new String(nb, StandardCharsets.UTF_8);
+            need(bb, 1, "`" + name + "` 的维数");
             int nd = bb.get() & 0xFF;
-            int[] shape = new int[nd];
-            int total = 1;
-            for (int j = 0; j < nd; j++) {
-                shape[j] = bb.getInt();
-                total *= shape[j];
+            if (nd < 1 || nd > 8) {
+                throw new IOException("张量 " + name + " 的维数 " + nd + " 不合理（只支持 1..8 维）");
             }
-            float[] data = new float[total];
+            int[] shape = new int[nd];
+            long total = 1;
+            for (int j = 0; j < nd; j++) {
+                need(bb, 4, "`" + name + "` 的形状");
+                shape[j] = bb.getInt();
+                if (shape[j] < 0 || (long) shape[j] > 10_000_000L) {
+                    throw new IOException("张量 " + name + " 的形状[" + j + "]=" + shape[j] + " 非法");
+                }
+                total *= shape[j];
+                if (total > 40_000_000L) {
+                    throw new IOException("张量 " + name + " 元素数 " + total + " 越界");
+                }
+            }
+            need(bb, (int) (total * 4L), "`" + name + "` 的数据");
+            float[] data = new float[(int) total];
             for (int j = 0; j < total; j++) {
                 data[j] = bb.getFloat();
             }
             if (!names.add(name)) {
                 throw new IOException("权重里有重复张量名：" + name);
             }
-            if (nd == 2) {
+            if (nd == 1) {
+                vecs.put(name, data);
+            } else if (nd == 2) {
                 float[][] m = new float[shape[0]][shape[1]];
                 for (int r = 0; r < shape[0]; r++) {
                     System.arraycopy(data, r * shape[1], m[r], 0, shape[1]);
                 }
                 mats.put(name, m);
-            } else if (nd == 1) {
-                vecs.put(name, data);
+            } else if (nd == 3) {
+                float[][][] c = new float[shape[0]][shape[1]][shape[2]];
+                int p = 0;
+                for (int a = 0; a < shape[0]; a++) {
+                    for (int b2 = 0; b2 < shape[1]; b2++) {
+                        System.arraycopy(data, p, c[a][b2], 0, shape[2]);
+                        p += shape[2];
+                    }
+                }
+                mats3.put(name, c);
             } else {
-                throw new IOException("张量 " + name + " 是 " + nd + " 维（只支持 1/2 维）");
+                throw new IOException("张量 " + name + " 是 " + nd + " 维（只支持 1/2/3 维）");
             }
+            actualParams += total;
         }
         if (bb.hasRemaining()) {
-            throw new IOException("权重文件尾部多了 " + bb.remaining() + " 字节（张量表与头部不符）");
+            throw new IOException("权重文件尾部多了 " + bb.remaining() + " 字节（张量表与头部/arch 段不符）");
         }
-        return new V4Policy(dModel, tileD, nHeads, valueBins, fingerprint, blocks, missing,
-                mats, vecs, names);
+        // ⑤ `params` 是**校验位**：必须等于张量表实算（⛔ "读了不用"的时代结束）
+        if (actualParams != declaredParams) {
+            throw new IOException("头部的 `params`=" + declaredParams + " 与张量表实算 " + actualParams
+                    + " 不符（差 " + (actualParams - declaredParams) + "）");
+        }
+        // ① `valueBins` 三处（头 / arch / heads.value.weight 行数）—— 前两处已在 readArch 核过，
+        //    第三处由 bindAll 的 `mat("heads.value.weight", vb, dm)` 钉住。
+        return new V4Policy(arch.topoId, arch.flags, arch.valueRange, dModel, tileD, nHeads,
+                valueBins, fingerprint, blocks, missing, mats, vecs, mats3, names);
+    }
+
+    /** 格式 2 的**硬切**文案：要让用户一眼看出"这是老包、需要旧二进制"，而不是"文件坏了"。 */
+    static final String RETIRED_FORMAT2 =
+            "权重格式版本 2 已退役：format 3 起是 v4 新拓扑（64 B 头 + arch 段）。"
+            + "**这是 A− 之前的老包**（format 2，没有 arch 段）—— 只有**旧二进制**能读它："
+            + "冻结快照 `lab/mv1/frozen-format2`（`mahjong-server.jar` sha 3E7D0ADC…、"
+            + "`trainer.exe` F6AAA307…）。⛔ 本加载器不会自动升级 / 不补 0 / 不猜 arch；"
+            + "要转格式请用冻结快照里的旧工具重新导出，或按段 3 的新端重训。";
+
+    /** `need`：带**边界检查**的读游标（⑥ 截断/越界一律 IOException，⛔ 不让 ByteBuffer 裸抛）。 */
+    private static void need(ByteBuffer bb, int n, String what) throws IOException {
+        if (n < 0 || bb.remaining() < n) {
+            throw new IOException("权重文件被截断/越界：读 " + what + " 需要 " + n + " B（偏移 "
+                    + bb.position() + "），文件只有 " + bb.limit() + " B");
+        }
+    }
+
+    /** arch 段解析结果（字段名与 `v4/export.py` 的 `_ARCH_FIELDS` 一一对应）。 */
+    static final class Arch {
+        int archLen;
+        int archVersion;
+        int topoId;
+        int dTile;
+        int dEvt;
+        int dFuse;
+        int dHead;
+        int dCand;
+        int headDim;
+        int nTileConv;
+        int nTileAttn;
+        int nJointLayer;
+        int actId;
+        int normId;
+        int segEmbMode;
+        int memTokenMode;
+        int flags;
+        int valueBins;
+        int nHeads;
+        float valueRange;
+        float lnEps;
+        int[] tileKernel = new int[4];
+        int nSeg;
+    }
+
+    /**
+     * 解析 `[64, 64+archLen)` 的 arch 段 ⇒ 字段；不合格一律报错（§3 fail-loud 清单逐条落地）。
+     *
+     * <p>⚠ 块表偏移 = `64 + archLen`，而 `archLen` 写的是**整段** 2,048 B ⇒ 96 B 核心之后的
+     * 1,952 B 保留尾在块表**之前**，不会漏读。两处必要出入（`archLen=2048`、`topoId=2` 注册）
+     * 见 `ARCH-REDESIGN` §11.1，⛔ 不回改 §3 正文。
+     */
+    static Arch readArch(byte[] raw, int feat, int obs, int derived, int dm, int td, int nh, int vb)
+            throws IOException {
+        if (raw.length < HEADER_BYTES + 4) {
+            throw new IOException("权重文件被截断：" + raw.length + " B，连 arch 段的 `archLen` 都读不到");
+        }
+        ByteBuffer ab = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
+        int alen = ab.getInt(HEADER_BYTES);
+        if (alen < ARCH_CORE_BYTES || alen > ARCH_SEG_BYTES || alen % 4 != 0) {
+            throw new IOException("archLen=" + alen + " 越界：必须在 [" + ARCH_CORE_BYTES + ", "
+                    + ARCH_SEG_BYTES + "] 且为 4 的倍数（§3：arch 段 96 B 核心 + 1,952 B 保留尾）");
+        }
+        if (raw.length < HEADER_BYTES + alen) {
+            throw new IOException("权重文件被截断：arch 段声明 " + alen + " B，文件只剩 "
+                    + (raw.length - HEADER_BYTES) + " B");
+        }
+        ByteBuffer s = ByteBuffer.wrap(raw, HEADER_BYTES, alen).order(ByteOrder.LITTLE_ENDIAN)
+                .slice().order(ByteOrder.LITTLE_ENDIAN);
+        Arch a = new Arch();
+        a.archLen = alen;
+        a.archVersion = s.getShort(4) & 0xFFFF;
+        a.topoId = s.getShort(6) & 0xFFFF;
+        a.dTile = s.getShort(8) & 0xFFFF;
+        a.dEvt = s.getShort(10) & 0xFFFF;
+        a.dFuse = s.getShort(12) & 0xFFFF;
+        a.dHead = s.getShort(14) & 0xFFFF;
+        a.dCand = s.getShort(16) & 0xFFFF;
+        a.headDim = s.getShort(18) & 0xFFFF;
+        a.nTileConv = s.get(20) & 0xFF;
+        a.nTileAttn = s.get(21) & 0xFF;
+        a.nJointLayer = s.get(22) & 0xFF;
+        a.actId = s.get(23) & 0xFF;
+        a.normId = s.get(24) & 0xFF;
+        a.segEmbMode = s.get(25) & 0xFF;
+        a.memTokenMode = s.get(26) & 0xFF;
+        a.flags = s.get(27) & 0xFF;
+        a.valueBins = s.getShort(28) & 0xFFFF;
+        a.nHeads = s.getShort(30) & 0xFFFF;
+        a.valueRange = s.getFloat(32);
+        a.lnEps = s.getFloat(36);
+        for (int i = 0; i < 4; i++) {
+            a.tileKernel[i] = s.get(40 + i) & 0xFF;
+        }
+        a.nSeg = s.get(44) & 0xFF;
+        int pad45 = s.get(45) & 0xFF;
+        int pad46 = s.get(46) & 0xFF;
+        int pad47 = s.get(47) & 0xFF;
+        int sFeat = s.getInt(48);
+        int sObs = s.getInt(52);
+        int sDerived = s.getInt(56);
+        int cTile = s.getShort(60) & 0xFFFF;
+        int cEvt = s.getShort(62) & 0xFFFF;
+        int kEvt = s.getShort(64) & 0xFFFF;
+        int cCtx = s.getShort(66) & 0xFFFF;
+        int cCand = s.getShort(68) & 0xFFFF;
+
+        if (a.archVersion != ARCH_VERSION) {
+            throw new IOException("archVersion=" + a.archVersion + " 不支持（本实现只认 " + ARCH_VERSION + "）");
+        }
+        if (a.topoId != TOPO_V4 && a.topoId != TOPO_A) {
+            throw new IOException("topoId=" + a.topoId + " 未注册（已注册：{" + TOPO_V4 + "=v4, "
+                    + TOPO_A + "=a-}）");
+        }
+        boolean isA = a.topoId == TOPO_A;
+        for (String[] en : new String[][]{{"actId", "" + a.actId}, {"normId", "" + a.normId},
+                {"segEmbMode", "" + a.segEmbMode}, {"memTokenMode", "" + a.memTokenMode}}) {
+            int v = Integer.parseInt(en[1]);
+            if (v != 0 && v != 1) {
+                throw new IOException("arch 段的 `" + en[0] + "`=" + v + " 未注册（已注册：[0, 1]）");
+            }
+        }
+        // 头 ↔ arch 段：三版本号 + 两个宽度必须相等（§3「头与 arch 两处必须相等」）
+        if (sFeat != feat) {
+            throw new IOException("头与 arch 段的 `featVersion` 不一致：头 " + feat + " / arch " + sFeat
+                    + "（文件自相矛盾）");
+        }
+        if (sObs != obs) {
+            throw new IOException("头与 arch 段的 `obsVersion` 不一致：头 " + obs + " / arch " + sObs);
+        }
+        if (sDerived != derived) {
+            throw new IOException("头与 arch 段的 `derivedVersion` 不一致：头 " + derived + " / arch "
+                    + sDerived);
+        }
+        if (a.valueBins != vb) {
+            throw new IOException("`valueBins` 三处不一致：头 " + vb + " / arch " + a.valueBins
+                    + "（第三处是 `heads.value.weight` 的行数，bindAll 会再核）—— ① fail-loud");
+        }
+        if (a.nHeads != nh) {
+            throw new IOException("头与 arch 段的 `nHeads` 不一致：头 " + nh + " / arch " + a.nHeads);
+        }
+        if (a.dFuse != dm || a.dTile != td) {
+            throw new IOException("arch 段的 `dFuse/dTile` = " + a.dFuse + "/" + a.dTile
+                    + " 与头部 `dModel/tileD` = " + dm + "/" + td + " 不一致");
+        }
+        if ((a.flags & ~(FLAG_B3 | FLAG_TILE_ID | FLAG_FILM | FLAG_MEM_GATE)) != 0) {
+            throw new IOException(String.format(
+                    "arch 段的 `flags`=%#04x 用了**保留位**（bit4–7 必须为 0）", a.flags));
+        }
+        if ((a.flags & FLAG_FILM) != 0) {
+            throw new IOException("arch 段声明 hasFiLM=1：本服务端未实现 FiLM（A− 已删除 gate/write/film）");
+        }
+        // 其余"由拓扑决定"的字段：必须逐字段等于期望值（⛔ 文件说 GELU、代码建 ReLU）
+        int nTileConv = isA ? 4 : 0;
+        int nJoint = isA ? 1 : 0;
+        int actId = isA ? 1 : 0;
+        int normId = isA ? 1 : 0;
+        int segEmb = isA ? 1 : 0;
+        int memTok = isA ? 1 : 0;
+        int[] kern = isA ? new int[]{5, 5, 3, 3} : new int[]{0, 0, 0, 0};
+        int nSeg = isA ? N_SEG : 0;
+        float vrange = isA ? 60.0f : 30.0f;
+        List<String> wrong = new ArrayList<>();
+        if (a.nTileConv != nTileConv) wrong.add("nTileConv=" + a.nTileConv + "（应 " + nTileConv + "）");
+        if (a.nTileAttn != 1) wrong.add("nTileAttn=" + a.nTileAttn + "（应 1）");
+        if (a.nJointLayer != nJoint) wrong.add("nJointLayer=" + a.nJointLayer + "（应 " + nJoint + "）");
+        if (a.actId != actId) wrong.add("actId=" + a.actId + "（应 " + actId + "）");
+        if (a.normId != normId) wrong.add("normId=" + a.normId + "（应 " + normId + "）");
+        if (a.segEmbMode != segEmb) wrong.add("segEmbMode=" + a.segEmbMode + "（应 " + segEmb + "）");
+        if (a.memTokenMode != memTok) wrong.add("memTokenMode=" + a.memTokenMode + "（应 " + memTok + "）");
+        for (int i = 0; i < 4; i++) {
+            if (a.tileKernel[i] != kern[i]) wrong.add("tileKernel" + i + "=" + a.tileKernel[i]
+                    + "（应 " + kern[i] + "）");
+        }
+        if (a.nSeg != nSeg) wrong.add("nSeg=" + a.nSeg + "（应 " + nSeg + "）");
+        if (cTile != V4Features.C_TILE) wrong.add("cTile=" + cTile + "（应 " + V4Features.C_TILE + "）");
+        if (cEvt != V4Features.C_EVT) wrong.add("cEvt=" + cEvt + "（应 " + V4Features.C_EVT + "）");
+        if (kEvt != V4Features.K_EVT) wrong.add("kEvt=" + kEvt + "（应 " + V4Features.K_EVT + "）");
+        if (cCtx != V4Features.C_CTX) wrong.add("cCtx=" + cCtx + "（应 " + V4Features.C_CTX + "）");
+        if (cCand != V4Features.C_CAND) wrong.add("cCand=" + cCand + "（应 " + V4Features.C_CAND + "）");
+        if (a.headDim != td / nh) wrong.add("headDim=" + a.headDim + "（应 " + (td / nh) + "）");
+        if (a.dEvt != dm) wrong.add("dEvt=" + a.dEvt + "（应 " + dm + "）");
+        if (a.dHead != dm) wrong.add("dHead=" + a.dHead + "（应 " + dm + "）");
+        if (a.dCand != V4Features.C_CAND) wrong.add("dCand=" + a.dCand + "（应 " + V4Features.C_CAND + "）");
+        if (!wrong.isEmpty()) {
+            throw new IOException("arch 段与 `" + (isA ? "a-" : "v4") + "` 拓扑不符（" + wrong.size()
+                    + " 条）：" + String.join("；", wrong));
+        }
+        if (Float.floatToIntBits(a.valueRange) != Float.floatToIntBits(vrange)) {
+            throw new IOException("`valueRange`=" + a.valueRange + " 与 arch `"
+                    + (isA ? "a-" : "v4") + "` 的声明 " + vrange + " 不符（① fail-loud）");
+        }
+        // 保留：核心 70..95（26 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+        if (pad45 != 0 || pad46 != 0 || pad47 != 0) {
+            throw new IOException("arch 段的 pad 字节非 0（" + pad45 + "/" + pad46 + "/" + pad47 + "）");
+        }
+        for (int i = 70; i < ARCH_CORE_BYTES; i++) {
+            if (s.get(i) != 0) {
+                throw new IOException("arch 段的保留区（偏移 70–95，26 B）非 0（§3：archVersion=1 必须全 0）");
+            }
+        }
+        for (int i = ARCH_CORE_BYTES; i < alen; i++) {
+            if (s.get(i) != 0) {
+                throw new IOException("arch 段的保留尾（偏移 96–" + (alen - 1) + "）非 0 —— 写端必须全 0");
+            }
+        }
+        return a;
+    }
+
+    /**
+     * `flags` ↔ 张量存在的**双向**校验（§3 fail-loud ②③）：
+     * flag 说"有" ⇒ 必须存在；flag 说"没有" ⇒ 必须不存在（⛔ 不补 0：那等于跑一个没声明的分支）。
+     */
+    private void checkFlags() throws IOException {
+        checkFlag("hasB3", FLAG_B3, new String[]{"fusion.u_norm.weight", "fusion.u_norm.bias",
+                "fusion.u_res"}, "B3（`fusion.u_norm.*`/`fusion.u_res`）");
+        checkFlag("hasTileId", FLAG_TILE_ID, new String[]{"tile.tile_id"},
+                "#0 身份嵌入（`tile.tile_id`）");
+        checkFlag("hasMemGate", FLAG_MEM_GATE, new String[]{"fusion.mem.weight", "fusion.mem.bias"},
+                "长程记忆门（`fusion.mem.*`）");
+        if (topoId == TOPO_A) {
+            // `a-` 的 B3 / `policy_gate` 是 T1 参数账的一部分：⛔ 缺 ⇒ 必须报错（补 0 = 静默换语义）
+            for (String n : new String[]{"fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res",
+                    "heads.policy_gate.weight", "heads.policy_gate.bias", "fusion.seg"}) {
+                if (!allNames.contains(n)) {
+                    throw new IOException("`a-` 的权重缺**拓扑必需**张量：" + n
+                            + "（⛔ 不补 0 / 不猜 —— a- 必须是全套）");
+                }
+            }
+        }
+    }
+
+    private void checkFlag(String label, int bit, String[] keys, String human) throws IOException {
+        boolean claimed = (archFlags & bit) != 0;
+        for (String k : keys) {
+            boolean has = allNames.contains(k);
+            if (claimed && !has) {
+                throw new IOException("arch 段声明 " + label + "=1（" + human + "），但包里**缺** `" + k
+                        + "`（⛔ 不补 0：那等于让前向跑一个 arch 没声明的分支）");
+            }
+            if (!claimed && has) {
+                throw new IOException("arch 段声明 " + label + "=0（无" + human + "），但包里**有** `"
+                        + k + "` —— 文件与水印（flags）不符");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 取张量
@@ -415,6 +750,23 @@ public final class V4Policy implements LogitPolicy {
         return v;
     }
 
+    /** 三维卷积核 `[cout][cin][k]`（格式 3 新增；形状在绑定期钉死）。 */
+    private float[][][] conv(String name, int cout, int cin, int k) throws IOException {
+        float[][][] w = mats3.get(name);
+        if (w == null) {
+            throw new IOException("权重缺张量：" + name);
+        }
+        if (w.length != cout || (cout > 0 && (w[0].length != cin
+                || (cin > 0 && w[0][0].length != k)))) {
+            throw new IOException("张量 " + name + " 形状 [" + w.length + ","
+                    + (w.length > 0 ? w[0].length : 0) + ","
+                    + (w.length > 0 && w[0].length > 0 ? w[0][0].length : 0)
+                    + "] != [" + cout + "," + cin + "," + k + "]");
+        }
+        used.add(name);
+        return w;
+    }
+
     /**
      * 把每一层要用的张量都取一遍 —— **同时**完成"形状核对 + 无多余张量"两件事。
      *
@@ -424,6 +776,29 @@ public final class V4Policy implements LogitPolicy {
      * 少张量、多张量、改名、形状不符**都在构造期**炸掉（不是等到对局里算出个奇怪的牌）。
      */
     private void bindAll() throws IOException {
+        if (topoId == TOPO_A) {
+            bindAllA();
+        } else {
+            bindAllV4();
+        }
+    }
+
+    /** `tile.tile_id`（#0）：**可缺**（`--legacy-tile-id` 的网不建 ⇒ 缺 = `tile + 0` 恒等）。 */
+    private void bindTileId() throws IOException {
+        float[][] t = mats.get("tile.tile_id");
+        if (t == null) {
+            return;
+        }
+        if (t.length != V4Features.KIND_COUNT || (t.length > 0 && t[0].length != V4Features.C_TILE)) {
+            throw new IOException("张量 tile.tile_id 形状 [" + t.length + ","
+                    + (t.length > 0 ? t[0].length : 0) + "] != [" + V4Features.KIND_COUNT + ","
+                    + V4Features.C_TILE + "]");
+        }
+        used.add("tile.tile_id");
+    }
+
+    /** v4（`topoId=2`）的张量表：与格式 2 的 81 张量逐个相同（另加可缺的 `tile.tile_id`）。 */
+    private void bindAllV4() throws IOException {
         int dm = dModel;
         int td = tileD;
         int vb = valueBins;
@@ -500,7 +875,117 @@ public final class V4Policy implements LogitPolicy {
         bindPolicyGate(dm);
         bindMemGate(dm);
         bindUNorm(dm);
+        bindTileId();
         vec("heads.policy.bias", 1);
+        mat("heads.value.weight", vb, dm);
+        vec("heads.value.bias", vb);
+        mat("heads.placement.weight", 4, dm);
+        vec("heads.placement.bias", 4);
+        mat("heads.belief_hand.weight", 3 * V4Features.KIND_COUNT, dm);
+        vec("heads.belief_hand.bias", 3 * V4Features.KIND_COUNT);
+        mat("heads.belief_tenpai.weight", 3, dm);
+        vec("heads.belief_tenpai.bias", 3);
+        mat("heads.danger.weight", 4, dm);
+        vec("heads.danger.bias", 4);
+        mat("heads.effect.weight", 3, dm);
+        vec("heads.effect.bias", 3);
+    }
+
+    /**
+     * **A−（T1）**的张量表：93 个张量（含可缺的 `tile.tile_id`），逐条钉住 `[rows, cols]` /
+     * `[out][in][k]`。形状与 `v4/export.py` 的 `_expected_shapes_a` **逐项相等**——这里不再抄一份
+     * 表，读一遍就是核对一遍（多/少/改名/形状不符都在构造期炸）。
+     */
+    private void bindAllA() throws IOException {
+        final int dm = dModel;
+        final int td = tileD;
+        final int vb = valueBins;
+        final int ct = V4Features.C_TILE;
+        final int ce = V4Features.C_EVT;
+
+        // 牌种塔：34 轴卷积（48→td,k=5）+ 3 个 pre-LN 残差块 + 轴向注意力 + proj
+        bindTileId();
+        conv("tile.stem.weight", td, ct, 5);
+        vec("tile.stem.bias", td);
+        vec("tile.stem_norm.weight", td);
+        vec("tile.stem_norm.bias", td);
+        for (int b = 0; b < 3; b++) {
+            int k = (b == 0) ? 5 : 3;
+            vec("tile.res." + b + ".norm.weight", td);
+            vec("tile.res." + b + ".norm.bias", td);
+            conv("tile.res." + b + ".conv.weight", td, td, k);
+            vec("tile.res." + b + ".conv.bias", td);
+        }
+        vec("tile.attn_norm.weight", td);
+        vec("tile.attn_norm.bias", td);
+        mat("tile.attn.in_proj_weight", 3 * td, td);
+        vec("tile.attn.in_proj_bias", 3 * td);
+        mat("tile.attn.out_proj.weight", td, td);
+        vec("tile.attn.out_proj.bias", td);
+        mat("tile.proj.weight", dm, td);
+        vec("tile.proj.bias", dm);
+        vec("tile.proj_norm.weight", dm);
+        vec("tile.proj_norm.bias", dm);
+
+        // 事件塔：Linear + GRUCell（增量 carry 契约不变）+ 2×Conv1d(k=3)+LN
+        mat("event.enc.weight", dm, ce);
+        vec("event.enc.bias", dm);
+        mat("event.cell.weight_ih", 3 * dm, dm);
+        mat("event.cell.weight_hh", 3 * dm, dm);
+        vec("event.cell.bias_ih", 3 * dm);
+        vec("event.cell.bias_hh", 3 * dm);
+        conv("event.conv1.weight", dm, dm, 3);
+        vec("event.conv1.bias", dm);
+        vec("event.norm1.weight", dm);
+        vec("event.norm1.bias", dm);
+        conv("event.conv2.weight", dm, dm, 3);
+        vec("event.conv2.bias", dm);
+        vec("event.norm2.weight", dm);
+        vec("event.norm2.bias", dm);
+
+        // ctx / cand：首层 LN（C5）+ 两个 Linear（死维掩码是**非持久** buffer ⇒ 见 CTX/CAND_DEAD_DIMS）
+        vec("ctx.norm.weight", V4Features.C_CTX);
+        vec("ctx.norm.bias", V4Features.C_CTX);
+        mat("ctx.fc1.weight", dm, V4Features.C_CTX);
+        vec("ctx.fc1.bias", dm);
+        mat("ctx.fc2.weight", dm, dm);
+        vec("ctx.fc2.bias", dm);
+        vec("cand.norm.weight", V4Features.C_CAND);
+        vec("cand.norm.bias", V4Features.C_CAND);
+        mat("cand.fc1.weight", dm, V4Features.C_CAND);
+        vec("cand.fc1.bias", dm);
+        mat("cand.fc2.weight", dm, dm);
+        vec("cand.fc2.bias", dm);
+
+        // 融合：3 段嵌入 + joint(95 token) + FFN + cross + out（LN(3Df) 在入口）+ B3
+        mat("fusion.seg", N_SEG, dm);
+        vec("fusion.joint_norm.weight", dm);
+        vec("fusion.joint_norm.bias", dm);
+        mat("fusion.joint.in_proj_weight", 3 * dm, dm);
+        vec("fusion.joint.in_proj_bias", 3 * dm);
+        mat("fusion.joint.out_proj.weight", dm, dm);
+        vec("fusion.joint.out_proj.bias", dm);
+        vec("fusion.ffn_norm.weight", dm);
+        vec("fusion.ffn_norm.bias", dm);
+        mat("fusion.ffn1.weight", dm, dm);
+        vec("fusion.ffn1.bias", dm);
+        mat("fusion.ffn2.weight", dm, dm);
+        vec("fusion.ffn2.bias", dm);
+        mat("fusion.cross.in_proj_weight", 3 * dm, dm);
+        vec("fusion.cross.in_proj_bias", 3 * dm);
+        mat("fusion.cross.out_proj.weight", dm, dm);
+        vec("fusion.cross.out_proj.bias", dm);
+        mat("fusion.out.weight", dm, 3 * dm);
+        vec("fusion.out.bias", dm);
+        vec("fusion.out_norm.weight", 3 * dm);
+        vec("fusion.out_norm.bias", 3 * dm);
+        bindUNorm(dm);                                    // B3：**a- 必需**（checkFlags 会再核）
+
+        // 头（26,054）：d=128 · value 81 bin（±60）· policy_gate 逐候选门控
+        mat("heads.policy.weight", 1, dm);
+        vec("heads.policy.bias", 1);
+        mat("heads.policy_gate.weight", dm, 3);
+        vec("heads.policy_gate.bias", dm);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
         mat("heads.placement.weight", 4, dm);
@@ -575,8 +1060,20 @@ public final class V4Policy implements LogitPolicy {
      */
     public Map<String, float[]> forwardCached(Map<String, Object> obs) throws IOException {
         V4Features.Tensors t = V4Features.assemble(obs, missingBlocks);
+        return forwardFrom(obs, t);
+    }
+
+    /**
+     * 张量已拼好之后的统一入口：缓存开 ⇒ 增量事件塔；关 / 消融 ⇒ 整手重放。
+     *
+     * <p>抽出来是为了让 {@link #chooseIndex} **只拼一次特征**（tie-break 要用 `cand`，
+     * 而策略头要用 `effect`；同一份 `t` 两边共用，省一次 `assemble`）。
+     */
+    private Map<String, float[]> forwardFrom(Map<String, Object> obs, V4Features.Tensors t)
+            throws IOException {
         if (!cacheEnabled || !missingBlocks.isEmpty()) {
-            return forwardAll(obs);                              // 关掉缓存 / 消融实验：走基准路径
+            EvtTower tw = eventTowerRound(obs, t.evt);           // 关掉缓存 / 消融实验：走基准路径
+            return forwardWith(t, tw.tokens, tw.h);
         }
         EvtTower tw = eventTowerCached(obs, t);
         return forwardWith(t, tw.tokens, tw.h);
@@ -638,18 +1135,23 @@ public final class V4Policy implements LogitPolicy {
         int len = Math.min(events, k);
         int pad = k - len;                                        // 前部 padding 行数
         boolean reuseRows = cacheLevel >= 2;
-        boolean reuseQkv = cacheLevel >= 3;
+        // ⚠ A− 的事件塔**没有** Transformer 层（塔尾是 2×Conv1d）⇒ 没有可复用的 `in_proj`
+        boolean reuseQkv = cacheLevel >= 3 && topoId != TOPO_A;
         if (!rebuild) {
             int shift = reuseRows ? delta : k;                     // 不复用行 ⇒ 视作整窗失效
             V4Cache.shiftRows(s.tok, shift);
             V4Cache.shiftRows(s.enc, shift);
-            V4Cache.shiftRows(s.qkv, shift);
+            if (topoId != TOPO_A) {
+                V4Cache.shiftRows(s.qkv, shift);
+            }
         }
         // ① 前部 padding 行：共享常量行（零 token 的编码；值必须与基准路径逐位相同）
         for (int p = 0; p < pad; p++) {
             s.tok[p] = padTok();
             s.enc[p] = padEnc();
-            s.qkv[p] = padQkv();
+            if (topoId != TOPO_A) {
+                s.qkv[p] = padQkv();
+            }
         }
         // ② 真实事件行 [pad, k)：复用时只有新增的 delta 行要算，幸存行按引用平移
         int first = k - Math.min(delta, k);
@@ -664,13 +1166,15 @@ public final class V4Policy implements LogitPolicy {
             cache.rowsEncoded++;
         }
         // ③ 注意力 in_proj：level ≥ 3 复用（幸存行保留平移过来的 `qkv`），否则**逐行重算**
-        if (reuseQkv) {
-            for (int p = Math.max(pad, first); p < k; p++) {
-                s.qkv[p] = eventQkvRow(s.enc[p]);
-            }
-        } else {
-            for (int p = pad; p < k; p++) {
-                s.qkv[p] = eventQkvRow(s.enc[p]);
+        if (topoId != TOPO_A) {
+            if (reuseQkv) {
+                for (int p = Math.max(pad, first); p < k; p++) {
+                    s.qkv[p] = eventQkvRow(s.enc[p]);
+                }
+            } else {
+                for (int p = pad; p < k; p++) {
+                    s.qkv[p] = eventQkvRow(s.enc[p]);
+                }
             }
         }
         // ④ 隐状态：建槽时重放**全部**事件（`EventStream.recompute()` 语义），否则只推进新行
@@ -694,7 +1198,7 @@ public final class V4Policy implements LogitPolicy {
         s.seen = events;
         s.len = len;
         s.valid = true;
-        return new EvtTower(transformerFromQkv(s.enc, s.qkv, "event.tr.layers.0"), s.h);
+        return new EvtTower(eventTokens(s.enc), s.h);
     }
 
     private float[] eventRowOf(Map<String, Object> event, int seat) {
@@ -726,8 +1230,15 @@ public final class V4Policy implements LogitPolicy {
         return padQkvRow;
     }
 
-    /** 一条事件 token 行 → 事件编码器输出（`event.enc` 两层，**末尾没有 ReLU**）。 */
+    /** 一条事件 token 行 → 事件编码器输出（v4：两层 MLP，**末尾没有 ReLU**；a-：Linear+GELU）。 */
     private float[] eventMlpRow(float[] tok) throws IOException {
+        if (topoId == TOPO_A) {
+            float[] e = new float[dModel];
+            linear(e, tok, mat("event.enc.weight", dModel, V4Features.C_EVT),
+                    vec("event.enc.bias", dModel));
+            gelu(e);
+            return e;
+        }
         float[] e = new float[dModel];
         linear(e, tok, mat("event.enc.0.weight", dModel, V4Features.C_EVT),
                 vec("event.enc.0.bias", dModel));
@@ -735,6 +1246,39 @@ public final class V4Policy implements LogitPolicy {
         linear(e, e, mat("event.enc.2.weight", dModel, dModel),
                 vec("event.enc.2.bias", dModel));
         return e;
+    }
+
+    /**
+     * 窗口 token 的**塔尾**：v4 = 1 层 TransformerEncoder（pre-LN、ReLU FFN、2d）；
+     * a- = `2×Conv1d(k=3)+LN+GELU`（**窗口内顺序**；卷积只作用在编码后的 token 上，
+     * 不改变 `h`，所以增量 carry 契约一个字节都没动）。
+     */
+    private float[][] eventTokens(float[][] e) throws IOException {
+        return topoId == TOPO_A ? eventConvStack(e) : transformerLayer(e, "event.tr.layers.0");
+    }
+
+    /** a- 的事件塔塔尾：`GELU(LN(e)) → conv1 → GELU(LN(·)) → conv2`（时间轴 = 行轴）。 */
+    private float[][] eventConvStack(float[][] e) throws IOException {
+        final int d = dModel;
+        float[] n1g = vec("event.norm1.weight", d);
+        float[] n1b = vec("event.norm1.bias", d);
+        float[] n2g = vec("event.norm2.weight", d);
+        float[] n2b = vec("event.norm2.bias", d);
+        float[][] y = new float[e.length][d];
+        for (int t = 0; t < e.length; t++) {
+            System.arraycopy(e[t], 0, y[t], 0, d);
+            layerNorm(y[t], n1g, n1b);
+            gelu(y[t]);
+        }
+        float[][] c1 = conv1d(y, conv("event.conv1.weight", d, d, 3),
+                vec("event.conv1.bias", d), 1);
+        float[][] z = new float[c1.length][d];
+        for (int t = 0; t < c1.length; t++) {
+            System.arraycopy(c1[t], 0, z[t], 0, d);
+            layerNorm(z[t], n2g, n2b);
+            gelu(z[t]);
+        }
+        return conv1d(z, conv("event.conv2.weight", d, d, 3), vec("event.conv2.bias", d), 1);
     }
 
     /** 一行事件表示的注意力 `in_proj`（在 `LayerNorm1` 之后；逐行可缓存的那一块）。 */
@@ -774,7 +1318,7 @@ public final class V4Policy implements LogitPolicy {
             h = gruStep(e[i], h, gih, ghh, gbi, gbh);
         }
         lastFullHidden = h;
-        return new EvtTower(transformerLayer(e, "event.tr.layers.0"), h);
+        return new EvtTower(eventTokens(e), h);
     }
 
     /**
@@ -805,7 +1349,7 @@ public final class V4Policy implements LogitPolicy {
             h = gruStep(e[i], h, gih, ghh, gbi, gbh);
         }
         lastFullHidden = h;
-        return new EvtTower(transformerLayer(e, "event.tr.layers.0"), h);
+        return new EvtTower(eventTokens(e), h);
     }
 
     /** 把 `ev[0, upto)` 这 `upto` 条**真实**事件行喂进 GRU（`h == null` ⇒ 从 0 起）。 */
@@ -858,17 +1402,35 @@ public final class V4Policy implements LogitPolicy {
      */
     private Map<String, float[]> forwardWith(V4Features.Tensors t, float[][] eTokens, float[] hEvt)
             throws IOException {
+        return topoId == TOPO_A ? forwardWithA(t, eTokens, hEvt) : forwardWithV4(t, eTokens, hEvt);
+    }
+
+    /** v4（`topoId=2`）的主干：tile MLP+post-LN MHA / q_tile+q_evt / gate·write·film / mem 门 / B3。 */
+    private Map<String, float[]> forwardWithV4(V4Features.Tensors t, float[][] eTokens, float[] hEvt)
+            throws IOException {
         int n = t.cand.length;
         int dm = dModel;
 
-        // ---- 牌种塔
+        // ---- 牌种塔（#0：`tile_id` 加在 `enc` 之前 —— 可缺 ⇒ `tile + 0` 逐位不变）
         float[][] ht = new float[V4Features.KIND_COUNT][tileD];
+        float[][] tileIn = t.tile;
+        float[][] tileId = mats.get("tile.tile_id");
+        if (tileId != null) {
+            tileIn = new float[t.tile.length][];
+            for (int k = 0; k < t.tile.length; k++) {
+                float[] row = Arrays.copyOf(t.tile[k], t.tile[k].length);
+                for (int c = 0; c < row.length; c++) {
+                    row[c] += tileId[k][c];
+                }
+                tileIn[k] = row;
+            }
+        }
         float[][] w1 = mat("tile.enc.0.weight", tileD, V4Features.C_TILE);
         float[] b1 = vec("tile.enc.0.bias", tileD);
         float[][] w2 = mat("tile.enc.2.weight", tileD, tileD);
         float[] b2 = vec("tile.enc.2.bias", tileD);
         for (int k = 0; k < ht.length; k++) {
-            linear(ht[k], t.tile[k], w1, b1);
+            linear(ht[k], tileIn[k], w1, b1);
             relu(ht[k]);
             linear(ht[k], ht[k], w2, b2);
             relu(ht[k]);
@@ -883,8 +1445,11 @@ public final class V4Policy implements LogitPolicy {
             }
             layerNorm(ht[k], normG, normB);
             for (int i = 0; i < tileD; i++) {
-                pool[i] += ht[k][i] / ht.length;                 // mean over tokens
+                pool[i] += ht[k][i];                             // 先求和再除（与 torch `.mean(1)` 同序）
             }
+        }
+        for (int i = 0; i < tileD; i++) {
+            pool[i] /= ht.length;
         }
         float[] hTilePool = new float[dm];
         linear(hTilePool, pool, mat("tile.proj.weight", dm, tileD), vec("tile.proj.bias", dm));
@@ -936,7 +1501,7 @@ public final class V4Policy implements LogitPolicy {
             System.arraycopy(uTile[i], 0, cat3, 0, dm);
             System.arraycopy(f, 0, cat3, dm, dm);
             System.arraycopy(ctxEmb, 0, cat3, 2 * dm, dm);
-            u[i] = mlp(cat3, "fusion.out.net", 3 * dm, dm);
+            u[i] = mlp(cat3, "fusion.out.net", 3 * dm, dm, false);   // C1：**末端无 ReLU**（current 语义）
         }
 
         // ---- 长程记忆门控（W1，第六十轮）：`u_i ⊙ g_mem`（**逐候选**）
@@ -1019,8 +1584,11 @@ public final class V4Policy implements LogitPolicy {
             effect[i] = new float[3];
             linear(effect[i], u[i], effW, effB);
             for (int j = 0; j < dm; j++) {
-                meanU[j] += u[i][j] / Math.max(1, n);
+                meanU[j] += u[i][j];                             // C2：先求和、再除 n（与 `state_pool` 同序）
             }
+        }
+        for (int j = 0; j < dm; j++) {
+            meanU[j] /= Math.max(1, n);
         }
         float[] bt = new float[3];
         linear(bt, meanU, mat("heads.belief_tenpai.weight", 3, dm),
@@ -1066,6 +1634,354 @@ public final class V4Policy implements LogitPolicy {
         // 于是"三端同值"可以直接比这个向量（比只看七个头灵敏得多 —— 见 golden 夹具格式 2）。
         out.put("h_evt", hEvt);
         return out;
+    }
+
+    /**
+     * **A−（T1）主干**（`ARCH-REDESIGN` §2.2）：tile `Conv1d(48→160,k=5)+LN+GELU` → 1×k=5 + 2×k=3
+     * pre-LN 残差 → 轴向 MHA(pre-LN) → `Linear(160→128)+LN`；evt 塔尾 2×Conv1d；融合 =
+     * **95-token joint attention**（34 tile + 60 evt + `h_evt` 第 95 个 token，含 3 段嵌入与 sin/cos
+     * 相对位置编码）→ FFN → `cross(cand→95)` → `out(LN(384)→128)` → B3；heads：`danger` 以
+     * **0 参数固定通道**进 policy。
+     *
+     * <p>⚠ 三处"少一个就静默偏移"的地方：① `[34,48] → [48,34]` 的转置只发生在卷积入口，
+     * 数据布局不变；② `tile.tile_id` 加在**转置之前**（#0）；③ pre-LN 的位置（残差主干不被压小）。
+     */
+    private Map<String, float[]> forwardWithA(V4Features.Tensors t, float[][] eTokens, float[] hEvt)
+            throws IOException {
+        final int n = t.cand.length;
+        final int dm = dModel;
+        final int td = tileD;
+        final int ct = V4Features.C_TILE;
+        final int kinds = V4Features.KIND_COUNT;
+
+        // ---- 牌种塔：身份嵌入加在输入侧；`[34][48]`（时间轴在行）直接进 time-major 卷积
+        float[][] tileId = mats.get("tile.tile_id");
+        float[][] x = new float[kinds][ct];
+        for (int k = 0; k < kinds; k++) {
+            for (int c = 0; c < ct; c++) {
+                float v = t.tile[k][c];
+                if (tileId != null) {
+                    v += tileId[k][c];
+                }
+                x[k][c] = v;
+            }
+        }
+        float[][] tt = conv1d(x, conv("tile.stem.weight", td, ct, 5),
+                vec("tile.stem.bias", td), 2);                        // [34][td]
+        float[] sg = vec("tile.stem_norm.weight", td);
+        float[] sb = vec("tile.stem_norm.bias", td);
+        for (int k = 0; k < tt.length; k++) {
+            layerNorm(tt[k], sg, sb);
+            gelu(tt[k]);
+        }
+        for (int b = 0; b < 3; b++) {
+            int kk = (b == 0) ? 5 : 3;
+            float[] ng = vec("tile.res." + b + ".norm.weight", td);
+            float[] nb = vec("tile.res." + b + ".norm.bias", td);
+            float[][] y = new float[tt.length][td];
+            for (int q = 0; q < tt.length; q++) {
+                System.arraycopy(tt[q], 0, y[q], 0, td);
+                layerNorm(y[q], ng, nb);
+                gelu(y[q]);
+            }
+            float[][] c = conv1d(y, conv("tile.res." + b + ".conv.weight", td, td, kk),
+                    vec("tile.res." + b + ".conv.bias", td), kk / 2);
+            for (int q = 0; q < tt.length; q++) {
+                for (int i = 0; i < td; i++) {
+                    tt[q][i] += c[q][i];                              // 残差（pre-LN）
+                }
+            }
+        }
+        // 轴向注意力（34 个 token 之间的全局混合，pre-LN + 残差）
+        float[] ang = vec("tile.attn_norm.weight", td);
+        float[] anb = vec("tile.attn_norm.bias", td);
+        float[][] tn = new float[tt.length][td];
+        for (int q = 0; q < tt.length; q++) {
+            System.arraycopy(tt[q], 0, tn[q], 0, td);
+            layerNorm(tn[q], ang, anb);
+        }
+        float[][] aa = mha(tn, tn, td, "tile.attn");
+        for (int q = 0; q < tt.length; q++) {
+            for (int i = 0; i < td; i++) {
+                tt[q][i] += aa[q][i];
+            }
+        }
+        // proj：GELU → Linear(td→dm) → LN(dm)
+        float[][] z = new float[tt.length][dm];
+        float[][] pw = mat("tile.proj.weight", dm, td);
+        float[] pb = vec("tile.proj.bias", dm);
+        float[] ppg = vec("tile.proj_norm.weight", dm);
+        float[] ppb = vec("tile.proj_norm.bias", dm);
+        for (int q = 0; q < tt.length; q++) {
+            float[] g = Arrays.copyOf(tt[q], td);
+            gelu(g);
+            linear(z[q], g, pw, pb);
+            layerNorm(z[q], ppg, ppb);
+        }
+        float[] tilePool = new float[dm];
+        for (int q = 0; q < z.length; q++) {
+            for (int i = 0; i < dm; i++) {
+                tilePool[i] += z[q][i];
+            }
+        }
+        for (int i = 0; i < dm; i++) {
+            tilePool[i] /= z.length;
+        }
+
+        // ---- ctx / cand：首层 LN（C5）+ 死维掩码（非持久 buffer ⇒ 这里按同一张表重建）
+        float[] ctxEmb = amlp(t.ctx, "ctx", V4Features.C_CTX, dm, CTX_DEAD_DIMS);
+        float[][] candEmb = new float[n][];
+        for (int i = 0; i < n; i++) {
+            candEmb[i] = amlp(t.cand[i], "cand", V4Features.C_CAND, dm, CAND_DEAD_DIMS);
+        }
+
+        // ---- 融合：95 token（34 tile + 60 evt + 1 mem），3 段嵌入 + evt 的 sin/cos 相对位置
+        float[][] seg = mat("fusion.seg", N_SEG, dm);
+        int kev = eTokens.length;
+        int ntok = z.length + kev + 1;
+        float[][] tokens = new float[ntok][dm];
+        for (int k = 0; k < z.length; k++) {
+            for (int i = 0; i < dm; i++) {
+                tokens[k][i] = z[k][i] + seg[0][i];
+            }
+        }
+        float[][] pe = sincosPe(kev, dm);
+        for (int e = 0; e < kev; e++) {
+            for (int i = 0; i < dm; i++) {
+                tokens[z.length + e][i] = eTokens[e][i] + seg[1][i] + pe[e][i];
+            }
+        }
+        for (int i = 0; i < dm; i++) {
+            tokens[ntok - 1][i] = hEvt[i] + seg[2][i];                // h_evt = 第 95 个 token
+        }
+        float[][] jn = new float[ntok][dm];
+        float[] jng = vec("fusion.joint_norm.weight", dm);
+        float[] jnb = vec("fusion.joint_norm.bias", dm);
+        for (int q = 0; q < ntok; q++) {
+            System.arraycopy(tokens[q], 0, jn[q], 0, dm);
+            layerNorm(jn[q], jng, jnb);
+        }
+        float[][] ja = mha(jn, jn, dm, "fusion.joint");
+        for (int q = 0; q < ntok; q++) {
+            for (int i = 0; i < dm; i++) {
+                tokens[q][i] += ja[q][i];
+            }
+        }
+        float[] fng = vec("fusion.ffn_norm.weight", dm);
+        float[] fnb = vec("fusion.ffn_norm.bias", dm);
+        float[][] f1W = mat("fusion.ffn1.weight", dm, dm);
+        float[] f1B = vec("fusion.ffn1.bias", dm);
+        float[][] f2W = mat("fusion.ffn2.weight", dm, dm);
+        float[] f2B = vec("fusion.ffn2.bias", dm);
+        float[][] fn = new float[ntok][dm];
+        float[] hid = new float[dm];
+        float[] res = new float[dm];
+        for (int q = 0; q < ntok; q++) {
+            System.arraycopy(tokens[q], 0, fn[q], 0, dm);
+            layerNorm(fn[q], fng, fnb);
+            linear(hid, fn[q], f1W, f1B);
+            gelu(hid);
+            linear(res, hid, f2W, f2B);
+            for (int i = 0; i < dm; i++) {
+                tokens[q][i] += res[i];
+            }
+        }
+        // cross：q = 无参数 `F.layer_norm(cand)`（0 参数 pre-LN），kv = joint tokens
+        // ⚠ 这里的 `cand` 是**候选编码器的输出**（`candEmb`，宽 = dm），不是原始 128 维 `t.cand`
+        float[][] q = new float[n][dm];
+        float[] ones = filled(dm, 1f);
+        float[] zeros = new float[dm];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(candEmb[i], 0, q[i], 0, dm);
+            layerNorm(q[i], ones, zeros);
+        }
+        float[][] cross = mha(q, tokens, dm, "fusion.cross");
+        // out：LN(3*Df) 在**入口**（pre-LN），再 Linear(3Df→Df)
+        float[][] outW = mat("fusion.out.weight", dm, 3 * dm);
+        float[] outB = vec("fusion.out.bias", dm);
+        float[] ong = vec("fusion.out_norm.weight", 3 * dm);
+        float[] onb = vec("fusion.out_norm.bias", 3 * dm);
+        float[] cat3 = new float[3 * dm];
+        float[][] u = new float[n][dm];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(cross[i], 0, cat3, 0, dm);
+            System.arraycopy(tilePool, 0, cat3, dm, dm);
+            System.arraycopy(ctxEmb, 0, cat3, 2 * dm, dm);
+            layerNorm(cat3, ong, onb);
+            linear(u[i], cat3, outW, outB);
+        }
+        // B3：`u ← u + tanh(u_res) ⊙ LN(u)`（a- 的 B3 是**拓扑必需**，checkFlags 已核）
+        float[] uNw = vecs.get("fusion.u_norm.weight");
+        float[] uNb = vecs.get("fusion.u_norm.bias");
+        float[] uRw = vecs.get("fusion.u_res");
+        if (uRw != null) {
+            float[] urT = new float[dm];
+            for (int j = 0; j < dm; j++) {
+                urT[j] = (float) Math.tanh(uRw[j]);
+            }
+            float[] r = new float[dm];
+            for (int i = 0; i < n; i++) {
+                System.arraycopy(u[i], 0, r, 0, dm);
+                layerNorm(r, uNw, uNb);
+                for (int j = 0; j < dm; j++) {
+                    u[i][j] += urT[j] * r[j];
+                }
+            }
+        }
+
+        // ---- 头：state = 逐候选均值（无 padding ⇒ 分母 = n）；danger 以 0 参数通道进 policy
+        float[][] danW = mat("heads.danger.weight", 4, dm);
+        float[] danB = vec("heads.danger.bias", 4);
+        float[][] effW = mat("heads.effect.weight", 3, dm);
+        float[] effB = vec("heads.effect.bias", 3);
+        float[][] danger = new float[n][4];
+        float[][] effect = new float[n][3];
+        float[] state = new float[dm];
+        for (int i = 0; i < n; i++) {
+            linear(danger[i], u[i], danW, danB);
+            linear(effect[i], u[i], effW, effB);
+            for (int j = 0; j < dm; j++) {
+                state[j] += u[i][j];
+            }
+        }
+        for (int j = 0; j < dm; j++) {
+            state[j] /= Math.max(1, n);
+        }
+        float[] bt = new float[3];
+        linear(bt, state, mat("heads.belief_tenpai.weight", 3, dm),
+                vec("heads.belief_tenpai.bias", 3));
+        float[][] pgW = mat("heads.policy_gate.weight", dm, 3);
+        float[] pgB = vec("heads.policy_gate.bias", dm);
+        float[] sbt = new float[3];
+        for (int j = 0; j < 3; j++) {
+            sbt[j] = (float) (1.0 / (1.0 + Math.exp(-bt[j])));
+        }
+        float[] gate = new float[dm];
+        for (int j = 0; j < dm; j++) {
+            double acc = 0.0;
+            for (int k2 = 0; k2 < 3; k2++) {
+                acc += (double) pgW[j][k2] * sbt[k2];
+            }
+            gate[j] = (float) (1.0 + Math.tanh(acc + pgB[j]));
+        }
+        float[][] polW = mat("heads.policy.weight", 1, dm);
+        float polB = vec("heads.policy.bias", 1)[0];
+        float[] policy = new float[n];
+        float[] gu = new float[dm];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < dm; j++) {
+                gu[j] = u[i][j] * gate[j];
+            }
+            double sig = 0.0;
+            for (int k2 = 0; k2 < 4; k2++) {
+                sig += 1.0 / (1.0 + Math.exp(-danger[i][k2]));
+            }
+            float risk = (float) Math.log(sig / 4.0 + DANGER_EPS);
+            policy[i] = polB + dot(polW[0], gu) + DANGER_COEF * risk;
+        }
+        Map<String, float[]> out = new LinkedHashMap<>();
+        out.put("policy", policy);
+        out.put("value", head(state, "value", valueBins));
+        out.put("placement", head(state, "placement", 4));
+        out.put("belief_hand", head(state, "belief_hand", 3 * kinds));
+        out.put("belief_tenpai", bt);
+        out.put("danger", flatten(danger, 4));
+        out.put("effect", flatten(effect, 3));
+        out.put("h_evt", hEvt);
+        return out;
+    }
+
+    /** A− 的 `ctx`/`cand` 编码器：`fc2(GELU(fc1(LN(x·mask)·mask)))`（死维**前后各掩一次**）。 */
+    private float[] amlp(float[] x, String prefix, int cin, int dm, int[] dead) throws IOException {
+        float[] m = filled(cin, 1f);
+        for (int i : dead) {
+            m[i] = 0f;
+        }
+        float[] xn = new float[cin];
+        for (int i = 0; i < cin; i++) {
+            xn[i] = x[i] * m[i];
+        }
+        layerNorm(xn, vec(prefix + ".norm.weight", cin), vec(prefix + ".norm.bias", cin));
+        for (int i = 0; i < cin; i++) {
+            xn[i] *= m[i];                                     // LN 会把死维变成非 0 ⇒ 必须再掩一次
+        }
+        float[] h = new float[dm];
+        linear(h, xn, mat(prefix + ".fc1.weight", dm, cin), vec(prefix + ".fc1.bias", dm));
+        gelu(h);
+        float[] out = new float[dm];
+        linear(out, h, mat(prefix + ".fc2.weight", dm, dm), vec(prefix + ".fc2.bias", dm));
+        return out;
+    }
+
+    /** 固定 sin/cos **相对窗口位置**编码（0 参数、非持久 ⇒ 不进 `net.bin`；按窗口形状缓存）。 */
+    private float[][] sincosPe(int n, int d) {
+        if (peCache != null && peCache.length == n && peCache[0].length == d) {
+            return peCache;
+        }
+        float[][] pe = new float[n][d];
+        for (int p = 0; p < n; p++) {
+            for (int i = 0; i < d / 2; i++) {
+                // ⚠ `i` 是**偶数列号**（0,2,4,…）⇒ 与 Python 的 `arange(0,d,2)` 同义，
+                //   指数里的分子必须是 `2*i`，少了这个 2 就是一套完全不同的位置编码。
+                float div = (float) Math.exp((float) (-Math.log(10000.0) * (2 * i)) / d);
+                double ang = (double) p * div;
+                pe[p][2 * i] = (float) Math.sin(ang);
+                if (2 * i + 1 < d) {
+                    pe[p][2 * i + 1] = (float) Math.cos(ang);
+                }
+            }
+        }
+        peCache = pe;
+        return pe;
+    }
+
+    /** 时间轴在行上的转置：`[rows][cols] → [cols][rows]`。 */
+    private static float[][] transpose(float[][] a) {
+        float[][] o = new float[a[0].length][a.length];
+        for (int r = 0; r < a.length; r++) {
+            for (int c = 0; c < a[r].length; c++) {
+                o[c][r] = a[r][c];
+            }
+        }
+        return o;
+    }
+
+    /**
+     * `Conv1d`（**跨相关**，与 torch 同向）：`out[t][oc] = b[oc] + Σ_ic Σ_k w[oc][ic][k]·x[t+k-pad][ic]`。
+     *
+     * <p>⛔ 不新增 SIMD kernel：参数化之后它就是"k 次移位 + 逐点乘加"，与三端逐位对拍的
+     * 关键是**固定累加顺序**（先 `ic` 后 `k`，单累加器），不是向量化。
+     */
+    private static float[][] conv1d(float[][] x, float[][][] w, float[] b, int pad) {
+        int len = x.length;
+        int cin = x.length > 0 ? x[0].length : 0;
+        int cout = w.length;
+        int k = cout > 0 && w[0].length > 0 ? w[0][0].length : 0;
+        float[][] out = new float[len][cout];
+        for (int t = 0; t < len; t++) {
+            for (int oc = 0; oc < cout; oc++) {
+                float s = b == null ? 0f : b[oc];
+                for (int ic = 0; ic < cin; ic++) {
+                    float[] row = w[oc][ic];
+                    for (int kk = 0; kk < k; kk++) {
+                        int idx = t + kk - pad;
+                        if (idx >= 0 && idx < len) {
+                            s += row[kk] * x[idx][ic];
+                        }
+                    }
+                }
+                out[t][oc] = s;
+            }
+        }
+        return out;
+    }
+
+    private static float[] filled(int n, float v) {
+        float[] a = new float[n];
+        if (v != 0f) {
+            Arrays.fill(a, v);
+        }
+        return a;
     }
 
     private float[] head(float[] state, String name, int width) throws IOException {
@@ -1190,14 +2106,27 @@ public final class V4Policy implements LogitPolicy {
         return cache.slot(seat).tok;
     }
 
+    /**
+     * 带先验的 argmax + **A− 确定性 tie-break**（`ARCH-REDESIGN` §2.6）。
+     *
+     * <p>⚠ **归属 = caller**（与 `v4/policy.py:choose_index` 同一条规格）：`Heads` 只拿得到 logits，
+     * 拿不到"同动作族 / 牌码 / 进张数"这些候选语义 ⇒ 规则活在这里。并列判据：
+     * `top1 − logit < τ=1e-3` **且**与 argmax **同动作族**（`cand[0:9].argmax()`）⇒ 依次比较
+     * ① `effect` 的**进张数**（第 2 维，越大越好）② **牌码**（`cand[9:46].argmax()`，越小越好）
+     * ③ 最小合法下标。⛔ 不许浮点末位/随机破平。
+     */
     @Override
     public int chooseIndex(Map<String, Object> json, List<String> keys, int priorIndex, float alpha) {
         try {
-            float[] out = logits(json);
+            V4Features.Tensors t = V4Features.assemble(json, missingBlocks);
+            Map<String, float[]> o = forwardFrom(json, t);
+            float[] out = o.get("policy");
             if (priorIndex >= 0 && priorIndex < out.length && alpha > 0f) {
                 out[priorIndex] += alpha;
             }
-            return Logits.argmaxOf(out);
+            int pick = Logits.argmaxTieBreak(out, t.cand, o.get("effect"), Logits.TAU);
+            assert pick >= 0 && pick < out.length : "tie-break 返回了越界下标：" + pick;
+            return pick;
         } catch (IOException | RuntimeException e) {
             Log.warn("v4 网络前向失败：" + e.getMessage());
             return -1;                                          // 调用方兜底（Policies.fromAction / hybrid）
@@ -1208,12 +2137,14 @@ public final class V4Policy implements LogitPolicy {
     public int sampleIndex(Map<String, Object> json, List<String> keys, int priorIndex, float alpha,
                            float temp, Random rng) {
         try {
-            float[] out = logits(json);
+            V4Features.Tensors t = V4Features.assemble(json, missingBlocks);
+            Map<String, float[]> o = forwardFrom(json, t);
+            float[] out = o.get("policy");
             if (priorIndex >= 0 && priorIndex < out.length && alpha > 0f) {
                 out[priorIndex] += alpha;
             }
             if (!(temp > 0f)) {
-                return Logits.argmaxOf(out);
+                return Logits.argmaxTieBreak(out, t.cand, o.get("effect"), Logits.TAU);
             }
             return Logits.sampleSoftmax(out, temp, rng);
         } catch (IOException | RuntimeException e) {
@@ -1235,10 +2166,32 @@ public final class V4Policy implements LogitPolicy {
                 total += row.length;
             }
         }
+        for (float[][][] c : mats3.values()) {
+            for (float[][] a : c) {
+                for (float[] row : a) {
+                    total += row.length;
+                }
+            }
+        }
         for (float[] v : vecs.values()) {
             total += v.length;
         }
         return total;
+    }
+
+    /** `topoId`（2 = v4、3 = A−）：格式 3 的拓扑**只认 arch 段**。 */
+    public int topoId() {
+        return topoId;
+    }
+
+    /** arch 段的 `flags`（bit0 B3 / bit1 #0 / bit2 FiLM / bit3 mem 门）。 */
+    public int archFlags() {
+        return archFlags;
+    }
+
+    /** arch 段声明的值域（v4 = ±30、a- = ±60，千点）。 */
+    public float valueRange() {
+        return valueRange;
     }
 
     public Map<String, Integer> dims() {
@@ -1269,8 +2222,9 @@ public final class V4Policy implements LogitPolicy {
         bias[0] += delta;
         v2.put("heads.policy.bias", bias);
         try {
-            return new V4Policy(dModel, tileD, nHeads, valueBins, fingerprint, blocks, missingBlocks,
-                    new HashMap<>(mats), v2, new HashSet<>(allNames));
+            return new V4Policy(topoId, archFlags, valueRange, dModel, tileD, nHeads, valueBins,
+                    fingerprint, blocks, missingBlocks, new HashMap<>(mats), v2,
+                    new HashMap<>(mats3), new HashSet<>(allNames));
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
@@ -1289,9 +2243,14 @@ public final class V4Policy implements LogitPolicy {
      * 清零它**必须**改变 logits）。
      */
     public V4Policy debugZeroHead(String head) {
-        String prefix = "heads." + head + ".";
+        return debugZeroPrefix("heads." + head + ".");
+    }
+
+    /** 自检用：把**指定前缀**的张量全部清零（`debugZeroHead` 的泛化版；也用于 B3 红证）。 */
+    public V4Policy debugZeroPrefix(String prefix) {
         Map<String, float[][]> m2 = new HashMap<>(mats);
         Map<String, float[]> v2 = new HashMap<>(vecs);
+        Map<String, float[][][]> m3 = new HashMap<>(mats3);
         for (String k : allNames) {
             if (!k.startsWith(prefix)) {
                 continue;
@@ -1308,17 +2267,31 @@ public final class V4Policy implements LogitPolicy {
             if (v != null) {
                 v2.put(k, new float[v.length]);
             }
+            float[][][] c = m3.get(k);
+            if (c != null) {
+                float[][][] z = new float[c.length][][];
+                for (int r = 0; r < c.length; r++) {
+                    z[r] = new float[c[r].length][];
+                    for (int q = 0; q < c[r].length; q++) {
+                        z[r][q] = new float[c[r][q].length];
+                    }
+                }
+                m3.put(k, z);
+            }
         }
         try {
-            return new V4Policy(dModel, tileD, nHeads, valueBins, fingerprint, blocks, missingBlocks,
-                    m2, v2, new HashSet<>(allNames));
+            return new V4Policy(topoId, archFlags, valueRange, dModel, tileD, nHeads, valueBins,
+                    fingerprint, blocks, missingBlocks, m2, v2, m3, new HashSet<>(allNames));
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
     }
 
     public String describe() {
-        return "V4Policy（" + paramCount() + " 参数，格式 " + FORMAT_VERSION + "，dims=" + dims()
+        return "V4Policy（" + paramCount() + " 参数，格式 " + FORMAT_VERSION + "，topoId=" + topoId
+                + "（" + (topoId == TOPO_A ? "a-" : "v4") + "），flags="
+                + String.format("%#04x", archFlags) + "，valueRange=" + valueRange
+                + "，dims=" + dims()
                 + "，块 " + blocks.size() + " / 注册表 " + V4Features.BLOCK_IDS.length
                 + "，指纹 " + fingerprint + "）";
     }
@@ -1376,13 +2349,15 @@ public final class V4Policy implements LogitPolicy {
         int n = x.length;
         float mean = 0f;
         for (float v : x) {
-            mean += v / n;
+            mean += v;                                  // 先求和、再除 n（与 torch `.mean` 同序）
         }
+        mean /= n;
         float var = 0f;
         for (float v : x) {
             float d = v - mean;
-            var += d * d / n;
+            var += d * d;
         }
+        var /= n;
         float inv = (float) (1.0 / Math.sqrt(var + LN_EPS));
         for (int i = 0; i < n; i++) {
             x[i] = (x[i] - mean) * inv * g[i] + b[i];
@@ -1391,13 +2366,80 @@ public final class V4Policy implements LogitPolicy {
 
     /** `Mlp`（=`Linear + ReLU + Linear + ReLU`，注意**末尾那个 ReLU**）。 */
     private float[] mlp(float[] x, String prefix, int cin, int dm) throws IOException {
+        return mlp(x, prefix, cin, dm, true);
+    }
+
+    /**
+     * 参数化的 `Mlp`：`Linear → ReLU → Linear → [ReLU]`。
+     *
+     * <p>`finalRelu=false` 是 **C1**（`ARCH-REDESIGN` §2.4："去 `fusion.out` ReLU"）——格式 3 起的
+     * v4 图按 **current 语义**跑（旧 c2 包是格式 2，已被硬切退役，只能由冻结快照读）。
+     */
+    private float[] mlp(float[] x, String prefix, int cin, int dm, boolean finalRelu)
+            throws IOException {
         float[] h = new float[dm];
         linear(h, x, mat(prefix + ".0.weight", dm, cin), vec(prefix + ".0.bias", dm));
         relu(h);
         float[] out = new float[dm];
         linear(out, h, mat(prefix + ".2.weight", dm, dm), vec(prefix + ".2.bias", dm));
-        relu(out);
+        if (finalRelu) {
+            relu(out);
+        }
         return out;
+    }
+
+    /** **erf 版 GELU**（`0.5·x·(1+erf(x/√2))`）；⛔ 不许换 tanh 近似（三端末位就不同）。 */
+    static void gelu(float[] x) {
+        for (int i = 0; i < x.length; i++) {
+            double v = x[i];
+            x[i] = (float) (0.5 * v * (1.0 + erf(v / 1.4142135623730951)));
+        }
+    }
+
+    /**
+     * 双精度 `erf`（Java 没有 `Math.erf`）。
+     *
+     * <p>算法：`|x| ≤ 3` 用 Maclaurin 级数（double 下最坏抵消 ~450×，仍留 1e-13）；
+     * `|x| > 3` 用 `erfc` 的渐近展开（截到第 10 项，误差 ~1e-9）。⛔ 不用 A&S 7.1.26 那类
+     * 1.5e-7 的近似 —— 它会顺着 4 层卷积放大到 1e-5 量级，正好吃掉 G1 的容差。
+     */
+    static double erf(double x) {
+        double ax = Math.abs(x);
+        if (ax <= 3.0) {
+            double term = x;                                  // n = 0 项
+            double sum = x;
+            double x2 = x * x;
+            for (int n = 1; n < 80; n++) {
+                term *= -x2 / n;
+                double add = term / (2 * n + 1);
+                sum += add;
+                if (Math.abs(add) < 1e-20 * Math.abs(sum) + 1e-300) {
+                    break;
+                }
+            }
+            return 1.1283791670955126 * sum;                  // 2/√π
+        }
+        // erfc(x) = exp(-x²)/(x√π) · Σ_{n≥0} (-1)^n (2n-1)!! / (2x²)^n
+        // ⚠ 这是**渐近**级数：项先减后增 ⇒ 必须在**最小项**处截断（截到固定 30 项在 x≈3 会发散）。
+        double u = 1.0 / (2.0 * ax * ax);
+        double term = 1.0;
+        double series = 1.0;
+        double prev = Double.MAX_VALUE;
+        for (int n = 1; n <= 60; n++) {
+            term *= -(2.0 * n - 1.0) * u;
+            double at = Math.abs(term);
+            if (at > prev) {
+                break;                                        // 到最小项：再往后是发散段
+            }
+            series += term;
+            prev = at;
+            if (at < 1e-18) {
+                break;
+            }
+        }
+        double erfc = Math.exp(-ax * ax) / (ax * 1.7724538509055159) * series;
+        double e = 1.0 - erfc;
+        return x < 0 ? -e : e;
     }
 
     /** 多头注意力（单样本、无 mask）：`q` 对 `kv` 做注意力，`prefix` 给出三块权重。 */
