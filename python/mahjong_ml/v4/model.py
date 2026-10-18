@@ -69,6 +69,30 @@ LEGACY_OUT_RELU = False
 ZERO_INIT_STD = 1e-3
 LEGACY_ZERO_INIT = False
 
+#: `fusion` 关键路径上的 **`u` 尺度约束**（**B3**，第一百零四轮）：
+#:
+#: - `False`（缺省，新行为）= `u ← u + tanh(u_res) ⊙ LayerNorm(u)`：
+#:   `u_res`（逐维，**零初始化**）⇒ 出生恒等；`u_norm` 的 LN 给尺度一条**独立可学**的路径，
+#:   不再让 `fusion.out → 三处 tanh 门 → 线性 policy` 这条链的尺度漂移直接级联到 policy；
+#: - `True` = legacy：**不建**这段残差（连 LN 都不算），**逐位复现**改动前
+#:   （`pretrain --legacy-u-res`）。
+#:
+#: ⚠ 参数 **+576**（`u_norm.weight/bias` 2×192 + `u_res` 192）；`u_res=0` 时
+#:   `u + tanh(0)·LN(u) = u` ⇒ **旧包（缺这三组张量 ⇒ 补 `(w=1,b=0)`/`0`）逐位不变**。
+#: ⚠ 自欺警告：LN 会让 `frac(u==0)` **结构上必绿** ⇒ 判据必须**同时**报 LN **之前**
+#:   （`fusion.out` 的输出）的 `frac(u==0)`，见 `NOTES.md` §6.5 第一百零四轮。
+LEGACY_U_RES = False
+
+
+def set_legacy_u_res(flag: bool) -> None:
+    """**进程级** B3 残差开关（`pretrain --legacy-u-res` 在 `train()` 开头设一次）。
+
+    为什么是进程级：一次训练会建好几张 V4Model（主网 / `--init` / `π_ref` / 行为策略）——
+    只设主网会让参照网的前向图不同 ⇒ 旧轨迹复现不出来（与 `--legacy-out-relu` 同一个理由）。
+    """
+    global LEGACY_U_RES
+    LEGACY_U_RES = bool(flag)
+
 
 def set_legacy_zero_init(flag: bool) -> None:
     """**进程级**门控初始化开关（`pretrain --legacy-zero-init` 在 `train()` 开头设一次）。
@@ -259,7 +283,8 @@ class Fusion(nn.Module):
     """关键张注意力 + 状态/增量**两轮双向**（设计 §5.2）。"""
 
     def __init__(self, d: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
-                 legacy_out_relu: bool | None = None) -> None:
+                 legacy_out_relu: bool | None = None,
+                 legacy_u_res: bool | None = None) -> None:
         super().__init__()
         self.tile_proj = nn.Linear(tile_d, d)
         self.q_tile = nn.MultiheadAttention(d, n_heads, batch_first=True)
@@ -284,6 +309,22 @@ class Fusion(nn.Module):
         #   塌方（logits 常数、top1 0.165）。⛔ 其它 Mlp（ctx/cand）不动。
         self.legacy_out_relu = LEGACY_OUT_RELU if legacy_out_relu is None else bool(legacy_out_relu)
         self.out = Mlp(3 * d, d, final_relu=self.legacy_out_relu)
+        # ★ B3（第一百零四轮）：`u` 的 **LayerNorm + 零初始化逐维残差门**（+576 参数）。
+        #   为什么在这一处：`u` 是 policy/danger/effect/state 的**唯一**入口，而 scale 级联
+        #   实测每一跳都从 policy 领跑（第一百零三轮：`g_policy` 97.17 vs `g_aux` 0.615）。
+        #   LN 把"尺度"从 `fusion.out → 三处 tanh 门 → 线性 policy` 这条链里**解耦出来**，
+        #   残差门让原 `u` 原样保留 ⇒ **不动 argmax 主体、可逐维校正**（不是整行缩放）。
+        #   `u_res = 0` ⇒ 数学恒等；`legacy_u_res=True` ⇒ **不建这两块**（张量表退回 78 个 ⇒
+        #   `net.bin` 与改动前**逐字节相同**，而不只是"数值等价"）。⚠ 只在构造期决定，别在
+        #   前向里改（否则同一份 `state_dict` 会有两种张量集）。
+        self.legacy_u_res = LEGACY_U_RES if legacy_u_res is None else bool(legacy_u_res)
+        #   ⚠ LN 的 **eps 用 torch 缺省 1e-5**，与 Java/C++ 的手写实现必须同一个常数。
+        if self.legacy_u_res:
+            self.u_norm = None
+            self.u_res = None
+        else:
+            self.u_norm = nn.LayerNorm(d)
+            self.u_res = nn.Parameter(torch.zeros(d))
 
     def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor, e_tokens: torch.Tensor,
                 h_evt: torch.Tensor, ctx: torch.Tensor, cand: torch.Tensor) -> torch.Tensor:
@@ -300,7 +341,13 @@ class Fusion(nn.Module):
         u = self.out(torch.cat([u_tile, evt_mod, ctx_b], dim=-1))
         # ③ 长程记忆门控（乘在**逐候选**的 `u_i` 上；零初始化 ⇒ 恒等 ⇒ 旧网逐位不变）。
         #    乘在 `u` 上而不是只乘 policy ⇒ danger/effect/state（value 等）一起看到长程记忆。
-        return u * (1.0 + torch.tanh(self.mem(h_evt))).unsqueeze(1)
+        u = u * (1.0 + torch.tanh(self.mem(h_evt))).unsqueeze(1)
+        # ④ ★ B3：`u ← u + tanh(u_res) ⊙ LN(u)`（逐维、逐候选；`u_res` 零初始化 ⇒ 出生恒等）。
+        #    ⚠ legacy 分支**跳过整段**（连 LN 都不算）⇒ 与改动前**逐位相同**；
+        #      非 legacy 且 `u_res=0`（旧包）⇒ `u + 0·LN(u)`，数值上也是恒等（逐位已实测）。
+        if self.legacy_u_res:
+            return u
+        return u + torch.tanh(self.u_res) * self.u_norm(u)
 
 
 class Heads(nn.Module):

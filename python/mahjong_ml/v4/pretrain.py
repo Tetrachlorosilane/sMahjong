@@ -608,13 +608,13 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
         from . import export as v4export
         parsed = v4export.read_net(p)
         model = M.build(1, **parsed["dims"])
-        model.load_state_dict(v4export.state_from_net(parsed), strict=True)
+        model.load_state_dict(v4export.adapt_to_model(v4export.state_from_net(parsed), model, what=str(p)), strict=True)
     else:
         from . import export as v4export
         ck = torch.load(p, map_location="cpu", weights_only=False)
         model = M.build(1, **(ck.get("config", {}).get("dims") or M.build(1).dims()))
         # ⚠ 旧 ckpt 没有门控张量 ⇒ `normalize_state` 补 0（门控恒等）；policy 宽度也在这里归一。
-        model.load_state_dict(v4export.normalize_state(ck["model"]), strict=True)
+        model.load_state_dict(v4export.adapt_to_model(v4export.normalize_state(ck["model"]), model, what=str(p)), strict=True)
     return model.to(device).eval()
 
 
@@ -1923,6 +1923,15 @@ def train(args) -> dict:
         "**legacy 全零**（`g ≡ 1`、`h_evt` 零影响；⛔ 只用于逐位复现改动前）"
         if _legacy_zero_init else
         f"**小非零** `N(0, {M.ZERO_INIT_STD:g}²)` + bias 0（C3；0 参数，net.bin 格式不变）"))
+    # ---- ★ B3（第一百零四轮）：`u` 的 LayerNorm + 零初始化逐维残差门（+576 参数）------------
+    # `--legacy-u-res`（缺省关）：开 = **不建**这段残差（连 LN 都不算）⇒ 逐位复现改动前。
+    # ⚠ 同样进程级（主网 / `--init` / `π_ref` / 行为策略同一前向图）；⚠ 会改 policy logits ⇒ 进缓存键。
+    _legacy_u_res = bool(getattr(args, "legacy_u_res", False))
+    M.set_legacy_u_res(_legacy_u_res)
+    print("u 的尺度约束（B3）：" + (
+        "**legacy**（无 LN / 无残差门；⛔ 只用来自证与逐位复现改动前）"
+        if _legacy_u_res else
+        "**LN(192) + 零初始化逐维残差门**（`u_res=0` ⇒ 出生恒等；旧包缺张量 ⇒ 补 (1,0)/0）"))
     # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
     # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
     for _split, _data in (("train", train_data), ("val", val_data)):
@@ -3129,6 +3138,9 @@ def _cached_ref_logits(args, model, data: dict, device: str,
                                    # ★ C1：`fusion.out` 去不去 ReLU 会改 **policy** 的 logits（以及
                                    #   value）⇒ 同样必须进键，否则会静默复用旧口径算出的 π_ref。
                                    "legacy_out_relu": bool(M.LEGACY_OUT_RELU),
+                                   # ★ B3：LN+残差门会改 **policy** 的 logits（以及 danger/effect）
+                                   #   ⇒ 同一理由进键，否则会静默复用旧口径算出的 π_ref。
+                                   "legacy_u_res": bool(M.LEGACY_U_RES),
                                    "lmax": lmax, "rows": n})
     got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
     if got is not None:
@@ -3160,6 +3172,8 @@ def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, devi
                                    "legacy_pool": bool(M.LEGACY_POOL),
                                    # ★ C1：value 头读 `state`（= 池化的 `u`）⇒ 同一理由，ReLU 口径进键
                                    "legacy_out_relu": bool(M.LEGACY_OUT_RELU),
+                                   # ★ B3：`u` 的 LN+残差门同样改 `state`/value ⇒ 进键
+                                   "legacy_u_res": bool(M.LEGACY_U_RES),
                                    "rows": [n, nv]})
     got = _refcache.load(cache_dir, "v_old", key, kd)
     if got is not None:
@@ -3227,6 +3241,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-zero-init", action="store_true",
                     help="⛔ 只用来自证/复现：`fusion.mem` / `heads.policy_gate` 回到**全零**初始化"
                          "（g ≡ 1、h_evt 零影响）。缺省 = 小非零 N(0, 1e-3²)（C3；0 参数、格式不变）")
+    # ★ B3（第一百零四轮）：`u` 的 LN + 零初始化逐维残差门（+576 参数）。缺省 = **开**；
+    #   开这个开关才回到"没有这段残差"的前向图（连 LN 都不算）—— 只用于逐位复现改动前。
+    ap.add_argument("--legacy-u-res", action="store_true",
+                    help="⛔ 只用来自证/复现：不建 B3 的 `u_norm`/`u_res` 残差（逐位复现改动前）。"
+                         "缺省 = LN(192)+零初始化逐维残差门（u_res=0 ⇒ 出生恒等；旧包逐位不变）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

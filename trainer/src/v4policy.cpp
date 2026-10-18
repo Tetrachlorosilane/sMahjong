@@ -542,6 +542,24 @@ bool V4Policy::bindAll(std::string &err) {
         }
     }
 
+    // ★ B3（第一百零四轮）：`u` 的 LN + 零初始化逐维残差门 —— 三组**可缺**张量（各 `[dm]`）。
+    //   `fusion.u_norm.weight` / `fusion.u_norm.bias` / `fusion.u_res`；缺 ⇒ `tanh(0)=0` ⇒ 跳过整段
+    //   ⇒ 旧网逐位不变（与 `fusion.mem` 同一兼容套路）。⚠ 形状不符必须炸掉，所以查表不用 `vec()`。
+    {
+        for (const char *n : {"fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res"}) {
+            const auto it = vecs.find(n);
+            if (it == vecs.end()) {
+                continue;
+            }
+            if (static_cast<int>(it->second.size()) != dm) {
+                err = std::string("张量 ") + n + " 长度 " + std::to_string(it->second.size())
+                      + " != " + std::to_string(dm);
+                return false;
+            }
+            used.insert(n);
+        }
+    }
+
     // ⚠ **policy 宽度兼容**（第五十五轮定稿）：
     //   · `[1, dm]` = 正常（第五十五轮起的门控版、以及第一季之前的旧网）；
     //   · `[1, dm+3]` = 第五十轮那版"拼接 sigmoid(belief_tenpai)" —— **截断**掉后 3 列。
@@ -1791,6 +1809,50 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < dm; j++) {
                     u[static_cast<size_t>(i) * dm + j] *= memG[static_cast<size_t>(j)];
+                }
+            }
+        }
+    }
+
+    // ---- ★ B3（第一百零四轮）：`u_i ← u_i + tanh(u_res) ⊙ LN(u_i)`（逐候选、逐维）
+    //   位置与 Java 一致：mem 门**之后**、所有头**之前**。LN 把尺度从
+    //   `fusion.out → 三处 tanh 门 → 线性 policy` 这条链里解耦；残差门保留原 `u` ⇒ 只做逐维校正。
+    //   ⚠ 缺 `fusion.u_res` ⇒ `tanh(0)=0` ⇒ 跳过整段 ⇒ 旧网逐位不变。
+    {
+        const auto urw = vecs.find("fusion.u_res");
+        if (urw != vecs.end()) {
+            const auto un = vecs.find("fusion.u_norm.weight");
+            const auto ub = vecs.find("fusion.u_norm.bias");
+            std::vector<float> urT(static_cast<size_t>(dm));
+            for (int j = 0; j < dm; j++) {
+                urT[static_cast<size_t>(j)] = static_cast<float>(
+                    std::tanh(static_cast<double>((urw->second)[static_cast<size_t>(j)])));
+            }
+            std::vector<float> r(static_cast<size_t>(dm));
+            for (int i = 0; i < n; i++) {
+                float *ui = u + static_cast<size_t>(i) * dm;
+                double mean = 0.0;
+                for (int j = 0; j < dm; j++) {
+                    mean += static_cast<double>(ui[j]);
+                }
+                mean /= static_cast<double>(dm);
+                double var = 0.0;
+                for (int j = 0; j < dm; j++) {
+                    const double d = static_cast<double>(ui[j]) - mean;
+                    var += d * d;
+                }
+                var /= static_cast<double>(dm);            // **有偏**方差（与 torch LN 一致）
+                const double inv = 1.0 / std::sqrt(var + 1e-5);
+                for (int j = 0; j < dm; j++) {
+                    const double g = un == vecs.end() ? 1.0
+                                                      : static_cast<double>((un->second)[static_cast<size_t>(j)]);
+                    const double b = ub == vecs.end() ? 0.0
+                                                      : static_cast<double>((ub->second)[static_cast<size_t>(j)]);
+                    r[static_cast<size_t>(j)] = static_cast<float>(
+                        (static_cast<double>(ui[j]) - mean) * inv * g + b);
+                }
+                for (int j = 0; j < dm; j++) {
+                    ui[j] += urT[static_cast<size_t>(j)] * r[static_cast<size_t>(j)];
                 }
             }
         }

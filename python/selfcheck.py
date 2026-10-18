@@ -2043,6 +2043,47 @@ ok(v4_model.build(seed=5).legacy_pool is False
    and v4_model.LEGACY_ZERO_INIT is False,
    "C3：初始化缺省 = 小非零（`--legacy-zero-init` 缺省**关**）")
 
+# ---- B3（第一百零四轮）：`u` 的 **LN(192) + 零初始化逐维残差门**（+576 参数）----------------
+# 判据：① 参数 +576（1,397,992 → 1,398,568）；② 出生恒等（`u_res=0`、LN=(1,0)）；
+#       ③ `u_res=0` ⇒ 与 legacy 前向**逐位相同**（旧包缺张量补 (1,0)/0 的等价性）；
+#       ④ `u_res≠0` ⇒ 残差路径**真的在算**（不是个永远乘 0 的死分支）；
+#       ⑤ `frac(u==0)` **LN 前 / 后各报一次**（⚠ LN 之后结构上必为 0 ⇒ 只报后值 = 假绿）。
+_b3 = v4_model.build(seed=5)
+eq("B3：参数 = 现网 1,397,992 + 576", _b3.param_count(), 1398568)
+ok(float(_b3.fusion.u_res.abs().max()) == 0.0
+   and float((_b3.fusion.u_norm.weight - 1.0).abs().max()) == 0.0
+   and float(_b3.fusion.u_norm.bias.abs().max()) == 0.0,
+   "B3：出生恒等（`u_res` 全 0、`u_norm` = (weight 1, bias 0)）")
+_b3_out = {}
+_b3_h1 = _b3.fusion.out.register_forward_hook(
+    lambda _m, _i, _o: _b3_out.__setitem__("pre_ln", _o.detach().clone()))
+_b3_h2 = _b3.fusion.register_forward_hook(
+    lambda _m, _i, _o: _b3_out.__setitem__("post", _o.detach().clone()))
+with _torch.no_grad():
+    _b3_new = _b3(**_x, mask=_mfull)["policy"]
+    _b3.fusion.legacy_u_res = True
+    _b3_leg = _b3(**_x, mask=_mfull)["policy"]
+    _b3.fusion.legacy_u_res = False
+_b3_h1.remove()
+_b3_h2.remove()
+_b3_d = float((_b3_new - _b3_leg).abs().max())
+ok(_b3_d == 0.0,
+   f"B3：`u_res=0` ⇒ 与 legacy 前向**逐位相同**（max|Δpolicy|={_b3_d:g}）")
+_b3_pre = _b3_out["pre_ln"]
+_b3_frac_pre = float((_b3_pre == 0).to(_torch.float64).mean())
+_b3_frac_post = float((_b3_out["post"] == 0).to(_torch.float64).mean())
+ok(_b3_frac_post == 0.0,
+   f"B3：`frac(u==0)` **LN 前 = {_b3_frac_pre:.4f} / LN 后 = {_b3_frac_post:.4f}**"
+   f"（⚠ LN 后必为 0 是结构性的 ⇒ 判据 1 必须看**前**值）")
+with _torch.no_grad():
+    _b3.fusion.u_res.fill_(0.1)
+    _b3_live = _b3(**_x, mask=_mfull)["policy"]
+_b3_live_d = float((_b3_live - _b3_leg).abs().max())
+ok(_b3_live_d > 1e-3,
+   f"B3：`u_res≠0` ⇒ 残差路径**真的在算**（max|Δpolicy|={_b3_live_d:.4g} > 1e-3）")
+ok(v4_model.LEGACY_U_RES is False,
+   "B3：残差缺省**开**（`--legacy-u-res` 缺省关 ⇒ 只有自证时才回到旧前向图）")
+
 # ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
 # 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
 # ⚠ 这十二条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分
@@ -2735,9 +2776,10 @@ import struct as _struct                                               # noqa: E
 from mahjong_ml.v4 import export as v4_export                          # noqa: E402
 
 _v4shape = v4_export.expected_shapes(v4_export.FULL_DIMS)
-# 78 = 74（三塔 + 融合 + 多头）+ 2（`heads.policy_gate.*`，第五十五轮）+ 2（`fusion.mem.*`，第六十轮 W1）
-eq("P5 导出：期望张量表条数（78 个张量 = 74 + 逐候选门控 2 + 长程门控 2）", len(_v4shape), 78)
-eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 78)
+# 81 = 74（三塔 + 融合 + 多头）+ 2（`heads.policy_gate.*`，第五十五轮）+ 2（`fusion.mem.*`，第六十轮 W1）
+#      + 3（`fusion.u_norm.{weight,bias}` + `fusion.u_res`，第一百零四轮 B3）
+eq("P5 导出：期望张量表条数（81 = 74 + 门控 2 + 长程 2 + B3 3）", len(_v4shape), 81)
+eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 81)
 _v4sd = v4_model.build(20260928).state_dict()
 _v4dims = v4_export.dims_from_state(_v4sd)
 eq("P5 导出：从权重形状反推的维度", _v4dims, v4_export.FULL_DIMS)
@@ -2751,7 +2793,7 @@ _v4p = v4_export.save_net(_v4sd, _v4dims, _pnet)
 _eq = v4_export.read_net(_v4p)
 eq("P5 导出：读回的格式号", _eq["format"], v4_export.NET_FORMAT)
 eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
-eq("P5 导出：读回的张量数", len(_eq["tensors"]), 78)
+eq("P5 导出：读回的张量数", len(_eq["tensors"]), 81)
 eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
 eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
 # ⚠ 契约里有两种"候选写法"（见 `export._check_shapes` 的注释）：**多个候选形状**（policy 宽 dm 或 dm+3）

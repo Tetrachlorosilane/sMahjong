@@ -364,6 +364,33 @@ public final class V4Policy implements LogitPolicy {
         return new float[dm];
     }
 
+    /**
+     * **B3（第一百零四轮）**：`u` 的 `LayerNorm(192)` + 零初始化逐维残差门 —— 三组**可缺**张量。
+     *
+     * <p>`fusion.u_norm.{weight,bias}`（各 `[dm]`）与 `fusion.u_res`（`[dm]`）。前向是
+     * `u_i ← u_i + tanh(u_res) ⊙ LN(u_i)`（逐候选）。
+     *
+     * <p>**可缺**：旧网没有它们 ⇒ `u_res` 当全 0 ⇒ `tanh(0)=0` ⇒ **跳过整段** ⇒ 与"没有 B3"
+     * **逐位相同**（同 `fusion.mem` / `heads.policy_gate` 的兼容套路）。有它时把名字记进 `used`
+     * —— ⚠ **必须在绑定期标记**，理由同 {@link #bindPolicyGate}（加载期的"有张量没人读"校验不等前向）。
+     *
+     * <p>⚠ 形状核对**不能**用 `mat()`/`vec()` 探测：那两个会污染 `err`，而且"维度不符"必须炸掉、
+     * 不能被当成"没有这个张量"（同一理由见 C++ 侧 `fusion.mem` 的查表写法）。
+     */
+    private void bindUNorm(int dm) {
+        String[] names = {"fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res"};
+        for (String n : names) {
+            float[] v = vecs.get(n);
+            if (v == null) {
+                continue;
+            }
+            if (v.length != dm) {
+                throw new IllegalStateException("张量 " + n + " 长度 " + v.length + " != " + dm);
+            }
+            used.add(n);
+        }
+    }
+
     private float[][] mat(String name, int rows, int cols) throws IOException {        float[][] m = mats.get(name);
         if (m == null) {
             throw new IOException("权重缺张量：" + name);
@@ -472,6 +499,7 @@ public final class V4Policy implements LogitPolicy {
         matPolicyCompat(dm);
         bindPolicyGate(dm);
         bindMemGate(dm);
+        bindUNorm(dm);
         vec("heads.policy.bias", 1);
         mat("heads.value.weight", vb, dm);
         vec("heads.value.bias", vb);
@@ -933,6 +961,37 @@ public final class V4Policy implements LogitPolicy {
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < dm; j++) {
                     u[i][j] *= memG[j];
+                }
+            }
+        }
+
+        // ---- ★ B3（第一百零四轮）：`u_i ← u_i + tanh(u_res) ⊙ LN(u_i)`（逐候选、逐维）
+        //   为什么在**所有头之前**、在 mem 门**之后**：`u` 是 policy/danger/effect/meanU 的唯一入口，
+        //   而实测级联每一跳都由 policy 领跑（第一百零三轮：`g_policy` 97.17 vs `g_aux` 0.615）。
+        //   LN 把"尺度"从 `fusion.out → 三处 tanh 门 → 线性 policy` 这条链里解耦出来；
+        //   残差门保留原 `u` ⇒ 不动 argmax 主体、只做逐维校正（不是整行缩放）。
+        //   ⚠ 旧网缺这三组张量 ⇒ `u_res` 当 0 ⇒ `tanh(0)=0` ⇒ **跳过整段** ⇒ 逐位不变。
+        float[] uNw = vecs.get("fusion.u_norm.weight");
+        float[] uNb = vecs.get("fusion.u_norm.bias");
+        float[] uRw = vecs.get("fusion.u_res");
+        if (uRw != null) {
+            if (uNw == null) {
+                uNw = new float[dm];
+                java.util.Arrays.fill(uNw, 1f);
+            }
+            if (uNb == null) {
+                uNb = new float[dm];
+            }
+            float[] urT = new float[dm];
+            for (int j = 0; j < dm; j++) {
+                urT[j] = (float) Math.tanh(uRw[j]);
+            }
+            float[] r = new float[dm];
+            for (int i = 0; i < n; i++) {
+                System.arraycopy(u[i], 0, r, 0, dm);
+                layerNorm(r, uNw, uNb);                  // 原地：r = LN(u_i)（有偏方差、eps=1e-5）
+                for (int j = 0; j < dm; j++) {
+                    u[i][j] += urT[j] * r[j];
                 }
             }
         }

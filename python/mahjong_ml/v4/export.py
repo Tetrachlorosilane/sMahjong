@@ -144,6 +144,12 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.mem.bias": (None, (dm,)),
         "fusion.out.net.0.weight": (dm, 3 * dm), "fusion.out.net.0.bias": (dm,),
         "fusion.out.net.2.weight": (dm, dm), "fusion.out.net.2.bias": (dm,),
+        # ★ B3（第一百零四轮）：`u` 的 LayerNorm + 零初始化逐维残差门。**可缺**（旧网没有）⇒
+        # 补 `weight=1 / bias=0 / u_res=0` ⇒ `u + tanh(0)·LN(u) = u` ⇒ 恒等（逐位已实测）。
+        # ⚠ 补的 LN 必须是 **(1,0)** 而不是 0：补 0 会让 LN 输出恒 0 ⇒ 从 warm-start 学不动。
+        "fusion.u_norm.weight": (None, (dm,)),
+        "fusion.u_norm.bias": (None, (dm,)),
+        "fusion.u_res": (None, (dm,)),
         # 头
         # ⚠ **policy 的输入宽度 = `dm`**（第五十五轮把 belief 改成"逐候选门控"后恢复）；
         #   但**旧网**里它可能是 `dm+3`（第五十轮那版"拼接"）⇒ 加载期**截断**掉后 3 列：
@@ -337,11 +343,17 @@ def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是 {dm} "
                                  f"也不是旧版 {dm + 3}")
     dtype = out["tile.proj.weight"].dtype
-    # 可缺张量（旧网没有）⇒ 补 0 即"恒等"：加新的可缺张量时**只需要动这张表**
-    for name, shape in (("heads.policy_gate.weight", (dm, 3)), ("heads.policy_gate.bias", (dm,)),
-                        ("fusion.mem.weight", (dm, dm)), ("fusion.mem.bias", (dm,))):
+    # 可缺张量（旧网没有）⇒ 补"恒等"：加新的可缺张量时**只需要动这张表**。
+    # ⚠ 第三列是**补什么**：0 ⇒ 恒等门（`1+tanh(0)=1` / `u+tanh(0)·…=u`）；
+    #   1 ⇒ LN 的 `weight` 恒等（1,0）。⛔ 别把 LN 的 weight 补 0（那会让 LN 输出恒 0）。
+    for name, shape, fill in (
+            ("heads.policy_gate.weight", (dm, 3), 0.0), ("heads.policy_gate.bias", (dm,), 0.0),
+            ("fusion.mem.weight", (dm, dm), 0.0), ("fusion.mem.bias", (dm,), 0.0),
+            # ★ B3：旧包缺这三组 ⇒ LN 用 (1,0)、残差门用 0 ⇒ 恒等
+            ("fusion.u_norm.weight", (dm,), 1.0), ("fusion.u_norm.bias", (dm,), 0.0),
+            ("fusion.u_res", (dm,), 0.0)):
         if name not in out:
-            out[name] = torch.zeros(shape, dtype=dtype)
+            out[name] = torch.full(shape, fill, dtype=dtype)
     return out
 
 
@@ -352,6 +364,31 @@ def state_from_net(parsed: Mapping[str, Any]) -> dict[str, torch.Tensor]:
     """
     return normalize_state({k: torch.from_numpy(np.ascontiguousarray(v))
                             for k, v in parsed["tensors"].items()})
+
+
+#: `--legacy-u-res` 的网**没有**这三组张量（B3 在构造期就不建）；把新包载入那种网时
+#: 只允许**这三组**多出来（其余多/少一律照旧报错 —— ⛔ 别把这条放宽成"多余键都忽略"）。
+_B3_KEYS = ("fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res")
+
+
+def adapt_to_model(sd: Mapping[str, torch.Tensor], model: torch.nn.Module,
+                   *, what: str = "") -> dict[str, torch.Tensor]:
+    """把（可能来自新包的）状态字典适配到**这张网的张量集**上。
+
+    存在的唯一理由 = **B3 的 legacy 网**（`--legacy-u-res` 在构造期不建 `u_norm`/`u_res`）：
+    新包里有这三组、目标网没有 ⇒ 丢掉；反过来（目标有、字典缺）`normalize_state` 已经补过
+    (1,0)/0 ⇒ 不会走到"缺键"。⚠ 除这三组之外的任何多余键仍然**报错**（保持原有的 fail-closed）。
+    """
+    want = set(model.state_dict())
+    have = set(sd)
+    missing = sorted(want - have)
+    if missing:
+        raise NetFormatError(f"{what or '权重'} 缺 {len(missing)} 个张量：{missing[:6]}")
+    extra = sorted(have - want)
+    bad = [k for k in extra if k not in _B3_KEYS]
+    if bad:
+        raise NetFormatError(f"{what or '权重'} 多出 {len(bad)} 个张量：{bad[:6]}")
+    return {k: v for k, v in sd.items() if k in want}
 
 
 # ------------------------------------------------------------------ 夹具
