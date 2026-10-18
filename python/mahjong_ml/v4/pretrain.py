@@ -1932,6 +1932,16 @@ def train(args) -> dict:
         "**legacy**（无 LN / 无残差门；⛔ 只用来自证与逐位复现改动前）"
         if _legacy_u_res else
         "**LN(192) + 零初始化逐维残差门**（`u_res=0` ⇒ 出生恒等；旧包缺张量 ⇒ 补 (1,0)/0）"))
+    # ---- ★ #0（第一百零六轮）：`TileTower` 的 34 行身份嵌入（+1,632 参数）-------------------
+    # `--legacy-tile-id`（缺省关）：开 = **不建** `tile.tile_id`（`net.bin` 逐字节复旧）；
+    # 缺省 = 建（小非零初始化 ⇒ 出生即可区分 34 个牌种；旧包缺张量 ⇒ 补 0 ⇒ 逐位不变）。
+    # ⚠ 同样进程级（主网 / `--init` / `π_ref` / 行为策略同一前向图）；⚠ 会改 policy logits ⇒ 进缓存键。
+    _legacy_tile_id = bool(getattr(args, "legacy_tile_id", False))
+    M.set_legacy_tile_id(_legacy_tile_id)
+    print("#0 tile 身份嵌入：" + (
+        "**legacy**（不建 `tile.tile_id`；34 行不可区分；⛔ 只用于自证/逐位复现）"
+        if _legacy_tile_id else
+        f"**34×{M.C_TILE} 行身份嵌入**（+{34 * M.C_TILE} 参数；`N(0, {M.TILE_ID_STD:g}²)` 初始化）"))
     # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
     # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
     for _split, _data in (("train", train_data), ("val", val_data)):
@@ -3141,6 +3151,9 @@ def _cached_ref_logits(args, model, data: dict, device: str,
                                    # ★ B3：LN+残差门会改 **policy** 的 logits（以及 danger/effect）
                                    #   ⇒ 同一理由进键，否则会静默复用旧口径算出的 π_ref。
                                    "legacy_u_res": bool(M.LEGACY_U_RES),
+                                   # ★ #0：身份嵌入会改 `tile` 塔（⇒ policy/value 都变）⇒ 进键，
+                                   #   否则同一缓存目录会静默复用"没有 tile_id"的 π_ref。
+                                   "legacy_tile_id": bool(M.LEGACY_TILE_ID),
                                    "lmax": lmax, "rows": n})
     got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
     if got is not None:
@@ -3174,6 +3187,8 @@ def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, devi
                                    "legacy_out_relu": bool(M.LEGACY_OUT_RELU),
                                    # ★ B3：`u` 的 LN+残差门同样改 `state`/value ⇒ 进键
                                    "legacy_u_res": bool(M.LEGACY_U_RES),
+                                   # ★ #0：tile 塔变 ⇒ `u`/state 变 ⇒ value 变，同一理由进键
+                                   "legacy_tile_id": bool(M.LEGACY_TILE_ID),
                                    "rows": [n, nv]})
     got = _refcache.load(cache_dir, "v_old", key, kd)
     if got is not None:
@@ -3246,6 +3261,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-u-res", action="store_true",
                     help="⛔ 只用来自证/复现：不建 B3 的 `u_norm`/`u_res` 残差（逐位复现改动前）。"
                          "缺省 = LN(192)+零初始化逐维残差门（u_res=0 ⇒ 出生恒等；旧包逐位不变）")
+    # ★ #0（第一百零六轮）：`TileTower` 的 34 行身份嵌入 `tile_id[34,48]`（+1,632 参数）。
+    #   缺省 = **开**（新行为）；开这个开关才回到"没有身份嵌入"的旧前向图 —— 只用于逐位复现。
+    ap.add_argument("--legacy-tile-id", action="store_true",
+                    help="⛔ 只用来自证/复现：不建 `tile.tile_id` 身份嵌入（34 行不可区分）。"
+                         "缺省 = 建（+1,632 参数；旧包缺张量 ⇒ 补 0 ⇒ 逐位不变）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

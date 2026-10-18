@@ -83,6 +83,50 @@ LEGACY_ZERO_INIT = False
 #:   （`fusion.out` 的输出）的 `frac(u==0)`，见 `NOTES.md` §6.5 第一百零四轮。
 LEGACY_U_RES = False
 
+#: **#0 tile 身份嵌入**（第一百零六轮）：`TileTower` 在 `enc` **之前**加 `tile_id[34, C_TILE]`
+#: （34 行可学习、逐行不同）。
+#:
+#: - `False`（缺省，新行为）= 建这块嵌入、**小非零**初始化 ⇒ 出生即可区分 34 个牌种；
+#: - `True` = legacy：**构造期不建**（`state_dict` 退回 81 个张量 = 78 + B3 3）⇒ `net.bin` **逐字节**复旧
+#:   （`pretrain --legacy-tile-id`）。
+#:
+#: 为什么必须加：`tile` 塔对 34 行整行互换（2m↔8m）只改 `|Δlogits|` = **1.5e-5** ——
+#: 共享 MLP + 置换等变注意力让 34 行**无法区分**（`ARCH-REDESIGN §8.2` 的"过度不变/伪对称"）。
+#: 身份嵌入是**唯一**能在 `tile` 塔内部打破它的通道；与 §7 的"对称共享"无关（`--sym-share`
+#: 仍缺省 `none`）。
+#:
+#: ⚠ **参数增量**：34×C_TILE = 34×48 = **+1,632**（放在 `enc` 输入侧）。若改放在 `enc` 之后
+#: （宽 `d_tile=64`）则是 34×64 = **+2,176** —— 本实现选输入侧，因为"在 `enc` 之前"是冻结要求，
+#: 且零参数/零形状不改既有层。⚠ 旧包缺 `tile.tile_id` ⇒ `normalize_state` 补 **0** ⇒ 前向
+#: **逐位不变**（同 `fusion.mem` / `policy_gate` / B3 的可缺套路）；`--init` 载旧网时同样补 0
+#: ⇒ warm-start 出生仍是旧策略（本批 1,200 步训练从 0 学起）。
+#: ⚠ 这是**训练侧**语义，`net.bin` 多一个张量 ⇒ Java/C++ 前向**尚不认识**（本批只做 Python 侧）。
+LEGACY_TILE_ID = False
+TILE_ID_STD = 0.02
+
+
+def set_legacy_tile_id(flag: bool) -> None:
+    """**进程级** #0 身份嵌入开关（`pretrain --legacy-tile-id` 在 `train()` 开头设一次）。
+
+    为什么是进程级：一次训练会建好几张 V4Model（主网 / `--init` / `π_ref` / 行为策略）——
+    只让主网带/不带 `tile_id` 会让参照网的前向图不同（张量集不同），旧轨迹复现不出来。
+    """
+    global LEGACY_TILE_ID
+    LEGACY_TILE_ID = bool(flag)
+
+
+def _init_tile_id_(p: torch.Tensor) -> None:
+    """身份嵌入的初始化：小非零 `N(0, TILE_ID_STD²)`。
+
+    ⚠ **先存/后恢复 RNG**：和 `_init_gate_` 同一个理由 —— 不让这块新参数消耗全局 RNG，
+    否则同一 seed 下其余层的初值会整体漂移，"出生影响"就分不清是身份嵌入还是别的层。
+    """
+    st = torch.get_rng_state()
+    try:
+        nn.init.normal_(p, mean=0.0, std=TILE_ID_STD)
+    finally:
+        torch.set_rng_state(st)
+
 
 def set_legacy_u_res(flag: bool) -> None:
     """**进程级** B3 残差开关（`pretrain --legacy-u-res` 在 `train()` 开头设一次）。
@@ -171,14 +215,26 @@ SEMANTICS: dict[str, tuple[bool, bool, bool]] = {
 
 
 def apply_semantics(name: str) -> None:
-    """按名字设置三处进程级开关；未知名字**响亮报错**（⛔ 不静默退化成 current）。"""
+    """按名字设置**四处**进程级开关；未知名字**响亮报错**（⛔ 不静默退化成 current）。
+
+    ⚠ #0 身份嵌入（第一百零六轮）也在这里：**除 `current` 外的所有历史档都 `legacy=True`**
+    —— 那些档用于重生成/驱动**旧夹具与旧网**，多一个 `tile.tile_id` 张量会让它们不再是
+    "逐字节复旧"。`current` = 训练侧缺省（C1+C3+B3+#0）。
+    """
     try:
-        out_relu, zero_init, u_res = SEMANTICS[name]
+        out_relu, zero_init, u_res, legacy_tile_id = _SEMANTICS_FULL[name]
     except KeyError:
         raise ValueError(f"未知语义档 {name!r}（可选：{sorted(SEMANTICS)}）") from None
     set_legacy_out_relu(out_relu)
     set_legacy_zero_init(zero_init)
     set_legacy_u_res(u_res)
+    set_legacy_tile_id(legacy_tile_id)
+
+
+#: `apply_semantics` 的完整四元组（`SEMANTICS` 保持三列对外兼容，见下）。
+_SEMANTICS_FULL: dict[str, tuple[bool, bool, bool, bool]] = {
+    name: (v[0], v[1], v[2], name != "current") for name, v in SEMANTICS.items()
+}
 
 
 @dataclass(frozen=True)
@@ -230,11 +286,22 @@ ONLINE_HEADS: tuple[str, ...] = ("policy", "belief_tenpai")
 
 
 class TileTower(nn.Module):
-    """逐牌种共享 MLP + 自注意力 → `[B,34,TILE_D]` 与池化向量。"""
+    """逐牌种共享 MLP + 自注意力 → `[B,34,TILE_D]` 与池化向量。
+
+    ★ #0（第一百零六轮）：`enc` **之前**加一块可学习的 `tile_id[34, C_TILE]`（34 行身份嵌入，
+    +1,632 参数）。没有它时，共享 MLP + 置换等变注意力对 34 行的整行互换几乎无感
+    （2m↔8m：`|Δlogits|` 1.5e-5）—— 见 `LEGACY_TILE_ID` 的注释。
+    """
 
     def __init__(self, d_tile: int = TILE_D, n_heads: int = N_HEADS,
                  d_model: int = D_MODEL) -> None:
         super().__init__()
+        # ⚠ legacy ⇒ **不建**（`state_dict` 少一个张量 ⇒ `net.bin` 逐字节 == 改动前）。
+        if LEGACY_TILE_ID:
+            self.tile_id = None
+        else:
+            self.tile_id = nn.Parameter(torch.empty(34, C_TILE))
+            _init_tile_id_(self.tile_id)
         self.enc = nn.Sequential(nn.Linear(C_TILE, d_tile), nn.ReLU(),
                                  nn.Linear(d_tile, d_tile), nn.ReLU())
         self.attn = nn.MultiheadAttention(d_tile, n_heads, batch_first=True)
@@ -242,6 +309,10 @@ class TileTower(nn.Module):
         self.proj = nn.Linear(d_tile, d_model)
 
     def forward(self, tile: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # 身份嵌入**加在输入侧**：34 行各自带一个可学偏移，共享 `enc` 因此能"看见是哪张牌"。
+        # 旧包（补 0）⇒ `tile + 0` 逐位不变。
+        if self.tile_id is not None:
+            tile = tile + self.tile_id.unsqueeze(0)
         h = self.enc(tile)
         a, _ = self.attn(h, h, h, need_weights=False)
         h = self.norm(h + a)

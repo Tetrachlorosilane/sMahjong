@@ -2048,7 +2048,12 @@ ok(v4_model.build(seed=5).legacy_pool is False
 #       ③ `u_res=0` ⇒ 与 legacy 前向**逐位相同**（旧包缺张量补 (1,0)/0 的等价性）；
 #       ④ `u_res≠0` ⇒ 残差路径**真的在算**（不是个永远乘 0 的死分支）；
 #       ⑤ `frac(u==0)` **LN 前 / 后各报一次**（⚠ LN 之后结构上必为 0 ⇒ 只报后值 = 假绿）。
+_b3_tile_flag = v4_model.LEGACY_TILE_ID
+# ⚠ #0（第一百零六轮）之后缺省模型多 `tile.tile_id`（+1,632）⇒ B3 的"+576"必须建在
+#   **legacy #0** 的网上量，否则会把张量增量算进 B3 的账（1,398,568 → 1,400,200 的误读）。
+v4_model.set_legacy_tile_id(True)
 _b3 = v4_model.build(seed=5)
+v4_model.set_legacy_tile_id(_b3_tile_flag)
 eq("B3：参数 = 现网 1,397,992 + 576", _b3.param_count(), 1398568)
 ok(float(_b3.fusion.u_res.abs().max()) == 0.0
    and float((_b3.fusion.u_norm.weight - 1.0).abs().max()) == 0.0
@@ -2776,10 +2781,11 @@ import struct as _struct                                               # noqa: E
 from mahjong_ml.v4 import export as v4_export                          # noqa: E402
 
 _v4shape = v4_export.expected_shapes(v4_export.FULL_DIMS)
-# 81 = 74（三塔 + 融合 + 多头）+ 2（`heads.policy_gate.*`，第五十五轮）+ 2（`fusion.mem.*`，第六十轮 W1）
+# 82 = 74（三塔 + 融合 + 多头）+ 2（`heads.policy_gate.*`，第五十五轮）+ 2（`fusion.mem.*`，第六十轮 W1）
 #      + 3（`fusion.u_norm.{weight,bias}` + `fusion.u_res`，第一百零四轮 B3）
-eq("P5 导出：期望张量表条数（81 = 74 + 门控 2 + 长程 2 + B3 3）", len(_v4shape), 81)
-eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 81)
+#      + 1（`tile.tile_id`，第一百零六轮 #0；**可缺** ⇒ 旧包/`--legacy-tile-id` 仍是 81）
+eq("P5 导出：期望张量表条数（82 = 74 + 门控 2 + 长程 2 + B3 3 + #0 1）", len(_v4shape), 82)
+eq("P5 导出：逐张量名不重复", len(set(_v4shape)), 82)
 _v4sd = v4_model.build(20260928).state_dict()
 _v4dims = v4_export.dims_from_state(_v4sd)
 eq("P5 导出：从权重形状反推的维度", _v4dims, v4_export.FULL_DIMS)
@@ -2793,7 +2799,7 @@ _v4p = v4_export.save_net(_v4sd, _v4dims, _pnet)
 _eq = v4_export.read_net(_v4p)
 eq("P5 导出：读回的格式号", _eq["format"], v4_export.NET_FORMAT)
 eq("P5 导出：读回的维度", _eq["dims"], v4_export.FULL_DIMS)
-eq("P5 导出：读回的张量数", len(_eq["tensors"]), 81)
+eq("P5 导出：读回的张量数", len(_eq["tensors"]), 82)
 eq("P5 导出：读回的块数", len(_eq["blocks"]), len(v4_spec.BLOCKS))
 eq("P5 导出：块指纹 == 注册表指纹", _eq["fingerprint"], v4_spec.fingerprint())
 # ⚠ 契约里有两种"候选写法"（见 `export._check_shapes` 的注释）：**多个候选形状**（policy 宽 dm 或 dm+3）

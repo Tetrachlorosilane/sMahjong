@@ -150,6 +150,10 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         "fusion.u_norm.weight": (None, (dm,)),
         "fusion.u_norm.bias": (None, (dm,)),
         "fusion.u_res": (None, (dm,)),
+        # ★ #0（第一百零六轮）：34 行身份嵌入。**可缺**（旧包没有）⇒ 补 0 ⇒ 逐位不变；
+        #   `--legacy-tile-id` 的网也不建它 ⇒ 两种张量表都合法（net.bin 逐字节复旧）。
+        #   ⚠ Java/C++ 前向尚未认识这个张量（本批只做 Python 侧）。
+        "tile.tile_id": (None, (34, ct)),
         # 头
         # ⚠ **policy 的输入宽度 = `dm`**（第五十五轮把 belief 改成"逐候选门控"后恢复）；
         #   但**旧网**里它可能是 `dm+3`（第五十轮那版"拼接"）⇒ 加载期**截断**掉后 3 列：
@@ -351,7 +355,10 @@ def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             ("fusion.mem.weight", (dm, dm), 0.0), ("fusion.mem.bias", (dm,), 0.0),
             # ★ B3：旧包缺这三组 ⇒ LN 用 (1,0)、残差门用 0 ⇒ 恒等
             ("fusion.u_norm.weight", (dm,), 1.0), ("fusion.u_norm.bias", (dm,), 0.0),
-            ("fusion.u_res", (dm,), 0.0)):
+            ("fusion.u_res", (dm,), 0.0),
+            # ★ #0（第一百零六轮）：旧包缺身份嵌入 ⇒ 补 **0** ⇒ `tile + 0` 逐位不变
+            #   （形状 = `[34, C_TILE]`，与 `TileTower` 的输入宽同一来源）。
+            ("tile.tile_id", (34, spec.C_TILE), 0.0)):
         if name not in out:
             out[name] = torch.full(shape, fill, dtype=dtype)
     return out
@@ -369,15 +376,20 @@ def state_from_net(parsed: Mapping[str, Any]) -> dict[str, torch.Tensor]:
 #: `--legacy-u-res` 的网**没有**这三组张量（B3 在构造期就不建）；把新包载入那种网时
 #: 只允许**这三组**多出来（其余多/少一律照旧报错 —— ⛔ 别把这条放宽成"多余键都忽略"）。
 _B3_KEYS = ("fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res")
+#: 同理：`--legacy-tile-id` 的网没有 `tile.tile_id`（#0 在构造期就不建）⇒ 新包载入它时只多这一组。
+_TILE_ID_KEYS = ("tile.tile_id",)
+_OPTIONAL_KEYS = _B3_KEYS + _TILE_ID_KEYS
 
 
 def adapt_to_model(sd: Mapping[str, torch.Tensor], model: torch.nn.Module,
                    *, what: str = "") -> dict[str, torch.Tensor]:
     """把（可能来自新包的）状态字典适配到**这张网的张量集**上。
 
-    存在的唯一理由 = **B3 的 legacy 网**（`--legacy-u-res` 在构造期不建 `u_norm`/`u_res`）：
-    新包里有这三组、目标网没有 ⇒ 丢掉；反过来（目标有、字典缺）`normalize_state` 已经补过
-    (1,0)/0 ⇒ 不会走到"缺键"。⚠ 除这三组之外的任何多余键仍然**报错**（保持原有的 fail-closed）。
+    存在的唯一理由 = **构造期可缺的两类张量**：
+    - **B3 的 legacy 网**（`--legacy-u-res` 不建 `u_norm`/`u_res`）；
+    - **#0 的 legacy 网**（`--legacy-tile-id` 不建 `tile_id`）。
+    新包里有、目标网没有 ⇒ 丢掉；反过来（目标有、字典缺）`normalize_state` 已经补过
+    (1,0)/0 ⇒ 不会走到"缺键"。⚠ 除这两类之外的任何多余键仍然**报错**（保持 fail-closed）。
     """
     want = set(model.state_dict())
     have = set(sd)
@@ -385,7 +397,7 @@ def adapt_to_model(sd: Mapping[str, torch.Tensor], model: torch.nn.Module,
     if missing:
         raise NetFormatError(f"{what or '权重'} 缺 {len(missing)} 个张量：{missing[:6]}")
     extra = sorted(have - want)
-    bad = [k for k in extra if k not in _B3_KEYS]
+    bad = [k for k in extra if k not in _OPTIONAL_KEYS]
     if bad:
         raise NetFormatError(f"{what or '权重'} 多出 {len(bad)} 个张量：{bad[:6]}")
     return {k: v for k, v in sd.items() if k in want}
