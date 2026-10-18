@@ -2320,6 +2320,12 @@ def train(args) -> dict:
     else:
         print("值头/优势口径：整场结果（value = final_scores − 起点；旧口径）")
     keep_tr, w_tr = _row_weights(train_data, np.arange(n), rwr_beta, "cpu")
+    # ⚠ 全表都是学生行（自对弈四席同一张网）时 `_row_weights` 返回 None（"不需要掩码"），
+    #   而 PPO 的替代项**必须有** `row_keep`。这里补成全 1 掩码（语义与"不裁剪"完全相同，
+    #   `n` 是训练行数）—— 缺 `is_student` 列（老数据集/没给 `--student`）仍然交给下游硬拒。
+    if (str(getattr(args, "objective", "")) == "ppo" and keep_tr is None
+            and train_data.get("is_student") is not None):
+        keep_tr = torch.ones(int(n), dtype=torch.float32)
     if rwr_beta > 0 and w_tr is None:
         raise SystemExit("--rwr-beta > 0 但数据集里没有 `delta` 列（老数据集）—— "
                          "重新 `python -m mahjong_ml.v4.dataset build …`（它现在会写 `delta`/`is_student`）")

@@ -668,4 +668,75 @@ format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同�
   入口要换 G1（本批未改工具，只直接跑 `trainer v4golden`）；三端闸门与发布属段 4。
 - ⛔ 本批未采集、未跑闸门、未发布；未改 Java / `tools/policy-gate-check.mjs` / `MV1-PLAN §1–§9`。
 
+## 14 段 4 = a− 自采 → 在线训练 → 验收 10 条（第一百一十一轮，2026-10-19）
+
+> 判据行 = 本节 §4（1–10）+ `AGENTS.md` §6.5 判据 23。证据 = `.tmp/mv1-s30/`（`smoke-selfplay.log` / `collect-mem.log` / `dataset-mem.log` / `train.log` / `probe-*.json` / `g2/compare.txt` / `selftest.log` / `selfcheck.log` / `policy-gate.log`）。⛔ 未发布、未跑强度闸门。
+
+### 14.1 自采数据（a− 自己产，满足 PPO 口径）
+
+- **权重**：`mv1-s27-A3000b` 先转 format 3（`A3000b-format3.bin`，3,841,261 B，sha256 `67BE1D1A…CA9BE1`）—— 段 2 的导出器，format=3 / `topoId=3`。
+- **命令（逐字）**：`trainer.exe selfplay 1200 --workers 8 --policy net:C:\…\.tmp\mv1-s29a\A3000b-format3.bin#1,×4 --seed 20261020 --out .tmp\mv1-s30\data\collect-1200`（`MAHJONG_PRODUCER=cpp` 的等价直调；§一·1）。
+- **先小后大**：200 场冒烟 **254.6 s** / 2,239 小局 / 135,498 决策 / `DATASET PASS` ⇒ 管线、`policy=`、轨迹校验先过；再 1,200 场。
+- **1,200 场读数**：**1,583.1 s**（0.76 场/s、528 决策/s）· 13,577 小局 · **836,200 决策**（自家 652,099 / 鸣牌 184,101）· 流局率 11.47% · 每场 11.31 小局。
+- **`policy=` 串**（`summary.json` 与逐行 `g*.jsonl` 一致）：`net:C:\Users\HP\source\games\mahjong\.tmp\mv1-s29a\A3000b-format3.bin#1` ×4 ⇒ 数据生成策略 **==** 训练 `--init`。
+- **校验**：`node tools\selfplay-check.mjs .tmp\mv1-s30\data\collect-1200` ⇒ **DATASET PASS**（OBS_KEYS/schema/动作分布全过；`obs.v=3`）。
+- **compact**：`.tmp/mv1-s30/data/compact`，793,538 train + 42,662 val（全部 `is_student=1`），`meta.json` sha256 `4AAD48F6…B47730`，**目录清单 sha256 `2cdda21d…1739f9`**（48 个 `.npy`，19.30 GB）；`h0` 由 `--carry-model` 同一张 a− 网算（`h0_nonzero_frac` 5.19%）。
+- **落私有根**：`.tmp/mv1-s30/data/`；⛔ 未写 `raw/**`；逐手轨迹只在私有根，报后按纪律删（仅留 `summary.json`/证据）。
+
+### 14.2 在线训练（配方逐字）
+
+`python -m mahjong_ml.v4.pretrain --data .tmp\mv1-s30\data\compact --label mv1-s30-online --epochs 12 --max-steps 100 --batch 512 --lr 3e-3 --head-lr-mult 3.0 --seed 20261020 --objective ppo --behaviour <A3000b-format3> --behaviour-temp 1.0 --value-target delta --stage-a 0 --stage-b 0 --grad-clip 0.5 --kl-early-stop 1.0 --kl-min-steps 100 --threads 8 --lr-schedule floored-cosine --lr-floor-frac 0.75 --arch a- --init <同一张网> --cache-ref-logits .tmp\mv1-s30\refcache`
+
+- **PPO 口径自检**：`KL(π_old‖π_new) = -3.34e-08`（≈0）⇒ 权重与温度（T=1）都对上。
+- **跑满**：1,200/1,200（12×100 步）· `stop_reason` **空** · 训练相 **169.1 s** / 总 **261.5 s**。
+- **读数**（验收探针，1,024 val 学生行）：`KL(π_trained‖π_init)`（T=1）**0.031888**（p99 0.2848）· argmax 翻转 **6.15%** · 学生 top1 **0.725586** · init top1 **0.747070**（比值 **0.971**）· `frac(u==0)` LN 前 **0.0000** · `tile_id max|emb|` **0.5666**。
+- **`net.bin`**：format 3 / `topoId=3` / **959,078 参数** / **3,841,261 B** / sha256 **`3DB904FF…D0054493`**。
+- ⚠ **`--value-target delta` + `--advantage auto` 实际走 `value`（整场结果）**（源码 `value_key = rtg else value`；`delta` 只有显式 `--advantage hand` 才生效）。本批照实记。
+
+### 14.3 ⭐ 判据 3（事件真接入）：仍红 ⇒ 段 1 的归因**不成立**
+
+| 网（1,024 行） | 事件窗口打乱 argmax | KL | 只动 tile 34 行（翻转 / KL） | 窗口 roll 1 行 | 事件整段置 0 |
+| --- | ---: | ---: | --- | --- | --- |
+| **S30（自采+在线）** | **1.367%** | **0.008380** | 0.391% / 0.000398 | 0.391% / 0.001141 | 2.441% / 0.1024 |
+| a− init（数据生成策略） | 1.660% | 0.013402 | 0.195% / 0.000157 | 0.781% / 0.004478 | 2.344% / 0.06735 |
+| 段 1 A3000b（BC·v4 标签） | 1.46% | 0.0079 | 0.39% / 2.0e-4 | — | 3.13% / 0.048 |
+
+⇒ **判据 3 仍红**（要 ≥5% ∧ KL ≥0.02）：自采一代只把 KL 从 0.0079 抬到 0.0084（+6%），翻转 1.46%→1.37%。
+**归因不成立**：换掉"标签来自 v4 旧网"这个条件后没有量级变化，而**老师（a− init）自己也只有 1.66% / 0.0134** ⇒ 上限在**结构/训练**（顺序有关的 GRU 只经 `h_evt` 第 95 token 进 joint attention，信号的梯度太弱），不在 v4 标签。下一步应做"直接监督顺序敏感量 / 给 `h_evt` 加显式读出"的消融，而不是再换一代老师。
+
+### 14.4 验收 10 条（逐条读数）
+
+| # | 判据 | 读数 | 判定 |
+| --- | --- | --- | --- |
+| 1 | `frac(u==0) <10%` ∧ 活维 | LN 前 **0.0000** · 活维 **128/128** | ✅ |
+| 2 | 有效秩 ≥0.8×维度（分块） | tile **964/1632=59.1%**（按 §2.1 的 1190 有效维 = **81.0%**）· ctx **39/55=70.9%** · evt **75/96=78.1%** · cand **85/96=88.5%** | cand ✅；其余 ✗（2/4 若 tile 按 1190 计） |
+| 3 | 事件打乱 ≥5% ∧ KL ≥0.02 | **1.367% / 0.008380** | ❌（见 §14.3） |
+| 4 | 逐头指标 + 阴性对照 + ECE≤0.05 + value 首末 bin | **无法判定**：本批未采 `--aux`（`has_aux=false`），缺逐头校准/阴性对照读数 | 无法判定 |
+| 5 | `policy-gate-check --strict` 退出 0 | **exit 1**：在线 5 / **退化 4**（`v4-bc-004`/`v4-league-g08`/`v4-p3-001`/`v4-ppo-001`，**既有 9 包**；新网未进 `bot-ai/`，未参与） | ❌（既有） |
+| 6 | 三端 argmax ≥3,083/3,083、真分歧 0、TIE<中位 gap | **py↔cpp 3,083/3,083 · py↔java 3,083/3,083 · cpp↔java 3,083/3,083**；真分歧 **0**；`max|Δ|` 短 **6.87e-5** / 长 **2.48e-5**；gap 中位 **0.9625**（TIE≈1.37e-4） | ✅ |
+| 7 | `MDE ≤ 判定阈值`（δ≥1.0 顺位点） | **未跑**（按指令不跑强度闸门）⇒ 无法判定；设计侧 n=12,000 `MDE_Bonf=1.104` | 无法判定 |
+| 8 | 判据 23 合取（KL≥0.1 ∧ 无早停 ∧ top1≥0.8×init ∧ 跑满） | KL **0.0319** ❌ · 无早停 ✅ · top1 比 **0.971** ✅ · **1,200/1,200** ✅ | ❌（KL 腿） |
+| 9 | 每层激活 std>0 / 梯度到达 ≥95% / 首层输入列 std 比 ≤20× | 激活：tile/evt/ctx/fusion **dead 0**（cand 有 **1,152/2,944 死列 = padding**）；梯度到达 **95.50%**（policy CE 路径）；列 std 比 tile **19.47×** ✅ · ctx **180.9×** ✗ · cand **194.1×** ✗ | 部分 ❌ |
+| 10 | 参数占比 + FLOPs ≤103.3 M + 1.70 ms + 增量 carry | FLOPs **73.06 M**（审计口径 **68.77**）✅；占比 tile 46.6 / evt 22.0 / fusion 22.6 / heads 2.7%（结构不变）✅；torch 墙钟 5.69 ms（只作相对量）；C++ `v4net` 端到端 15.3 ms/行（**含逐行 JSON 解析 ~2.9 ms**，⛔ 不与 1.70 ms 并排）；增量 carry 契约未变（`trainer --selftest` PASS + G2 长/短 carry 一致） | FLOPs/占比 ✅；1.70 ms **未测到纯前向** |
+
+### 14.5 与段 1 对照表 + 一句结论
+
+| 指标 | 段 1 A3000b（BC on v4 标签） | 段 4 S30（a− 自采 + 在线 PPO） | 段 4 init（a−） |
+| --- | ---: | ---: | ---: |
+| 事件打乱 argmax 翻转 | 1.46% | **1.367%** | 1.660% |
+| 事件打乱 KL | 0.0079 | **0.008380** | 0.013402 |
+| 事件整段置 0（翻转 / KL） | 3.13% / 0.048 | 2.441% / 0.1024 | 2.344% / 0.06735 |
+| `frac(u==0)` LN 前 | 0.0000 | **0.0000** | — |
+| 学生 top1（各自 val） | 0.669 | **0.725586**（init 0.747070） | — |
+| KL(π_t‖π_init) | 5.773（**冷启，无信息量**） | **0.031888**（有信息量：init 是 a− 自采网） | — |
+
+⭐ **结论一句**：**自采数据没有解除老师上限** —— 在线一代的事件顺序敏感性仍 1.37%/0.0084，且数据生成策略自己也仅 1.66%/0.0134 ⇒ 段 1 的"标签来自 v4 旧网"归因**不成立**，瓶颈是结构/训练对事件顺序的利用。
+
+### 14.6 段 4 的代码修复（最小、可复现）
+
+- `v4/dataset.py`（两处，父进程 + 并行子进程）：`M.build(**dims)` → `M.build(arch=parsed["arch"], **dims)` —— 不传 arch 时按 v4 建塔，加载 a− 权重直接 `Missing/Unexpected key`（段 4 实测；§14.1 的 `h0` 因此才建得出来）。
+- `v4/pretrain.py`：全表都是学生行时 `_row_weights` 返回 `None`（"不需要掩码"），而 PPO 的替代项必须有 `row_keep` ⇒ 补全 1 掩码（语义与不裁剪相同；缺 `is_student` 列仍由下游硬拒）。
+- `server/tests/golden/README.md` + `tools/gen-golden.ps1`：golden 二进制**构建期生成**（缺文件时 selftest 打印"跳过"并继续，见 README）；⛔ `.bin` 不进仓库。
+
+
 

@@ -1022,7 +1022,9 @@ def build(src: str | Path, out_dir: str | Path, *, val_frac: float = 0.05, split
         nthr = pin_torch_threads()                  # 逐事件小 GEMM：线程 >1 只会更慢（见该函数）
         parsed = v4export.read_net(carry_spec)
         dims = {k: int(v) for k, v in parsed["dims"].items()}
-        net = M.build(**dims)                       # `n_heads` 已在 `read_net` 的 dims 里
+        # ⚠ arch 必须**从权重里读**：A− 与 v4 的张量名/形状不同（a- 的 GRU 是 128），
+        #   按缺省 v4 建塔再 load 会直接 "Missing/Unexpected key"（段 4 实测）。
+        net = M.build(arch=parsed["arch"], **dims)   # `n_heads` 已在 `read_net` 的 dims 里
         net.load_state_dict(v4export.state_from_net(parsed), strict=True)
         net.eval()
         net.requires_grad_(False)                   # 算 `h0` 是**推理**：不建图、不更新这个网
@@ -1619,7 +1621,7 @@ def main(argv: list[str] | None = None) -> int:
             pin_torch_threads()
             parsed = v4export.read_net(carry_spec)
             dims = {kk: int(v) for kk, v in parsed["dims"].items()}
-            net = M.build(**dims)
+            net = M.build(arch=parsed["arch"], **dims)   # 与父进程同一条：arch 从权重读
             net.load_state_dict(v4export.state_from_net(parsed), strict=True)
             net.eval()
             net.requires_grad_(False)
