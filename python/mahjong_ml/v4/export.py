@@ -95,12 +95,18 @@ class NetFormatError(RuntimeError):
 
 # ------------------------------------------------------------------ 形状审计
 
-def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
+def expected_shapes(d: Mapping[str, int], arch: str = M.ARCH_V4) -> dict[str, tuple[int, ...]]:
     """这套宽度下**应该**出现的每个张量名与形状（逐条核对，缺/多/形状不符都报错）。
 
     为什么要有这张表：`state_dict()` 是"训练代码的现状"，而推理端要的是"契约"。
     两者之间的任何漂移（改名、换层、少一个 bias）都必须在这里**当场**变成错误。
+
+    ⚠ **两套拓扑**（`arch`）：`v4` = 现有图（**逐字节不变**）；`a-` = T1 新图
+    （`ARCH-REDESIGN` §2.2）。`net.bin` 的**格式**没变 —— 只是张量集不同，读端用
+    `arch_of()` 按张量名反推（`format` 3 是段 2 的事）。
     """
+    if arch == M.ARCH_A:
+        return _expected_shapes_a(d)
     dm, td, vb = int(d["d_model"]), int(d["tile_d"]), int(d["value_bins"])
     k, ct, ce, cc = spec.K_EVT, spec.C_TILE, spec.C_EVT, spec.C_CAND
     out: dict[str, tuple[int, ...]] = {
@@ -174,8 +180,91 @@ def expected_shapes(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: str) -> None:
-    want = expected_shapes(d)
+def _expected_shapes_a(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
+    """**A−（T1）**的张量表（`ARCH-REDESIGN` §2.2；93 个张量，含可缺的 `tile.tile_id`）。
+
+    ⚠ 逐模块参数（与 §0.1 T1 列**逐项相等**）：tile 446,144（+`tile_id` 1,632）·
+    evt 210,560 · fusion 216,064（+B3 384）· ctx 24,960 · cand 33,280 · heads 26,054。
+    """
+    dm, td, vb = int(d["d_model"]), int(d["tile_d"]), int(d["value_bins"])
+    ct, ce, cc = spec.C_TILE, spec.C_EVT, spec.C_CAND
+    out: dict[str, tuple[int, ...]] = {
+        # ★ #0 身份嵌入：**可缺**（`--legacy-tile-id` 的网不建它 ⇒ 逐字节复旧）
+        "tile.tile_id": (None, (34, ct)),
+        # 34 轴卷积 + 3 个 pre-LN 残差块 + 轴向注意力 + 投影到 fusion 宽
+        "tile.stem.weight": (td, ct, 5), "tile.stem.bias": (td,),
+        "tile.stem_norm.weight": (td,), "tile.stem_norm.bias": (td,),
+        "tile.res.0.norm.weight": (td,), "tile.res.0.norm.bias": (td,),
+        "tile.res.0.conv.weight": (td, td, 5), "tile.res.0.conv.bias": (td,),
+        "tile.res.1.norm.weight": (td,), "tile.res.1.norm.bias": (td,),
+        "tile.res.1.conv.weight": (td, td, 3), "tile.res.1.conv.bias": (td,),
+        "tile.res.2.norm.weight": (td,), "tile.res.2.norm.bias": (td,),
+        "tile.res.2.conv.weight": (td, td, 3), "tile.res.2.conv.bias": (td,),
+        "tile.attn_norm.weight": (td,), "tile.attn_norm.bias": (td,),
+        "tile.attn.in_proj_weight": (3 * td, td), "tile.attn.in_proj_bias": (3 * td,),
+        "tile.attn.out_proj.weight": (td, td), "tile.attn.out_proj.bias": (td,),
+        "tile.proj.weight": (dm, td), "tile.proj.bias": (dm,),
+        "tile.proj_norm.weight": (dm,), "tile.proj_norm.bias": (dm,),
+        # 事件塔：Linear + GRUCell（增量 carry 契约不变）+ 2×Conv1d(k=3)+LN
+        "event.enc.weight": (dm, ce), "event.enc.bias": (dm,),
+        "event.cell.weight_ih": (3 * dm, dm), "event.cell.weight_hh": (3 * dm, dm),
+        "event.cell.bias_ih": (3 * dm,), "event.cell.bias_hh": (3 * dm,),
+        "event.conv1.weight": (dm, dm, 3), "event.conv1.bias": (dm,),
+        "event.norm1.weight": (dm,), "event.norm1.bias": (dm,),
+        "event.conv2.weight": (dm, dm, 3), "event.conv2.bias": (dm,),
+        "event.norm2.weight": (dm,), "event.norm2.bias": (dm,),
+        # ctx / cand 编码器：**首层 LN（C5）** + 2 个 Linear（死维/恒等维在首层被掩码挡住）
+        "ctx.norm.weight": (spec.C_CTX,), "ctx.norm.bias": (spec.C_CTX,),
+        "ctx.fc1.weight": (dm, spec.C_CTX), "ctx.fc1.bias": (dm,),
+        "ctx.fc2.weight": (dm, dm), "ctx.fc2.bias": (dm,),
+        "cand.norm.weight": (cc,), "cand.norm.bias": (cc,),
+        "cand.fc1.weight": (dm, cc), "cand.fc1.bias": (dm,),
+        "cand.fc2.weight": (dm, dm), "cand.fc2.bias": (dm,),
+        # 95-token joint attention + FFN + cross + out
+        "fusion.seg": (M.N_SEG, dm),
+        "fusion.joint_norm.weight": (dm,), "fusion.joint_norm.bias": (dm,),
+        "fusion.joint.in_proj_weight": (3 * dm, dm), "fusion.joint.in_proj_bias": (3 * dm,),
+        "fusion.joint.out_proj.weight": (dm, dm), "fusion.joint.out_proj.bias": (dm,),
+        "fusion.ffn_norm.weight": (dm,), "fusion.ffn_norm.bias": (dm,),
+        "fusion.ffn1.weight": (dm, dm), "fusion.ffn1.bias": (dm,),
+        "fusion.ffn2.weight": (dm, dm), "fusion.ffn2.bias": (dm,),
+        "fusion.cross.in_proj_weight": (3 * dm, dm), "fusion.cross.in_proj_bias": (3 * dm,),
+        "fusion.cross.out_proj.weight": (dm, dm), "fusion.cross.out_proj.bias": (dm,),
+        "fusion.out.weight": (dm, 3 * dm), "fusion.out.bias": (dm,),
+        "fusion.out_norm.weight": (3 * dm,), "fusion.out_norm.bias": (3 * dm,),
+        # ★ B3 按 128 重算（+2×128+128 = +384）：**可缺**（`--legacy-u-res` 的网不建）
+        "fusion.u_norm.weight": (None, (dm,)), "fusion.u_norm.bias": (None, (dm,)),
+        "fusion.u_res": (None, (dm,)),
+        # 头（26,054）
+        "heads.policy.weight": (1, dm), "heads.policy.bias": (1,),
+        "heads.policy_gate.weight": (dm, 3), "heads.policy_gate.bias": (dm,),
+        "heads.value.weight": (vb, dm), "heads.value.bias": (vb,),
+    }
+    for name, width in HEAD_WIDTHS.items():
+        if name == "policy":
+            continue
+        out[f"heads.{name}.weight"] = (width, dm)
+        out[f"heads.{name}.bias"] = (width,)
+    assert ct == 48 and ce == 96
+    return out
+
+
+def arch_of(sd: Mapping[str, torch.Tensor]) -> str:
+    """按**张量名**反推拓扑（`net.bin` 格式没变 ⇒ 不靠头部字段）。
+
+    判据是 `tile.stem.weight`：只有 A− 的 tile 塔有 34 轴卷积；v4 的 tile 塔是 `tile.enc.*`。
+    ⚠ 两种都不是 ⇒ **报错**（不许猜成 v4 —— 猜错会让 `_check_shapes` 报一堆"缺 tile.enc.0"）。
+    """
+    if "tile.stem.weight" in sd:
+        return M.ARCH_A
+    if "tile.enc.0.weight" in sd:
+        return M.ARCH_V4
+    raise NetFormatError("认不出拓扑：既没有 `tile.stem.weight`（A−）也没有 `tile.enc.0.weight`（v4）")
+
+
+def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: str,
+                  arch: str = M.ARCH_V4) -> None:
+    want = expected_shapes(d, arch)
     got = {k: tuple(v.shape) for k, v in sd.items()}
     bad: list[str] = []
     for k, s in want.items():
@@ -205,10 +294,18 @@ def _check_shapes(sd: Mapping[str, torch.Tensor], d: Mapping[str, int], what: st
 
 
 def dims_from_state(sd: Mapping[str, torch.Tensor]) -> dict[str, int]:
-    """从权重形状反推四个宽度（`nHeads` 反推不出来 —— 只是分组方式，必须外部给）。"""
-    # ⚠ `d_model` **从 `tile.proj.weight`（`[dm, td]`）反推**，别再从 policy 权重反推：
-    #   第四十九轮起 policy 的输入是 `dm+3`（多拼了 3 个 belief 概率），而**旧网仍是 `dm` 宽**
-    #   ⇒ 从它反推会把 d_model 读成 192 或 195 两种，取决于网的新旧。`tile.proj` 与新旧无关。
+    """从权重形状反推四个宽度（`nHeads` 反推不出来 —— 只是分组方式，必须外部给）。
+
+    ⚠ `d_model` **从 `tile.proj.weight`（`[dm, td]`）反推**，别再从 policy 权重反推：
+      第四十九轮起 policy 的输入是 `dm+3`（多拼了 3 个 belief 概率），而**旧网仍是 `dm` 宽**
+      ⇒ 从它反推会把 d_model 读成 192 或 195 两种，取决于网的新旧。`tile.proj` 与新旧无关。
+    ⚠ A− 的 `tile_d` 从 `tile.stem.weight`（`[td, 48, k]`）反推（`tile.enc.0` 不存在）。
+    """
+    if arch_of(sd) == M.ARCH_A:
+        return {"d_model": int(sd["tile.proj.weight"].shape[0]),
+                "tile_d": int(sd["tile.stem.weight"].shape[0]),
+                "n_heads": M.A_N_HEADS,
+                "value_bins": int(sd["heads.value.weight"].shape[0])}
     dm = int(sd["tile.proj.weight"].shape[0])
     return {"d_model": dm, "tile_d": int(sd["tile.enc.0.weight"].shape[0]),
             "n_heads": M.N_HEADS, "value_bins": int(sd["heads.value.weight"].shape[0])}
@@ -226,10 +323,15 @@ def fingerprint_of(bl: tuple[spec.Block, ...] = spec.BLOCKS) -> str:
 
 
 def net_blob(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], *,
-             blocks_: tuple[spec.Block, ...] = spec.BLOCKS) -> bytes:
-    """权重 state_dict → `net.bin` 格式 2（**确定性**：同输入两次导出逐字节相同）。"""
+             blocks_: tuple[spec.Block, ...] = spec.BLOCKS,
+             arch: str | None = None) -> bytes:
+    """权重 state_dict → `net.bin` 格式 2（**确定性**：同输入两次导出逐字节相同）。
+
+    ⚠ `arch` 缺省 = 按张量名反推（`arch_of`）；**格式一个字节没动**（A− 只换张量集）。
+    """
     d = {k: int(v) for k, v in dims.items()}
-    _check_shapes(sd, d, "net_blob")
+    a = arch_of(sd) if arch is None else str(arch)
+    _check_shapes(sd, d, "net_blob", a)
     bl = _block_table(blocks_)
     tensors = sorted(((k, v.detach().cpu().numpy().astype("<f4", copy=False))
                       for k, v in sd.items()), key=lambda kv: kv[0])
@@ -252,14 +354,16 @@ def net_blob(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], *,
 
 def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str | Path, *,
              label: str = "", source: str = "", blocks_: tuple[spec.Block, ...] = spec.BLOCKS,
-             extra: Mapping[str, Any] | None = None) -> Path:
+             extra: Mapping[str, Any] | None = None, arch: str | None = None) -> Path:
     p = Path(out)
     p.parent.mkdir(parents=True, exist_ok=True)
     d = {k: int(v) for k, v in dims.items()}
-    blob = net_blob(sd, d, blocks_=blocks_)
+    a = arch_of(sd) if arch is None else str(arch)
+    blob = net_blob(sd, d, blocks_=blocks_, arch=a)
     p.write_bytes(blob)
     meta: dict[str, Any] = {
         "kind": "v4", "format": NET_FORMAT, "bytes": len(blob),
+        "arch": a,
         "feature_version": spec.FEATURE_VERSION_V4, "obs_version": spec.OBS_VERSION_V4,
         "derived_version": spec.DERIVED_VERSION_V4,
         "dims": d, "params": int(struct.unpack_from("<I", blob, 60)[0]),
@@ -268,7 +372,7 @@ def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str |
         "blocks": [list(x) for x in _block_table(blocks_)],
         "contract_heads": list(M.contract_heads()),  # 旧 key 名 inference_heads（语义=训练与契约必需，2026-10-07 改名）
         "label": label, "source": source,
-        "tensors": {k: list(v) for k, v in sorted(expected_shapes(d).items())},
+        "tensors": {k: list(v) for k, v in sorted(expected_shapes(d, a).items())},
     }
     if extra:
         meta.update(dict(extra))
@@ -316,11 +420,13 @@ def read_net(path: str | Path) -> dict[str, Any]:
     return {"magic": magic, "format": fmt, "feature_version": feat, "obs_version": obs,
             "derived_version": derived,
             "dims": {"d_model": dm, "tile_d": td, "n_heads": nh, "value_bins": vb},
+            "arch": arch_of(tensors),
             "blocks": bl, "fingerprint": fp, "params": params, "tensors": tensors,
             "bytes": len(raw)}
 
 
-def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def normalize_state(sd: Mapping[str, torch.Tensor], arch: str | None = None
+                    ) -> dict[str, torch.Tensor]:
     """把**任意一代**的状态字典归一成**当前模型**的形状 —— 所有加载点共用这一处。
 
     处理三件跨代差异（第五十/五十五/六十轮）：
@@ -338,6 +444,7 @@ def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     `value_audit` 直接 `strict=True` 载 ckpt ⇒ `Missing key(s): heads.policy_gate.*`）。
     """
     out = dict(sd)
+    a = arch_of(out) if arch is None else str(arch)
     dm = int(out["tile.proj.weight"].shape[0])
     w = out.get("heads.policy.weight")
     if w is not None and w.ndim == 2:
@@ -347,6 +454,11 @@ def normalize_state(sd: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             raise NetFormatError(f"heads.policy.weight 宽度 {int(w.shape[1])} 既不是 {dm} "
                                  f"也不是旧版 {dm + 3}")
     dtype = out["tile.proj.weight"].dtype
+    if a == M.ARCH_A:
+        # A−：**只有 `tile.tile_id` 是可缺**（`--legacy-tile-id`）；`policy_gate` 恒在（T1 账里有）。
+        if "tile.tile_id" not in out:
+            out["tile.tile_id"] = torch.zeros(34, spec.C_TILE, dtype=dtype)
+        return out
     # 可缺张量（旧网没有）⇒ 补"恒等"：加新的可缺张量时**只需要动这张表**。
     # ⚠ 第三列是**补什么**：0 ⇒ 恒等门（`1+tanh(0)=1` / `u+tanh(0)·…=u`）；
     #   1 ⇒ LN 的 `weight` 恒等（1,0）。⛔ 别把 LN 的 weight 补 0（那会让 LN 输出恒 0）。

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -113,6 +114,81 @@ def set_legacy_tile_id(flag: bool) -> None:
     """
     global LEGACY_TILE_ID
     LEGACY_TILE_ID = bool(flag)
+
+
+# ====================================================================== A−（T1）新网络图
+#
+# 规格 = `lab/mv1/ARCH-REDESIGN.md` §2.2（逐层张量表 T1）+ §0.1（参数账）+ §2.3/§2.4/§2.5。
+# 开关 = `--arch {v4|a-}`，**缺省 `v4` = 现有图，逐位不变**（`ARCH` 只被 `build()`/`V4Model`
+# 读一次；不传就是旧图，连一个分支都不多）。
+#
+# ⚠ **`net.bin` 格式一个字节都没动**（仍是格式 2、64 B 头 + 块表 + 张量表）。A− 只是**换张量集**
+#   （`format` 3 是段 2 的事，本批不做）；读端的 arch 由**张量名**反推（`export.arch_of`），
+#   所以旧包照旧、新包也只多一组名字。
+# ⚠ 三端未同步 ⇒ A− 的网**不得**上线/上闸门（Java/C++ 不认识这些张量名）。
+ARCH_V4 = "v4"
+ARCH_A = "a-"
+#: 进程级 arch（`pretrain --arch a-` 在 `train()` 开头设一次；缺省 v4 = 旧图，逐位不变）
+ARCH = ARCH_V4
+
+#: A−（T1）的四个宽度：`d_tile=160 · d_evt=d_fuse=128 · value ±60/81 bin`（§0.1 T1 列）
+A_D_MODEL = 128
+A_TILE_D = 160
+A_N_HEADS = 4
+A_VALUE_BINS = 81
+A_VALUE_RANGE = 60.0
+
+#: 段嵌入的三种段（tile / evt / mem）—— `h_evt` 是**第 95 个 token**（§2.3 第 2 条：必须走
+#: "token 进注意力"，⛔ 不能拼在候选后面或作逐行常数，那对 softmax/argmax 是数学空操作）。
+N_SEG = 3
+SEG_TILE, SEG_EVT, SEG_MEM = 0, 1, 2
+
+#: A− 的 `danger → policy` 是**逐候选特征**（A 档语义），**0 参数**（`+4` 参数会破坏 957,062 的
+#: 逐模块账）：`logit_i += DANGER_COEF · log(mean_k sigmoid(danger_i,k) + eps)`。
+#: 为什么是固定系数而不是再学一层：heads 的账（policy 129 · gate 512 · value 10,449 · …）是
+#: 冻结的，`Linear(d+4→1)` 会变成 +4 参数；而"危险度作为逐候选特征"这件事本身只需要一条
+#: **确定性**（无参数）通道。出生时 danger 权重 ~U(±1/√128) ⇒ 逐候选差 ≪1e-3 ⇒ 等价于逐行常数
+#: （不改 argmax），训练后才真正分叉。⚠ 三端必须同样实现（同 eps、同系数、同 mean 口径）。
+DANGER_COEF = 1.0
+DANGER_EPS = 1e-6
+
+#: `u` 的死维 / 恒等维**不进首层**（`ARCH-REDESIGN` §2.1：ctx 删 9、cand 删 32）——
+#: 做法 = 在首层前乘一个**非持久 buffer 掩码**（`persistent=False` ⇒ 不进 `state_dict` ⇒
+#: 不进 `net.bin`，参数账一个数都不变），被掩列**永远拿不到梯度**（不是"初始化成 0 等它学回来"）。
+#: 依据：`ctx[17]≡ctx[8]`（恒等）、`ctx[35]/ctx[37]` 恒 0、`ctx[58..63]` 预留恒 0；
+#: `cand[96..98]` 三端恒 0、`cand[99..127]` 预留恒 0。
+CTX_DEAD_DIMS: tuple[int, ...] = (17, 35, 37, 58, 59, 60, 61, 62, 63)
+CAND_DEAD_DIMS: tuple[int, ...] = tuple(range(96, 128))
+
+
+def set_arch(name: str) -> None:
+    """**进程级** arch 开关（`pretrain --arch a-` 在 `train()` 开头设一次）。
+
+    为什么也是进程级：一次训练会建好几张 V4Model（主网 / `--init` / `π_ref` / 行为策略）——
+    只让主网换图会让参照网的张量集不同 ⇒ 既不能 warm-start，也不能算 KL。
+    ⚠ `a-` 与 v4 **不能互相 warm-start**（张量名/形状全不同）⇒ 本批的 a- 臂只能冷启。
+    """
+    global ARCH
+    if name not in (ARCH_V4, ARCH_A):
+        raise ValueError(f"未知 arch {name!r}（可选：{ARCH_V4!r} / {ARCH_A!r}）")
+    ARCH = name
+
+
+def arch_dims(arch: str | None = None) -> dict[str, int]:
+    """该 arch 的四个宽度（写进 `checkpoint.config.dims` / `net.bin` 头）。"""
+    a = ARCH if arch is None else arch
+    if a == ARCH_A:
+        return {"d_model": A_D_MODEL, "tile_d": A_TILE_D, "n_heads": A_N_HEADS,
+                "value_bins": A_VALUE_BINS}
+    return {"d_model": D_MODEL, "tile_d": TILE_D, "n_heads": N_HEADS, "value_bins": VALUE_BINS}
+
+
+def value_bins(arch: str | None = None) -> int:
+    return arch_dims(arch)["value_bins"]
+
+
+def value_range(arch: str | None = None) -> float:
+    return A_VALUE_RANGE if (ARCH if arch is None else arch) == ARCH_A else VALUE_RANGE
 
 
 def _init_tile_id_(p: torch.Tensor) -> None:
@@ -380,6 +456,294 @@ class Mlp(nn.Module):
         return F.relu(h) if self.final_relu else h
 
 
+class AMlp(nn.Module):
+    """A− 的 `ctx` / `cand` 编码器：**首层 LayerNorm（C5）** + 两个 Linear + GELU。
+
+    参数（§0.1 T1）：`ctx` = 128+8,320+16,512 = **24,960**；`cand` = 256+16,512+16,512 = **33,280**。
+
+    ⚠ **死维 / 恒等维不进首层**：`dead` 里的通道在首层输入上乘一个**非持久 buffer 掩码**
+    （`persistent=False` ⇒ 不进 `state_dict`/`net.bin` ⇒ 参数账不变）。被掩列的梯度恒 0
+    ⇒ 它们不是"初始化成 0 等它自己学回来"，而是**结构上**读不到（判据：`grad` 恒 0）。
+    为什么用掩码而不是删通道：删通道 = 改 `C_CTX`/`C_CAND` = 改特征版本（要全量重建数据）；
+    掩码保住"张量仍 336/128 宽"（A 档 = 零数据重建）。
+    """
+
+    def __init__(self, cin: int, cout: int, dead: tuple[int, ...] = ()) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(cin)
+        self.fc1 = nn.Linear(cin, cout)
+        self.fc2 = nn.Linear(cout, cout)
+        m = torch.ones(cin)
+        for i in dead:
+            m[i] = 0.0
+        self.register_buffer("mask", m, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # ⚠ 掩码要**前后各一次**：只在 LN 前掩 ⇒ 死维的输入是 0，但 LN 的 `bias`/均值会把它们变成
+        #   非 0 ⇒ `fc1` 那一列**照样拿得到梯度**（判据"不进首层"当场红）。LN 后再掩一次 ⇒
+        #   死维对 `fc1` 的输入恒 0、梯度恒 0，且它们的**原值**也进不了 LN 的统计量。
+        return self.fc2(GELU(self.fc1(self.norm(x * self.mask) * self.mask)))
+
+
+class AGelu(nn.Module):
+    """**erf 版 GELU**（`approximate="none"`）—— A− 三端唯一的激活（C++ `std::erf` / Java 自带 erf）。
+
+    ⚠ ⛔ 不许换成 `tanh` 近似（末位就不同 ⇒ 长 carry 行逐层放大，见
+    `lab/mv1/A-REFACTOR-IMPL-PLAN.md` §5 风险 8）。⛔ 也不许换成 ReLU（A− 的设计前提是"无硬零"，
+    判据 1 的 `frac(u==0)<10%` 靠它）。
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="none")
+
+
+GELU = AGelu()
+
+
+class AResConv(nn.Module):
+    """**pre-LN 残差卷积块**：`x + conv(gelu(LN(x)))`（参数 = 1×conv(160→160,k) + 1×LN(160)）。
+
+    ⚠ 为什么是 pre-LN：§2.4 要求"全塔 pre-LN + 残差"；post-LN 在 4 层卷积后会把残差主干压小。
+    ⚠ 参数账（§0.1 T1 列）：k=5 ⇒ 128,160+320 = **128,480**；k=3 ⇒ 76,960+320 = **77,280**；
+      1×k=5 + 2×k=3 ⇒ **283,040**（与 T1 表逐项相等）。
+    """
+
+    def __init__(self, d: int, k: int) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(d)
+        self.conv = nn.Conv1d(d, d, kernel_size=k, padding=k // 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """`x`：`[B, 34, d]`（时间轴在 1）；返回同形状（残差在**通道**上，不在时间上）。"""
+        y = GELU(self.norm(x)).transpose(1, 2)                        # [B,d,34]
+        return x + self.conv(y).transpose(1, 2)
+
+
+class ATileTower(nn.Module):
+    """**34 轴卷积 + 轴向注意力**（T1 `d_tile=160` → `d_fuse=128`）。
+
+    数据布局**不动**：`tile` 仍是 `[B,34,C_TILE]`（34 牌种在前）⇒ 直接 `.transpose(1,2)`
+    成 `[B,48,34]` 做 `conv1d`（⛔ **不重建数据**，`C_TILE`/`FEATURE_VERSION` 不变）。
+
+    层次（参数见每行）：
+      1. `Conv1d(48→160,k=5,pad=2) + LN + GELU`            38,880
+      2. `1×ResConv(k=5) + 2×ResConv(k=3)`（pre-LN 残差）  283,040
+      3. `轴向 self-attn(4 头, d=160) + LN`（**pre-LN**，34 个 token 之间的全局混合）
+         → `Linear(160→128)+LN`                             124,224
+    合计 **446,144**（= §0.1 T1 的 tile 行）。
+
+    ★ #0 的 `tile_id[34, C_TILE]`（+1,632）**原样保留在输入侧**（加在转置之前）—— 已实测
+    "2m↔8m 整行互换 `|Δ|` 2.29e-5 → 3.087"（第一百零六轮）；A− 的卷积是**平移共享**的，
+    身份嵌入比旧图更关键（否则 34 行会被同一组卷积核完全同化）。
+    """
+
+    def __init__(self, d_tile: int = A_TILE_D, d_fuse: int = A_D_MODEL,
+                 n_heads: int = A_N_HEADS) -> None:
+        super().__init__()
+        if LEGACY_TILE_ID:
+            self.tile_id = None
+        else:
+            self.tile_id = nn.Parameter(torch.empty(34, C_TILE))
+            _init_tile_id_(self.tile_id)
+        self.stem = nn.Conv1d(C_TILE, d_tile, kernel_size=5, padding=2)
+        self.stem_norm = nn.LayerNorm(d_tile)
+        self.res = nn.ModuleList([AResConv(d_tile, 5), AResConv(d_tile, 3), AResConv(d_tile, 3)])
+        self.attn_norm = nn.LayerNorm(d_tile)
+        self.attn = nn.MultiheadAttention(d_tile, n_heads, batch_first=True)
+        self.proj = nn.Linear(d_tile, d_fuse)
+        self.proj_norm = nn.LayerNorm(d_fuse)
+
+    def forward(self, tile: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = tile + self.tile_id.unsqueeze(0) if self.tile_id is not None else tile
+        h = self.stem(x.transpose(1, 2))                            # [B,160,34]
+        t = GELU(self.stem_norm(h.transpose(1, 2)))                 # [B,34,160]
+        for blk in self.res:
+            t = blk(t)                                               # [B,34,160]
+        a, _ = self.attn(self.attn_norm(t), self.attn_norm(t), self.attn_norm(t),
+                         need_weights=False)
+        t = t + a                                                    # pre-LN 残差
+        z = self.proj_norm(self.proj(GELU(t)))                       # [B,34,128]
+        return z, z.mean(dim=1)
+
+
+class AEventTower(nn.Module):
+    """事件塔：`Linear(96→128)+GELU` → `GRUCell(128,128)`（**增量 carry 契约不变**）
+    → `2×Conv1d(128→128,k=3)+LN+GELU`（窗口内顺序）。
+
+    参数：`12,416 + 99,072 + 2×49,536 = 210,560`（= §0.1 T1 的 evt 行）。
+
+    ⚠ **carry 契约**：`forward`/`step` 的返回 `h` 仍是"**窗口之后**的 GRU 隐状态"
+    （逐事件推进、只喂真实行），与 `v4/cache.EventStream` / Java/C++ 的缓存槽同一把递推。
+    卷积只作用在**编码后的窗口 token** 上 —— 它不改变 `h`，因此增量契约一个字节都没动
+    （⛔ 不要把它写成"卷积输出进 GRU"：那会让 `h` 依赖窗口起点，缓存立刻陈旧）。
+    """
+
+    def __init__(self, d: int = A_D_MODEL) -> None:
+        super().__init__()
+        self.enc = nn.Linear(C_EVT, d)
+        self.cell = nn.GRUCell(d, d)
+        self.conv1 = nn.Conv1d(d, d, kernel_size=3, padding=1)
+        self.norm1 = nn.LayerNorm(d)
+        self.conv2 = nn.Conv1d(d, d, kernel_size=3, padding=1)
+        self.norm2 = nn.LayerNorm(d)
+
+    def _tokens(self, e: torch.Tensor) -> torch.Tensor:
+        # ⚠ `LayerNorm(d)` 归一化的是**最后一维** ⇒ 每次 LN 前先转成 `[B,T,d]`，conv 前再转回。
+        x = GELU(self.norm1(e)).transpose(1, 2)                       # [B,128,60]
+        x = self.conv1(x)
+        x = GELU(self.norm2(x.transpose(1, 2))).transpose(1, 2)       # [B,128,60]
+        x = self.conv2(x)
+        return x.transpose(1, 2)                                      # [B,60,128]
+
+    def forward(self, evt: torch.Tensor, h: torch.Tensor | None = None
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+        e = GELU(self.enc(evt))                                      # [B,K,128]
+        if h is None:
+            h = torch.zeros(e.shape[0], e.shape[2], dtype=e.dtype, device=e.device)
+        real = evt.abs().sum(dim=-1) > 0
+        for t in range(e.shape[1]):
+            h = torch.where(real[:, t].unsqueeze(-1), self.cell(e[:, t], h), h)
+        return self._tokens(e), h
+
+    def step(self, new_evt: torch.Tensor, h: torch.Tensor | None):
+        e = GELU(self.enc(new_evt))
+        for t in range(e.shape[1]):
+            h = self.cell(e[:, t], h)
+        return h
+
+
+def _sincos_pe(n: int, d: int) -> torch.Tensor:
+    """固定 sin/cos **相对窗口位置**编码 `[n,d]`（0 参数；`ARCH-REDESIGN` §2.3 第 1 条）。
+
+    为什么必须有它：joint attention 对**同一组 token** 是**置换等变**的 —— 只把 60 条事件
+    重新排序，"事件袋"一字不变，若不给位置信号，打乱窗口就只经 evt 塔的两层 k=3 卷积
+    **局部**改变表示（实测：无 PE 的 A− 打乱后 argmax 只翻 2.44%，低于判据 3 的 ≥5%）。
+    ⚠ 0 参数 ⇒ 957,062 的账一分钱不动；⚠ 常数 buffer（`persistent=False`）⇒ 不进 `net.bin`。
+    """
+    pos = torch.arange(n, dtype=torch.float32).unsqueeze(1)
+    i = torch.arange(0, d, 2, dtype=torch.float32)
+    div = torch.exp(-math.log(10000.0) * i / d)
+    pe = torch.zeros(n, d)
+    pe[:, 0::2] = torch.sin(pos * div)
+    if d % 2 == 0:
+        pe[:, 1::2] = torch.cos(pos * div)
+    else:
+        pe[:, 1::2] = torch.cos(pos * div[: d // 2])
+    return pe
+
+
+class AFusion(nn.Module):
+    """**95-token joint attention**：34 tile + 60 evt + 1 `h_evt`（第 95 个 token）。
+
+    参数（§0.1 T1 的 fusion 行，**216,064**）：
+      段嵌入 3×128 = 384 · `joint self-attn(4 头,d=128)` 66,048 · LN 256 ·
+      `FFN(128→128→128)` 33,024 · LN 256 · `cross(cand→95)` 66,048 ·
+      `out Linear(384→128)` 49,280 · `LN(384)` 768。
+
+    ⚠ 与旧 `Fusion` 的差别是**结构性的**（不是改宽度）：旧图 `q_tile`/`q_evt` 两条独立 MHA
+    + `gate/write/film` + `mem` 逐维门；A− 只有**一条** joint self-attn（tile↔evt 天然双向）
+    + 一条 `cross`（候选在**同一个** joint memory 上取一次），`h_evt` 改作 token（0 参数）。
+    ⚠ `cross` 的 q 用**无参数** `F.layer_norm`（pre-LN 但不占参数账）—— `cand` 塔末端是
+    Linear，直接进注意力尺度会随塔漂移；用可学 LN 会 +256 参数、破坏 T1 账。
+    ⚠ B3（`u` 的 LN + 零初始化逐维残差门）**按 128 重算**：`u_norm` 2×128 + `u_res` 128 = **+384**。
+    """
+
+    def __init__(self, d: int = A_D_MODEL, n_heads: int = A_N_HEADS,
+                 legacy_u_res: bool | None = None) -> None:
+        super().__init__()
+        self.seg = nn.Parameter(torch.empty(N_SEG, d))
+        nn.init.normal_(self.seg, mean=0.0, std=0.02)
+        self.joint_norm = nn.LayerNorm(d)
+        self.joint = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.ffn_norm = nn.LayerNorm(d)
+        self.ffn1 = nn.Linear(d, d)
+        self.ffn2 = nn.Linear(d, d)
+        self.cross = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.out = nn.Linear(3 * d, d)
+        self.out_norm = nn.LayerNorm(3 * d)
+        # 事件 token 的**固定 sin/cos 位置编码**（0 参数、非持久 ⇒ 不进 net.bin/参数账）
+        self.register_buffer("pe_evt", _sincos_pe(K_EVT, d), persistent=False)
+        self.legacy_u_res = LEGACY_U_RES if legacy_u_res is None else bool(legacy_u_res)
+        if self.legacy_u_res:
+            self.u_norm = None
+            self.u_res = None
+        else:
+            self.u_norm = nn.LayerNorm(d)
+            self.u_res = nn.Parameter(torch.zeros(d))
+
+    def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor,
+                e_tokens: torch.Tensor, h_evt: torch.Tensor,
+                ctx: torch.Tensor, cand: torch.Tensor) -> torch.Tensor:
+        b, lmax = int(cand.shape[0]), int(cand.shape[1])
+        mem = h_evt.unsqueeze(1)                                      # [B,1,128]
+        tokens = torch.cat([h_tile + self.seg[SEG_TILE],
+                            e_tokens + self.seg[SEG_EVT] + self.pe_evt.unsqueeze(0),
+                            mem + self.seg[SEG_MEM]], dim=1)          # [B,95,128]
+        jn = self.joint_norm(tokens)
+        a, _ = self.joint(jn, jn, jn, need_weights=False)
+        tokens = tokens + a
+        tokens = tokens + self.ffn(self.ffn_norm(tokens))
+        q = F.layer_norm(cand, (cand.shape[-1],))                     # 0 参数 pre-LN
+        cross, _ = self.cross(q, tokens, tokens, need_weights=False)  # [B,L,128]
+        ctx_b = ctx.unsqueeze(1).expand(-1, lmax, -1)
+        pool_b = h_tile_pool.unsqueeze(1).expand(-1, lmax, -1)
+        # ⚠ `out_norm` 是 **LN(3Df)**：按 §0.1 的 `out Linear(3Df→Df)+LN(3Df)`，LN 在**入口**
+        #   （pre-LN），归一化的是 384 维拼接输入 —— 不是 linears 的输出。
+        u = self.out(self.out_norm(torch.cat([cross, pool_b, ctx_b], dim=-1)))
+        if self.legacy_u_res:
+            return u
+        return u + torch.tanh(self.u_res) * self.u_norm(u)
+
+    def ffn(self, x: torch.Tensor) -> torch.Tensor:
+        """`FFN(128→128→128)`（两个 Linear + GELU，pre-LN 残差在 `forward` 里加）。"""
+        return self.ffn2(GELU(self.ffn1(x)))
+
+
+class AHeads(nn.Module):
+    """A− 多头（`d=128`、value **81 bin（±60）**）：逐模块参数见 §0.1 T1 的 heads 行（26,054）。
+
+    ⚠ `danger` **进 policy**：A 档语义 = 逐候选特征。实现是**0 参数**的固定通道
+    （`logit_i += DANGER_COEF·log(mean_k sigmoid(danger_i,k)+eps)`），见 `DANGER_COEF` 的注释。
+    ⚠ `effect` **不在这里用**：它参与**确定性 tie-break**，而 tie-break 的归属是 **caller**
+    （`v4/policy.py` 的 `choose_index`）—— 理由：`Heads` 只拿得到 logits，拿不到"同一动作族/
+    牌码"这些候选语义（`lab/mv1/A-REFACTOR-IMPL-PLAN.md` 风险 2）。
+    """
+
+    def __init__(self, d: int = A_D_MODEL, value_bins: int = A_VALUE_BINS) -> None:
+        super().__init__()
+        self.policy = nn.Linear(d, 1)
+        self.policy_gate = nn.Linear(3, d)
+        _init_gate_(self.policy_gate, legacy=LEGACY_ZERO_INIT)
+        self.value = nn.Linear(d, value_bins)
+        self.placement = nn.Linear(d, 4)
+        self.belief_hand = nn.Linear(d, 3 * 34)
+        self.belief_tenpai = nn.Linear(d, 3)
+        self.danger = nn.Linear(d, 4)
+        self.effect = nn.Linear(d, 3)
+
+    def forward(self, u: torch.Tensor, state: torch.Tensor, mask: torch.Tensor | None) -> dict:
+        bt = self.belief_tenpai(state)
+        gate = 1.0 + torch.tanh(self.policy_gate(torch.sigmoid(bt)))
+        ug = u * gate.unsqueeze(1)
+        danger = self.danger(u)                                       # [B,L,4]
+        logits = self.policy(ug).squeeze(-1)
+        # A 档：danger 作为**逐候选**特征进 policy（固定系数、0 参数；出生≈逐行常数）
+        risk = torch.log(torch.sigmoid(danger).mean(dim=-1) + DANGER_EPS)
+        logits = logits + DANGER_COEF * risk
+        if mask is not None:
+            logits = logits.masked_fill(~mask, float("-inf"))
+        return {
+            "policy": logits,
+            "state": state,
+            "value": self.value(state),
+            "placement": self.placement(state),
+            "belief_hand": self.belief_hand(state).view(*state.shape[:-1], 3, 34),
+            "belief_tenpai": bt,
+            "danger": danger,
+            "effect": self.effect(u),
+        }
+
+
 class Fusion(nn.Module):
     """关键张注意力 + 状态/增量**两轮双向**（设计 §5.2）。"""
 
@@ -564,10 +928,21 @@ class V4Model(nn.Module):
     而上线权重照跑 192/64/4/51。
     """
 
-    def __init__(self, *, d_model: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
-                 value_bins: int = VALUE_BINS, legacy_pool: bool | None = None,
-                 legacy_out_relu: bool | None = None) -> None:
+    def __init__(self, *, arch: str | None = None, d_model: int | None = None,
+                 tile_d: int | None = None, n_heads: int | None = None,
+                 value_bins: int | None = None, legacy_pool: bool | None = None,
+                 legacy_out_relu: bool | None = None,
+                 legacy_u_res: bool | None = None) -> None:
         super().__init__()
+        # ★ A−（T1）：`arch` 只决定**建哪一套塔**；缺省 v4 = 现有图（逐位不变）。
+        self.arch = ARCH if arch is None else str(arch)
+        if self.arch not in (ARCH_V4, ARCH_A):
+            raise ValueError(f"未知 arch {self.arch!r}（可选：{ARCH_V4!r} / {ARCH_A!r}）")
+        _dd = arch_dims(self.arch)
+        d_model = _dd["d_model"] if d_model is None else int(d_model)
+        tile_d = _dd["tile_d"] if tile_d is None else int(tile_d)
+        n_heads = _dd["n_heads"] if n_heads is None else int(n_heads)
+        value_bins = _dd["value_bins"] if value_bins is None else int(value_bins)
         if d_model % n_heads or tile_d % n_heads:
             raise ValueError(f"n_heads={n_heads} 必须同时整除 d_model={d_model} 与 tile_d={tile_d}")
         # ⚠ `legacy_pool` **不是宽度**：不进 `dims_cfg`、不进 `net.bin` 头部（格式一个字节没动）。
@@ -576,12 +951,22 @@ class V4Model(nn.Module):
         self.legacy_out_relu = LEGACY_OUT_RELU if legacy_out_relu is None else bool(legacy_out_relu)
         self.dims_cfg = {"d_model": int(d_model), "tile_d": int(tile_d),
                          "n_heads": int(n_heads), "value_bins": int(value_bins)}
-        self.tile = TileTower(tile_d, n_heads, d_model)
-        self.event = EventTower(d_model, n_heads)
-        self.ctx = Mlp(C_CTX, d_model)
-        self.cand = Mlp(C_CAND, d_model)
-        self.fusion = Fusion(d_model, tile_d, n_heads, legacy_out_relu=self.legacy_out_relu)
-        self.heads = Heads(d_model, value_bins)
+        #: 值头量纲（千点）：v4 = ±30、A−（T1）= **±60**（81 bin）—— `pretrain` 的软标签/EV 用它。
+        self.value_range = value_range(self.arch)
+        if self.arch == ARCH_A:
+            self.tile = ATileTower(tile_d, d_model, n_heads)
+            self.event = AEventTower(d_model)
+            self.ctx = AMlp(C_CTX, d_model, CTX_DEAD_DIMS)
+            self.cand = AMlp(C_CAND, d_model, CAND_DEAD_DIMS)
+            self.fusion = AFusion(d_model, n_heads, legacy_u_res=legacy_u_res)
+            self.heads = AHeads(d_model, value_bins)
+        else:
+            self.tile = TileTower(tile_d, n_heads, d_model)
+            self.event = EventTower(d_model, n_heads)
+            self.ctx = Mlp(C_CTX, d_model)
+            self.cand = Mlp(C_CAND, d_model)
+            self.fusion = Fusion(d_model, tile_d, n_heads, legacy_out_relu=self.legacy_out_relu)
+            self.heads = Heads(d_model, value_bins)
 
     # ---------------------------------------------------------------- 前向
     def forward(self, tile: torch.Tensor, evt: torch.Tensor, ctx: torch.Tensor,
@@ -630,10 +1015,14 @@ class V4Model(nn.Module):
                 "params": self.param_count(), "dims": self.dims()}
 
 
-def build(seed: int = 20260927, **dims: int) -> V4Model:
-    """建一个**确定**的模型（便于自检逐位比较）。`dims` 见 `V4Model.__init__`。"""
+def build(seed: int = 20260927, arch: str | None = None, **dims: int) -> V4Model:
+    """建一个**确定**的模型（便于自检逐位比较）。`dims` 见 `V4Model.__init__`。
+
+    ⚠ `arch` 缺省 = **进程级 `ARCH`**（`pretrain --arch a-` 设；缺省 v4）—— 这样
+    `M.build(seed)` 与 `M.build(seed, **net.bin 的 dims)` 两条路径在 a- 训练里都建同一套塔。
+    """
     torch.manual_seed(seed)
-    m = V4Model(**dims)
+    m = V4Model(arch=arch, **dims)
     m.eval()
     return m
 
@@ -681,14 +1070,17 @@ def loss_weights() -> dict[str, float]:
     return {h.name: h.weight for h in HEAD_SPECS}
 
 
-def hl_gauss_targets(values: torch.Tensor, bins: int = VALUE_BINS,
-                     vrange: float = VALUE_RANGE) -> torch.Tensor:
+def hl_gauss_targets(values: torch.Tensor, bins: int | None = None,
+                     vrange: float | None = None) -> torch.Tensor:
     """把标量回报折成 `[B,bins]` 的软标签（值头用；与 `VALUE_RANGE` 同一量纲：**千点**）。
 
+    ⚠ 缺省 `bins`/`vrange` 按**进程级 arch** 取：v4 = 51/±30（逐位不变）、A− = **81/±60**（§2.6）。
     ⚠ 只有**落点那一格**与它的右邻拿到质量（`1−frac` 与 `frac`）—— 第一版把
     `x.floor()`（长度 = bins 的向量）直接喂给 `scatter_`，等于往几十格重复写，行和远大于 1；
     自检里"每行和为 1"那条当场抓住。
     """
+    bins = value_bins() if bins is None else int(bins)
+    vrange = value_range() if vrange is None else float(vrange)
     v = values.clamp(-vrange, vrange)
     width = 2.0 * vrange / bins
     pos = (v + vrange) / width                                  # 连续下标 [B]

@@ -75,9 +75,12 @@ class MaskedEventHead(nn.Module):
     补出来，训完就丢；checkpoint 里单独存一份（`ssl_head`）以便复现。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, d_model: int | None = None) -> None:
         super().__init__()
-        self.proj = nn.Linear(M.D_MODEL, len(spec.EVT_TYPES))
+        # ⚠ 宽度按**进程级 arch** 取（A− 的 `e_tokens` 是 128 宽；v4 是 192）——
+        #   写死 `M.D_MODEL` 会在 a- 上当场形状不匹配（实测 `30720x128 and 192x8`）。
+        self.proj = nn.Linear(int(M.arch_dims()["d_model"] if d_model is None else d_model),
+                              len(spec.EVT_TYPES))
 
     def forward(self, e_tokens: torch.Tensor) -> torch.Tensor:
         return self.proj(e_tokens)
@@ -95,9 +98,10 @@ class OwnWinHead(nn.Module):
     （与 `ref=None`/`il=None`/`rho=None`/`ssl=None` 同一处口径）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, d_model: int | None = None) -> None:
         super().__init__()
-        self.proj = nn.Linear(M.D_MODEL, 1)
+        # ⚠ 同 `MaskedEventHead`：宽度按 arch 取（`state` 在 A− 上是 128 维）。
+        self.proj = nn.Linear(int(M.arch_dims()["d_model"] if d_model is None else d_model), 1)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.proj(state).squeeze(-1)
@@ -201,7 +205,7 @@ def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> 
     （`logp_old` 同一道理）；而且算一次就**冻结**，否则一个 epoch 内 baseline 一直在动
     （`docs/TRAINING-V4.md` §14 P2-①）。
     """
-    center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS).to(device)
+    center = torch.linspace(-M.value_range(), M.value_range(), M.value_bins()).to(device)
     n = int(data["nlegal"].shape[0])
     out = np.zeros(n, dtype=np.float64)
     model.eval()
@@ -535,7 +539,7 @@ def _advantages(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],
         `none` = 原样（配合 `adv_fixed` 的**全局**归一化：那条路径在 `_hand_advantage` 里
         已经按学生行全局 z-score 过一次，**绝不能再归一化第二次**）。
     """
-    center = torch.linspace(-M.VALUE_RANGE, M.VALUE_RANGE, M.VALUE_BINS,
+    center = torch.linspace(-M.value_range(), M.value_range(), M.value_bins(),
                             device=out["value"].device)
     v_hat = (torch.softmax(out["value"], dim=-1) * center).sum(-1)
     adv = b[key] - v_hat
@@ -607,12 +611,16 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
     if p.suffix == ".bin":
         from . import export as v4export
         parsed = v4export.read_net(p)
-        model = M.build(1, **parsed["dims"])
+        # ⚠ `arch` **显式传**：A− 训练里拿来当 `--behaviour` 的可能仍是 v4 的现任网
+        #   （新拓扑没有 v4→a- 的权重映射，不能 warm-start，但"数据由谁生成"没变）。
+        model = M.build(1, arch=parsed.get("arch"), **parsed["dims"])
         model.load_state_dict(v4export.adapt_to_model(v4export.state_from_net(parsed), model, what=str(p)), strict=True)
     else:
         from . import export as v4export
         ck = torch.load(p, map_location="cpu", weights_only=False)
-        model = M.build(1, **(ck.get("config", {}).get("dims") or M.build(1).dims()))
+        cfg = ck.get("config", {}) or {}
+        model = M.build(1, arch=cfg.get("arch"),
+                        **(cfg.get("dims") or M.build(1).dims()))
         # ⚠ 旧 ckpt 没有门控张量 ⇒ `normalize_state` 补 0（门控恒等）；policy 宽度也在这里归一。
         model.load_state_dict(v4export.adapt_to_model(v4export.normalize_state(ck["model"]), model, what=str(p)), strict=True)
     return model.to(device).eval()
@@ -1637,7 +1645,10 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict,
                     own_win_head=None) -> None:
     ck = {"model": model.state_dict(),
           "ssl_head": ssl_head.state_dict(),
-          "config": {"model": "v4", "params": model.param_count(), "dims": model.dims()},
+          # ⚠ `arch` 与 `dims` 一起落盘：A− 的张量集与 v4 不同，加载时必须建对塔
+          #   （缺省 v4 ⇒ 旧 ckpt 逐字节/逐行为不变）。
+          "config": {"model": "v4", "arch": getattr(model, "arch", M.ARCH_V4),
+                     "params": model.param_count(), "dims": model.dims()},
           "dataset_meta": meta,
           "feature_version": spec.FEATURE_VERSION_V4,
           "blocks_fingerprint": spec.fingerprint(),
@@ -1942,6 +1953,23 @@ def train(args) -> dict:
         "**legacy**（不建 `tile.tile_id`；34 行不可区分；⛔ 只用于自证/逐位复现）"
         if _legacy_tile_id else
         f"**34×{M.C_TILE} 行身份嵌入**（+{34 * M.C_TILE} 参数；`N(0, {M.TILE_ID_STD:g}²)` 初始化）"))
+    # ---- ★ A−（T1，段 1）：`--arch {v4|a-}` —— 缺省 v4 = **现有图，逐位不变** ------------------
+    # `a-` = 34 轴卷积/轴向注意力 + 事件 joint attention（95 token，`h_evt` 作第 95 个 token）
+    #       + 全塔 pre-LN/残差/GELU（erf）+ value 81 bin（±60）+ heads d=128。
+    # ⚠ 进程级：主网 / `--init` / `π_ref` / 行为策略必须同一张图（张量集不同就不能互载）。
+    # ⚠ `a-` 与 v4 **不能互相 warm-start** ⇒ a- 臂只能冷启；`--behaviour` 仍可指 v4 现任网
+    #   （"数据由谁生成"没变），但那样 PPO 的口径闸门 `KL(π_old‖π_new)≈0` 必然红 ⇒ 本批 a- 走 BC。
+    # ⚠ 三端（Java/C++）**未同步** ⇒ a- 的网**不得**上线/上闸门。
+    _arch = str(getattr(args, "arch", M.ARCH_V4) or M.ARCH_V4)
+    M.set_arch(_arch)
+    print("网络图 arch：" + (
+        "**v4（现有图，逐位不变）**" if _arch == M.ARCH_V4 else
+        f"**a-（T1 新图）**：tile 34 轴卷积+轴向注意力（{M.A_TILE_D}→{M.A_D_MODEL}）· "
+        f"evt GRU+2×conv · fusion 95-token joint attention · value {M.A_VALUE_BINS} bin"
+        f"（±{M.A_VALUE_RANGE:g}）· heads d={M.A_D_MODEL} · 全塔 pre-LN/残差/GELU(erf)"))
+    if _arch != M.ARCH_V4 and any((_legacy_pool, _legacy_out_relu, _legacy_zero_init,
+                                   _legacy_u_res, _legacy_tile_id)):
+        print("  ⚠ 这些 legacy 开关只作用于 v4 塔（a- 恒为 GELU/pre-LN）；`--legacy-tile-id` 仍生效")
     # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
     # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
     for _split, _data in (("train", train_data), ("val", val_data)):
@@ -1988,6 +2016,28 @@ def train(args) -> dict:
     if has_h0 and not no_carry:
         print(f"长程 carry：`h0[{int(train_data['h0'].shape[1])}]` 已接入前向"
               f"（**窗口之前**的 GRU 隐状态逐行喂进 `EventTower`）—— 与上线端的整手 carry 同一把递推")
+    # ---- ★ A−（T1）：`h0` 的宽度必须 == 本 arch 的 GRU 宽 -------------------------------------
+    # 为什么是硬闸门：`h0` 是**上一代网**（v4，d=192）逐手重放出来的隐状态；A− 的 GRU 宽是 128
+    # ⇒ 两个隐空间**没有对应关系**（不是"少了几维"，是另一个坐标系）。⛔ 不许切片、⛔ 不许投影
+    # （投影要 +参数、会破坏 957,062 的账）。可选路径只有一条：显式 `--no-carry` 承担"窗口冷启动"，
+    # 并在报告里写明"增量契约本身没变，变的是窗口之前的起点"。
+    if has_h0:
+        _h0w = int(train_data["h0"].shape[1])
+        _gruw = int(M.arch_dims()["d_model"])
+        if _h0w != _gruw:
+            _msg = (f"`h0` 的宽度 {_h0w} ≠ 本 arch（{M.ARCH}）的 GRU 宽 {_gruw} —— "
+                    f"h0 是**另一个隐空间**（v4 d={_h0w}）里逐手重放出来的，切片/投影都不是同一个量"
+                    f"（投影还要 +参数、破坏 957,062 的账）")
+            if no_carry is True:
+                train_data.pop("h0", None)
+                val_data.pop("h0", None)
+                has_h0 = False
+                print(f"⚠⚠ {_msg} ⇒ 按显式 `--no-carry` **丢弃 h0**（窗口冷启动："
+                      f"增量契约不变，变的是「窗口之前」的起点；要恢复得用 a- 学生网重放整手事件 = 重新采集）")
+            else:
+                raise SystemExit(
+                    f"⛔ {_msg}；要跑就只能显式 `--no-carry`（承担窗口冷启动），"
+                    f"或重新采集把 `h0` 重算成 {_gruw} 维")
 
     # ---- ★ MV-1 第一刀：辅助子目标头 `own_win` 的**前置闸门（fail-closed）**--------------------
     # 三条（`lab/mv1/MV1-FEASIBILITY.md` §4.1 #10）：① 权重不能为负；② 权重 > 0 时**标签列必须在**
@@ -3154,6 +3204,8 @@ def _cached_ref_logits(args, model, data: dict, device: str,
                                    # ★ #0：身份嵌入会改 `tile` 塔（⇒ policy/value 都变）⇒ 进键，
                                    #   否则同一缓存目录会静默复用"没有 tile_id"的 π_ref。
                                    "legacy_tile_id": bool(M.LEGACY_TILE_ID),
+                                   # ★ A−（T1）：整张图变了 ⇒ π_ref 的 logits 全变 ⇒ 必须进键
+                                   "arch": str(M.ARCH),
                                    "lmax": lmax, "rows": n})
     got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
     if got is not None:
@@ -3179,8 +3231,10 @@ def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, devi
     key, kd = _artifact_key(args, "v_old", weights_sha=_state_sha256(model.state_dict()),
                             data_dir=str(Path(args.data).resolve()), splits=("train", "val"),
                             device=device, batch=args.eval_batch,
-                            extra={"value_bins": int(M.VALUE_BINS),
-                                   "value_range": float(M.VALUE_RANGE),
+                            extra={"value_bins": int(M.value_bins()),
+                                   "value_range": float(M.value_range()),
+                                   # ★ A−（T1）：整张图变了 ⇒ `u`/state/value 全变 ⇒ 必须进键
+                                   "arch": str(M.ARCH),
                                    # ★ C2：`V_old` 读 value 头 ⇒ 池化口径必须进键（同源理由见 `_cached_ref_logits`）
                                    "legacy_pool": bool(M.LEGACY_POOL),
                                    # ★ C1：value 头读 `state`（= 池化的 `u`）⇒ 同一理由，ReLU 口径进键
@@ -3241,6 +3295,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr-floor-frac", type=float, default=0.1, metavar="F",
                     help="`--lr-schedule floored-cosine` 的 lr 下限（占 --lr 的比例，缺省 0.1）；"
                          "⚠ `--lr-schedule cosine` 下必须留缺省（0.1），否则报错")
+    # ★ A−（T1，段 1）：拓扑开关。缺省 v4 = 现有图（逐位不变）；`a-` = 新图（`ARCH-REDESIGN` §2.2）。
+    ap.add_argument("--arch", choices=[M.ARCH_V4, M.ARCH_A], default=M.ARCH_V4,
+                    help="网络图：v4（缺省，现有图，逐位不变）/ a-（T1：34 轴卷积+轴向注意力、"
+                         "95-token joint attention、value 81 bin、heads d=128）。"
+                         "⚠ a- 与 v4 不能互相 warm-start；三端未同步 ⇒ 不得上线/上闸门")
     # ★ C2（第一百轮）：state 级头池化口径。缺省 = **新**（mask-aware，只对 n_legal 个合法槽求均值，
     #   与 Java/C++ 同分母）；开这个开关才回到旧的 `u.mean(1)`（分母 Lmax）—— 只用于逐位复现旧行为。
     ap.add_argument("--legacy-pool", action="store_true",

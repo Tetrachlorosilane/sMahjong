@@ -2089,6 +2089,151 @@ ok(_b3_live_d > 1e-3,
 ok(v4_model.LEGACY_U_RES is False,
    "B3：残差缺省**开**（`--legacy-u-res` 缺省关 ⇒ 只有自证时才回到旧前向图）")
 
+# ---- A−（T1，段 1）：`--arch {v4|a-}` 的**静态**判据（零训练；`ARCH-REDESIGN` §2.2/§0.1）--------
+# 判据：① 缺省 arch = **v4**，且 v4 的参数量/张量数一个数没变（逐位不变的前提）；
+#       ② A− 的**逐模块加总 == 957,062**（T1 表，±0），总参数 = 957,062 + B3 384 + #0 1,632；
+#       ③ A− 前向形状（value 81 bin、danger/effect 逐候选、h_evt 作第 95 个 token）；
+#       ④ ctx/cand 的死维**真的拿不到梯度**（掩码不是"初始化成 0 等它学回来"）；
+#       ⑤ 事件塔的增量契约在 A− 上不变（`step` 逐事件推进 == 整窗 `forward` 的 carry）；
+#       ⑥ `danger` 在 policy 的推理路径上（清零后 logits 变；逐候选 risk 的 std > 0）；
+#       ⑦ tie-break（`v4/policy.choose_index`）：无 cand/effect 时逐位 == argmax，
+#          gap<τ 且同族 ⇒ 进张数 → 牌码；不同族/超阈值 ⇒ 不动；
+#       ⑧ A− 的 `net.bin` 往返回环（格式仍是 2；arch 由张量名反推；头里的 params == 959,078）。
+import torch as _torch2                                            # noqa: E402
+from mahjong_ml.v4 import export as _v4ex, policy as _v4pol       # noqa: E402
+
+eq("A−：缺省 arch = v4（不给开关 ⇒ 现有图，逐位不变）", v4_model.ARCH, v4_model.ARCH_V4)
+eq("A−：缺省 v4 的参数量（1,400,200 = 1,397,992 + B3 576 + #0 1,632）", _v4m.param_count(), 1400200)
+eq("A−：缺省 v4 的张量数（82）", len(_v4m.state_dict()), 82)
+_a = v4_model.build(seed=5, arch=v4_model.ARCH_A)
+
+
+def _a_mod(net, prefix: str, *, skip: tuple[str, ...] = ()) -> int:
+    return sum(p.numel() for n, p in net.named_parameters()
+               if n.startswith(prefix) and n not in skip)
+
+
+_a_tile = _a_mod(_a, "tile.", skip=("tile.tile_id",))
+_a_fuse = _a_mod(_a, "fusion.", skip=("fusion.u_norm.weight", "fusion.u_norm.bias",
+                                      "fusion.u_res"))
+_a_evt = _a_mod(_a, "event.")
+_a_ctx = _a_mod(_a, "ctx.")
+_a_cand = _a_mod(_a, "cand.")
+_a_heads = _a_mod(_a, "heads.")
+_a_sum = _a_tile + _a_evt + _a_fuse + _a_ctx + _a_cand + _a_heads
+eq("A−：tile 塔参数（T1 表 446,144）", _a_tile, 446144)
+eq("A−：evt 塔参数（T1 表 210,560）", _a_evt, 210560)
+eq("A−：fusion 参数（T1 表 216,064）", _a_fuse, 216064)
+eq("A−：ctx 参数（T1 表 24,960）", _a_ctx, 24960)
+eq("A−：cand 参数（T1 表 33,280）", _a_cand, 33280)
+eq("A−：heads 参数（T1 表 26,054）", _a_heads, 26054)
+eq("A−：**逐模块加总 == 957,062**（T1 表，±0）", _a_sum, 957062)
+eq("A−：总参数 = 957,062 + B3 384 + #0 1,632", _a.param_count(), 959078)
+eq("A−：B3 按 128 重算 = +2×128+128", _a_mod(_a, "fusion.u_norm") + _a_mod(_a, "fusion.u_res"), 384)
+eq("A−：四个宽度", _a.dims(),
+   {"d_model": 128, "tile_d": 160, "n_heads": 4, "value_bins": 81})
+with _torch2.no_grad():
+    _a_out = _a(**_x, mask=_mfull)
+eq("A−：policy logits 形状", tuple(_a_out["policy"].shape), (1, _L))
+eq("A−：value 81 bin（±60）", tuple(_a_out["value"].shape), (1, 81))
+eq("A−：danger 逐候选", tuple(_a_out["danger"].shape), (1, _L, 4))
+eq("A−：effect 逐候选", tuple(_a_out["effect"].shape), (1, _L, 3))
+ok(_a.value_range == 60.0 and v4_model.build(seed=5).value_range == 30.0,
+   "A−：值头量纲 ±60（v4 仍 ±30）")
+# 事件 token 的固定 sin/cos 位置编码（§2.3 第 1 条）：0 参数、非持久 buffer
+ok("fusion.pe_evt" not in _a.state_dict()
+   and tuple(_a.fusion.pe_evt.shape) == (v4_spec.K_EVT, 128),
+   "A−：事件位置编码是**非持久 buffer**（0 参数、不进 `net.bin`/参数账）")
+ok(float((_a.fusion.pe_evt[0] - _a.fusion.pe_evt[1]).abs().max()) > 1e-3,
+   "A−：位置编码逐位置不同（否则它等于一个常数偏移，打乱窗口时提供不了顺序信息）")
+# ④ 死维掩码：被掩列在首层权重的**梯度恒 0**（不是"初始化为 0"）
+_a.train()
+_a.zero_grad(set_to_none=True)
+_a(**_x, mask=_mfull)["policy"].sum().backward()
+_g_ctx = _a.ctx.fc1.weight.grad.detach()
+_g_cand = _a.cand.fc1.weight.grad.detach()
+_a.eval()
+ok(float(_g_ctx[:, list(v4_model.CTX_DEAD_DIMS)].abs().max()) == 0.0,
+   f"A−：ctx 死维/恒等维（{len(v4_model.CTX_DEAD_DIMS)} 列）在首层的梯度恒 0")
+ok(float(_g_cand[:, list(v4_model.CAND_DEAD_DIMS)].abs().max()) == 0.0,
+   f"A−：cand 死维（{len(v4_model.CAND_DEAD_DIMS)} 列）在首层的梯度恒 0")
+ok(float(_g_ctx.abs().max()) > 0.0 and float(_g_cand.abs().max()) > 0.0,
+   "A−：正向对照 —— 未被掩的列梯度非 0（否则这条判据在空转）")
+_a.zero_grad(set_to_none=True)
+# ⑤ 事件塔增量 carry：`step()` 逐事件推进 == `forward()` 的 carry（逐位）
+# ⚠ 必须用**没有 padding 行**的窗口：`forward` 对整行全 0 的 padding 跳过 GRU（`torch.where`），
+#   而 `step` 的契约是"只喂真实事件" ⇒ 拿带 padding 的 `_x["evt"]` 比会假红。
+_a_evt_in = _torch2.randn_like(_x["evt"])
+with _torch2.no_grad():
+    _h_full = _a.event(_a_evt_in, _torch2.zeros(1, 128))[1]
+    _h_step = _torch2.zeros(1, 128)
+    for _ti in range(int(_a_evt_in.shape[1])):
+        _h_step = _a.step_event(_a_evt_in[:, _ti:_ti + 1], _h_step)
+ok(bool((_h_full - _h_step).abs().max() <= 1e-6),
+   "A−：事件 GRU 的增量契约不变（`step` 逐事件 == 整窗 `forward` 的 carry，"
+   f"max|Δ|={float((_h_full - _h_step).abs().max()):.2e} ≤1e-6）",
+   "⚠ 这里是**等价**不是逐位：`Linear` 在 M=60 与 M=1 两种 GEMM 形状下归约顺序不同"
+   "（实测 6.7e-8）；逐位判据由 `v4-cache-check` 在**同一条 step 路径**上守")
+# ⑥ danger 在 policy 的推理路径上（清零后 logits 变）+ 逐候选 risk 的 std > 0
+_a_cap: dict = {}
+_a_hk = _a.heads.danger.register_forward_hook(
+    lambda _m, _i, _o: _a_cap.__setitem__("d", _o.detach().clone()))
+with _torch2.no_grad():
+    _a_pol0 = _a(**_x, mask=_mfull)["policy"].clone()
+_a_hk.remove()
+_a_sd = {k: v.clone() for k, v in _a.state_dict().items()}
+with _torch2.no_grad():
+    for k, v in _a.state_dict().items():
+        if k.startswith("heads.danger."):
+            v.zero_()
+    _a_pol1 = _a(**_x, mask=_mfull)["policy"].clone()
+_a.load_state_dict(_a_sd)
+ok(not bool(_torch2.equal(_a_pol0, _a_pol1)),
+   "A−：`danger` **在 policy 的推理路径上**（清零 danger ⇒ policy logits 变）")
+_risk = _torch2.log(_torch2.sigmoid(_a_cap["d"]).mean(-1) + v4_model.DANGER_EPS)
+ok(float(_risk.std()) > 0.0,
+   f"A−：danger 是**逐候选**特征（risk 逐候选 std={float(_risk.std()):.3g} > 0）")
+# ⑦ tie-break（`v4/policy.py`）—— 三端必须同样实现
+_eq = v4_model
+_cd = _torch2.zeros(1, 3, _eq.C_CAND if hasattr(_eq, "C_CAND") else v4_spec.C_CAND)
+_cd[0, 0, 1] = 1.0   # type 1
+_cd[0, 1, 1] = 1.0   # type 1（同族）
+_cd[0, 2, 2] = 1.0   # type 2（异族）
+_cd[0, 0, 9 + 5] = 1.0
+_cd[0, 1, 9 + 9] = 1.0
+_cd[0, 2, 9 + 7] = 1.0
+_ef = _torch2.tensor([[[0.0, 1.0, 0.0], [0.0, 3.0, 0.0], [0.0, 2.0, 0.0]]])
+# ⚠ 让 **argmax 那一项的进张数更小**，才能证明 tie-break **真的改了选择**（不是"恰好选到 argmax"）
+_lg = _torch2.tensor([[5e-4, 0.0, -0.5]])
+_mk = _torch2.ones(1, 3, dtype=_torch2.bool)
+eq("A− tie-break：gap<τ 且同族 ⇒ 取**进张数**大的（翻转 argmax：1 vs 3）",
+   int(_v4pol.choose_index(_lg, mask=_mk, cand=_cd, effect=_ef)[0]), 1)
+_cd2 = _cd.clone()
+_cd2[0, 1, 2] = 1.0
+_cd2[0, 1, 1] = 0.0                                   # 候选 1 改成异族
+eq("A− tie-break：异族不参与（退回 argmax = 0）",
+   int(_v4pol.choose_index(_lg, mask=_mk, cand=_cd2, effect=_ef)[0]), 0)
+eq("A− tie-break：gap ≥ τ ⇒ 不动（argmax = 0）",
+   int(_v4pol.choose_index(_torch2.tensor([[1e-2, 0.0, -0.5]]),
+                           mask=_mk, cand=_cd, effect=_ef)[0]), 0)
+_ef_tie = _torch2.tensor([[[0.0, 2.0, 0.0], [0.0, 2.0, 0.0], [0.0, 2.0, 0.0]]])
+eq("A− tie-break：进张数也并列 ⇒ 牌码小的（5 < 9）",
+   int(_v4pol.choose_index(_lg, mask=_mk, cand=_cd, effect=_ef_tie)[0]), 0)
+ok(bool(_torch2.equal(_v4pol.choose_index(_lg), _lg.argmax(dim=-1))),
+   "A− tie-break：**不给 cand/effect ⇒ 逐位等于 argmax**（旧路径一个数都不动）")
+# ⑧ net.bin 往返回环（格式仍是 2；arch 由张量名反推）
+import tempfile as _tf                                            # noqa: E402
+with _tf.TemporaryDirectory() as _td:
+    _np = _v4ex.save_net(_a.state_dict(), _a.dims(), f"{_td}/net.bin")
+    _pr = _v4ex.read_net(_np)
+eq("A−：net.bin 的 arch 由张量名反推", _pr["arch"], v4_model.ARCH_A)
+eq("A−：net.bin 格式仍是 2（⛔ 本批不动 format）", _pr["format"], 2)
+eq("A−：net.bin 头里的 params == 959,078", _pr["params"], 959078)
+eq("A−：net.bin 张量数（93 = 92 + 可缺的 tile.tile_id）", len(_pr["tensors"]), 93)
+eq("A−：A− 期望张量表条数", len(_v4ex.expected_shapes(_a.dims(), v4_model.ARCH_A)), 93)
+eq("A−：v4 期望张量表条数（不变）", len(_v4ex.expected_shapes(dict(_v4m.dims()))), 82)
+
+
 # ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
 # 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
 # ⚠ 这十二条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分
