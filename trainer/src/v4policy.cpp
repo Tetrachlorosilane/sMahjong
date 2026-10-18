@@ -27,6 +27,7 @@
 #endif
 
 #include "net.hpp"        // netArgmax（= Java `Logits.argmaxOf`）
+#include "sha256.hpp"     // `sha256Hex`（权重整段字节的摘要 —— `V4Cache` 槽键的一部分）
 #include "v4features.hpp"
 
 namespace trainer {
@@ -44,6 +45,31 @@ namespace {
  */
 const bool kScalarMode = std::getenv("TRAINER_V4_SCALAR") != nullptr;
 constexpr float kLnEps = 1e-5f;
+
+// ---------------------------------------------------------------- A−（topoId=3）的结构常量
+//
+// 唯一规格 = `python/mahjong_ml/v4/model.py`（Python 是语义权威）。这些值**不是超参**：
+// arch 段里若写了别的（或写 ReLU/post-LN）⇒ 加载期就报错（"文件在说谎"）。
+/** 段嵌入的 3 段（`N_SEG` / `SEG_TILE, SEG_EVT, SEG_MEM`）。 */
+constexpr int kNSeqA = 3;
+constexpr int kSegTile = 0;
+constexpr int kSegEvt = 1;
+constexpr int kSegMem = 2;
+/** 95 = 34 tile + 60 evt + 1 `h_evt`（第 95 个 token）。 */
+constexpr int kJointTokens = kKindCount + kKEvt + 1;
+/** `danger` 进 policy 的**0 参数固定通道**（`AHeads.forward`：`logit += COEF·log(mean_k σ(d)+eps)`）。 */
+constexpr float kDangerCoef = 1.0f;
+constexpr float kDangerEps = 1e-6f;
+/**
+ * `AMlp` 的**死维/恒等维首层掩码**（`model.py` 的 `CTX_DEAD_DIMS` / `CAND_DEAD_DIMS`）。
+ *
+ * <p>⚠ 这两个表**不在 `net.bin` 里**（`persistent=False` 的 buffer），但它是 A− 前向的一部分：
+ * Python 在 LN **前后各掩一次** ⇒ 这些列对 `fc1` 的输入恒 0。C++ 不掩 ⇒ 首层读到的是
+ * `LN(bias)` 而不是 0 ⇒ 与 Python 分叉（不是"少一点信息"，是**另一个函数**）。
+ * 判据 = G2 的逐行 argmax/max|Δ|。
+ */
+constexpr int kCtxDeadDims[] = {17, 35, 37, 58, 59, 60, 61, 62, 63};
+constexpr int kCandDeadDimsFirst = 96;     // = 96..127（`C_CAND` 的后 32 列）
 
 /** 小端读取器：**显式按字节拼**（不依赖宿主字节序，也不做未对齐访问）。 */
 struct Reader {
@@ -179,6 +205,23 @@ bool finishPolicy(V4Policy &p, std::string &err) {
               + joinNames(unused, 6) + " —— 导出器与本前向不同版本";
         return false;
     }
+    // A− 的固定 sin/cos 位置编码（0 参数、非持久）—— 只有这张图才有；在加载期算一次。
+    if (p.arch == kTopoA) {
+        p.peEvt.assign(static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel), 0.f);
+        const int d = p.dModel;
+        for (int n = 0; n < kKEvt; n++) {
+            for (int i = 0; i < d; i += 2) {
+                // `div = exp(-ln(10000) · i / d)`，i = 0,2,4,…（= `_sincos_pe`；全程 float32）
+                const float div = std::exp(-std::log(10000.0f) * static_cast<float>(i)
+                                           / static_cast<float>(d));
+                const float pos = static_cast<float>(n);
+                p.peEvt[static_cast<size_t>(n) * d + i] = std::sin(pos * div);
+                if (i + 1 < d) {
+                    p.peEvt[static_cast<size_t>(n) * d + (i + 1)] = std::cos(pos * div);
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -303,6 +346,25 @@ void reluBuf(float *x, size_t n) {
         if (x[i] < 0.f) {
             x[i] = 0.f;
         }
+    }
+}
+
+/**
+ * **erf 版 GELU**（`F.gelu(x, approximate="none")`）—— A− 全塔唯一的激活。
+ *
+ * <p>⛔ 不许换成 tanh 近似、也不许换成 ReLU（`A-REFACTOR-IMPL-PLAN.md` 风险 8：tanh 近似的
+ * 末位就不同 ⇒ 长 carry 行逐层放大；而 ReLU 会造假零、判据 1 的 `frac(u==0)<10%` 当场红）。
+ * <p>口径：`0.5·x·(1+erf(x/√2))`，`std::erf` 走 `double` 再降 float（与 torch 的 float32
+ * erf 差在 1 ulp 量级；三端判据是 `max|Δ|`，不是逐位）。
+ */
+void geluBuf(float *x, size_t n) {
+    // ⚠ 全程 **float32**（`std::erf(float)` 返回 float）：torch 的 `F.gelu(approximate="none")`
+    //   在 float32 张量上就是这么算的 —— 用 double 反而会与它在最后一位分叉（我们比的是
+    //   `max|Δ|`，不是"谁的 erf 更准"）。
+    constexpr float kInvSqrt2 = 0.70710678118654752440f;
+    for (size_t i = 0; i < n; i++) {
+        const float v = x[i];
+        x[i] = 0.5f * v * (1.f + std::erf(v * kInvSqrt2));
     }
 }
 
@@ -432,8 +494,21 @@ const std::vector<float> *V4Policy::vec(const std::string &name, int n, std::str
 /**
  * 把每一层要用的张量都取一遍（= Java `V4Policy.bindAll`）—— 前向要把每个张量读一遍，
  * 读的时候顺手钉住形状，最后 `used` 与文件里的名字集合比对。
+ *
+ * <p>段 3b 起按 `arch` 分派（两套表都是**闭集**，多余张量由 `finishPolicy` 抓）。
  */
 bool V4Policy::bindAll(std::string &err) {
+    if (arch == kTopoA) {
+        return bindAllA(err);
+    }
+    if (arch == kTopoV4) {
+        return bindAllV4(err);
+    }
+    err = "内部错误：未设置 arch（加载器必须先定 topoId）";
+    return false;
+}
+
+bool V4Policy::bindAllV4(std::string &err) {
     used.clear();
     const int dm = dModel;
     const int td = tileD;
@@ -614,7 +689,492 @@ bool V4Policy::bindAll(std::string &err) {
     V("heads.danger.bias", 4);
     M("heads.effect.weight", 3, dm);
     V("heads.effect.bias", 3);
+
+    // ★ #0（第一百零六轮，段 3b 补齐 C++ 读端）：`tile.tile_id` **可缺**（旧包没有 ⇒ `tile+0`
+    //   逐位不变）。⚠ 与 `flags` 的 bit1 **双向**校验：文件说"有"就必须真在、说"没有"就不许在
+    //   （单向校验会让"导出器忘了写 flag"静默漏读一整块身份嵌入）。
+    const bool hasTileId = mats.count("tile.tile_id") != 0;
+    if (hasTileId) {
+        M("tile.tile_id", kKindCount, kCTile);
+    }
+    if (hasTileId != ((flags & kFlagTileId) != 0)) {
+        err = std::string("arch 段的 `flags` 与张量表自相矛盾：bit1(hasTileId)=")
+              + ((flags & kFlagTileId) != 0 ? "1" : "0") + "，而 `tile.tile_id` "
+              + (hasTileId ? "在" : "不在") + " —— 导出器与读端不同版本";
+        return false;
+    }
+    // B3（第一百零四轮）：三张量**必须整组出现或整组缺席**（半组 = 文件坏了）。
+    {
+        const bool hasW = vecs.count("fusion.u_norm.weight") != 0;
+        const bool hasB = vecs.count("fusion.u_norm.bias") != 0;
+        const bool hasR = vecs.count("fusion.u_res") != 0;
+        if (hasW != hasB || hasW != hasR) {
+            err = "B3 张量不成组（fusion.u_norm.weight/bias/u_res）—— 文件坏了";
+            return false;
+        }
+        if (hasR != ((flags & kFlagB3) != 0)) {
+            err = std::string("arch 段的 `flags` 与张量表自相矛盾：bit0(hasB3)=")
+                  + ((flags & kFlagB3) != 0 ? "1" : "0") + "，而 B3 三张量 "
+                  + (hasR ? "在" : "不在");
+            return false;
+        }
+    }
+    if ((flags & kFlagFiLM) != 0) {
+        err = "arch 段的 `flags` 声明了 FiLM（bit2）—— 本前向不实现 FiLM，⛔ 不猜语义";
+        return false;
+    }
+    {
+        const bool hasMem = mats.count("fusion.mem.weight") != 0;
+        if (hasMem != ((flags & kFlagMemGate) != 0)) {
+            err = std::string("arch 段的 `flags` 与张量表自相矛盾：bit3(hasMemGate)=")
+                  + ((flags & kFlagMemGate) != 0 ? "1" : "0") + "，而 `fusion.mem.weight` "
+                  + (hasMem ? "在" : "不在");
+            return false;
+        }
+    }
     return err.empty();
+}
+
+/**
+ * **A−（topoId=3）**的张量表（= `export._expected_shapes_a`，93 个张量，含可缺的 `tile.tile_id`）。
+ *
+ * <p>⛔ 与 v4 表**互不相交**：A− 没有 `tile.enc.*` / `fusion.q_tile|q_evt|gate|write|film|mem` /
+ * `event.tr.*`；v4 没有 `tile.stem.*` / `fusion.joint|cross|seg`。名字写错 ⇒ 这里报"缺张量"，
+ * 反向的多余张量由 `finishPolicy` 报 ⇒ 两个方向都 fail-loud。
+ */
+bool V4Policy::bindAllA(std::string &err) {
+    const int dm = dModel;
+    const int td = tileD;
+    const int vb = valueBins;
+    auto M = [&](const char *name, int rows, int cols) {
+        if (mat(name, rows, cols, err) != nullptr) {
+            used.insert(name);
+        }
+    };
+    auto V = [&](const char *name, int n) {
+        if (vec(name, n, err) != nullptr) {
+            used.insert(name);
+        }
+    };
+    // 三维卷积权重：**必须**走 `convs`（`mat()` 只认 1/2 维）
+    auto C = [&](const char *name, int out, int in, int k) {
+        const auto it = convs.find(name);
+        if (it == convs.end()) {
+            err = "权重缺张量：" + std::string(name);
+            return;
+        }
+        const Conv &c = it->second;
+        if (c.out != out || c.in != in || c.k != k) {
+            err = std::string("张量 ") + name + " 形状 [" + std::to_string(c.out) + ","
+                  + std::to_string(c.in) + "," + std::to_string(c.k) + "] != [" + std::to_string(out)
+                  + "," + std::to_string(in) + "," + std::to_string(k) + "]";
+            return;
+        }
+        used.insert(name);
+    };
+
+    // ---- #0（可缺）+ tile 塔
+    const bool hasTileId = mats.count("tile.tile_id") != 0;
+    if (hasTileId) {
+        M("tile.tile_id", kKindCount, kCTile);
+    }
+    C("tile.stem.weight", td, kCTile, 5);
+    V("tile.stem.bias", td);
+    V("tile.stem_norm.weight", td);
+    V("tile.stem_norm.bias", td);
+    for (int b = 0; b < 3; b++) {
+        const std::string pre = "tile.res." + std::to_string(b);
+        V((pre + ".norm.weight").c_str(), td);
+        V((pre + ".norm.bias").c_str(), td);
+        C((pre + ".conv.weight").c_str(), td, td, b == 0 ? 5 : 3);   // 三维张量只看 `convs`
+        V((pre + ".conv.bias").c_str(), td);
+    }
+    V("tile.attn_norm.weight", td);
+    V("tile.attn_norm.bias", td);
+    M("tile.attn.in_proj_weight", 3 * td, td);
+    V("tile.attn.in_proj_bias", 3 * td);
+    M("tile.attn.out_proj.weight", td, td);
+    V("tile.attn.out_proj.bias", td);
+    M("tile.proj.weight", dm, td);
+    V("tile.proj.bias", dm);
+    V("tile.proj_norm.weight", dm);
+    V("tile.proj_norm.bias", dm);
+
+    // ---- 事件塔（Linear + GRUCell + 2×Conv1d(k=3)）
+    M("event.enc.weight", dm, kCEvt);
+    V("event.enc.bias", dm);
+    M("event.cell.weight_ih", 3 * dm, dm);
+    M("event.cell.weight_hh", 3 * dm, dm);
+    V("event.cell.bias_ih", 3 * dm);
+    V("event.cell.bias_hh", 3 * dm);
+    C("event.conv1.weight", dm, dm, 3);
+    V("event.conv1.bias", dm);
+    V("event.norm1.weight", dm);
+    V("event.norm1.bias", dm);
+    C("event.conv2.weight", dm, dm, 3);
+    V("event.conv2.bias", dm);
+    V("event.norm2.weight", dm);
+    V("event.norm2.bias", dm);
+
+    // ---- ctx / cand 编码器（首层 LN + 死维掩码）
+    V("ctx.norm.weight", kCCtx);
+    V("ctx.norm.bias", kCCtx);
+    M("ctx.fc1.weight", dm, kCCtx);
+    V("ctx.fc1.bias", dm);
+    M("ctx.fc2.weight", dm, dm);
+    V("ctx.fc2.bias", dm);
+    V("cand.norm.weight", kCCand);
+    V("cand.norm.bias", kCCand);
+    M("cand.fc1.weight", dm, kCCand);
+    V("cand.fc1.bias", dm);
+    M("cand.fc2.weight", dm, dm);
+    V("cand.fc2.bias", dm);
+
+    // ---- fusion：段嵌入 3 + 95-token joint + FFN + cross + out(384→128) + LN(384)
+    M("fusion.seg", kNSeqA, dm);
+    V("fusion.joint_norm.weight", dm);
+    V("fusion.joint_norm.bias", dm);
+    M("fusion.joint.in_proj_weight", 3 * dm, dm);
+    V("fusion.joint.in_proj_bias", 3 * dm);
+    M("fusion.joint.out_proj.weight", dm, dm);
+    V("fusion.joint.out_proj.bias", dm);
+    V("fusion.ffn_norm.weight", dm);
+    V("fusion.ffn_norm.bias", dm);
+    M("fusion.ffn1.weight", dm, dm);
+    V("fusion.ffn1.bias", dm);
+    M("fusion.ffn2.weight", dm, dm);
+    V("fusion.ffn2.bias", dm);
+    M("fusion.cross.in_proj_weight", 3 * dm, dm);
+    V("fusion.cross.in_proj_bias", 3 * dm);
+    M("fusion.cross.out_proj.weight", dm, dm);
+    V("fusion.cross.out_proj.bias", dm);
+    M("fusion.out.weight", dm, 3 * dm);
+    V("fusion.out.bias", dm);
+    V("fusion.out_norm.weight", 3 * dm);
+    V("fusion.out_norm.bias", 3 * dm);
+
+    // ---- 头（26,054）：`policy_gate` 与 B3 在 A− 里是**拓扑必需**（不是"可缺"）
+    M("heads.policy.weight", 1, dm);
+    V("heads.policy.bias", 1);
+    M("heads.policy_gate.weight", dm, 3);
+    V("heads.policy_gate.bias", dm);
+    M("heads.value.weight", vb, dm);
+    V("heads.value.bias", vb);
+    M("heads.placement.weight", 4, dm);
+    V("heads.placement.bias", 4);
+    M("heads.belief_hand.weight", 3 * kKindCount, dm);
+    V("heads.belief_hand.bias", 3 * kKindCount);
+    M("heads.belief_tenpai.weight", 3, dm);
+    V("heads.belief_tenpai.bias", 3);
+    M("heads.danger.weight", 4, dm);
+    V("heads.danger.bias", 4);
+    M("heads.effect.weight", 3, dm);
+    V("heads.effect.bias", 3);
+    if (!err.empty()) {
+        return false;
+    }
+
+    // ---- flags ↔ 张量表（双向）
+    if (hasTileId != ((flags & kFlagTileId) != 0)) {
+        err = std::string("arch 段的 `flags` 与张量表自相矛盾：bit1(hasTileId)=")
+              + ((flags & kFlagTileId) != 0 ? "1" : "0") + "，而 `tile.tile_id` "
+              + (hasTileId ? "在" : "不在");
+        return false;
+    }
+    if ((flags & kFlagB3) == 0 || vecs.count("fusion.u_norm.weight") == 0
+            || vecs.count("fusion.u_norm.bias") == 0 || vecs.count("fusion.u_res") == 0) {
+        err = "A− 的 B3（`fusion.u_norm.*` + `fusion.u_res`）是**拓扑必需**："
+              "缺张量或 `flags` 的 bit0 没置 ⇒ 文件与拓扑不符（⛔ 不补 0 / 不猜）";
+        return false;
+    }
+    if (vecs.count("fusion.u_norm.weight") != 0) {
+        V("fusion.u_norm.weight", dm);
+        V("fusion.u_norm.bias", dm);
+        V("fusion.u_res", dm);
+    }
+    if ((flags & (kFlagFiLM | kFlagMemGate)) != 0) {
+        err = "A− 的 arch 段声明了 FiLM 或 mem 门（flags bit2/bit3）—— 这两块在 T1 图里"
+              "**不存在**（`h_evt` 已是第 95 个 token）⇒ 文件与拓扑不符";
+        return false;
+    }
+    return err.empty();
+}
+
+// ---------------------------------------------------------------- arch 段（格式 3）
+//
+// 布局 = `A-REFACTOR-IMPL-PLAN.md` §3 的字段表（段 2 的落地读数见 `ARCH-REDESIGN.md` §11.1：
+// `archLen = 2048` 整段、核心 96 B、保留尾 1,952 B 必须全 0）。**块表偏移 = 64 + archLen**。
+//
+// ⛔ 读端口径：arch 段是**唯一拓扑判据**（`topoId`）；张量名反推只当一致性断言（本训练端
+// 不做反推 —— 名字表就是 `bindAllV4/bindAllA`，多余的张量由 `finishPolicy` 抓）。
+
+/** arch 段的解析结果（字段全部保留：`describe` / 报错 / 前向分支都要用）。 */
+struct ArchInfo {
+    int archLen = 0;
+    int archVersion = 0;
+    int topoId = 0;
+    int dTile = 0, dEvt = 0, dFuse = 0, dHead = 0, dCand = 0, headDim = 0;
+    int nTileConv = 0, nTileAttn = 0, nJointLayer = 0;
+    int actId = 0, normId = 0, segEmbMode = 0, memTokenMode = 0, flags = 0;
+    int valueBins = 0, nHeads = 0;
+    float valueRange = 0.f, lnEps = 0.f;
+    int tileKernel[4] = {0, 0, 0, 0};
+    int nSeg = 0;
+    int featVersion = 0, obsVersion = 0, derivedVersion = 0;
+    int cTile = 0, cEvt = 0, kEvt = 0, cCtx = 0, cCand = 0;
+};
+
+/** 该拓扑在给定宽度下的**期望**字段（= `export.arch_profile`，逐字段同值）。 */
+struct ArchExpect {
+    int topoId = 0;
+    int dTile = 0, dEvt = 0, dFuse = 0, dHead = 0, dCand = 0, headDim = 0;
+    int nTileConv = 0, nTileAttn = 0, nJointLayer = 0;
+    int actId = 0, normId = 0, segEmbMode = 0, memTokenMode = 0;
+    int valueBins = 0, nHeads = 0;
+    float valueRange = 0.f, lnEps = 1e-5f;
+    int tileKernel[4] = {0, 0, 0, 0};
+    int nSeg = 0;
+    int cTile = kCTile, cEvt = kCEvt, kEvt = kKEvt, cCtx = kCCtx, cCand = kCCand;
+};
+
+bool archExpectOf(int topo, int dModel, int tileD, int nHeads, int valueBins, ArchExpect &e,
+                  std::string &err) {
+    e.topoId = topo;
+    e.dTile = tileD;
+    e.dEvt = dModel;
+    e.dFuse = dModel;
+    e.dHead = dModel;
+    e.dCand = kCCand;
+    e.headDim = tileD / nHeads;
+    e.valueBins = valueBins;
+    e.nHeads = nHeads;
+    if (topo == kTopoA) {
+        e.nTileConv = 4;
+        e.nTileAttn = 1;
+        e.nJointLayer = 1;
+        e.actId = kActGelu;
+        e.normId = kNormPre;
+        e.segEmbMode = 1;
+        e.memTokenMode = 1;
+        e.valueRange = 60.f;
+        e.tileKernel[0] = 5;
+        e.tileKernel[1] = 5;
+        e.tileKernel[2] = 3;
+        e.tileKernel[3] = 3;
+        e.nSeg = kNSeqA;
+        return true;
+    }
+    if (topo == kTopoV4) {
+        e.nTileConv = 0;                 // v4 的 tile 塔没有 conv
+        e.nTileAttn = 1;
+        e.nJointLayer = 0;
+        e.actId = kActReLU;
+        e.normId = kNormPost;
+        e.segEmbMode = 0;
+        e.memTokenMode = 0;
+        e.valueRange = 30.f;
+        e.nSeg = 0;
+        return true;
+    }
+    err = "topoId=" + std::to_string(topo) + " 未注册（已注册：2 = v4、3 = A−/T1）";
+    return false;
+}
+
+inline uint16_t rd16(const uint8_t *p) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8));
+}
+inline uint32_t rd32(const uint8_t *p) {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+            | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+inline float rdF32(const uint8_t *p) {
+    const uint32_t bits = rd32(p);
+    float v = 0.f;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+/**
+ * 解析 `[64, 64+archLen)` 的 arch 段并**逐条 fail-loud**（§3 的清单 + §11.2 的六条）。
+ *
+ * <p>⛔ 六条里每一条都对应一次"静默算错"：valueBins/valueRange 不核 ⇒ 值头宽度错位；
+ * `flags` 与张量表不核 ⇒ B3/#0 静默漏读；截断不查 ⇒ 读出垃圾；保留位不查 ⇒ 未来字段被
+ * 当成现在语义；topoId 不查 ⇒ 拿 v4 的代码跑 A− 的权重。
+ */
+bool parseArchSegment(const std::vector<uint8_t> &raw, const std::string &what, int dModel,
+                      int tileD, int nHeads, int valueBins, int featVer, int obsVer,
+                      int derivedVer, ArchInfo &out, std::string &err) {
+    if (raw.size() < static_cast<size_t>(kV4HeaderBytes) + 4) {
+        err = "权重文件被截断：" + std::to_string(raw.size()) + " B —— 连 arch 段的 `archLen` 都读不到："
+              + what;
+        return false;
+    }
+    const uint8_t *base = raw.data() + kV4HeaderBytes;
+    const int alen = static_cast<int>(rd32(base));
+    if (alen < kV4ArchCoreBytes || alen > kV4ArchSegBytes || (alen % 4) != 0) {
+        err = "archLen=" + std::to_string(alen) + " 越界：必须在 [" + std::to_string(kV4ArchCoreBytes)
+              + ", " + std::to_string(kV4ArchSegBytes) + "] 且为 4 的倍数（§3：96 B 核心 + 保留尾）："
+              + what;
+        return false;
+    }
+    if (raw.size() < static_cast<size_t>(kV4HeaderBytes) + static_cast<size_t>(alen)) {
+        err = "权重文件被截断：arch 段声明 " + std::to_string(alen) + " B，文件只剩 "
+              + std::to_string(raw.size() - static_cast<size_t>(kV4HeaderBytes)) + " B：" + what;
+        return false;
+    }
+    out.archLen = alen;
+    out.archVersion = rd16(base + 4);
+    out.topoId = rd16(base + 6);
+    out.dTile = rd16(base + 8);
+    out.dEvt = rd16(base + 10);
+    out.dFuse = rd16(base + 12);
+    out.dHead = rd16(base + 14);
+    out.dCand = rd16(base + 16);
+    out.headDim = rd16(base + 18);
+    out.nTileConv = base[20];
+    out.nTileAttn = base[21];
+    out.nJointLayer = base[22];
+    out.actId = base[23];
+    out.normId = base[24];
+    out.segEmbMode = base[25];
+    out.memTokenMode = base[26];
+    out.flags = base[27];
+    out.valueBins = rd16(base + 28);
+    out.nHeads = rd16(base + 30);
+    out.valueRange = rdF32(base + 32);
+    out.lnEps = rdF32(base + 36);
+    for (int i = 0; i < 4; i++) {
+        out.tileKernel[i] = base[40 + i];
+    }
+    out.nSeg = base[44];
+    out.featVersion = static_cast<int>(rd32(base + 48));
+    out.obsVersion = static_cast<int>(rd32(base + 52));
+    out.derivedVersion = static_cast<int>(rd32(base + 56));
+    out.cTile = rd16(base + 60);
+    out.cEvt = rd16(base + 62);
+    out.kEvt = rd16(base + 64);
+    out.cCtx = rd16(base + 66);
+    out.cCand = rd16(base + 68);
+
+    if (out.archVersion != 1) {
+        err = "archVersion=" + std::to_string(out.archVersion) + " 不支持（本实现只认 1）：" + what;
+        return false;
+    }
+    ArchExpect e;
+    if (!archExpectOf(out.topoId, dModel, tileD, nHeads, valueBins, e, err)) {
+        err += "：" + what;
+        return false;
+    }
+    // 枚举字段：**先查"注册没注册"**（未注册 ⇒ 报错），再查"与拓扑一致"
+    if (out.actId != kActReLU && out.actId != kActGelu) {
+        err = "arch 段的 `actId`=" + std::to_string(out.actId) + " 未注册（0 = ReLU、1 = GELU-erf）："
+              + what;
+        return false;
+    }
+    if (out.normId != kNormPost && out.normId != kNormPre) {
+        err = "arch 段的 `normId`=" + std::to_string(out.normId) + " 未注册（0 = post-LN、1 = pre-LN）："
+              + what;
+        return false;
+    }
+    if (out.segEmbMode > 1 || out.memTokenMode > 1) {
+        err = "arch 段的 `segEmbMode/memTokenMode`=" + std::to_string(out.segEmbMode) + "/"
+              + std::to_string(out.memTokenMode) + " 未注册（只认 0/1）：" + what;
+        return false;
+    }
+    if ((out.flags & kFlagReserved) != 0) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "arch 段的 `flags`=%#04x 用了**保留位**（bit4–7 必须为 0）",
+                      out.flags);
+        err = std::string(buf) + "：" + what;
+        return false;
+    }
+    // 头 ↔ arch 段：三版本号 + 两个宽度必须相等（文件不许自相矛盾）
+    if (out.featVersion != featVer || out.obsVersion != obsVer
+            || out.derivedVersion != derivedVer) {
+        err = "头与 arch 段的版本三件套不一致：头 " + std::to_string(featVer) + "/"
+              + std::to_string(obsVer) + "/" + std::to_string(derivedVer) + "，arch "
+              + std::to_string(out.featVersion) + "/" + std::to_string(out.obsVersion) + "/"
+              + std::to_string(out.derivedVersion) + "（文件自相矛盾）：" + what;
+        return false;
+    }
+    if (out.valueBins != valueBins) {
+        err = "`valueBins` 三处不一致：头 " + std::to_string(valueBins) + " / arch "
+              + std::to_string(out.valueBins) + "（张量表里的 `heads.value.weight` 行数由 bindAll 核）："
+              + what;
+        return false;
+    }
+    if (out.nHeads != nHeads) {
+        err = "头与 arch 段的 `nHeads` 不一致：头 " + std::to_string(nHeads) + " / arch "
+              + std::to_string(out.nHeads) + "：" + what;
+        return false;
+    }
+    if (out.dFuse != dModel || out.dTile != tileD) {
+        err = "arch 段的 `dFuse/dTile` = " + std::to_string(out.dFuse) + "/"
+              + std::to_string(out.dTile) + " 与头部 `dModel/tileD` = " + std::to_string(dModel)
+              + "/" + std::to_string(tileD) + " 不一致：" + what;
+        return false;
+    }
+    if (out.dEvt != e.dEvt || out.dHead != e.dHead || out.dCand != e.dCand
+            || out.headDim != e.headDim || out.valueRange != e.valueRange) {
+        err = "arch 段的宽度/量纲与 `" + std::string(out.topoId == kTopoA ? "a-" : "v4")
+              + "` 拓扑不符：dEvt=" + std::to_string(out.dEvt) + "（应 " + std::to_string(e.dEvt)
+              + "）dHead=" + std::to_string(out.dHead) + "（应 " + std::to_string(e.dHead)
+              + "）dCand=" + std::to_string(out.dCand) + "（应 " + std::to_string(e.dCand)
+              + "）headDim=" + std::to_string(out.headDim) + "（应 " + std::to_string(e.headDim)
+              + "）valueRange=" + std::to_string(out.valueRange) + "（应 "
+              + std::to_string(e.valueRange) + "）：" + what;
+        return false;
+    }
+    // 其余"由拓扑决定"的字段：逐字段等于期望（⛔ 不许"文件说 GELU、代码建 ReLU"）
+    std::vector<std::string> bad;
+    auto chk = [&](const char *name, int got, int want) {
+        if (got != want) {
+            bad.push_back(std::string(name) + "=" + std::to_string(got) + "（应 "
+                          + std::to_string(want) + "）");
+        }
+    };
+    chk("nTileConv", out.nTileConv, e.nTileConv);
+    chk("nTileAttn", out.nTileAttn, e.nTileAttn);
+    chk("nJointLayer", out.nJointLayer, e.nJointLayer);
+    chk("actId", out.actId, e.actId);
+    chk("normId", out.normId, e.normId);
+    chk("segEmbMode", out.segEmbMode, e.segEmbMode);
+    chk("memTokenMode", out.memTokenMode, e.memTokenMode);
+    for (int i = 0; i < 4; i++) {
+        chk((std::string("tileKernel") + std::to_string(i)).c_str(), out.tileKernel[i],
+            e.tileKernel[i]);
+    }
+    chk("nSeg", out.nSeg, e.nSeg);
+    chk("cTile", out.cTile, e.cTile);
+    chk("cEvt", out.cEvt, e.cEvt);
+    chk("kEvt", out.kEvt, e.kEvt);
+    chk("cCtx", out.cCtx, e.cCtx);
+    chk("cCand", out.cCand, e.cCand);
+    if (!bad.empty()) {
+        err = "arch 段与 `" + std::string(out.topoId == kTopoA ? "a-" : "v4") + "` 拓扑不符（"
+              + std::to_string(bad.size()) + " 条）：" + joinNames(bad, 8) + "：" + what;
+        return false;
+    }
+    // 保留：pad 两字节 + 核心 70..95 + 保留尾 96..archLen 必须全 0
+    if (base[45] != 0 || base[46] != 0 || base[47] != 0) {
+        err = "arch 段的 pad 字节非 0（" + std::to_string(base[45]) + "/" + std::to_string(base[46])
+              + "/" + std::to_string(base[47]) + "）：" + what;
+        return false;
+    }
+    for (int i = 70; i < kV4ArchCoreBytes; i++) {
+        if (base[i] != 0) {
+            err = "arch 段的保留区（偏移 70–95，26 B）非 0（archVersion=1 必须全 0）：" + what;
+            return false;
+        }
+    }
+    for (int i = kV4ArchCoreBytes; i < alen; i++) {
+        if (base[i] != 0) {
+            err = "arch 段的保留尾（偏移 96–" + std::to_string(alen - 1) + "）非 0 —— 写端必须全 0："
+                  + what;
+            return false;
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------- 加载
@@ -631,7 +1191,7 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
     const int32_t fmt = r.i32();
     const int32_t featVer = r.i32();
     const int32_t obsVer = r.i32();
-    r.i32();                                              // derivedVersion（本前向用不到）
+    const int32_t derivedVer = r.i32();
     const int32_t dModel = r.i32();
     const int32_t tileD = r.i32();
     const int32_t nHeads = r.i32();
@@ -643,10 +1203,21 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
         err = std::string(buf) + "：" + what;
         return false;
     }
+    if (fmt == 2) {
+        // ⛔ **硬切**（`A-REFACTOR-IMPL-PLAN.md` §3）：格式 2 = A− 之前的老包，**没有 arch 段**
+        //   ⇒ 本前向无法知道这是 v4 图还是 A− 图。⛔ 不自动升级、不补 0、不猜 arch。
+        err = "权重格式版本 2（= A− 之前的老包，没有 arch 段）已经退役：format 3 起是 v4/A− 的"
+              "统一容器。只有**冻结快照**能读它：`lab/mv1/frozen-format2/`（jar `3E7D0ADC…` / "
+              "trainer.exe `F6AAA307…`）—— ⛔ 不会自动升级、不补 0、不猜 arch：" + what;
+        return false;
+    }
+    if (fmt == 1) {
+        err = "权重格式版本 1 是 v3 的定长 MLP（由 loadNet 加载），不是 v4 的容器：" + what;
+        return false;
+    }
     if (fmt != kV4FormatVersion) {
         err = "权重格式版本 " + std::to_string(fmt) + " != 本训练端 "
-              + std::to_string(kV4FormatVersion)
-              + "（格式 1 是 v3 的定长 MLP，由 loadNet 加载）：" + what;
+              + std::to_string(kV4FormatVersion) + "（v3 = 1，v4/A− = 3；2 已退役）：" + what;
         return false;
     }
     if (featVer != kV4FeatureVersion) {
@@ -667,12 +1238,21 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
               + "：" + what;
         return false;
     }
+
+    // ---- arch 段（**块表之前**，偏移 64，长度 = 段首 u32）——格式 3 的唯一"拓扑判据"
     const int32_t nBlocks = r.i32();
     const int32_t nTensors = r.i32();
     uint8_t fpB[16];
     r.bytes(fpB, 16);
     std::string fingerprint(reinterpret_cast<const char *>(fpB), 16);
-    r.i32();                                              // params（日志用，不信它）
+    const int32_t paramsHeader = r.i32();     // 格式 3 起是**校验位**（⛔ 不再"读了不用"）
+    ArchInfo ai;
+    if (!parseArchSegment(raw, what, dModel, tileD, nHeads, valueBins, featVer, obsVer, derivedVer,
+                          ai, err)) {
+        return false;
+    }
+    r.pos = static_cast<size_t>(kV4HeaderBytes) + static_cast<size_t>(ai.archLen);
+    r.bad = false;
 
     // ---- 块清单：id 已注册 / 宽度相符 / 顺序递增（= Java 的三条检查）
     std::set<std::string> missing;
@@ -731,8 +1311,29 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
     p.fingerprint = fingerprint;
     p.blocks = blocks;
     p.missingBlocks.assign(missing.begin(), missing.end());
+    p.format = static_cast<int>(fmt);
+    p.arch = ai.topoId;
+    p.flags = ai.flags;
+    p.valueRange = ai.valueRange;
+    p.dTile = ai.dTile;
+    p.dEvt = ai.dEvt;
+    p.dFuse = ai.dFuse;
+    p.dHead = ai.dHead;
+    p.nSeg = ai.nSeg;
+    for (int i = 0; i < 4; i++) {
+        p.tileKernels[i] = ai.tileKernel[i];
+    }
+    // 权重整段字节的 sha256（`V4Cache` 槽键的一部分）。⚠ 算在**原始字节**上：改一字节就换键。
+    p.weightSha = sha256Hex(raw.data(), raw.size(), 16);
+    // 块/张量数的上界（§3 的夹逼：⛔ 别让一个坏头把内存吃完）
+    if (nBlocks < 0 || nBlocks > 10000 || nTensors < 0 || nTensors > 10000) {
+        err = "权重的块数/张量数越界：nBlocks=" + std::to_string(nBlocks) + " nTensors="
+              + std::to_string(nTensors) + "（上限 10,000）：" + what;
+        return false;
+    }
 
     // ---- 张量表（名字升序，但顺序不参与语义；逐条核对维度数）
+    long long paramsSeen = 0;
     for (int i = 0; i < nTensors; i++) {
         const uint16_t ln = r.u16();
         std::vector<char> nb(ln);
@@ -770,6 +1371,7 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
             err = "权重里有重复张量名：" + name;
             return false;
         }
+        paramsSeen += total;
         if (nd == 2) {
             V4Policy::Mat m;
             m.rows = shape[0];
@@ -778,13 +1380,28 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
             p.mats[name] = std::move(m);
         } else if (nd == 1) {
             p.vecs[name] = std::move(data);
+        } else if (nd == 3) {
+            // A− 的 `Conv1d` 权重 `[out][in][k]`（= PyTorch 布局，行主序拍平即可）
+            V4Policy::Conv c;
+            c.out = shape[0];
+            c.in = shape[1];
+            c.k = shape[2];
+            c.data = std::move(data);
+            p.convs[name] = std::move(c);
         } else {
-            err = "张量 " + name + " 是 " + std::to_string(nd) + " 维（只支持 1/2 维）";
+            err = "张量 " + name + " 是 " + std::to_string(nd) + " 维（只支持 1/2/3 维）";
             return false;
         }
     }
     if (r.remaining() != 0) {
-        err = "权重文件尾部多了 " + std::to_string(r.remaining()) + " 字节（张量表与头部不符）";
+        err = "权重文件尾部多了 " + std::to_string(r.remaining()) + " 字节（张量表与头部不符）："
+              + what;
+        return false;
+    }
+    // `params` = **校验位**（§3 fail-loud ⑤；C++/Java 以前"读了不用"）
+    if (static_cast<long long>(paramsHeader) != paramsSeen) {
+        err = "头部的 `params`=" + std::to_string(paramsHeader) + " != 张量表实算 "
+              + std::to_string(paramsSeen) + "（校验位不符：文件被改过或写端有 bug）：" + what;
         return false;
     }
     if (!finishPolicy(p, err)) {
@@ -821,9 +1438,15 @@ bool v4WeightFormatOf(const std::string &path, int &format, std::string &err) {
         err = std::string(buf) + "：" + path;
         return false;
     }
+    if (fmt == 2) {
+        err = "权重格式版本 2（= A− 之前的老包，没有 arch 段）已经退役：只有**冻结快照**能读它"
+              "（`lab/mv1/frozen-format2/`，jar `3E7D0ADC…` / trainer.exe `F6AAA307…`）—— "
+              "⛔ 不自动升级、不补 0、不猜 arch：" + path;
+        return false;
+    }
     if (fmt != 1 && fmt != kV4FormatVersion) {
-        err = "权重格式版本 " + std::to_string(fmt) + " 不认识（v3 = 1，v4 = 2）—— 重新导出权重："
-              + path;
+        err = "权重格式版本 " + std::to_string(fmt) + " 不认识（v3 = 1，v4/A− = 3；2 已退役）—— "
+              "重新导出权重：" + path;
         return false;
     }
     format = fmt;
@@ -847,17 +1470,30 @@ long long v4ParamCount(const V4Policy &p) {
     for (const auto &kv : p.mats) {
         total += static_cast<long long>(kv.second.data.size());
     }
+    for (const auto &kv : p.convs) {
+        total += static_cast<long long>(kv.second.data.size());
+    }
     for (const auto &kv : p.vecs) {
         total += static_cast<long long>(kv.second.size());
     }
     return total;
 }
 
+std::string V4Policy::cacheTag() const {
+    // ⚠ 版本号写进键里（段 3b：`CACHE_VERSION 1→2`）—— **键的语义**变了（现在含网络身份），
+    //   不 bump 的话"旧进程里存下的槽"与"新语义"无法区分；跨进程本就没有槽，所以这里的作用
+    //   只是让**代码版本**也进键（判据：换 arch / 换权重 / 换实现都必须 miss）。
+    return "v2|f" + std::to_string(format) + "|t" + std::to_string(arch) + "|" + weightSha;
+}
+
 std::string v4Describe(const V4Policy &p) {
+    const char *topo = p.arch == kTopoA ? "a-" : (p.arch == kTopoV4 ? "v4" : "?");
     return "V4Policy（" + std::to_string(v4ParamCount(p)) + " 参数，格式 "
-           + std::to_string(kV4FormatVersion) + "，dims={d_model=" + std::to_string(p.dModel)
+           + std::to_string(p.format) + "，arch=" + topo + "（topoId="
+           + std::to_string(p.arch) + "），dims={d_model=" + std::to_string(p.dModel)
            + ", tile_d=" + std::to_string(p.tileD) + ", n_heads=" + std::to_string(p.nHeads)
-           + ", value_bins=" + std::to_string(p.valueBins) + "}，块 "
+           + ", value_bins=" + std::to_string(p.valueBins) + "}，flags="
+           + std::to_string(p.flags) + "，权重 sha=" + p.weightSha.substr(0, 8) + "，块 "
            + std::to_string(p.blocks.size()) + " / 注册表 16，指纹 " + p.fingerprint + "）";
 }
 
@@ -872,7 +1508,8 @@ namespace {
  * 激活逐元素 —— 与原来逐行调用**逐位相同**。
  */
 bool mlp(const V4Policy &p, const float *x, int xStride, int B, size_t xn,
-         const std::string &prefix, int cin, int dm, float *out, V4Scratch &sc, std::string &err) {
+         const std::string &prefix, int cin, int dm, float *out, V4Scratch &sc, std::string &err,
+         bool finalRelu = true) {
     const V4Policy::Mat *w0 = p.mat(prefix + ".0.weight", dm, cin, err);
     const std::vector<float> *b0 = p.vec(prefix + ".0.bias", dm, err);
     const V4Policy::Mat *w2 = p.mat(prefix + ".2.weight", dm, dm, err);
@@ -887,7 +1524,9 @@ bool mlp(const V4Policy &p, const float *x, int xStride, int B, size_t xn,
     linearBatchFast(h.data(), dm, x, xStride, B, xn, *w0, b0->data(), 0, dm);
     reluBuf(h.data(), static_cast<size_t>(B) * static_cast<size_t>(dm));
     linearBatchFast(out, dm, h.data(), dm, B, static_cast<size_t>(dm), *w2, b2->data(), 0, dm);
-    reluBuf(out, static_cast<size_t>(B) * static_cast<size_t>(dm));
+    if (finalRelu) {
+        reluBuf(out, static_cast<size_t>(B) * static_cast<size_t>(dm));
+    }
     return true;
 }
 
@@ -1046,16 +1685,24 @@ bool head(const V4Policy &p, const std::vector<float> &state, const std::string 
 //   ① 生产全量 = `eventTowerRound`（整手 carry）；② 增量 = 槽里的 `s.h`（Java 侧，C++ 无缓存）；
 //   ③ golden 夹具 = `eventTowerWindow`（`h0` 由 Python 显式给出，只喂窗口里的真实行）。
 
-/** `event.enc` 的两层（**末尾没有 ReLU** —— 与 `tile.enc` 不同，见 hpp 顶部纪律①）。 */
+/** `event.enc` 的两层（v4：**末尾没有 ReLU**；A−：**只有一层 Linear + GELU**）。 */
 struct EventEnc {
     const V4Policy::Mat *w1 = nullptr;
     const std::vector<float> *b1 = nullptr;
     const V4Policy::Mat *w2 = nullptr;
     const std::vector<float> *b2 = nullptr;
+    /** `topoId`：A− 的编码器是单个 `Linear(C_EVT→d)` + GELU（`AEventTower.enc`）。 */
+    int arch = kTopoV4;
 
     /** 绑定一次、逐行复用：逐行重放是热路径，没必要每行再查 4 次表 + 核形状。 */
     bool bind(const V4Policy &p, std::string &err) {
         const int dm = p.dModel;
+        arch = p.arch;
+        if (arch == kTopoA) {
+            w1 = p.mat("event.enc.weight", dm, kCEvt, err);
+            b1 = p.vec("event.enc.bias", dm, err);
+            return err.empty();
+        }
         w1 = p.mat("event.enc.0.weight", dm, kCEvt, err);
         b1 = p.vec("event.enc.0.bias", dm, err);
         w2 = p.mat("event.enc.2.weight", dm, dm, err);
@@ -1133,6 +1780,11 @@ void EventEnc::rows(const float *tok, int len, int tokStride, float *out, V4Scra
     const int dm = w1->rows;
     linearBatchFast(out, dm, tok, tokStride, len, static_cast<size_t>(kCEvt), *w1, b1->data(), 0,
                     dm);
+    if (arch == kTopoA) {
+        // A−：`GELU(Linear(C_EVT→d))`，**没有第二层**（`AEventTower.enc`）
+        geluBuf(out, static_cast<size_t>(len) * static_cast<size_t>(dm));
+        return;
+    }
     reluBuf(out, static_cast<size_t>(len) * static_cast<size_t>(dm));
     // 第二个线性层与 out 别名：先整块拷进 `sc.encTmp`（与 Java 的"别名先复制"同一条纪律）
     const size_t need = static_cast<size_t>(len) * static_cast<size_t>(dm);
@@ -1150,6 +1802,125 @@ void EventEnc::rows(const float *tok, int len, int tokStride, float *out, V4Scra
  * <p>两条 carry 路线在这里是**同一份代码**（Java 里那两段也是逐行同构）—— 所以"给定同一个 h、
  * 同一个窗口 ⇒ 同一个结果"是构造出来的，不是靠两处实现碰巧一样。
  */
+/**
+ * `Conv1d`（`stride=1`、`padding=k/2`，两端补 0）：
+ * `y[o][t] = b[o] + Σ_c Σ_j W[o][c][j]·x[c][t+j-pad]`。
+ *
+ * <p>`x` 是 **[cin][len]**（通道在前 = PyTorch `conv1d` 的输入布局），`y` 是 **[cout][len]**。
+ * `W` 的布局就是 `Conv1d.weight` 的 `[out][in][k]` 拍平 ⇒ 不用重建权重。
+ * ⚠ 单累加器、`c` 升序再 `j` 升序、`bias` 起累加（与全仓其它算子的"别改求和顺序"同一条纪律；
+ *   三端判据是 `max|Δ|`，卷积在 torch 侧的求和顺序本来就不保证，所以这里只保证**确定性**）。
+ */
+void conv1dBuf(float *y, const float *x, int len, const V4Policy::Conv &w, const float *bias,
+               int pad, int cout) {
+    const int cin = w.in;
+    const int k = w.k;
+    for (int o = 0; o < cout; o++) {
+        for (int t = 0; t < len; t++) {
+            float s = bias[o];
+            for (int c = 0; c < cin; c++) {
+                const float *row = w.data.data()
+                        + (static_cast<size_t>(o) * static_cast<size_t>(cin)
+                           + static_cast<size_t>(c)) * static_cast<size_t>(k);
+                const float *xc = x + static_cast<size_t>(c) * static_cast<size_t>(len);
+                for (int j = 0; j < k; j++) {
+                    const int pos = t + j - pad;
+                    if (pos >= 0 && pos < len) {
+                        s += row[j] * xc[pos];
+                    }
+                }
+            }
+            y[static_cast<size_t>(o) * static_cast<size_t>(len) + t] = s;
+        }
+    }
+}
+
+/**
+ * A− 的事件窗口卷积塔：`GELU(LN(conv1(GELU(LN(e))))) → conv2`（`AEventTower._tokens`）。
+ *
+ * <p>输入/输出都是**token 在前** `[len][d]`；中间为卷积转成 `[d][len]`。
+ * ⚠ 卷积**不改变 GRU 的 carry**（carry 在 `e` 上推进）—— 这是增量缓存契约不变的前提
+ * （`AEventTower` 的 docstring 明写：别把卷积放到 GRU 之前，否则 `h` 依赖窗口起点）。
+ */
+bool eventConvTower(const V4Policy &p, const float *e, int len, float *out, V4Scratch &sc,
+                    std::string &err) {
+    const int d = p.dModel;
+    const size_t ld = static_cast<size_t>(len) * static_cast<size_t>(d);
+    // 取张量（形状在 bindAllA 已核过；这里只取指针）
+    const auto cv = [&](const char *n, int outCh, int inCh, int k) -> const V4Policy::Conv * {
+        const auto it = p.convs.find(n);
+        if (it == p.convs.end() || it->second.out != outCh || it->second.in != inCh
+                || it->second.k != k) {
+            err = std::string("张量 ") + n + " 缺失或形状不符";
+            return nullptr;
+        }
+        return &it->second;
+    };
+    const V4Policy::Conv *conv1 = cv("event.conv1.weight", d, d, 3);
+    const V4Policy::Conv *conv2 = cv("event.conv2.weight", d, d, 3);
+    const auto vv = [&](const char *n, int w) -> const std::vector<float> * {
+        const auto it = p.vecs.find(n);
+        if (it == p.vecs.end() || static_cast<int>(it->second.size()) != w) {
+            err = std::string("张量 ") + n + " 缺失或长度不符";
+            return nullptr;
+        }
+        return &it->second;
+    };
+    const std::vector<float> *b1 = vv("event.conv1.bias", d);
+    const std::vector<float> *g1 = vv("event.norm1.weight", d);
+    const std::vector<float> *bb1 = vv("event.norm1.bias", d);
+    const std::vector<float> *b2 = vv("event.conv2.bias", d);
+    const std::vector<float> *g2 = vv("event.norm2.weight", d);
+    const std::vector<float> *bb2 = vv("event.norm2.bias", d);
+    if (conv1 == nullptr || conv2 == nullptr || b1 == nullptr || g1 == nullptr || bb1 == nullptr
+            || b2 == nullptr || g2 == nullptr || bb2 == nullptr) {
+        return false;
+    }
+    if (sc.aBuf.size() < ld) {
+        sc.aBuf.resize(ld);
+        sc.aBuf2.resize(ld);
+        sc.xn.resize(ld);
+    }
+    float *tok = sc.xn.data();       // [len][d]
+    float *ch = sc.aBuf.data();      // [d][len]
+    float *ch2 = sc.aBuf2.data();    // [d][len]
+    // ① GELU(LN(e))（逐 token，LN 在特征维上）
+    for (int t = 0; t < len; t++) {
+        std::memcpy(tok + static_cast<size_t>(t) * d, e + static_cast<size_t>(t) * d,
+                    sizeof(float) * static_cast<size_t>(d));
+        layerNormBuf(tok + static_cast<size_t>(t) * d, d, g1->data(), bb1->data());
+    }
+    geluBuf(tok, ld);
+    // ② 转置 → conv1
+    for (int t = 0; t < len; t++) {
+        for (int j = 0; j < d; j++) {
+            ch[static_cast<size_t>(j) * len + t] = tok[static_cast<size_t>(t) * d + j];
+        }
+    }
+    conv1dBuf(ch2, ch, len, *conv1, b1->data(), 1, d);
+    // ③ 转置 → GELU(LN(·)) → 转置 → conv2
+    for (int t = 0; t < len; t++) {
+        for (int j = 0; j < d; j++) {
+            tok[static_cast<size_t>(t) * d + j] = ch2[static_cast<size_t>(j) * len + t];
+        }
+        layerNormBuf(tok + static_cast<size_t>(t) * d, d, g2->data(), bb2->data());
+    }
+    geluBuf(tok, ld);
+    for (int t = 0; t < len; t++) {
+        for (int j = 0; j < d; j++) {
+            ch[static_cast<size_t>(j) * len + t] = tok[static_cast<size_t>(t) * d + j];
+        }
+    }
+    conv1dBuf(ch2, ch, len, *conv2, b2->data(), 1, d);
+    // ④ 转回 token 在前
+    for (int t = 0; t < len; t++) {
+        for (int j = 0; j < d; j++) {
+            out[static_cast<size_t>(t) * d + j] = ch2[static_cast<size_t>(j) * len + t];
+        }
+    }
+    return true;
+}
+
 bool encodeWindow(const V4Policy &p, const V4Tensors &t, const EventEnc &enc, V4Scratch &sc,
                   std::string &err) {
     if (sc.eRows.size() < static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel)) {
@@ -1157,6 +1928,9 @@ bool encodeWindow(const V4Policy &p, const V4Tensors &t, const EventEnc &enc, V4
         sc.eTokens.resize(static_cast<size_t>(kKEvt) * static_cast<size_t>(p.dModel));
     }
     enc.rows(t.evt[0].data(), kKEvt, kCEvt, sc.eRows.data(), sc);
+    if (p.arch == kTopoA) {
+        return eventConvTower(p, sc.eRows.data(), kKEvt, sc.eTokens.data(), sc, err);
+    }
     return transformerLayer(p, sc.eRows.data(), kKEvt, "event.tr.layers.0", sc.eTokens.data(), sc,
                             err);
 }
@@ -1445,6 +2219,15 @@ bool eventTowerCached(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4
         // 没有 `round` 信息 ⇒ **不缓存**，但仍是整手 carry（宁可不省，也不能拿上一局的当这一局的）
         return roundAdvance(p, obs, t, enc, gru, sc, err);
     }
+    // ★ 段 3b（`A-REFACTOR-IMPL-PLAN.md` 风险 5）：槽键 = **网络身份** + 小局身份。
+    //   旧键只有 `handKey` ⇒ 同进程换网/换 arch 后，旧槽会被当成"这一局的 carry"静默复用
+    //   （carry 宽度/语义都变了）。判据：`trainer v4cache --swap-net`（换网后 B 的增量必须
+    //   仍与它自己的整手重放逐位相同）。
+    //   ⚠ 负向注入 `TRAINER_V4_OLD_KEY=1` ⇒ 回到旧口径（只给判据用，证明判据有牙齿；
+    //     ⛔ 采集与训练里绝不能设 —— 它会让换网后的 carry 静默错）。
+    if (std::getenv("TRAINER_V4_OLD_KEY") == nullptr) {
+        key = p.cacheTag() + "|" + key;
+    }
     if (sc.carryCache == nullptr) {
         sc.carryCache = std::make_shared<V4CarryCache>();
     }
@@ -1463,8 +2246,7 @@ bool eventTowerCached(const V4Policy &p, const JVal &obs, const V4Tensors &t, V4
     }
     if (rebuild) {
         cc.st.cold++;
-        s.key = key;
-        s.seen = 0;
+        s.key = key;        s.seen = 0;
         s.len = 0;
         s.valid = true;
         if (s.h.size() != static_cast<size_t>(p.dModel)) {
@@ -1572,8 +2354,554 @@ void v4CarryResetStats(V4Scratch &scr) {
     }
 }
 
+/**
+ * **A−（topoId=3）前向** —— 语义权威 = `python/mahjong_ml/v4/model.py`（`ATileTower` /
+ * `AEventTower` / `AFusion` / `AHeads`）。
+ *
+ * <p>层次（`ARCH-REDESIGN.md` §2.2 的 T1 表；括号里是 Python 的类）：
+ *   tile：`Conv1d(48→160,k=5)+LN+GELU` → `1×k5 + 2×k3` pre-LN 残差卷积 → 轴向 MHA(4,d=160)
+ *         （pre-LN、残差）→ `GELU → Linear(160→128) → LN`；`[34,48]` **转成 `[48,34]`** 做卷积
+ *         （⛔ 不重建数据）；**#0 `tile_id` 在转置之前加**；
+ *   evt ：`Linear(96→128)+GELU` → `GRUCell(128,128)`（**carry 契约不变**）→ `2×Conv1d(k=3)+LN+GELU`；
+ *   fusion：`95 = 34 tile + 60 evt + 1 h_evt` token 的 joint self-attn（段嵌入 3 种 + evt 的
+ *         sin/cos 相对位置）→ `FFN(128→128→128)` → `cross(cand→95)` → `LN(384) → Linear(384→128)`
+ *         → B3；
+ *   heads：`value` 81 bin（±60）· `danger` 经 **0 参数固定通道**进 policy · `effect` 只给 caller
+ *         做 tie-break。
+ *
+ * <p>⚠ 三处与 v4 **结构性不同**、漏一处就是静默换语义：① 激活是 **GELU-erf**（不是 ReLU）；
+ * ② `fusion.out` 之前是 **LN(384)（pre-LN，带参数）**；③ `h_evt` 是**第 95 个 token**（不再是
+ * 逐维门控）。
+ */
+bool V4Policy::forwardA(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
+                        std::string &err, const std::vector<float> *h0, V4Scratch *scr) const {
+    err.clear();
+    V4Tensors t;
+    if (!v4Assemble(obs, missingBlocks, t, err)) {
+        return false;
+    }
+    V4Scratch localScr;
+    V4Scratch &sc = scr != nullptr ? *scr : localScr;
+    const int dm = dModel;
+    const int td = tileD;
+    const int n = static_cast<int>(t.cand.size());
+    const int maxCand = std::max(1, n);
+
+    // ---- 事件塔（与 v4 同一套 carry 契约：窗口喂真实行、`h_evt` = 窗口之后的 carry）
+    if (sc.carry.size() < static_cast<size_t>(dm)) {
+        sc.carry.assign(static_cast<size_t>(dm), 0.f);
+        sc.tok.assign(static_cast<size_t>(kCEvt), 0.f);
+        sc.rowTmp.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (h0 != nullptr) {
+        if (static_cast<int>(h0->size()) != dm) {
+            err = "h0 长度 " + std::to_string(h0->size()) + " != d_model " + std::to_string(dm)
+                  + "（既不截断也不补零）";
+            return false;
+        }
+        std::copy(h0->begin(), h0->end(), sc.carry.begin());
+        if (!eventTowerWindow(*this, t, sc, err)) {
+            return false;
+        }
+    } else if (!eventTowerProduction(*this, obs, t, sc, err)) {
+        return false;
+    }
+    const float *eTokens = sc.eTokens.data();
+    const float *hEvt = sc.carry.data();
+
+    // 取张量的小包装（形状在 bindAllA 已钉死；这里只取指针 + 防呆）
+    const auto matOf = [&](const char *name, int rows, int cols) -> const Mat * {
+        return mat(name, rows, cols, err);
+    };
+    const auto vecOf = [&](const char *name, int len) -> const std::vector<float> * {
+        return vec(name, len, err);
+    };
+    const auto convOf = [&](const char *name, int outCh, int inCh, int k) -> const Conv * {
+        const auto it = convs.find(name);
+        if (it == convs.end() || it->second.out != outCh || it->second.in != inCh
+                || it->second.k != k) {
+            err = std::string("张量 ") + name + " 缺失或形状不符";
+            return nullptr;
+        }
+        return &it->second;
+    };
+
+    // ---- 牌种塔：`[34,48] → [48,34]`（卷积）→ … → `[34,128]` + pool
+    std::vector<float> xin(static_cast<size_t>(kCTile) * static_cast<size_t>(kKindCount));
+    const Mat *tid = mats.count("tile.tile_id") ? &mats.at("tile.tile_id") : nullptr;
+    for (int k = 0; k < kKindCount; k++) {
+        for (int c = 0; c < kCTile; c++) {
+            float v = t.tile[static_cast<size_t>(k)][static_cast<size_t>(c)];
+            if (tid != nullptr) {
+                v += tid->data[static_cast<size_t>(k) * kCTile + c];   // ★ #0：**先加身份**
+            }
+            xin[static_cast<size_t>(c) * kKindCount + k] = v;
+        }
+    }
+    const size_t tileN = static_cast<size_t>(kKindCount) * static_cast<size_t>(td);
+    std::vector<float> tok(tileN, 0.f);        // [34][td]
+    std::vector<float> ch(static_cast<size_t>(td) * kKindCount, 0.f);    // [td][34]
+    std::vector<float> ch2(static_cast<size_t>(td) * kKindCount, 0.f);   // [td][34]
+    std::vector<float> acc(tileN, 0.f);        // [34][td]（残差/注意力输出）
+    {
+        const Conv *stem = convOf("tile.stem.weight", td, kCTile, 5);
+        const std::vector<float> *stemB = vecOf("tile.stem.bias", td);
+        const std::vector<float> *snG = vecOf("tile.stem_norm.weight", td);
+        const std::vector<float> *snB = vecOf("tile.stem_norm.bias", td);
+        if (stem == nullptr || stemB == nullptr || snG == nullptr || snB == nullptr) {
+            return false;
+        }
+        conv1dBuf(ch.data(), xin.data(), kKindCount, *stem, stemB->data(), 2, td);
+        for (int k = 0; k < kKindCount; k++) {
+            for (int o = 0; o < td; o++) {
+                tok[static_cast<size_t>(k) * td + o]
+                        = ch[static_cast<size_t>(o) * kKindCount + k];
+            }
+            layerNormBuf(tok.data() + static_cast<size_t>(k) * td, td, snG->data(), snB->data());
+        }
+        geluBuf(tok.data(), tileN);
+    }
+    for (int b = 0; b < 3; b++) {
+        const std::string pre = "tile.res." + std::to_string(b);
+        const int ksz = b == 0 ? 5 : 3;
+        const Conv *cv = convOf((pre + ".conv.weight").c_str(), td, td, ksz);
+        const std::vector<float> *cvB = vecOf((pre + ".conv.bias").c_str(), td);
+        const std::vector<float> *nG = vecOf((pre + ".norm.weight").c_str(), td);
+        const std::vector<float> *nB = vecOf((pre + ".norm.bias").c_str(), td);
+        if (cv == nullptr || cvB == nullptr || nG == nullptr || nB == nullptr) {
+            return false;
+        }
+        // pre-LN + GELU（逐 token），再转成通道在前做卷积；**残差先存起来**（LN 是原地改写）
+        for (int k = 0; k < kKindCount; k++) {
+            std::memcpy(acc.data() + static_cast<size_t>(k) * td,
+                        tok.data() + static_cast<size_t>(k) * td,
+                        sizeof(float) * static_cast<size_t>(td));
+            layerNormBuf(tok.data() + static_cast<size_t>(k) * td, td, nG->data(), nB->data());
+        }
+
+        geluBuf(tok.data(), tileN);
+        for (int k = 0; k < kKindCount; k++) {
+            for (int o = 0; o < td; o++) {
+                ch[static_cast<size_t>(o) * kKindCount + k]
+                        = tok[static_cast<size_t>(k) * td + o];
+            }
+        }
+        conv1dBuf(ch2.data(), ch.data(), kKindCount, *cv, cvB->data(), ksz / 2, td);
+        for (int k = 0; k < kKindCount; k++) {
+            for (int o = 0; o < td; o++) {
+                const float a = ch2[static_cast<size_t>(o) * kKindCount + k];
+                const size_t idx = static_cast<size_t>(k) * td + o;
+                tok[idx] = acc[idx] + a;               // 残差在**通道**上（不是时间轴）
+            }
+        }
+    }
+    // 轴向注意力（pre-LN、残差）：34 个 token 之间的全局混合
+    {
+        const std::vector<float> *anG = vecOf("tile.attn_norm.weight", td);
+        const std::vector<float> *anB = vecOf("tile.attn_norm.bias", td);
+        if (anG == nullptr || anB == nullptr) {
+            return false;
+        }
+        if (sc.xn.size() < tileN) {
+            sc.xn.resize(tileN);
+        }
+        for (int k = 0; k < kKindCount; k++) {
+            std::memcpy(sc.xn.data() + static_cast<size_t>(k) * td, tok.data() + static_cast<size_t>(k) * td,
+                        sizeof(float) * static_cast<size_t>(td));
+            layerNormBuf(sc.xn.data() + static_cast<size_t>(k) * td, td, anG->data(), anB->data());
+        }
+        if (!mha(*this, sc.xn.data(), kKindCount, sc.xn.data(), kKindCount, td, "tile.attn",
+                 acc.data(), sc, err)) {
+            return false;
+        }
+        for (size_t i = 0; i < tileN; i++) {
+            tok[i] += acc[i];
+        }
+    }
+    // `GELU → Linear(160→128) → LN(128)`
+    if (sc.candEmb.size() < static_cast<size_t>(kKindCount) * static_cast<size_t>(dm)) {
+        sc.candEmb.resize(static_cast<size_t>(kKindCount) * static_cast<size_t>(dm));
+    }
+    geluBuf(tok.data(), tileN);
+    {
+        const Mat *pw = matOf("tile.proj.weight", dm, td);
+        const std::vector<float> *pb = vecOf("tile.proj.bias", dm);
+        const std::vector<float> *pnG = vecOf("tile.proj_norm.weight", dm);
+        const std::vector<float> *pnB = vecOf("tile.proj_norm.bias", dm);
+        if (pw == nullptr || pb == nullptr || pnG == nullptr || pnB == nullptr) {
+            return false;
+        }
+        linearBatchFast(sc.candEmb.data(), dm, tok.data(), td, kKindCount, static_cast<size_t>(td),
+                        *pw, pb->data(), 0, dm);
+        for (int k = 0; k < kKindCount; k++) {
+            layerNormBuf(sc.candEmb.data() + static_cast<size_t>(k) * dm, dm, pnG->data(),
+                         pnB->data());
+        }
+    }
+    float *hTile = sc.candEmb.data();          // [34][dm]（借这一块，随后单独拷出 pool）
+    if (sc.pool.size() < static_cast<size_t>(dm)) {
+        sc.pool.assign(static_cast<size_t>(dm), 0.f);
+    } else {
+        std::fill(sc.pool.begin(), sc.pool.end(), 0.f);
+    }
+    for (int k = 0; k < kKindCount; k++) {
+        for (int j = 0; j < dm; j++) {
+            sc.pool[static_cast<size_t>(j)] += hTile[static_cast<size_t>(k) * dm + j]
+                    / static_cast<float>(kKindCount);
+        }
+    }
+
+    // ---- ctx / cand 编码器（A−：首层 LN + **死维掩码** + GELU，**末尾无激活**）
+    const auto amLp = [&](const float *x, int xStride, int B, int cin, const char *prefix,
+                          const int *dead, int ndead, float *out) -> bool {
+        const std::vector<float> *nG = vecOf((std::string(prefix) + ".norm.weight").c_str(), cin);
+        const std::vector<float> *nB = vecOf((std::string(prefix) + ".norm.bias").c_str(), cin);
+        const Mat *f1 = matOf((std::string(prefix) + ".fc1.weight").c_str(), dm, cin);
+        const std::vector<float> *f1b = vecOf((std::string(prefix) + ".fc1.bias").c_str(), dm);
+        const Mat *f2 = matOf((std::string(prefix) + ".fc2.weight").c_str(), dm, dm);
+        const std::vector<float> *f2b = vecOf((std::string(prefix) + ".fc2.bias").c_str(), dm);
+        if (nG == nullptr || nB == nullptr || f1 == nullptr || f1b == nullptr || f2 == nullptr
+                || f2b == nullptr) {
+            return false;
+        }
+        std::vector<float> row(static_cast<size_t>(cin), 0.f);
+        std::vector<float> hid(static_cast<size_t>(std::max(1, B)) * static_cast<size_t>(dm), 0.f);
+        for (int b = 0; b < B; b++) {
+            for (int c = 0; c < cin; c++) {
+                row[static_cast<size_t>(c)] = x[static_cast<size_t>(b) * xStride + c];
+            }
+            for (int i = 0; i < ndead; i++) {
+                row[static_cast<size_t>(dead[i])] = 0.f;      // LN **前**掩一次
+            }
+            layerNormBuf(row.data(), cin, nG->data(), nB->data());
+            for (int i = 0; i < ndead; i++) {
+                row[static_cast<size_t>(dead[i])] = 0.f;      // LN **后**再掩（否则 LN 的 bias 会漏进去）
+            }
+            linearFast(hid.data() + static_cast<size_t>(b) * dm, row.data(),
+                       static_cast<size_t>(cin), *f1, f1b->data(), 0, dm);
+        }
+        geluBuf(hid.data(), static_cast<size_t>(B) * static_cast<size_t>(dm));
+        linearBatchFast(out, dm, hid.data(), dm, B, static_cast<size_t>(dm), *f2, f2b->data(), 0,
+                        dm);
+        return true;
+    };
+    if (sc.ctxEmb.size() < static_cast<size_t>(dm)) {
+        sc.ctxEmb.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (!amLp(t.ctx.data(), kCCtx, 1, kCCtx, "ctx", kCtxDeadDims,
+              static_cast<int>(sizeof(kCtxDeadDims) / sizeof(kCtxDeadDims[0])),
+              sc.ctxEmb.data())) {
+        return false;
+    }
+    if (sc.uTile.size() < static_cast<size_t>(maxCand) * static_cast<size_t>(dm)) {
+        sc.uTile.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+        sc.uEvt.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+        sc.u.resize(static_cast<size_t>(maxCand) * static_cast<size_t>(dm));
+    }
+    // cand 的编码器输出写进 sc.uEvt（用完即可覆盖），cross 的 q 直接用它做 0 参数 LN
+    int candDead[32];
+    int nCandDead = 0;
+    for (int c = kCandDeadDimsFirst; c < kCCand; c++) {
+        candDead[nCandDead++] = c;
+    }
+    if (n > 0) {
+        if (!amLp(t.cand[0].data(), kCCand, n, kCCand, "cand", candDead, nCandDead,
+                  sc.uEvt.data())) {
+            return false;
+        }
+        // `q = layer_norm(cand)`（**无仿射**，eps=1e-5）—— pre-LN 但不占参数账
+        for (int i = 0; i < n; i++) {
+            float *row = sc.uEvt.data() + static_cast<size_t>(i) * dm;
+            double mean = 0.0;
+            for (int j = 0; j < dm; j++) {
+                mean += static_cast<double>(row[j]);
+            }
+            mean /= static_cast<double>(dm);
+            double var = 0.0;
+            for (int j = 0; j < dm; j++) {
+                const double dd = static_cast<double>(row[j]) - mean;
+                var += dd * dd;
+            }
+            var /= static_cast<double>(dm);
+            const double inv = 1.0 / std::sqrt(var + static_cast<double>(kLnEps));
+            for (int j = 0; j < dm; j++) {
+                row[j] = static_cast<float>((static_cast<double>(row[j]) - mean) * inv);
+            }
+        }
+    }
+
+    // ---- 融合：95 token（34 tile + 60 evt + h_evt 第 95 个）+ 段嵌入 + evt 的 sin/cos
+    const int nTok = kJointTokens;
+    const size_t tokBytes = static_cast<size_t>(nTok) * static_cast<size_t>(dm);
+    if (sc.yv.size() < tokBytes) {
+        sc.yv.resize(tokBytes);
+        sc.att.resize(tokBytes);
+        sc.xn.resize(tokBytes);
+    }
+    float *tokens = sc.yv.data();
+    {
+        const Mat *seg = matOf("fusion.seg", kNSeqA, dm);
+        if (seg == nullptr) {
+            return false;
+        }
+        for (int k = 0; k < kKindCount; k++) {
+            for (int j = 0; j < dm; j++) {
+                tokens[static_cast<size_t>(k) * dm + j]
+                        = hTile[static_cast<size_t>(k) * dm + j]
+                        + seg->data[static_cast<size_t>(kSegTile) * dm + j];
+            }
+        }
+        for (int row = 0; row < kKEvt; row++) {
+            const size_t off = static_cast<size_t>(kKindCount + row) * dm;
+            for (int j = 0; j < dm; j++) {
+                tokens[off + j] = eTokens[static_cast<size_t>(row) * dm + j]
+                        + seg->data[static_cast<size_t>(kSegEvt) * dm + j]
+                        + peEvt[static_cast<size_t>(row) * dm + j];
+            }
+        }
+        for (int j = 0; j < dm; j++) {
+            tokens[static_cast<size_t>(kJointTokens - 1) * dm + j]
+                    = hEvt[static_cast<size_t>(j)]
+                    + seg->data[static_cast<size_t>(kSegMem) * dm + j];
+        }
+    }
+    // joint self-attn（pre-LN + 残差）
+    {
+        const std::vector<float> *jnG = vecOf("fusion.joint_norm.weight", dm);
+        const std::vector<float> *jnB = vecOf("fusion.joint_norm.bias", dm);
+        if (jnG == nullptr || jnB == nullptr) {
+            return false;
+        }
+        for (int row = 0; row < nTok; row++) {
+            std::memcpy(sc.xn.data() + static_cast<size_t>(row) * dm,
+                        tokens + static_cast<size_t>(row) * dm, sizeof(float) * static_cast<size_t>(dm));
+            layerNormBuf(sc.xn.data() + static_cast<size_t>(row) * dm, dm, jnG->data(), jnB->data());
+        }
+        if (!mha(*this, sc.xn.data(), nTok, sc.xn.data(), nTok, dm, "fusion.joint", sc.att.data(),
+                 sc, err)) {
+            return false;
+        }
+        for (size_t i = 0; i < tokBytes; i++) {
+            tokens[i] += sc.att[i];
+        }
+    }
+    // FFN(128→128→128)（pre-LN + 残差）
+    {
+        const std::vector<float> *fnG = vecOf("fusion.ffn_norm.weight", dm);
+        const std::vector<float> *fnB = vecOf("fusion.ffn_norm.bias", dm);
+        const Mat *w1 = matOf("fusion.ffn1.weight", dm, dm);
+        const std::vector<float> *b1 = vecOf("fusion.ffn1.bias", dm);
+        const Mat *w2 = matOf("fusion.ffn2.weight", dm, dm);
+        const std::vector<float> *b2 = vecOf("fusion.ffn2.bias", dm);
+        if (fnG == nullptr || fnB == nullptr || w1 == nullptr || b1 == nullptr || w2 == nullptr
+                || b2 == nullptr) {
+            return false;
+        }
+        if (sc.gu.size() < static_cast<size_t>(dm)) {
+            sc.gu.assign(static_cast<size_t>(dm), 0.f);
+        }
+        if (sc.memG.size() < static_cast<size_t>(dm)) {
+            sc.memG.assign(static_cast<size_t>(dm), 0.f);
+        }
+        for (int row = 0; row < nTok; row++) {
+            const size_t off = static_cast<size_t>(row) * dm;
+            std::memcpy(sc.rowTmp.data(), tokens + off, sizeof(float) * static_cast<size_t>(dm));
+            layerNormBuf(sc.rowTmp.data(), dm, fnG->data(), fnB->data());
+            linearFast(sc.gu.data(), sc.rowTmp.data(), static_cast<size_t>(dm), *w1, b1->data(), 0,
+                       dm);
+            geluBuf(sc.gu.data(), static_cast<size_t>(dm));
+            linearFast(sc.memG.data(), sc.gu.data(), static_cast<size_t>(dm), *w2, b2->data(), 0,
+                       dm);
+            for (int j = 0; j < dm; j++) {
+                tokens[off + static_cast<size_t>(j)] += sc.memG[static_cast<size_t>(j)];
+            }
+        }
+    }
+    // cross：候选（0 参数 LN 之后）对 95 个 token 取一次
+    if (!mha(*this, sc.uEvt.data(), n, tokens, nTok, dm, "fusion.cross", sc.uTile.data(), sc,
+             err)) {
+        return false;
+    }
+    // out：`LN(384) → Linear(384→128)`，再 B3（`u + tanh(u_res)·LN(u)`）
+    {
+        const std::vector<float> *onG = vecOf("fusion.out_norm.weight", 3 * dm);
+        const std::vector<float> *onB = vecOf("fusion.out_norm.bias", 3 * dm);
+        const Mat *ow = matOf("fusion.out.weight", dm, 3 * dm);
+        const std::vector<float> *ob = vecOf("fusion.out.bias", dm);
+        const std::vector<float> *unG = vecOf("fusion.u_norm.weight", dm);
+        const std::vector<float> *unB = vecOf("fusion.u_norm.bias", dm);
+        const std::vector<float> *ures = vecOf("fusion.u_res", dm);
+        if (onG == nullptr || onB == nullptr || ow == nullptr || ob == nullptr || unG == nullptr
+                || unB == nullptr || ures == nullptr) {
+            return false;
+        }
+        if (sc.cat3.size() < static_cast<size_t>(3 * dm)) {
+            sc.cat3.assign(static_cast<size_t>(3 * dm), 0.f);
+        }
+        if (sc.gu.size() < static_cast<size_t>(dm)) {
+            sc.gu.assign(static_cast<size_t>(dm), 0.f);
+        }
+        std::vector<float> uResT(static_cast<size_t>(dm), 0.f);
+        for (int j = 0; j < dm; j++) {
+            uResT[static_cast<size_t>(j)] = static_cast<float>(
+                std::tanh(static_cast<double>((*ures)[static_cast<size_t>(j)])));
+        }
+        for (int i = 0; i < n; i++) {
+            const float *cross = sc.uTile.data() + static_cast<size_t>(i) * dm;
+            for (int j = 0; j < dm; j++) {
+                sc.cat3[static_cast<size_t>(j)] = cross[static_cast<size_t>(j)];
+                sc.cat3[static_cast<size_t>(dm + j)] = sc.pool[static_cast<size_t>(j)];
+                sc.cat3[static_cast<size_t>(2 * dm + j)] = sc.ctxEmb[static_cast<size_t>(j)];
+            }
+            layerNormBuf(sc.cat3.data(), 3 * dm, onG->data(), onB->data());
+            float *ui = sc.u.data() + static_cast<size_t>(i) * dm;
+            linearFast(ui, sc.cat3.data(), static_cast<size_t>(3 * dm), *ow, ob->data(), 0, dm);
+            // B3：`u ← u + tanh(u_res) ⊙ LN(u)`（逐维、逐候选）
+            std::memcpy(sc.gu.data(), ui, sizeof(float) * static_cast<size_t>(dm));
+            layerNormBuf(sc.gu.data(), dm, unG->data(), unB->data());
+            for (int j = 0; j < dm; j++) {
+                ui[j] += uResT[static_cast<size_t>(j)] * sc.gu[static_cast<size_t>(j)];
+            }
+        }
+    }
+
+    // ---- 头（A−：`danger` 经 0 参数固定通道进 policy；`effect` 只给 caller）
+    const Mat *polW = matOf("heads.policy.weight", 1, dm);
+    const std::vector<float> *polB = vecOf("heads.policy.bias", 1);
+    const Mat *pgW = matOf("heads.policy_gate.weight", dm, 3);
+    const std::vector<float> *pgB = vecOf("heads.policy_gate.bias", dm);
+    const Mat *danW = matOf("heads.danger.weight", 4, dm);
+    const std::vector<float> *danB = vecOf("heads.danger.bias", 4);
+    const Mat *effW = matOf("heads.effect.weight", 3, dm);
+    const std::vector<float> *effB = vecOf("heads.effect.bias", 3);
+    if (polW == nullptr || polB == nullptr || pgW == nullptr || pgB == nullptr || danW == nullptr
+            || danB == nullptr || effW == nullptr || effB == nullptr) {
+        return false;
+    }
+    if (sc.meanU.size() < static_cast<size_t>(dm)) {
+        sc.meanU.assign(static_cast<size_t>(dm), 0.f);
+    } else {
+        std::fill(sc.meanU.begin(), sc.meanU.end(), 0.f);
+    }
+    if (sc.danger.size() < static_cast<size_t>(maxCand) * 4) {
+        sc.danger.resize(static_cast<size_t>(maxCand) * 4);
+        sc.effect.resize(static_cast<size_t>(maxCand) * 3);
+    }
+    float *danger = sc.danger.data();
+    float *effect = sc.effect.data();
+    if (n > 0) {
+        linearBatchFast(danger, 4, sc.u.data(), dm, n, static_cast<size_t>(dm), *danW, danB->data(),
+                        0, 4);
+        linearBatchFast(effect, 3, sc.u.data(), dm, n, static_cast<size_t>(dm), *effW, effB->data(),
+                        0, 3);
+    }
+    const float denom = static_cast<float>(std::max(1, n));
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < dm; j++) {
+            sc.meanU[static_cast<size_t>(j)] +=
+                    sc.u[static_cast<size_t>(i) * dm + j] / denom;
+        }
+    }
+    // 门控：`1 + tanh(W_g·sigmoid(bt) + b_g)`（A− 里 `policy_gate` **必有**）
+    if (sc.btProb.size() < 3) {
+        sc.btProb.assign(3, 0.f);
+    }
+    {
+        std::vector<float> btLogits;
+        if (!head(*this, sc.meanU, "belief_tenpai", 3, btLogits, err)) {
+            return false;
+        }
+        for (int j = 0; j < 3; j++) {
+            sc.btProb[static_cast<size_t>(j)]
+                    = 1.f / (1.f + std::exp(-btLogits[static_cast<size_t>(j)]));
+        }
+    }
+    if (sc.film.size() < static_cast<size_t>(dm)) {
+        sc.film.assign(static_cast<size_t>(dm), 0.f);
+    }
+    float *pgate = sc.film.data();
+    for (int j = 0; j < dm; j++) {
+        float acc2 = (*pgB)[static_cast<size_t>(j)];
+        for (int k = 0; k < 3; k++) {
+            acc2 += pgW->data[static_cast<size_t>(j) * 3 + static_cast<size_t>(k)]
+                    * sc.btProb[static_cast<size_t>(k)];
+        }
+        pgate[j] = 1.f + std::tanh(acc2);
+    }
+    if (sc.gu.size() < static_cast<size_t>(dm)) {
+        sc.gu.assign(static_cast<size_t>(dm), 0.f);
+    }
+    if (sc.policy.size() < static_cast<size_t>(maxCand)) {
+        sc.policy.resize(static_cast<size_t>(maxCand));
+    }
+    float *policy = sc.policy.data();
+    for (int i = 0; i < n; i++) {
+        const float *ui = sc.u.data() + static_cast<size_t>(i) * dm;
+        for (int j = 0; j < dm; j++) {
+            sc.gu[static_cast<size_t>(j)] = ui[j] * pgate[j];
+        }
+        float logit = (*polB)[0] + dotN(polW->data.data(), sc.gu.data(), dm);
+        // ★ 固定通道（0 参数）：`logit += 1.0 · log(mean_k σ(danger_k) + 1e-6)`（全程 float32）
+        float sig = 0.f;
+        for (int k = 0; k < 4; k++) {
+            const float z = danger[static_cast<size_t>(i) * 4 + k];
+            sig += 1.f / (1.f + std::exp(-z));
+        }
+        sig /= 4.f;
+        logit += kDangerCoef * std::log(sig + kDangerEps);
+        policy[i] = logit;
+    }
+
+    outAll.clear();
+    outAll["policy"].assign(policy, policy + n);
+    std::vector<float> value;
+    if (!head(*this, sc.meanU, "value", valueBins, value, err)) {
+        return false;
+    }
+    outAll["value"] = std::move(value);
+    std::vector<float> placement;
+    if (!head(*this, sc.meanU, "placement", 4, placement, err)) {
+        return false;
+    }
+    outAll["placement"] = std::move(placement);
+    std::vector<float> beliefHand;
+    if (!head(*this, sc.meanU, "belief_hand", 3 * kKindCount, beliefHand, err)) {
+        return false;
+    }
+    outAll["belief_hand"] = std::move(beliefHand);
+    std::vector<float> beliefTenpai;
+    if (!head(*this, sc.meanU, "belief_tenpai", 3, beliefTenpai, err)) {
+        return false;
+    }
+    outAll["belief_tenpai"] = std::move(beliefTenpai);
+    outAll["danger"].assign(danger, danger + static_cast<size_t>(n) * 4);
+    outAll["effect"].assign(effect, effect + static_cast<size_t>(n) * 3);
+    outAll["h_evt"].assign(hEvt, hEvt + dm);
+    return true;
+}
+
+/**
+ * 前向入口：**按 `arch` 分派**到 `forwardV4` / `forwardA`（段 3b）。
+ *
+ * <p>为什么不在一个函数里 if：两套图连"token 是什么"都不同（v4 的融合是候选当 query 对两条
+ * 记忆做注意力；A− 是 95 个 token 的联合自注意力 + 一次 cross）。合在一个函数里只会写出
+ * "看起来共用、实际每行都要分支"的代码 —— 而且 A− 的 `u` 尺度/头口径（danger 进 policy）
+ * 与 v4 不同，混着写必然把某一条约束漏到另一条上。
+ */
 bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
                           std::string &err, const std::vector<float> *h0, V4Scratch *scr) const {
+    if (arch == kTopoA) {
+        return forwardA(obs, outAll, err, h0, scr);
+    }
+    if (arch == kTopoV4) {
+        return forwardV4(obs, outAll, err, h0, scr);
+    }
+    err = "内部错误：前向时 arch 未设置（加载器必须先定 topoId）";
+    return false;
+}
+
+bool V4Policy::forwardV4(const JVal &obs, std::map<std::string, std::vector<float>> &outAll,
+                         std::string &err, const std::vector<float> *h0, V4Scratch *scr) const {
     err.clear();
     V4Tensors t;
     if (!v4Assemble(obs, missingBlocks, t, err)) {
@@ -1623,7 +2951,23 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
         return false;
     }
     float *ht = sc.tileH.data();
-    linearBatchFast(ht, tileD, t.tile[0].data(), kCTile, kKindCount, static_cast<size_t>(kCTile), *w1,
+    // ★ #0（第一百零六轮）：`tile.tile_id` **加在输入侧**（enc 之前）。旧包没有它 ⇒ `tile+0`。
+    const Mat *tileId = mats.count("tile.tile_id") ? &mats.at("tile.tile_id") : nullptr;
+    const float *tileIn = t.tile[0].data();
+    if (tileId != nullptr) {
+        if (sc.tileIn.size() < static_cast<size_t>(kKindCount) * static_cast<size_t>(kCTile)) {
+            sc.tileIn.assign(static_cast<size_t>(kKindCount) * static_cast<size_t>(kCTile), 0.f);
+        }
+        for (int k = 0; k < kKindCount; k++) {
+            for (int c = 0; c < kCTile; c++) {
+                sc.tileIn[static_cast<size_t>(k) * kCTile + c]
+                        = t.tile[static_cast<size_t>(k)][static_cast<size_t>(c)]
+                        + tileId->data[static_cast<size_t>(k) * kCTile + c];
+            }
+        }
+        tileIn = sc.tileIn.data();
+    }
+    linearBatchFast(ht, tileD, tileIn, kCTile, kKindCount, static_cast<size_t>(kCTile), *w1,
                     b1->data(), 0, tileD);
     reluBuf(ht, static_cast<size_t>(kKindCount) * static_cast<size_t>(tileD));
     // 第二个线性层与输入别名：先整块转一手（= Java `linear` 的别名保护）
@@ -1776,7 +3120,7 @@ bool V4Policy::forwardAll(const JVal &obs, std::map<std::string, std::vector<flo
             cat3[2 * dm + j] = sc.ctxEmb[static_cast<size_t>(j)];
         }
         if (!mlp(*this, cat3, 3 * dm, 1, static_cast<size_t>(3 * dm), "fusion.out.net", 3 * dm, dm,
-                 u + static_cast<size_t>(i) * dm, sc, err)) {
+                 u + static_cast<size_t>(i) * dm, sc, err, /*finalRelu=*/false)) {
             return false;
         }
     }
@@ -2991,19 +4335,162 @@ bool oneFile(const V4Policy &net, const std::string &path, int maxRows, int h0Bu
     return true;
 }
 
+/**
+ * `--swap-net` 的**缓存键负向判据**：同一份 `V4Scratch`（= 生产里的"每场一份策略实例"）
+ * 先用 A 预热，再让 B 在上面逐条跑；B 的**增量 carry 必须与它自己的整手重放逐位相同**。
+ *
+ * <p>为什么这样判：旧槽键只有 `handKey`（小局身份）⇒ 换网后第一张网的 carry 会被第二张网
+ * 当成"这一局的 carry"直接复用。⚠ 这种复用在**计数上完全看不出来**（同一份语料、同样的
+ * (小局, 座位) 序列 ⇒ hits/cold 一模一样），也不会有任何报错；唯一能抓住它的是**语义**：
+ * B 的增量 `h_evt` 会等于 A 的 GRU 递推结果，与 B 自己的整手重放**不同** ⇒ 逐位红。
+ * （前缀校验也帮不上忙：token 行不依赖网络，前缀当然对得上。）
+ *
+ * <p>强负向：`TRAINER_V4_OLD_KEY=1` 回到旧键（只给本判据用）⇒ 这一段必须报红。
+ */
+bool cacheSwapNetDemo(const V4Policy &a, const V4Policy &b, const std::string &file,
+                      std::string &report, std::string &err) {
+    auto rows = [&](std::vector<JVal> &obs) -> bool {
+        std::string text;
+        if (!readTextFile(file, text)) {
+            err = "读不了文件：" + file;
+            return false;
+        }
+        size_t pos = 0;
+        while (pos <= text.size() && obs.size() < 400) {
+            const size_t nl = text.find('\n', pos);
+            const size_t end = nl == std::string::npos ? text.size() : nl;
+            const std::string line = text.substr(pos, end - pos);
+            const bool last = nl == std::string::npos;
+            pos = last ? text.size() + 1 : nl + 1;
+            if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+                if (last) {
+                    break;
+                }
+                continue;
+            }
+            JVal row;
+            if (!jsonParse(line, row) || !row.isObj()) {
+                continue;
+            }
+            const JVal *type = row.find("type");
+            if (type == nullptr || !type->isStr() || type->strVal != "decision") {
+                continue;
+            }
+            const JVal *obsJ = row.find("obs");
+            if (obsJ != nullptr && obsJ->isObj()) {
+                obs.push_back(*obsJ);
+            }
+            if (last) {
+                break;
+            }
+        }
+        return true;
+    };
+    std::vector<JVal> obs;
+    if (!rows(obs)) {
+        return false;
+    }
+    if (obs.empty()) {
+        err = file + " 里没有 decision 行";
+        return false;
+    }
+    V4Scratch warm;
+    warm.carryEnabled = true;
+    V4Scratch full;
+    full.carryEnabled = false;
+    std::map<std::string, std::vector<float>> out;
+    // ① A 只预热**前半段**（`[0, half)`）：这很关键 —— 若 A 把整个文件都跑完，槽里的
+    //    `seen` 停在文件末尾，B 从第 0 行开始时 `events < s.seen` ⇒ **陈旧退回**，旧键也照样
+    //    重建（第一版就写成这样，负向控制红不了）。从 `half` 开始，B 的首个决策事件前缀
+    //    恰好接得上 A 的 `seen` ⇒ 旧键下**真的会复用** A 的 carry。
+    const size_t half = obs.size() / 2;
+    if (half == 0) {
+        err = "语料太短（<2 条决策），无法做换网判据";
+        return false;
+    }
+    for (size_t i = 0; i < half; i++) {
+        if (!a.forwardAll(obs[i], out, err, nullptr, &warm)) {
+            return false;
+        }
+    }
+    const V4CarryStats sa = v4CarryStatsOf(warm);
+    // ② B 在 A 预热过的 scratch 上跑后半段：**增量 vs 整手重放逐位**。
+    //    ⛔ 这才是判据的正确形态：如果槽键不含网络身份，B 的第一个决策会拿到 A 的 carry
+    //    （token 行相同 ⇒ 前缀校验**过得去**），于是 B 的增量 h_evt 与它自己的整手重放不同
+    //    ⇒ 逐位红。计数（hits/cold）在这里**不构成判据** —— 同一份语料下两张网的计数相同。
+    v4CarryResetStats(warm);                      // 只清计数器，槽保留
+    long long rowsDone = 0;
+    long long badRows = 0;
+    std::string firstBad;
+    for (size_t i = half; i < obs.size(); i++) {
+        std::map<std::string, std::vector<float>> oc, of;
+        if (!b.forwardAll(obs[i], oc, err, nullptr, &warm)) {
+            return false;
+        }
+        if (!b.forwardAll(obs[i], of, err, nullptr, &full)) {
+            return false;
+        }
+        HeadDiff d;
+        diffHeads(oc, of, d);
+        rowsDone++;
+        if (d.badHeads > 0) {
+            badRows++;
+            if (firstBad.empty()) {
+                firstBad = "后半段第 " + std::to_string(rowsDone) + " 行 头 " + d.firstHead + "["
+                        + std::to_string(d.firstIdx) + "] 增量=" + std::to_string(d.a)
+                        + " 全量=" + std::to_string(d.b);
+            }
+        }
+    }
+    const V4CarryStats sb = v4CarryStatsOf(warm);
+    char buf[768];
+    std::snprintf(buf, sizeof(buf),
+                  "swap-net：A 键 %s · B 键 %s\n"
+                  "  A 预热：决策 %lld / 命中 %lld / 建槽 %lld（命中率 %.1f%%）\n"
+                  "  B 在 A 预热过的槽上：决策 %lld / 命中 %lld / 建槽 %lld / 陈旧 %lld ·"
+                  " 增量 vs 整手重放 不符 %lld 行\n",
+                  a.cacheTag().c_str(), b.cacheTag().c_str(),
+                  static_cast<long long>(sa.decisions), static_cast<long long>(sa.hits),
+                  static_cast<long long>(sa.cold),
+                  sa.decisions == 0 ? 0.0 : 100.0 * static_cast<double>(sa.hits)
+                                              / static_cast<double>(sa.decisions),
+                  static_cast<long long>(sb.decisions), static_cast<long long>(sb.hits),
+                  static_cast<long long>(sb.cold), static_cast<long long>(sb.stale), badRows);
+    report = buf;
+    if (!firstBad.empty()) {
+        report += "  首个不符：" + firstBad + "\n";
+    }
+    if (sa.decisions <= 1 || sa.hits == 0) {
+        err = "阶段①（A 预热）缓存没热起来（hits=0）⇒ 这条判据是空转";
+        return false;
+    }
+    if (sb.hits == 0) {
+        err = "阶段②（B 自己）缓存一次都没命中 ⇒ 判据空转";
+        return false;
+    }
+    if (badRows != 0) {
+        err = "换网后 B 的增量 carry 与自己的整手重放不符 ⇒ 槽键没带网络身份"
+              "（复跑请设 TRAINER_V4_OLD_KEY=1 看旧键下的红）";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int v4CacheCli(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr,
                      "用法：trainer v4cache <net.bin> <轨迹1.jsonl|目录> [更多…]\n"
-                     "                 [--workers K] [--limit N] [--h0-rows N]\n"
+                     "                 [--workers K] [--limit N] [--h0-rows N] [--swap-net <另一张网>]\n"
                      "  逐条真实决策行跑两条事件塔路径并**逐位**比对七个头 + `h_evt`：\n"
                      "    ① 增量 carry（缓存开）== 整手重放（缓存关）   ← 判据「增量 == 全量」\n"
                      "    ② `h_evt` 那一格同时就是「缓存 carry == 整手重放」（W1 起 h_evt 被融合消费）\n"
                      "    ③ 前 `--h0-rows`（缺省 2000）行额外判「前缀 carry + 窗口 == 整手重放」\n"
                      "  ⛔ 只有「相等」是假绿 ⇒ 命中率一起打印；命中率 0 ⇒ 退出码非 0。\n"
-                     "  `--limit N` = 总条数上限（0/缺省 = 不限）；`--workers` 缺省 1（按文件切）。\n");
+                     "  `--limit N` = 总条数上限（0/缺省 = 不限）；`--workers` 缺省 1（按文件切）。\n"
+                     "  `--swap-net B` = **缓存键负向判据**：同一份 scratch 先跑 A、再跑 B、再跑 A，\n"
+                     "    换网必须全 miss（槽键含 arch/format/权重 sha）。\n");
         return 2;
     }
     V4Policy net;
@@ -3016,6 +4503,7 @@ int v4CacheCli(int argc, char **argv) {
     int workers = 1;
     long long limit = 0;
     long long h0Rows = 2000;
+    std::string swapNet;
     int i = 2;
     for (; i < argc; i++) {
         const std::string a = argv[i];
@@ -3032,6 +4520,8 @@ int v4CacheCli(int argc, char **argv) {
             limit = std::atoll(next("--limit"));
         } else if (a == "--h0-rows") {
             h0Rows = std::atoll(next("--h0-rows"));
+        } else if (a == "--swap-net") {
+            swapNet = next("--swap-net");
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "[trainer] 未知参数：%s\n", a.c_str());
             return 2;
@@ -3063,6 +4553,25 @@ int v4CacheCli(int argc, char **argv) {
         return 2;
     }
     std::sort(files.begin(), files.end());
+    // ---- `--swap-net`：缓存键负向判据（跑完就返回，不走逐位对拍那套）
+    if (!swapNet.empty()) {
+        V4Policy net2;
+        if (!v4LoadPolicy(swapNet, net2, err)) {
+            std::fprintf(stderr, "[trainer] %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "[trainer] swap-net：A=%s（%s）· B=%s（%s）\n", argv[1],
+                     v4Describe(net).c_str(), swapNet.c_str(), v4Describe(net2).c_str());
+        std::string report;
+        if (!cacheSwapNetDemo(net, net2, files[0], report, err)) {
+            std::printf("%s", report.c_str());
+            std::fprintf(stderr, "[trainer] v4cache --swap-net FAIL：%s\n", err.c_str());
+            return 1;
+        }
+        std::printf("%s", report.c_str());
+        std::printf("v4cache --swap-net PASS（换网/换 arch ⇒ V4Cache 全 miss）\n");
+        return 0;
+    }
     const int w = std::max(1, std::min(workers, static_cast<int>(files.size())));
     std::fprintf(stderr, "[trainer] v4cache：%s（%s）· %d 个文件 · workers=%d · limit=%lld · h0-rows=%lld%s\n",
                  argv[1], v4Describe(net).c_str(), static_cast<int>(files.size()), w, limit, h0Rows,

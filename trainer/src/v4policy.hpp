@@ -34,10 +34,36 @@ namespace trainer {
 
 /** 与 v3 同一个魔数（`kNetMagic`），用 `format` 区分代号。 */
 inline constexpr uint32_t kV4Magic = 0x4D4A4E4EU;
-/** v4 = 格式 2（带块清单）；v3 = 1。 */
-inline constexpr int kV4FormatVersion = 2;
+/**
+ * v4 = **格式 3**（64 B 头 + **2,048 B arch 段** + 块表 + 张量表）。
+ *
+ * <p>段 2（第一百零八轮）把 `net.bin` 从格式 2 升到 3；段 3b（本段）让 C++ 读端认 3。
+ * ⚠ `format==2` 是**A− 之前的老包**、只有冻结快照能读 ⇒ 见 `v4LoadPolicyBytes` 的专用错误
+ * （⛔ 不自动升级、不补 0、不猜 arch）。
+ */
+inline constexpr int kV4FormatVersion = 3;
 /** 头部字节数（9 个 u32 + 2 个 u32 + 16 B 指纹 + 1 个 u32）。 */
 inline constexpr int kV4HeaderBytes = 64;
+/** arch 段：核心 96 B + 1,952 B 保留尾 ⇒ `archLen = 2,048`（块表偏移 = `64 + archLen`）。 */
+inline constexpr int kV4ArchCoreBytes = 96;
+inline constexpr int kV4ArchSegBytes = 2048;
+
+// ---- arch 段的注册值（唯一规格 = `python/mahjong_ml/v4/export.py` 的 `arch_profile`）
+/** `topoId`：2 = 现有 v4 图；3 = A−（T1）。未注册 ⇒ 报错。 */
+inline constexpr int kTopoV4 = 2;
+inline constexpr int kTopoA = 3;
+/** `actId`：0 = ReLU（v4）、1 = GELU-erf（A−）。 */
+inline constexpr int kActReLU = 0;
+inline constexpr int kActGelu = 1;
+/** `normId`：0 = post-LN（v4）、1 = pre-LN（A−）。 */
+inline constexpr int kNormPost = 0;
+inline constexpr int kNormPre = 1;
+/** `flags` 位：bit0 B3 · bit1 `tile.tile_id` · bit2 FiLM（恒 0）· bit3 mem 门。 */
+inline constexpr int kFlagB3 = 0x01;
+inline constexpr int kFlagTileId = 0x02;
+inline constexpr int kFlagFiLM = 0x04;
+inline constexpr int kFlagMemGate = 0x08;
+inline constexpr int kFlagReserved = 0xF0;
 
 /**
  * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）—— 与 Python
@@ -73,10 +99,40 @@ struct V4Policy {    int dModel = 0;
     int nHeads = 0;
     int valueBins = 0;
     std::string fingerprint;
+    /** 文件格式（只可能是 3；留成字段是为了日志与 `describe` 能如实打印）。 */
+    int format = 0;
+    /** 拓扑：2 = v4（ReLU/post-LN）、3 = A−/T1（GELU-erf/pre-LN + 95-token joint）。 */
+    int arch = 0;
+    /** arch 段里的 `flags`（B3 / #0 / FiLM / mem 门）与 `valueRange`（诊断用）。 */
+    int flags = 0;
+    float valueRange = 0.f;
+    /** arch 段里"文件声明的"结构字段（与代码常量交叉校验过才留在这里）。 */
+    int dTile = 0;
+    int dEvt = 0;
+    int dFuse = 0;
+    int dHead = 0;
+    int nSeg = 0;
+    int tileKernels[4] = {0, 0, 0, 0};
+    /**
+     * **权重整段字节的 sha256 前 16 位**（= `A-REFACTOR-IMPL-PLAN.md` 风险 5 的"权重 sha 段"）。
+     *
+     * <p>用途只有一个：`V4Cache` 槽键——`handKey` 只是"小局身份"，它**不含网络身份**
+     * ⇒ 同进程换网（或换 arch）后旧槽会被静默复用（carry 是另一张图的）。键里带上它 + `arch`
+     * + `format` ⇒ 换网必 miss。⛔ 别拿"块清单指纹"顶替：块清单与拓扑无关（两图指纹相同）。
+     */
+    std::string weightSha;
     /** 文件里的块清单（按注册表顺序，子集 = 消融训练的权重）。 */
     std::vector<std::string> blocks;
     /** 注册表里有、权重里没有的块（**训练时就没用** ⇒ 推理必须置 0，规范 §7）。 */
     std::vector<std::string> missingBlocks;
+
+    /** 三维张量（只有 A− 的 `Conv1d` 权重是 3 维）：`[out][in][k]` 行主序（= PyTorch 布局）。 */
+    struct Conv {
+        int out = 0;
+        int in = 0;
+        int k = 0;
+        std::vector<float> data;
+    };
 
     /** 二维张量：行主序紧凑（`rows × cols`），与 Java 的 `float[rows][cols]` 同序。 */
     struct Mat {
@@ -98,11 +154,20 @@ struct V4Policy {    int dModel = 0;
     };
 
     std::map<std::string, Mat> mats;
+    std::map<std::string, Conv> convs;
     std::map<std::string, std::vector<float>> vecs;
+    /**
+     * A− 的**固定 sin/cos 位置编码** `[K_EVT][dModel]`（0 参数、非持久 buffer ⇒ 不在 `net.bin`
+     * 里）。加载期按 `dModel` 算一次：它是网络拓扑的一部分（A− 才有），⛔ 别蒸腾成权重。
+     */
+    std::vector<float> peEvt;
     /** 文件里出现过的全部张量名（用来判"有张量没人读"）。 */
     std::set<std::string> allNames;
     /** `bindAll` 读过的张量名（构造期与 `allNames` 比对；**前向不改它** —— 见下）。 */
     std::set<std::string> used;
+
+    /** 缓存键前缀（`format/topoId/weightSha`）：网络身份变了 ⇒ `V4Cache` 必须 miss。 */
+    std::string cacheTag() const;
 
     /**
      * 取二维张量（形状核对）= Java `V4Policy.mat`。
@@ -119,8 +184,16 @@ struct V4Policy {    int dModel = 0;
     /**
      * 把每一层要用的张量都取一遍 —— **同时**完成"形状核对 + 无多余张量"两件事
      * （= Java `V4Policy.bindAll` + 构造器末尾的 `used != allNames` 检查）。
+     *
+     * <p>段 3b 起按 `arch` 分派：`topoId=2`（v4）走原表 + `tile.tile_id`；`topoId=3`（A−/T1）走
+     * 卷积/轴向/joint 表。两表都是**闭集**：文件里出现任何一处没被 bind 的张量名 ⇒ 构造期报错
+     * （=`finishPolicy` 的 `used==allNames`），⛔ 不静默忽略。
      */
     bool bindAll(std::string &err);
+    /** `topoId=2` 的表（现有 v4 图 + 可缺的 `tile.tile_id`）。 */
+    bool bindAllV4(std::string &err);
+    /** `topoId=3` 的表（A−/T1：卷积 + 轴向 + joint/cross + 段嵌入）。 */
+    bool bindAllA(std::string &err);
 
     /**
      * 全部七个头（自检与 golden 对拍用）= Java `V4Policy.forwardAll`（**只读**，可多线程共享）。
@@ -135,6 +208,17 @@ struct V4Policy {    int dModel = 0;
     bool forwardAll(const JVal &obs, std::map<std::string, std::vector<float>> &out,
                     std::string &err, const std::vector<float> *h0 = nullptr,
                     V4Scratch *scr = nullptr) const;
+
+    /** `topoId=2` 的前向（现有 v4 图）—— `forwardAll` 按 `arch` 分派到它。 */
+    bool forwardV4(const JVal &obs, std::map<std::string, std::vector<float>> &out,
+                   std::string &err, const std::vector<float> *h0, V4Scratch *scr) const;
+    /**
+     * `topoId=3` 的前向（A−/T1）：tile 34 轴卷积 + 轴向注意力 · evt GRU + 2 层 k=3 卷积 ·
+     * **95-token joint attention**（34 tile + 60 evt + `h_evt` 第 95 个）· cross(cand→95) ·
+     * B3；heads 带 **danger → policy 的 0 参数固定通道**。
+     */
+    bool forwardA(const JVal &obs, std::map<std::string, std::vector<float>> &out,
+                  std::string &err, const std::vector<float> *h0, V4Scratch *scr) const;
 
     /** 策略头 logits（逐候选，顺序 = `obs.legal`）= Java `V4Policy.logits`。 */
     bool logits(const JVal &obs, std::vector<float> &out, std::string &err,
@@ -195,10 +279,12 @@ void v4CarryResetStats(V4Scratch &scr);
  */
 struct V4Scratch {
     /** 一维缓冲（按需 `resize`，只增不缩）。 */
+    std::vector<float> tileIn;     // kKindCount × kCTile（加了 #0 `tile.tile_id` 之后的输入）
     std::vector<float> tileH;      // kKindCount × tileD（tile.enc 输出）
     std::vector<float> tileAt;     // kKindCount × tileD（tile.attn 输出）
     std::vector<float> eRows;      // kKEvt × dModel（event.enc 输出 = GRU 输入）
-    std::vector<float> eTokens;    // kKEvt × dModel（Transformer 输出）
+    std::vector<float> eConv;      // dModel × kKEvt（A− 的事件卷积：**通道在前**）
+    std::vector<float> eTokens;    // kKEvt × dModel（Transformer 输出 / A− 的卷积输出）
     std::vector<float> carry;      // dModel（事件塔的 GRU 隐状态）
     std::vector<float> tok;        // kCEvt（一条事件 token 行）
     std::vector<float> rowTmp;     // dModel（单行事件编码输出）
@@ -239,6 +325,9 @@ struct V4Scratch {
     std::vector<float> meanU;      // dModel
     /** 只给**负向注入** `--v4-carry-bug noclear` 用的"上一行"缓冲（正常路径不碰它）。 */
     std::vector<float> bugTok;
+    /** A− 的通用中转缓冲（卷积是"通道在前"、LN 是"特征在后" ⇒ 每层要转两次）。 */
+    std::vector<float> aBuf;
+    std::vector<float> aBuf2;
 
     /**
      * **增量事件 GRU carry**（默认开；`--no-v4-cache` 走进程级缺省置 false）。
@@ -284,7 +373,9 @@ bool v4ForwardAllH0(const V4Policy &p, const JVal &obs, const std::vector<float>
 /**
  * 只读权重文件头 8 字节判格式（= Java `NetWeights.loadBytes` 的分派口）。
  *
- * @param format 出参：1 = v3 定长 MLP（`net.hpp` 那条路），2 = v4（本文件）
+ * @param format 出参：1 = v3 定长 MLP（`net.hpp` 那条路），**3 = v4/A−（本文件）**
+ * @return false 且填 `err`：魔数不对 / `format==2`（**A− 之前的老包** ⇒ 只有冻结快照能读，
+ *         专用错误里写明冻结快照路径与 sha，⛔ 不自动升级）/ 其它不认识的版本号
  */
 bool v4WeightFormatOf(const std::string &path, int &format, std::string &err);
 

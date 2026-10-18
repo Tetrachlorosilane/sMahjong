@@ -1001,14 +1001,14 @@ Java 权威实现 2026-09-27 落地（`docs/PROTOCOL.md` §8.2 · `NOTES.md` §6
 （`v4/traces.load_sidecar` 再对一次 `DERIVED_VERSION_V4`），**重跑 `--features` 即可**；
 `compact/*` 里的旧 `derived_version` 由 `load_split` 拒绝（原有闸门）。
 
-### 6.22 v4 前向镜像（`net.bin` 格式 2，2026-09-27，已完成）
+### 6.22 v4 前向镜像（`net.bin` **格式 3**（段 3b 起；此前为格式 2），2026-09-27 立 / 2026-10-19 升级）
 
-> ⚠ **段 2（2026-10-19）起 Python 写出的是 `format=3`（64 B 头 + 2,048 B arch 段 + 块表 + 张量表）**，
-> 本节与 `v4policy.cpp` 的加载器仍只认 **`format=2`** ⇒ **新包现在读不了**（`v4WeightFormatOf` 返回 2，
-> 见 `A-REFACTOR-IMPL-PLAN.md` §3 的段 3 清单）。⛔ 这不是"尽力而为"的兼容层：format 3 的包在 C++ 侧
-> 必须**报错**，`format==2` 的旧包在 Python 侧也**报专用错误**（指向冻结快照 `lab/mv1/frozen-format2`）。
-> 段 3 的改动点：`v4LoadPolicyBytes` 先读 `archLen` 跳过 arch 段、`v4WeightFormatOf` 返回 3、
-> `format==2` 给专用错误。字段表见 `ARCH-REDESIGN.md` §11.1（`archLen=2,048` = 整段）。
+> ⚠ **段 3b（2026-10-19）起 C++ 读 `format=3`**（64 B 头 + 2,048 B arch 段 + 块表 + 张量表），
+> 且**两张图**（`topoId=2` = v4、`3` = A−）都能跑：见下面 **§6.29**（arch 段解析 / 绑定 / 前向 /
+> 缓存键 / fail-loud 的契约）。⛔ `format==2` 的旧包一律**专用错误 + 非 0 退出**（只有冻结快照
+> `lab/mv1/frozen-format2` 能读），⛔ 不自动升级、不补 0、不猜 arch。
+> ⚠ **v4 的语义 = current**（`fusion.out` 末端**无** ReLU，与 Python `model.SEMANTICS["current"]` /
+> Java 端同一条）：format 3 只有这一档，旧 c2 包是 format 2 ⇒ 只能由冻结快照读。
 
 **为什么这一步是 P5 的"训练端"那一半**：v4 世代的采集席都是 `net:<上一代>`，训练端如果只会读
 v3 的 `format=1`，那么 v4 世代就只能整条退回 Java（慢 1–2 个数量级）。镜像之后
@@ -1559,6 +1559,30 @@ G1 拒、`check` exit=3；G7 在真机有重负载时把 `check` 拒成 **exit=4
 `cmp-readouts.py` 对拍器、`jobprobe.ps1`/`probe.ps1` 两条**失败**口径留作红证、`*.csv` 的 1 s 栅格
 commit_free、四臂的 `.out.txt` + `.b1.jsonl`）· `b2-overlap.py`（读数 ‖ 采集的七闸门编排，复用
 `b1-overlap.py`）· `BACKLOG.md` BL-01 / BL-05。
+
+---
+
+### 6.29 v4 前向：**format 3 + 两张图**（`topoId=2` v4 / `3` A−），2026-10-19（段 3b）
+
+> 唯一的语义权威是 **Python**（`python/mahjong_ml/v4/model.py`）；字段表 = `ARCH-REDESIGN.md` §11.1
+> + `A-REFACTOR-IMPL-PLAN.md` §3。本节只写**C++ 侧必须守的契约**。
+
+| 契约 | 落点（`trainer/src/`） | 判据 / 为什么要这条 |
+| --- | --- | --- |
+| `format`：1 = v3、**3 = v4/A−**、2 = **已退役** | `v4policy.cpp` `v4LoadPolicyBytes` / `v4WeightFormatOf` / `policies.hpp` 的 `format==3` 分派 | format 2 ⇒ 专用错误（点名冻结快照 `3E7D0ADC…`/`F6AAA307…`）+ 非 0 退出。⚠ `policies.hpp` 漏改会把新包送进 v3 的 `loadNet` |
+| arch 段 = **唯一拓扑判据** | `parseArchSegment` | `archLen∈[96,2048] ∧ %4`、`archVersion==1`、`topoId∈{2,3}`、枚举（`actId/normId/segEmbMode/memTokenMode`）已注册、头↔arch 三版本与 `valueBins/nHeads` 相等、`dFuse/dTile` 与头部相等、**拓扑派生字段逐条相等**（层数/核/`nSeg`/五常量）、`valueRange` 相等、`flags` 保留位 = 0、核心保留区 70–95 与保留尾 96–`archLen` 全 0。读端**不按张量名反推拓扑** |
+| 张量表 | 2D → `Mat`、1D → `vec`、**3D → `Conv`**（`[out][in][k]` = PyTorch 布局） | 名字重复 / 形状不符 / 尾部多字节 / **`params` ≠ 实算**（格式 3 起是校验位）全部加载期报错 |
+| 绑定按 `topoId` 选表；**闭集** | `bindAll` → `bindAllV4` / `bindAllA`；`finishPolicy` 的 `used==allNames` | `#0 tile.tile_id` 两图都绑（v4 可缺、a- 可缺）；a- 的 **B3 / `policy_gate` 是拓扑必需**；`flags` 与张量表**双向**（B3/#0/mem/FiLM）⇒ 文件说"有"就必须真在、说"没有"就不许在。**未知张量 fail-closed**（⛔ 不静默忽略） |
+| v4 图（`topoId=2`）仍必须能跑 | `forwardV4`（= 原实现 + `fusion.out` **去末端 ReLU** = current 语义 + #0 加在 `enc` 前） | 旧包转 format 3 后要能推理；`tile.tile_id` 缺失 ⇒ `tile+0`（旧包逐位不变） |
+| A− 图（`topoId=3`） | `forwardA` + `conv1dBuf` + `eventConvTower` | tile `[34,48]→[48,34]` 只发生在卷积入口（数据布局不动）+ stem `Conv1d(48→160,k=5)+LN+GELU` + 1×k5/2×k3 pre-LN 残差 + 轴向 MHA(pre-LN) + `Linear(160→128)+LN`；evt `Linear+GELU` → GRU（**carry 契约不变**）→ 2×conv(k=3)+LN+GELU；融合 = **95 token**（34+60+`h_evt` 第 95）+ 3 段嵌入 + sin/cos PE（0 参数、加载期算）+ joint self-attn + FFN + cross + `LN(384)→Linear(384→128)` + **B3**；heads `danger` **0 参数固定通道** `logit += log(mean_k σ(danger_k)+1e-6)`；`value` 81 bin（arch 声明 ±60） |
+| 激活 | `geluBuf` = **float32 erf** | ⛔ 非 tanh 近似、⛔ 非 ReLU；用 double 反而与 torch 末位分叉（实测 argmax 10/11 → **11/11**） |
+| 池化 | `meanU = Σu/n`（`n = 合法候选数`，推理无 padding） | 与 Python mask-aware 池化在"无 padding"时逐位同义（风险 6） |
+| **缓存键** | `V4Policy::cacheTag()` = `v2 / f<format> / t<arch> / <权重 sha256-16>`；`eventTowerCached` 里 `key = tag + "\|" + handKey` | 旧键只有 `handKey` ⇒ 换网/换 arch 后旧槽被静默复用（carry 是另一张图的）。负向：`v4cache --swap-net`（A 暖前半段 → B 跑后半段，判**增量 vs 整手重放逐位**）；旧键注入 `TRAINER_V4_OLD_KEY=1` ⇒ 必红（⛔ 采集/训练绝不能设） |
+| 加载失败的传播 | `policies.hpp` `makePolicy` 返回 `nullptr` + `err`；`selfplay` 打印"自对弈失败：…"并非 0 退出 | ⛔ **没有**"读不动就退回 teacher/bot"的分支（旧包误加载的静默失败模式）；format 2 旧包实测退出码 **2** |
+
+> 读数（本机，原文在 `.tmp/mv1-s29b/`）：G1（v4/format3/current）前向 `maxΔ=4.77e-6` / argmax **11/11**；
+> G2（a-，R-4 3,083 决策）C++↔Python argmax **3083/3083**、真分歧 0、`max|Δ|` 短 **5.24e-5** / 长 **1.907e-5**；
+> `v4cache`（a-，3,083 行）**逐位 0 不符**、命中率 **93.12%**、判据③ 200 行 0 不符。
 
 ---
 

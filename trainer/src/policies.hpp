@@ -848,15 +848,16 @@ inline PolicyFactory policyFactoryByName(const std::string &name, std::string &e
             return nullptr;
         }
         // ⚠ **按格式分派**（= Java `mahjong.ai.NetWeights.loadBytes`）：两个加载器共用魔数 `MJNN`，
-        //   靠头部的 `format` 区分 —— 1 = v3 定长 MLP、2 = v4（三塔 + 多头）。拿错版本一律
-        //   加载期报错，**不"尽力而为"**。格式 1 走的还是原来那条 `loadNet`（行为一位不变）。
+        //   靠头部的 `format` 区分 —— 1 = v3 定长 MLP、**3 = v4/A−**（段 3b 起；2 已退役 ⇒
+        //   `v4WeightFormatOf` 会报专用错误）。拿错版本一律加载期报错，**不"尽力而为"**；
+        //   ⛔ 这里**没有**"读不动就退回 teacher/bot"的分支（那正是旧包误加载的静默失败模式）。
         int format = 0;
         std::string peekErr;
         if (!v4WeightFormatOf(rest, format, peekErr)) {
             err = "加载神经网络权重失败：" + rest + " —— " + peekErr;
             return nullptr;
         }
-        if (format == 2) {
+        if (format == 3) {
             const std::shared_ptr<const V4Policy> sharedV4 = sharedV4Policy(rest, err);
             if (!sharedV4) {
                 return nullptr;

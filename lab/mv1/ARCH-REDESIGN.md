@@ -557,3 +557,61 @@ format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同�
 - 段 3 待办（照 §3/§4）：C++ `v4LoadPolicyBytes` 读 arch 段 + `v4WeightFormatOf` 返回 3 + `format==2` 专用错误；
   Java `loadBytes`/`FORMAT_VERSION`/`NetWeights` 分派；`policy-gate-check.mjs` 认 3（`2` 标冻结快照）；
   `trainer-v4-parity.mjs --golden` 换 G1；R-4 的 3,083 行三端对拍。
+
+## 13 段 3b 已实现（**C++ 前向同步到 format 3 与 A− 新图**）+ 读数（第一百一十轮，2026-10-19）
+
+> 本节只**追加**，⛔ 未改 §0–§11 的任何结论（Java 端与本批**并行**，其读数由它自己的小节负责）。依据 = `A-REFACTOR-IMPL-PLAN.md`
+> §1（C++ 逐函数映射）/ §3（format 3）/ §5（风险）。本批只动**训练端 C++**（`trainer/src/**`）：
+> ⛔ Java（`server/**`，并行批次）、⛔ Python、⛔ `tools/policy-gate-check.mjs`（并行批次）、
+> ⛔ 采集 / 闸门 / 发布。证据 = gitignored `.tmp/mv1-s29b/`（对拍日志 / 坏包 / 缓存键负向 / 内存采样）。
+
+### 13.1 落地与 §1 对账（`文件:行` + 行数增量）
+
+| # | §1 的项 | 实际落点 | 增量 | 与预估 |
+| --- | --- | --- | ---: | --- |
+| 1 | format 3 arch 段 | `v4policy.cpp:909 ArchInfo` · `:1001 parseArchSegment`（字段表/枚举/保留区/保留尾/截断/头↔arch 三处相等） | +230 | §1 估 +75/−6：多出的是**逐字段报错文案**与保留位/保留尾/`archLen` 的三重夹逼 |
+| 2 | 绑定按 `topoId` | `:742 bindAllA`（93 张量 + 3D 卷积）· `bindAllV4`（原表 + 可缺 `tile.tile_id`）· `:436 bindAll` 分派 · flags↔张量**双向** | +150 | ≈ +70/−20（多出 a- 全表与 flags 双向） |
+| 3 | A− 前向 | `:2373 forwardA`（tile 卷积/轴向、evt 卷积塔、95-token joint、cross、B3、danger 通道） | +500 | §1 估 tile+95/−25 · evt +68 · fusion +150/−110；实际**整图新增**（v4 那些张量一个都用不上） |
+| 4 | v4 图仍能跑 | `:2900 forwardV4`（原实现改名 + `fusion.out` **末端去 ReLU** = current 语义 + #0 `tile_id`） | +28/−22 | §1 未列（C1 语义同步是 Java 端同轮才落定的） |
+| 5 | 算子层复用 | `mha`/`linearBatchFast`/`layerNormBuf` 原样；**只新增** `:360 geluBuf`（float32 erf）· `:1811 conv1dBuf`（k 次移位 + 零 pad，无新 SIMD kernel） | +60 | §1 估 +14（只 gelu）；conv 原估 +46 ⇒ 实际 +60（含注释） |
+| 6 | 事件塔 arch 化 | `EventEnc`（a- = 单层 Linear+GELU）· `:1842 eventConvTower` · `encodeWindow` 分派 | +95 | ≈ +68 ✓ |
+| 7 | 缓存键 | `:1479 cacheTag()`（`v2 / f<format> / t<arch> / <权重 sha256-16>`，槽键 = 它 + `handKey`）· `eventTowerCached` 前缀拼接 | +20 | §1/风险 5 的"槽键加 arch/format/权重 sha" ✓ |
+| 8 | 加载尾/描述 | `:1179 v4LoadPolicyBytes`（arch 段 + 3D 张量 + `params` 校验位）· `v4WeightFormatOf`（2 ⇒ 专用错误）· `v4Describe`（arch/sha） | +140/−10 | ≈ +75/−6 + `params` 校验 |
+| 9 | 换网负向判据 | `:4347 cacheSwapNetDemo`（`v4cache --swap-net`：A 预热前半段 → B 跑后半段 ⇒ **增量 vs 整手重放逐位**） | +120 | 风险 5 的"负向用例"（§1 未列） |
+| 10 | 记忆体 | `policies.hpp` 分派 `format==2 → 3`（否则 format 3 会被送进 v3 的 `loadNet`） | +4/−3 | 关键一处（漏了就是"新包读成 v3"） |
+| 11 | sha256 抽出 | 新 `trainer/src/sha256.hpp`（`v4features.cpp` 的匿名实现搬进具名 namespace，两处共用） | +180/−89 | 风险 5 的"权重 sha"需要它 |
+
+**合计**：`v4policy.cpp` **+1,544/−38** · `v4policy.hpp` +95/−4 · `policies.hpp` +4/−3 ·
+`v4features.cpp` +4/−89 · 新 `sha256.hpp` +180。**净 +1,849**（§1 估 +724/−201 ⇒ 被改 ≈925）。
+⚠ **超预估 2×**，归因三条（都是结构性的，不是注水）：① §1 把 A− 的 tile/evt/融合写成"改现有函数"，
+实际是**第二张完整图**（v4 的 `tile.enc.*`/`q_tile`/`q_evt`/gate/write/film/mem 在 A− 里一个都不存在）；
+② arch 段解析 + 坏包文案 + `params` 校验位 ≈230 行（§1 只估 +75）；③ 换网负向判据（+120）与 sha 抽取（+180）
+不在 §1 表里。**逐函数对照**见上表，行数按 `git diff --numstat` 实测。
+
+### 13.2 读数（逐条原文在 `.tmp/mv1-s29b/`）
+
+| 项 | 读数 |
+| --- | --- |
+| 编译 | `pwsh -File trainer\build.ps1 -NoSelfTest` 通过（clang 22.1.7，`trainer\build\trainer.exe`） |
+| `trainer --selftest` | **TRAINER SELFTEST PASS**（含 v4 carry 键/负向注入等既有断言） |
+| ⭐ **G1（v4 / format 3 / current）** | `trainer v4golden .tmp\mv1-s28\golden\G1-current.bin --tol 1e-5` ⇒ 特征 **5.96e-8** · 前向 **4.77e-6** · **argmax 11/11** · 红证 5.96e-8 · h0 红证 2.17e-3 ⇒ **PASS** |
+| ⭐ **G2（a- / R-4 语料 3,083 决策）** | C++ ↔ Python（`export` 同口径的独立探针）：**argmax 3,083/3,083（100%）** · **真分歧 0** · 并列级差异 0；`max\|Δlogits\|`：**短 carry（ev≤60，n=2,961）5.24e-5** / **长 carry（ev>60，n=122）1.907e-5**（⚠ 远低于 §5 的"长 carry >0.05 判不可比"）；gap 中位 1.121 |
+| G2 夹具（11 用例，小网） | 特征 5.96e-8 · 前向 **1.52e-4** · **argmax 11/11**；⚠ 仍有一格 `c6.policy[10]` 超 `tol=1e-4`（该夹具把融合两处 `in_proj` **放大 20×**、tile 宽只有 16 ⇒ 它是最灵敏的放大器；Java 同夹具 **8.86e-5**，同一个近并列格）⇒ 判"**数值实现差异、非语义**"，依据 = 真网 3,083 行 100%/5.2e-5 |
+| ⭐ **a- 增量 carry 硬判据** | `trainer v4cache <a-> <g0..g4> --h0-rows 200` ⇒ **PASS**：决策 3,083、**逐位不符 0 行/0 头/0 格**、命中 **2,871** / 建槽 212（**93.12%**）、判据③（前缀 carry + 窗口）**200 行 0 不符**、少喂 GRU **8.29×** |
+| `format==2` 硬切 | 真旧包 `bot-ai\wl-dama\net.bin` ⇒ 专用错误（点名冻结快照 `3E7D0ADC…`/`F6AAA307…`）+ **退出码 1**；`v4WeightFormatOf` 同 |
+| fail-loud 六条 | 逐条坏包（`.tmp/mv1-s29b/bad/`）① valueBins 三处 ② valueRange ③ hasB3 缺 `u_res` ④ 张量形状 ≠ 契约 ⑤ `params` ≠ 实算 ⑥ 截断：**全部报错 + 退出码 1**；附加：`archLen=95` / 保留区非 0 / `topoId=7` / 头↔arch 版本不等 / 重名 / 多余张量 |
+| **缓存键负向** | `v4cache --swap-net`（A 暖前半段 → B 跑后半段）⇒ **PASS，增量 vs 整手重放 0 行不符**；强负向 `TRAINER_V4_OLD_KEY=1`（模拟旧键 = 只有 `handKey`）⇒ **FAIL，26 行不符**（首个：后半段第 1 行 `belief_hand[0]`）⇒ 判据有牙齿 |
+| **旧包误加载负向** | `trainer selfplay 1 --hands 1 --policy net:bot-ai\wl-dama\net.bin` ⇒ "自对弈失败：加载神经网络权重失败：…格式 2 已退役…" **退出码 2**（⛔ 没有退回 Bot 的分支）；format 3 坏包同 |
+| 资源（判据 20，按角色） | 本批无训练/采集相：`trainer*` committed 峰 **46.6 MB** / ws **49.5 MB**（`v4cache` 3,083 行全程 1.5 s 采样）；`python*` committed 峰 **1,658.5 MB** / ws **528.6 MB**（参考探针）；闸门工具 **0** |
+
+### 13.3 三端现状与交接
+
+- **三端现在都能读 format 3、都能跑两张图**：Java（并行批次）/ C++（本节）/ Python（§10–§11）。
+  G1（v4）三端：Java 5.01e-6 / C++ 4.77e-6（都对 Python 参考，≤1e-5）。G2（a-）三端：Java 3,083/3,083、
+  C++ 3,083/3,083，`max|Δ|` 同量级（短 5.4e-5 vs 5.2e-5）。
+- ⚠ **v4 语义 = current（`fusion.out` 末端无 ReLU）**：C++ 与 Java 同步；format 2 的 c2 旧包只走冻结快照。
+- **仍待段 4**：`bot-ai/` 9 个 format 2 包 ⇒ 先转 format 3；`tools/trainer-v4-parity.mjs --golden` 的夹具
+  入口要换 G1（本批未改工具，只直接跑 `trainer v4golden`）；三端闸门与发布属段 4。
+- ⛔ 本批未采集、未跑闸门、未发布；未改 Java / `tools/policy-gate-check.mjs` / `MV1-PLAN §1–§9`。
+
+
