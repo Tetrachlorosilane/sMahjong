@@ -1789,7 +1789,9 @@ def _recorded_args(args) -> dict:
                        #   于是"旧路径逐字节不变"不依赖任何新参数）
                        ("legacy_pool", False),
                        # ★ C1（第一百零一轮）：`fusion.out` 末端 ReLU（缺省 = 去掉 ⇒ 台账里一个键都不进）
-                       ("legacy_out_relu", False)):
+                       ("legacy_out_relu", False),
+                       # ★ C3（第一百零二轮）：门控初始化（缺省 = 小非零 ⇒ 台账里一个键都不进）
+                       ("legacy_zero_init", False)):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -1911,6 +1913,16 @@ def train(args) -> dict:
         "**legacy ReLU**（`u ≥ 0`，候选表示被截断；⛔ 只用于逐位复现改动前）"
         if _legacy_out_relu else
         "**无 ReLU**（C1：`u` 可正可负，候选表示不再被截断）"))
+    # ---- ★ C3（第一百零二轮）：`fusion.mem` / `heads.policy_gate` 的**初始化**（0 参数）--------
+    # `--legacy-zero-init`（缺省关）：开 = 两块**全零**初始化（门控恒等、`h_evt` 被乘 0），逐位复现。
+    # ⚠ 只影响**冷启**的网：`--init` 载入的权重（含这两块）会被文件值**原样覆盖** ⇒ warm-start 逐位不变。
+    # ⚠ 不进 π_ref/V_old 缓存键：初始化不改变任何前向语义（缓存存的是 `--init` 网的前向结果）。
+    _legacy_zero_init = bool(getattr(args, "legacy_zero_init", False))
+    M.set_legacy_zero_init(_legacy_zero_init)
+    print("门控初始化（mem/policy_gate）：" + (
+        "**legacy 全零**（`g ≡ 1`、`h_evt` 零影响；⛔ 只用于逐位复现改动前）"
+        if _legacy_zero_init else
+        f"**小非零** `N(0, {M.ZERO_INIT_STD:g}²)` + bias 0（C3；0 参数，net.bin 格式不变）"))
     # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
     # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
     for _split, _data in (("train", train_data), ("val", val_data)):
@@ -3210,6 +3222,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-out-relu", action="store_true",
                     help="⛔ 只用来自证/复现：`fusion.out` 末端保留旧 ReLU（u ≥ 0）。"
                          "缺省 = 去掉该 ReLU（C1；0 参数，net.bin 格式不变）")
+    # ★ C3（第一百零二轮）：`mem` / `policy_gate` 的初始化。缺省 = **小非零** `N(0, 1e-3²)`；
+    #   开这个开关才回到旧的全零初始化（出生时门控恒等）—— 只用于逐位复现改动前。
+    ap.add_argument("--legacy-zero-init", action="store_true",
+                    help="⛔ 只用来自证/复现：`fusion.mem` / `heads.policy_gate` 回到**全零**初始化"
+                         "（g ≡ 1、h_evt 零影响）。缺省 = 小非零 N(0, 1e-3²)（C3；0 参数、格式不变）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

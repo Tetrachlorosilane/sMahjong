@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | ---: | --- | --- |
 | C1 | 去输出端 ReLU（只 `fusion.out`）（✅ **已实现（C1-a，仅训练侧）**：第一百零一轮，`v4/model.py: Mlp(final_relu)` + `Fusion.out` + `pretrain --legacy-out-relu`；⛔ Java/C++ 未同步、未跑闸门） | T1 | 建议 | 0 | 否 | 是 |
 | C2 | state 级头改 mask-aware 池化（✅ **已实现**：第一百轮，`v4/model.py: state_pool` + `pretrain --legacy-pool`） | **T0** | **必做** | 0 | 否 | 否（要变强才重训） |
-| C3 | `mem`/`policy_gate` 非零小初始化 | T0 | 可后做 | 0 | 否 | 是（否则验不到） |
+| C3 | `mem`/`policy_gate` 非零小初始化（✅ **已实现**：第一百零二轮，`v4/model.py: _init_gate_` + `pretrain --legacy-zero-init`；⚠ 在 `--init` 配方下**逐字节惰性**、事件敏感性 ">1%" **未达**、aux 臂发散 ⇒ ⛔ R2 未跑；见 `NOTES.md` §6.5 第一百零二轮与 `lab/mv1/MV1-AMENDMENT.md` §6） | T0 | 可后做 | 0 | 否 | 是（否则验不到） |
 | C4 | value ±30→±60、51→81 bin | T1 | 建议 | +5,790（+0.41%） | 否 | 是 |
 | C5 | `ctx.points` ÷1000→÷5000 | T2 | 可后做 | 0 | **是** | 是 |
 | C6 | 接线 `cand[96..98]` / 删死维 | T2 | 可后做（接线：建议；删维：不建议） | +576 / −8,448 | 删维要 | 是 |
@@ -28,9 +28,10 @@
 - **理由** 现状是**训练/上线两套统计量**（Python 除以 Lmax，Java/C++ 除以 n），value/belief 主要由"合法集大小+padding"决定（`rel=1.118`，自身 logit std 5.74）⇒ 正确性缺陷，不是风格。
 - **半径/文件/判据** T0（Java/C++ 本来就是 mask-aware ⇒ 旧网在两端**逐位不变**、仍可加载；只改 Python 训练批口径）· 改 `model.py`⚠ `python/selfcheck.py`（加断言）`value_audit.py`（保留 `mean_all` 对照）｜**Java/C++ 不改** —— 这恰是 T0 的证据 · 判据：同一批状态把候选从 n 补 7 个零槽 ⇒ 四个 state 级头（value/placement/belief_hand/belief_tenpai）逐位不变（改前 value `rel=1.118`）；B=1 与 B=32 的 `meanU` 逐位相同；旧网在 Java/C++ 上 logits 逐位不变。
 - **风险·成本** 历史"padded 批"上算的读数（value EV 0.0513 等）要重算；head 输入尺度变、训练动态变。**2–4 人时**；不重建；不必重训（要变强才重训）。
-### C3 `mem`/`policy_gate` 零初始化 ｜T0｜可后做｜Δ参数 0 · ΔFLOPs 0
+### C3 `mem`/`policy_gate` 零初始化 ｜T0｜可后做｜Δ参数 0 · ΔFLOPs 0 ｜✅ **已实现 2026-10-18（第一百零二轮）**：`v4/model.py: _init_gate_`（`N(0, 1e-3²)` + bias 0，RNG 先存后恢复）+ `pretrain --legacy-zero-init`（旧全零逐位复现）；读数据见 `NOTES.md` §6.5 第一百零二轮 / `MV1-AMENDMENT.md` §6
 - **before** `model.py:166-167` `nn.init.zeros_(self.mem.weight); nn.init.zeros_(self.mem.bias)`；`:204-205` 同 `policy_gate` ⇒ 出生 `gate ≡ 1`、`h_evt` 被乘 0；实测 `policy-gate-check.mjs`：9 个 v4 包里 **4 个 `policy_gate.weight` 全 0 且 `fusion.mem.*` 整组缺失**；训练后打乱 60 行事件窗口 policy 只变 **0.78%**（初始化时 0.00000）。
 - **after** 两处改 `nn.init.normal_(w, std=1e-3)`、bias 0；`normalize_state`（`export.py:341-344`）对旧网补 0 不变 ⇒ 旧包逐位不变。
+- **实测（第一百零二轮，`lab` 口径）**：`--legacy-zero-init` 600 步 sha `62C378FB…267F5F` == C2 P600（逐位）；C2 同点（1200 步）带缺省 sha `C5D86973…A30F7` == C2 F1200f75 ⇒ ⚠ **在 `--init` 配方下逐字节惰性**（`--init` 的 `mem max|w| 0.0197` / `gate max|w| 0.0478` 覆盖新初始化）；事件窗口敏感性实测 legacy **3.7e-8** / c3@1e-3 **1.08e-4** / c3@3e-2 **3.2e-3** / 该网训练后 **3.7e-3** ⇒ ⛔ 判据"打乱窗口 **>1%**"**未达且初始化改不动**（它量的是"训练后门控学活了"，不是出生分布）。
 - **理由** 零初始化让"事件顺序/听牌信念"在出生时**零影响**；4/9 包至今门控全 0 ⇒ 这些包的 `belief_tenpai` 退化为 `{policy}`。⚠ 这 4 包是否**由**零初始化造成 **无法判定**（缺：它们的训练配置与 ckpt 原始张量表）；可判定的只是"出生即零影响"。
 - **半径/文件/判据** T0（只改初始化，张量名/形状/前向不变；旧版权重从文件读 ⇒ 逐位不变）· 改 `model.py` `python/selfcheck.py` `docs/TRAINING-V4.md §5`；`tools/policy-gate-check.mjs` 不改（用它判）· 判据：新 ckpt step0 `max|w|>0`；`policy-gate-check.mjs --strict` 退出 0；打乱窗口 policy 变化 **>1%**；旧 9 包加载后 logits 逐位不变。
 - **风险·成本** 训练早期方差变大；从旧网 warm-start 不再恒等（实验记录须写明）；可能白花钱（门控仍学不活）。**1–3 人时**；不重建；需重训才能验。

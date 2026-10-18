@@ -52,6 +52,55 @@ LEGACY_POOL = False
 #: 曾有 ReLU 全死塌方 top1 0.165）⇒ ⛔ Java/C++ 前向尚未同步，C1-a 的网**不得**上线上闸门。
 LEGACY_OUT_RELU = False
 
+#: `fusion.mem` / `heads.policy_gate` 的初始化（**C3**，第一百零二轮）：
+#:
+#: - `False`（缺省，新行为）= **小非零**：`weight ~ N(0, ZERO_INIT_STD²)`、`bias = 0`；
+#: - `True` = legacy：两块**全零**初始化（`g ≡ 1`、`h_evt` 被乘 0），**逐位复现**改动前
+#:   （`pretrain --legacy-zero-init`）。
+#:
+#: 为什么要有非零值：零初始化让"事件顺序 / 对手听牌信念"在**出生时**对 logits 的影响**恰好为 0**
+#: （门控恒等），而实测 9 个 v4 包里 4 个 `policy_gate.weight` 至今全 0、`fusion.mem.*` 整组缺失
+#: ⇒ 那些包的 `belief_tenpai` 根本不在推理路径（`tools/policy-gate-check.mjs`）。
+#: ⚠ 只改**训练侧初始化**：前向图 / 张量名 / 形状 / `net.bin` 格式**一个字节没动**，0 参数；
+#:   旧网（含 `--init` 载入的网）从文件读到的值**原样覆盖**这里的初值 ⇒ 对 warm-start 逐位不变。
+#: ⚠ σ 的选择依据见 `lab/mv1/ARCH-CHANGE-LIST.md` C3 与 `NOTES.md` §6.5 第一百零二轮：
+#:   σ=1e-3 ⇒ 出生时门控 `1+tanh(W·sigmoid(bt))` 偏离 1 约 1e-3 量级（相对 `u` 的 ~0.1%），
+#:   是"有影响但不动 argmax 主体"的量级；σ 太大（≥1e-2）就等于直接换掉 `--init` 的语义。
+ZERO_INIT_STD = 1e-3
+LEGACY_ZERO_INIT = False
+
+
+def set_legacy_zero_init(flag: bool) -> None:
+    """**进程级**门控初始化开关（`pretrain --legacy-zero-init` 在 `train()` 开头设一次）。
+
+    为什么是进程级：一次训练里会建**好几张** V4Model（主网、`--init`、`π_ref`、行为策略）——
+    只设主网会让"从零建的参照网"与主网出生分布不同（`--init` 路径本来就被文件覆盖，
+    所以这条只影响**冷启**的那些网）。
+    """
+    global LEGACY_ZERO_INIT
+    LEGACY_ZERO_INIT = bool(flag)
+
+
+def _init_gate_(lin: "nn.Linear", *, legacy: bool) -> None:
+    """门控层的初始化：legacy ⇒ 全零；否则 `N(0, ZERO_INIT_STD²)` + bias 0。
+
+    ⚠ **为什么先存/后恢复 RNG 状态**：C3 的判据要求"**只有**这两块张量和旧初始化不同"。
+    如果直接 `normal_()`，它会消耗全局 RNG ⇒ 后面所有层（`heads.value`/`placement`/…）的
+    初值全都跟着漂 —— 那样"出生影响"就分不清是门控造成的还是别的层造成的（审计口径要能归因）。
+    存/恢复一次，既保住"同 seed ⇒ 同初值"的既有性质，又让差异**恰好**落在这两块上。
+    """
+    if legacy:
+        nn.init.zeros_(lin.weight)
+        nn.init.zeros_(lin.bias)
+        return
+    st = torch.get_rng_state()
+    try:
+        nn.init.normal_(lin.weight, mean=0.0, std=ZERO_INIT_STD)
+        nn.init.zeros_(lin.bias)
+    finally:
+        torch.set_rng_state(st)
+
+
 #: 非法/缺失的合法数在这里被抓住（fail-closed）：⛔ **绝不悄悄退回全槽均值**。
 class LegalCountError(ValueError):
     """`state_pool` 拿不到可用的 `n_legal`（缺失 / ≤0 / >Lmax / 与 mask 不一致）。"""
@@ -226,8 +275,10 @@ class Fusion(nn.Module):
         #   零初始化 ⇒ `g ≡ 1` ⇒ **旧网（权重里没有这两个张量）逐位不变**：加载期补 0，
         #   见 `export.normalize_state`；`strict=True` 也不会红。
         self.mem = nn.Linear(d, d)
-        nn.init.zeros_(self.mem.weight)
-        nn.init.zeros_(self.mem.bias)
+        # ★ C3（第一百零二轮）：零初始化 → **小非零**（`N(0, 1e-3²)`、bias 0）。
+        #   `--legacy-zero-init` ⇒ 旧的 `zeros_`（`g ≡ 1`，逐位复现）。⚠ 零参数/零形状变化；
+        #   `--init` 载入的旧网从文件读到的值原样覆盖这里 ⇒ warm-start 逐位不变。
+        _init_gate_(self.mem, legacy=LEGACY_ZERO_INIT)
         # ★ C1（第一百零一轮）：**这一处**去掉末端 ReLU（`legacy_out_relu=True` ⇒ 旧的 `nn.ReLU()`）。
         #   理由：78.5% 的 `u` 维精确为 0、有效宽度只有 41/192（审计 §4），且有过一次 ReLU 全死
         #   塌方（logits 常数、top1 0.165）。⛔ 其它 Mlp（ctx/cand）不动。
@@ -265,11 +316,12 @@ class Heads(nn.Module):
         #   初始化 `W_g = b_g = 0` ⇒ `g ≡ 1` ⇒ 起步等价于"没有门控"（所以从旧网微调是安全的）。
         self.policy = nn.Linear(d, 1)
         self.policy_gate = nn.Linear(3, d)          # [dm,3]：`sigmoid(bt)[3]` → 逐维门控
-        # ⚠ **门控必须零初始化**：`nn.Linear` 默认随机 ⇒ 新网一出生就带随机门控，
-        #   "从旧网微调 = 先恒等再学"这个前提就没了（旧网加载时补的是 0，新训的网却是随机的，
-        #   两者起步行为不一致，实验没法比）。零初始化 ⇒ `g = 1 + tanh(0) = 1` ⇒ 恒等。
-        nn.init.zeros_(self.policy_gate.weight)
-        nn.init.zeros_(self.policy_gate.bias)
+        # ⚠ **门控必须小初始化**（C3 之前是**零**）：`1 + tanh(W·sigmoid(bt))`，`W=0` 时恒等。
+        #   旧注释的理由（"从旧网微调 = 先恒等再学"）没错，但代价是**出生时信念/事件零影响**：
+        #   9 个包里 4 个 `policy_gate` 至今全 0 ⇒ `belief_tenpai` 不在推理路径。
+        #   C3 改成 `N(0, 1e-3²)`、bias 0：出生时门控偏离 1 仅 ~1e-3 量级（有影响、但不动主体），
+        #   旧网加载时仍被文件值覆盖 ⇒ 旧包逐位不变；`--legacy-zero-init` 回到全零。
+        _init_gate_(self.policy_gate, legacy=LEGACY_ZERO_INIT)
         self.value = nn.Linear(d, value_bins)
         self.placement = nn.Linear(d, 4)
         self.belief_hand = nn.Linear(d, 3 * 34)

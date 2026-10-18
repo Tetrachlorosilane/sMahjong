@@ -2002,6 +2002,47 @@ ok(bool(_c2_raises(mask=_mfull, n_legal=_torch.tensor([_L - 1]))),
 ok(v4_model.build(seed=5).legacy_pool is False,
    "C2：池化缺省 = 新口径（`--legacy-pool` 缺省**关**）")
 
+# ---- C3（第一百零二轮）：`mem` / `policy_gate` 小非零初始化（**零训练**；改动见 `v4/model.py`）----
+# 判据：① 缺省 = 小非零（两块 `max|w| > 0` ∧ `max|w| ≤ 5σ` ∧ bias 恒 0）；
+#       ② `--legacy-zero-init` ⇒ 两块**逐位全 0**（旧行为）；
+#       ③ **只有这两块不同**：同 seed 下新旧两个网，除这两块之外每个张量**逐位相同**
+#          （否则"出生影响"归因不到门控，"只有初始化变了"这句话也不成立）；
+#       ④ 出生时门控**小**（`|tanh(W·sigmoid(bt))| < 0.02`）—— 是"小但非零"，不是"换了个网"；
+#       ⑤ 形状/张量表**逐字不变**（0 参数 ⇒ `net.bin` 格式不动）。
+_C3_GATES = ("fusion.mem.weight", "fusion.mem.bias",
+             "heads.policy_gate.weight", "heads.policy_gate.bias")
+_v4_model_flag = v4_model.LEGACY_ZERO_INIT
+v4_model.set_legacy_zero_init(False)
+_c3_new = v4_model.build(seed=5)
+v4_model.set_legacy_zero_init(True)
+_c3_old = v4_model.build(seed=5)
+v4_model.set_legacy_zero_init(_v4_model_flag)
+_sd_new, _sd_old = _c3_new.state_dict(), _c3_old.state_dict()
+ok(set(_sd_new) == set(_sd_old), "C3：新旧两网**张量表逐字相同**（0 参数、不改形状/名字）")
+ok(all(_torch.equal(_sd_new[k], _sd_old[k]) for k in _sd_new if not k.startswith(_C3_GATES)),
+   "C3：除 `mem`/`policy_gate` 外**每个张量逐位相同**（RNG 流未被扰动 ⇒ 差异可归因）")
+_c3_old_zero = all(float(_sd_old[k].abs().max()) == 0.0 for k in _C3_GATES)
+ok(_c3_old_zero, "C3：`--legacy-zero-init` ⇒ `mem`/`policy_gate` 全零（旧行为逐位复现）")
+_c3_w = float(_sd_new["fusion.mem.weight"].abs().max())
+_c3_g = float(_sd_new["heads.policy_gate.weight"].abs().max())
+_lim = 5.0 * v4_model.ZERO_INIT_STD
+ok(0.0 < _c3_w <= _lim and 0.0 < _c3_g <= _lim,
+   f"C3：缺省 = **小非零**（`fusion.mem` max|w|={_c3_w:.4g}、`policy_gate` max|w|={_c3_g:.4g}，"
+   f"都 ≤ 5σ={_lim:g}）",
+   f"ZERO_INIT_STD={v4_model.ZERO_INIT_STD:g}")
+ok(all(float(_sd_new[k].abs().max()) == 0.0
+       for k in ("fusion.mem.bias", "heads.policy_gate.bias")),
+   "C3：bias 仍为 0（只把 weight 抬离 0 —— 门控的出生偏置必须对称）")
+# 出生时的门控幅度：`1 + tanh(W·sigmoid(bt))`，bt 用真实前向里的 `belief_tenpai`
+with _torch.no_grad():
+    _c3_bt = _c3_new(**_x, mask=_mfull)["belief_tenpai"]
+    _c3_dev = float((_torch.tanh(_c3_new.heads.policy_gate(_torch.sigmoid(_c3_bt)))).abs().max())
+ok(_c3_dev < 0.02,
+   f"C3：出生时门控**小**（max|tanh(W·sigmoid(bt))|={_c3_dev:.4g} < 0.02 ⇒ 有影响但不动主体）")
+ok(v4_model.build(seed=5).legacy_pool is False
+   and v4_model.LEGACY_ZERO_INIT is False,
+   "C3：初始化缺省 = 小非零（`--legacy-zero-init` 缺省**关**）")
+
 # ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
 # 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
 # ⚠ 这十二条钉的是「**加上这个辅助头之后，缺省（开关关）路径仍逐字节旧**」的**静态**部分
