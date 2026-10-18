@@ -28,6 +28,34 @@ VALUE_BINS = 51
 #: 值域（千点）：训练时把 `final_scores − 起点` 折进这些分箱（设计 §6 的值头）
 VALUE_RANGE = 30.0
 
+#: state 级头（value / placement / belief_hand / belief_tenpai）的池化口径（**C2**）：
+#:
+#: - `False`（缺省）= **mask-aware**：只对 `n_legal` 个**合法槽**求均值 —— 与 Java
+#:   `V4Policy.forwardAll` / C++ `v4policy.cpp` **同一个分母**（推理端本来就没有 padding）；
+#: - `True` = **legacy**：`u.mean(dim=1)`，分母 = `Lmax`（把 padding 槽也平均进去）。
+#:   ⛔ 只用于**逐位复现**改动前的训练行为（`pretrain --legacy-pool`），不许当缺省。
+#:
+#: ⚠ 这是**训练侧**口径：`net.bin` 格式 / Java / C++ 前向 / 特征 / 数据一个字节都没动
+#: （那两端一直除以真实 `n` ⇒ 旧网在两端逐位不变）。旧口径的问题实测见
+#: `lab/mv1/ARCH-AUDIT.md` §4：value logits 对"合法集大小 + padding" 的 rel=1.118、
+#: max|Δ|=149.7，而自身 logit std 只有 5.74 ⇒ value/belief 主要由 padding 决定，不是状态。
+LEGACY_POOL = False
+
+#: 非法/缺失的合法数在这里被抓住（fail-closed）：⛔ **绝不悄悄退回全槽均值**。
+class LegalCountError(ValueError):
+    """`state_pool` 拿不到可用的 `n_legal`（缺失 / ≤0 / >Lmax / 与 mask 不一致）。"""
+
+
+def set_legacy_pool(flag: bool) -> None:
+    """**进程级**池化口径开关（`pretrain --legacy-pool` 在 `train()` 开头设一次）。
+
+    为什么是进程级而不是"每个网自己传"：一次训练里会建**好几张** V4Model（主网、`--init`
+    载入的网、`π_ref`、行为策略网）—— 只把主网设成 legacy、参照网还用新口径，
+    两边的 state/belief 口径不同 ⇒ **复现不出旧轨迹**（sha 会变）。
+    """
+    global LEGACY_POOL
+    LEGACY_POOL = bool(flag)
+
 
 @dataclass(frozen=True)
 class HeadSpec:
@@ -223,7 +251,8 @@ class Heads(nn.Module):
             "policy": logits,
             # ⚠ **`state` 只是一个键，不是一个头**（MV-1 第一刀，2026-10-16）：外部辅助头
             #   `own_win`（`pretrain.OwnWinHead`，与 `ssl_head` 同族）要读它，而它本来就在
-            #   这里现成（`u.mean(1)`）。与 `:277-279` 的 `h_evt`/`e_tokens` 同款：**多一个键
+            #   这里现成（C2 之后 = `state_pool(u, mask, n_legal)`，缺省 mask-aware）。
+            #   与 `:277-279` 的 `h_evt`/`e_tokens` 同款：**多一个键
             #   不改任何上线前向**（本仓库无 dropout/BN ⇒ 前向逐位不变），也**不进 `net.bin`**
             #   （`export` 按 `state_dict()` 建张量表，字典键不进表）。
             "state": state,                                     # [B,dm]
@@ -236,6 +265,57 @@ class Heads(nn.Module):
         }
 
 
+def state_pool(u: torch.Tensor, mask: torch.Tensor | None = None,
+               n_legal: torch.Tensor | None = None, *, legacy: bool | None = None) -> torch.Tensor:
+    """state 级头的池化：`[B,L,dm]` 候选表示 → `[B,dm]` 状态向量（**C2** 的唯一入口）。
+
+    - `legacy=True` ⇒ `u.mean(dim=1)`（分母 `Lmax`；逐位复现改动前，连调用形式都不改）；
+    - 否则 ⇒ `sum_{i<L} u_i·m_i / n`，`n` = 每行**真实合法数**（`n_legal`，或由 `mask` 求和）。
+
+    **fail-closed**：新口径下 `n_legal` 与 `mask` **都没有** ⇒ `LegalCountError`；
+    任何一行 `n ≤ 0` / `n > Lmax` / `n_legal` 与 `mask` 对不上 ⇒ `LegalCountError`。
+    ⛔ 不提供"拿不到 n 就退回全槽均值"的分支 —— 那正是 C2 要消灭的静默口径漂移。
+
+    ⚠ 无 padding 时（`mask` 全 True / `n == Lmax`）逐位等于 `u.mean(dim=1)`：乘 1.0 精确、
+    求和顺序与 `mean` 相同、除以同一个 `n`；自检把这条钉成"四头 torch.equal"。
+    """
+    if legacy is None:
+        legacy = LEGACY_POOL
+    if legacy:
+        return u.mean(dim=1)
+    if n_legal is None and mask is None:
+        raise LegalCountError(
+            "state 级头的 mask-aware 池化拿不到 `n_legal`（也没有 `mask`）—— "
+            "属于 fail-closed：⛔ 不退回全槽均值；推理端本来就没有 padding，请显式传 "
+            "`mask`（全 True）或 `n_legal`")
+    b, lmax = int(u.shape[0]), int(u.shape[1])
+    if n_legal is not None:
+        n = n_legal.reshape(-1).to(device=u.device, dtype=torch.int64)
+        if int(n.numel()) != b:
+            raise LegalCountError(f"`n_legal` 长度 {int(n.numel())} ≠ batch {b}")
+        if bool((n <= 0).any()) or bool((n > lmax).any()):
+            raise LegalCountError(
+                f"`n_legal` 越界：必须在 [1, Lmax={lmax}]，实测 "
+                f"min={int(n.min())} max={int(n.max())}（⛔ 不许把 ≤0 当'整行 padding'）")
+        if mask is None:
+            m = torch.arange(lmax, device=u.device)[None, :] < n[:, None]
+        else:
+            m = mask if mask.dtype == torch.bool else mask.bool()
+            # 两个来源必须说同一件事：一个按 n 除、一个按 mask 乘，对不上就是静默失真。
+            if not torch.equal(m.sum(dim=1).to(torch.int64), n):
+                raise LegalCountError("`n_legal` 与 `mask` 不一致（逐行合法数不同）")
+    else:
+        m = mask if mask.dtype == torch.bool else mask.bool()
+        n = m.sum(dim=1).to(torch.int64)
+        if bool((n <= 0).any()):
+            raise LegalCountError(
+                f"`mask` 里有**整行全 False** 的行（n=0）：合法候选数必须 ≥1（实测 "
+                f"{(n <= 0).sum().item()} 行）")
+    if m.shape != u.shape[:2]:
+        raise LegalCountError(f"`mask` 形状 {tuple(m.shape)} ≠ u 的前两维 {tuple(u.shape[:2])}")
+    return (u * m.unsqueeze(-1)).sum(dim=1) / n.to(u.dtype).unsqueeze(-1)
+
+
 class V4Model(nn.Module):
     """v4 全模型。`forward` 返回**每个头**的输出；推理只用 `ONLINE_HEADS`（前向实测；训练与契约必需是 `contract_heads()`）。
 
@@ -246,10 +326,12 @@ class V4Model(nn.Module):
     """
 
     def __init__(self, *, d_model: int = D_MODEL, tile_d: int = TILE_D, n_heads: int = N_HEADS,
-                 value_bins: int = VALUE_BINS) -> None:
+                 value_bins: int = VALUE_BINS, legacy_pool: bool | None = None) -> None:
         super().__init__()
         if d_model % n_heads or tile_d % n_heads:
             raise ValueError(f"n_heads={n_heads} 必须同时整除 d_model={d_model} 与 tile_d={tile_d}")
+        # ⚠ `legacy_pool` **不是宽度**：不进 `dims_cfg`、不进 `net.bin` 头部（格式一个字节没动）。
+        self.legacy_pool = LEGACY_POOL if legacy_pool is None else bool(legacy_pool)
         self.dims_cfg = {"d_model": int(d_model), "tile_d": int(tile_d),
                          "n_heads": int(n_heads), "value_bins": int(value_bins)}
         self.tile = TileTower(tile_d, n_heads, d_model)
@@ -262,7 +344,8 @@ class V4Model(nn.Module):
     # ---------------------------------------------------------------- 前向
     def forward(self, tile: torch.Tensor, evt: torch.Tensor, ctx: torch.Tensor,
                 cand: torch.Tensor, mask: torch.Tensor | None = None,
-                h: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+                h: torch.Tensor | None = None,
+                n_legal: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         """`h` = **窗口之前**的 GRU carry（`[B,dm]`；`None` ⇒ 全 0 冷启动）。
 
         ⚠ 两个量必须分清（W1 定稿，`docs/FEATURES-V4.md` §5.3）：
@@ -278,7 +361,9 @@ class V4Model(nn.Module):
         h_tile, tile_pool = self.tile(tile)
         e_tokens, h_evt = self.event(evt, h)
         u = self.fusion(h_tile, tile_pool, e_tokens, h_evt, self.ctx(ctx), self.cand(cand))
-        out = self.heads(u, u.mean(dim=1), mask)
+        # ★ C2：state 级头读 **mask-aware 池化**（只对真实 `n_legal` 个合法槽求均值）。
+        #   缺省新口径；`legacy_pool=True` ⇒ 旧 `u.mean(dim=1)`（逐位复现）。
+        out = self.heads(u, state_pool(u, mask, n_legal, legacy=self.legacy_pool), mask)
         out["h_evt"] = h_evt
         # ⚠ `e_tokens` 只给 **P1 的掩码事件重建**（先验/自监督 pretext）用 —— 推理路径不读它
         #   （`contract_heads()`/`ONLINE_HEADS` 里都没有它；多一个键不影响任何上线前向）。

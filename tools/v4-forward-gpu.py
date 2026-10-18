@@ -42,11 +42,13 @@
 
 ## 为什么按 `legal` 条数 `n` **分桶**而不是补 0 到 `lmax`（这条决定判据能不能过）
 
-`v4/model.py` 的 `V4Model.forward` 里 `state = u.mean(dim=1)`（候选维求均值），而 `Heads` 用
+`v4/model.py` 的 `V4Model.forward` 里 `state` 由候选维聚合成（C2 之前是 `u.mean(dim=1)`；
+现在缺省 mask-aware —— 但**补 0 到同一 lmax 仍会改变分母/集合**），而 `Heads` 用
 `belief_tenpai(state)` 经 `policy_gate` **逐候选**调制 policy 的输入表示。补 0 行会把均值拉偏
 ⇒ 门控变 ⇒ **logits 变**（不是舍入级的差，是实打实的语义差）。所以"一次前向塞进不同 `n` 的行"
 与 C++ `v4net` 的**逐行**语义**不等价**。本工具按 `n` 分桶：同一批内部 `n` 完全相同 ⇒
-`mask` 恒为 None、没有一行是 padding ⇒ **逐行等价**，同时仍然是批量前向（矩阵乘）。
+`mask` 恒为**全 True**（C2 之后显式传；候选维已切成 `n` 列、没有一行是 padding）⇒ **逐行等价**，
+同时仍然是批量前向（矩阵乘）。
 
 ## 用法
 
@@ -690,7 +692,11 @@ def forward(net: Net, rows: Rows, device, batch: int, *, index=None, quiet: bool
                 ctx = torch.from_numpy(rows.ctx[part, :]).to(device)
                 cand = torch.from_numpy(rows.cand[part, :n, :]).to(device)
                 h = None if h0_all is None else torch.from_numpy(h0_all[part, :]).to(device)
-                out = model(tile, evt, ctx, cand, mask=None, h=h)
+                # C2（第一百轮）：state 级头缺省 mask-aware 池化 ⇒ 显式给全 True 的 mask。
+                # 本工具**按 n 分桶**（候选维已切成 n 列、没有 padding）⇒ 新口径 = `sum/n` 与
+                # 旧 `u.mean(1)` **逐位相同**（乘 1.0 精确、求和顺序一致）⇒ 读数口径不变。
+                m = torch.ones(tile.shape[0], n, dtype=torch.bool, device=device)
+                out = model(tile, evt, ctx, cand, mask=m, h=h)
                 pol = out["policy"].detach().to("cpu", torch.float32).numpy()
                 for r, i in enumerate(part):
                     lg = [float(x) for x in pol[r]]

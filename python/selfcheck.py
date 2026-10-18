@@ -1950,8 +1950,57 @@ eq("v4：危险头形状（候选 × 4 家）", tuple(_out["danger"].shape), (1,
 _hg = v4_model.hl_gauss_targets(_torch.tensor([0.0, 5.0, -30.0, 100.0]))
 ok(bool((_hg.sum(dim=1) - 1.0).abs().max() < 1e-5), "v4：值头的软标签每行和为 1（HL-Gauss 正确）")
 ok(bool((_hg >= 0).all()), "v4：值头软标签非负（不会造出负概率）")
-ok(_torch.equal(_v4m(**_x, mask=None)["policy"][:, 0], _v4m(**_x, mask=None)["policy"][:, 0]),
+ok(_torch.equal(_v4m(**_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))["policy"][:, 0],
+                _v4m(**_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))["policy"][:, 0]),
    "v4：前向是确定性的（无 dropout）—— 红证①与判据④都依赖这条")
+
+# ---- C2（第一百轮）：state 级头 = mask-aware 池化（**零训练**；改动见 `v4/model.py: state_pool`）----
+# 判据：① 无 padding 时新口径四头**逐位**等于旧口径；② 有 padding 时确实变（但只在 state 级头上）；
+# ③ fail-closed：没有 n_legal / n≤0 / 与 mask 不一致 ⇒ 报错（⛔ 不许悄悄退回全槽均值）。
+_C2_HEADS = ("value", "placement", "belief_hand", "belief_tenpai")
+_L = int(_t.cand.shape[0])
+_mfull = _torch.ones(1, _L, dtype=_torch.bool)
+_v4m.legacy_pool = True
+with _torch.no_grad():
+    _c2_old = _v4m(**_x, mask=_mfull)
+_v4m.legacy_pool = False
+with _torch.no_grad():
+    _c2_new = _v4m(**_x, mask=_mfull)
+    _c2_newn = _v4m(**_x, mask=_mfull, n_legal=_torch.tensor([_L]))
+ok(all(_torch.equal(_c2_old[h], _c2_new[h]) for h in _C2_HEADS),
+   "C2：**无 padding** 时新口径（mask 求和）== 旧口径 —— 四个 state 级头逐位相同")
+ok(all(_torch.equal(_c2_old[h], _c2_newn[h]) for h in _C2_HEADS),
+   "C2：显式 `n_legal == Lmax` 时也逐位 == 旧口径")
+# 有 padding 的三行（n = L / L−3 / 1）：value logits 必须变（旧口径把 padding 槽也算进分母）
+_n3 = _torch.tensor([_L, max(1, _L - 3), 1])
+_m3 = _torch.arange(_L)[None, :] < _n3[:, None]
+_x3 = {k: v.repeat(int(_n3.numel()), *([1] * (v.dim() - 1))) for k, v in _x.items()}
+with _torch.no_grad():
+    _v4m.legacy_pool = True
+    _o3_old = _v4m(**_x3, mask=_m3)
+    _v4m.legacy_pool = False
+    _o3_new = _v4m(**_x3, mask=_m3, n_legal=_n3)
+_c2_dv = float((_o3_new["value"] - _o3_old["value"]).abs().max())
+ok(_c2_dv > 0.0, f"C2：**有 padding** 时 value logits 按预期变化（max|Δ|={_c2_dv:.4g} > 0）")
+
+
+def _c2_raises(**_kw) -> str:
+    try:
+        with _torch.no_grad():
+            _v4m(**_x, **_kw)
+    except v4_model.LegalCountError as _e:                        # noqa: BLE001
+        return str(_e)
+    return ""
+
+
+_c2_e1 = _c2_raises(mask=None)
+ok(bool(_c2_e1), "C2 fail-closed：**既无 `n_legal` 又无 `mask`** ⇒ 报错（⛔ 不退回全槽均值）")
+ok(bool(_c2_raises(mask=_torch.zeros(1, _L, dtype=_torch.bool))),
+   "C2 fail-closed：整行 mask 全 False（n=0）⇒ 报错")
+ok(bool(_c2_raises(mask=_mfull, n_legal=_torch.tensor([_L - 1]))),
+   "C2 fail-closed：`n_legal` 与 `mask` 不一致 ⇒ 报错")
+ok(v4_model.build(seed=5).legacy_pool is False,
+   "C2：池化缺省 = 新口径（`--legacy-pool` 缺省**关**）")
 
 # ---- MV-1 第一刀（辅助子目标多头 `own_win`）的可判性契约（2026-10-16；零训练）------------------
 # 判据出处：`AGENTS.md` §6.5 第 17 条 + `lab/mv1/MV1-{PLAN,FEASIBILITY}.md`。
@@ -2688,8 +2737,9 @@ import torch as _torch                                                  # noqa: 
 with _torch.no_grad():
     _args = (_torch.from_numpy(_tv.tile[None]), _torch.from_numpy(_tv.evt[None]),
              _torch.from_numpy(_tv.ctx[None]), _torch.from_numpy(_tv.cand[None]))
-    _o1 = v4_model.build(20260928)(*_args)
-    _o2 = _v4m2(*_args)
+    _mfull = _torch.ones(1, _tv.cand.shape[0], dtype=_torch.bool)
+    _o1 = v4_model.build(20260928)(*_args, mask=_mfull)
+    _o2 = _v4m2(*_args, mask=_mfull)
 ok(bool((_o1["policy"] == _o2["policy"]).all()),
    "P5 导出：导出→读回→载入后的 logits 与原始模型逐位相同")
 # 形状审计的负向对照：少一个张量 / 形状不对 ⇒ `net_blob` 必须报错（不是导出个坏文件）

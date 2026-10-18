@@ -210,7 +210,7 @@ def _behaviour_values(model: M.V4Model, data: dict, device: str, batch: int) -> 
             idx = np.arange(i0, min(i0 + batch, n))
             b = _batch(data, idx, device)
             v = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
-                      h=b.get("h"))["value"]
+                      h=b.get("h"), n_legal=b["nlegal"])["value"]
             out[i0:i0 + idx.size] = (torch.softmax(v.float(), dim=-1) * center).sum(-1).cpu().numpy()
     return out
 
@@ -563,7 +563,7 @@ def _behaviour_logprobs_at(model: M.V4Model, data: dict, index: np.ndarray, devi
             idx = idx_all[i0:min(i0 + batch, idx_all.size)]
             b = _batch(data, idx, device)
             logits = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
-                           h=b.get("h"))["policy"]
+                           h=b.get("h"), n_legal=b["nlegal"])["policy"]
             if temp > 0:
                 logits = logits / float(temp)
             lp = torch.log_softmax(logits, dim=-1).gather(1, b["label"][:, None]).squeeze(1)
@@ -643,7 +643,7 @@ def _ref_logits(ref_model: M.V4Model, data: dict, device: str, batch: int,
             idx = np.arange(i0, min(i0 + batch, n))
             b = _batch(data, idx, device, ablate=ablate)
             logits = ref_model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"],
-                               h=b.get("h"))["policy"]
+                               h=b.get("h"), n_legal=b["nlegal"])["policy"]
             # ⚠ 非法候选是被 `masked_fill(-inf)` 出来的（`Heads.forward`）⇒ 这里会存进 -inf。
             #   那是**对的**（`ref_kl_term` 里按 `isfinite` 把那几格挑掉），别在这里 clamp 成有限值。
             out[i0:i0 + idx.size] = logits.to("cpu").numpy()
@@ -1486,7 +1486,8 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
             evt_masked, mask_rows, target = mask_events(b["evt"], mask_frac, gen)
             b["evt"] = evt_masked
             ssl = (ssl_head, mask_rows, target)
-        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
+        out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"),
+                    n_legal=b["nlegal"])
         # ⚠ 掩码要喂进损失：自对弈数据集里 `random` 那 1/4 行的动作在训练过的网看来**几乎是零概率**
         #   （实测逐行 CE 中位 0.05 / 90 分位 24 / 最大 672）—— 不遮的话"策略 CE"这个指标会被它带跑，
         #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
@@ -1783,7 +1784,10 @@ def _recorded_args(args) -> dict:
                        # ★ MV-1：新开关在缺省值时一个键都不进（与上面三条同一个做法）
                        ("aux_own_win_weight", 0.0), ("aux_own_win_rows", "all"),
                        # ★ MV-1 第九十九轮：lr 调度（缺省 = 现行 cosine ⇒ 台账里一个键都不进）
-                       ("lr_schedule", "cosine"), ("lr_floor_frac", 0.1)):
+                       ("lr_schedule", "cosine"), ("lr_floor_frac", 0.1),
+                       # ★ C2（第一百轮）：池化口径（缺省 = mask-aware ⇒ 台账里一个键都不进，
+                       #   于是"旧路径逐字节不变"不依赖任何新参数）
+                       ("legacy_pool", False)):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -1885,6 +1889,32 @@ def train(args) -> dict:
     meta = train_data["meta"]
     train_data["meta"] = meta                        # `evaluate` 要 action_types
     val_data["meta"] = meta
+
+    # ---- ★ C2（第一百轮）：state 级头 = **mask-aware 池化**（只对 `n_legal` 个合法槽求均值）----
+    # `--legacy-pool`（缺省关）：开 = 旧的 `u.mean(dim=1)`（分母 Lmax，含 padding），**逐位复现**改动前。
+    # ⚠ **进程级**开关：这一次训练里建的每张 V4Model（主网 / `--init` / `π_ref` / 行为策略）都同口径 ——
+    #   只设主网会让参照网的口径不同，旧轨迹就复现不出来。
+    _legacy_pool = bool(getattr(args, "legacy_pool", False))
+    M.set_legacy_pool(_legacy_pool)
+    print("state 级头池化：" + (
+        "**legacy**（`u.mean(1)`，分母 = Lmax，含 padding 槽；⛔ 只用于逐位复现改动前）"
+        if _legacy_pool else
+        "mask-aware（只对真实 `n_legal` 个合法槽求均值；与 Java/C++ 前向同一分母）"))
+    # fail-closed：**没有真实 `n_legal` 就拒绝起跑** —— ⛔ 不许悄悄退回全槽均值（那正是 C2 要消灭的
+    # 训练/上线两套统计量）。缺列 / 有 ≤0 的行 / 超过候选宽度 都在这里拦住。
+    for _split, _data in (("train", train_data), ("val", val_data)):
+        _nl = _data.get("nlegal")
+        if _nl is None:
+            raise SystemExit(
+                f"⛔ 数据集 `{_split}` 切分没有 `nlegal` 列 ⇒ C2 的 mask-aware 池化拿不到真实 n，"
+                f"拒绝起跑（⛔ 不退回全槽均值）")
+        _nl = np.asarray(_nl)
+        _lmax = int(_data["cand"].shape[1])
+        if _nl.size == 0 or int(_nl.min()) <= 0 or int(_nl.max()) > _lmax:
+            raise SystemExit(
+                f"⛔ 数据集 `{_split}` 切分的 `nlegal` 越界：必须在 [1, Lmax={_lmax}]，实测 "
+                f"min={int(_nl.min()) if _nl.size else 'n/a'} "
+                f"max={int(_nl.max()) if _nl.size else 'n/a'} ⇒ 拒绝起跑（⛔ 不退回全槽均值）")
 
     # ---- ★ W1b 硬闸门：训练必须有"长程 carry"（`h0` 列）------------------------------------
     # 为什么是硬闸门：上线端（Java/C++）喂的是"**从 0 起逐事件推进整手**"的 carry，而紧凑集的
@@ -2680,7 +2710,8 @@ def train(args) -> dict:
                 evt_masked, mask_rows, target = mask_events(b["evt"], args.mask_frac, rng_gen)
                 b["evt"] = evt_masked
                 ssl = (ssl_head, mask_rows, target)
-            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"))
+            out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"),
+                        n_legal=b["nlegal"])
             kb = None if keep_tr is None else keep_tr[idx].to(device)
             wb = None if w_tr is None else w_tr[idx].to(device)
             ppo = None
@@ -3069,6 +3100,9 @@ def _cached_ref_logits(args, model, data: dict, device: str,
                             device=device, batch=args.eval_batch,
                             extra={"ablate": {k: [list(x) for x in v]
                                               for k, v in (ablate or {}).items()},
+                                   # ★ C2：池化口径会改 state 级头（value/belief）的输出 ⇒ 必须进键，
+                                   #   否则同一缓存目录下 `--legacy-pool` 与缺省会**静默混用**两份 logits。
+                                   "legacy_pool": bool(M.LEGACY_POOL),
                                    "lmax": lmax, "rows": n})
     got = _refcache.load(cache_dir, "pi_ref_logits", key, kd)
     if got is not None:
@@ -3096,6 +3130,8 @@ def _cached_behaviour_values(args, model, train_data: dict, val_data: dict, devi
                             device=device, batch=args.eval_batch,
                             extra={"value_bins": int(M.VALUE_BINS),
                                    "value_range": float(M.VALUE_RANGE),
+                                   # ★ C2：`V_old` 读 value 头 ⇒ 池化口径必须进键（同源理由见 `_cached_ref_logits`）
+                                   "legacy_pool": bool(M.LEGACY_POOL),
                                    "rows": [n, nv]})
     got = _refcache.load(cache_dir, "v_old", key, kd)
     if got is not None:
@@ -3148,6 +3184,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr-floor-frac", type=float, default=0.1, metavar="F",
                     help="`--lr-schedule floored-cosine` 的 lr 下限（占 --lr 的比例，缺省 0.1）；"
                          "⚠ `--lr-schedule cosine` 下必须留缺省（0.1），否则报错")
+    # ★ C2（第一百轮）：state 级头池化口径。缺省 = **新**（mask-aware，只对 n_legal 个合法槽求均值，
+    #   与 Java/C++ 同分母）；开这个开关才回到旧的 `u.mean(1)`（分母 Lmax）—— 只用于逐位复现旧行为。
+    ap.add_argument("--legacy-pool", action="store_true",
+                    help="⛔ 只用来自证/复现：state 级头退回旧 `u.mean(dim=1)`（分母 = Lmax，含 padding 槽）。"
+                         "缺省 = mask-aware 池化（只对真实 n_legal 个合法槽求均值；与 Java/C++ 前向同口径）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

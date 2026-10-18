@@ -99,8 +99,11 @@ def closure_proofs(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None = N
     t = blocks.assemble(obs, sidecar, allow_degraded=True)
     m = M.build(seed=7)
     x = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in t.as_dict().items()}
+    # C2：state 级头缺省 mask-aware 池化 ⇒ 没有 padding 的单行要**显式**声明全合法
+    # （⛔ 不许靠 mask=None 静默退回全槽均值；这里 L 就是真实候选数，两者数值相同）。
+    full = torch.ones(1, t.cand.shape[0], dtype=torch.bool)
     with torch.no_grad():
-        a = m(**x)["policy"]
+        a = m(**x, mask=full)["policy"]
     # 让"标签"以最容易被误用的方式存在：直接挂在 obs / sidecar 上
     obs_with_labels = dict(obs)
     obs_with_labels["aux_labels"] = {"opp_hand": [[1] * 34] * 3, "opp_tenpai": [1, 0, 1]}
@@ -109,7 +112,7 @@ def closure_proofs(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None = N
     t2 = blocks.assemble(obs_with_labels, sc_with_labels, allow_degraded=True)
     x2 = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in t2.as_dict().items()}
     with torch.no_grad():
-        b = m(**x2)["policy"]
+        b = m(**x2, mask=full)["policy"]
     identical = bool(torch.equal(a, b))
     reward_ok, reward_bad = reward_purity_scan()
     sep_ok, sep_bad = aux_separation_scan()

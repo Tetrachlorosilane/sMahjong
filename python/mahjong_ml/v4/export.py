@@ -545,14 +545,17 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             h0 = torch.zeros(dm) if h0 is None else h0[0].detach()
             args = (torch.from_numpy(t.tile[None]), torch.from_numpy(t.evt[None]),
                     torch.from_numpy(t.ctx[None]), torch.from_numpy(t.cand[None]))
-            o = net(*args, h=h0[None])
+            # C2：state 级头缺省 mask-aware 池化 ⇒ 显式声明"这一条没有 padding"。
+            # 单条用例的 L 就是真实候选数 ⇒ 与旧的 `u.mean(1)` 逐位相同（夹具字节不变）。
+            full_kw = {"mask": torch.ones(1, t.cand.shape[0], dtype=torch.bool)}
+            o = net(*args, h=h0[None], **full_kw)
             # 红证①（**夹具必须能测到 `fusion.mem`**）：把 `fusion.mem.weight` 归零 ⇒ 策略头
             #   必须变。零初始化只保证"起步恒等"，不保证"这条接线真的在算"。
             if float(net.fusion.mem.weight.abs().sum()) == 0.0:
                 raise NetFormatError("夹具空转：`fusion.mem.weight` 全 0（零初始化没被扰动）")
             saved = net.fusion.mem.weight.detach().clone()
             net.fusion.mem.weight.zero_()
-            o0 = net(*args, h=h0[None])
+            o0 = net(*args, h=h0[None], **full_kw)
             net.fusion.mem.weight.copy_(saved)
             fin = torch.isfinite(o["policy"] - o0["policy"])
             mem_probe = max(mem_probe, float((o["policy"] - o0["policy"])[fin].abs().max()))
@@ -563,7 +566,7 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
             # 红证②（**夹具必须能测到 `h0`**，只在 `h0 != 0` 的用例上有意义）：扰动 `h0`
             #   ⇒ 输出必须变。没有它，"三端都忽略 h0"也能全绿（GRU 收缩时实测差 3e-8）。
             if pre > 0:
-                o1 = net(*args, h=(h0 + 0.5)[None])
+                o1 = net(*args, h=(h0 + 0.5)[None], **full_kw)
                 fin1 = torch.isfinite(o["policy"] - o1["policy"])
                 h0_probe = max(h0_probe, float((o["policy"] - o1["policy"])[fin1].abs().max()))
         obs_b = json.dumps(obs, ensure_ascii=False).encode("utf-8")
