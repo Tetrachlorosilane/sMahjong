@@ -6667,7 +6667,7 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - ⭐ **a- 增量 carry 硬判据**：`trainer v4cache <a-> g0..g4 --h0-rows 200` ⇒ **PASS**：决策 3,083、**逐位不符 0 行 / 0 头 / 0 格**、命中 **2,871** / 建槽 212（**93.12%**）、判据③（前缀 carry + 窗口）200 行 0 不符、少喂 GRU **8.29×**。
 - **format==2 硬切 + fail-loud 六条**：真旧包 `bot-ai\wl-dama\net.bin` ⇒ 专用错误 + **退出码 1**；坏包逐条（valueBins 三处 / valueRange / hasB3 缺 `u_res` / 形状 / `params` 校验位 / 截断 + 保留区 / `topoId=7` / 头↔arch 版本 / 重名 / 多余张量）全部报错 + 退出码 1；`selfplay --policy net:<旧包>` ⇒ **退出码 2**（⛔ 不退回 Bot）。
 - **缓存键 + 换网负向**：槽键 = `v2/f<format>/t<arch>/<权重 sha256-16>` + `handKey`；`v4cache --swap-net`（A 暖前半段 → B 跑后半段，判**增量 vs 整手重放逐位**）**PASS 0 行不符**；旧键注入 `TRAINER_V4_OLD_KEY=1` ⇒ **FAIL 26 行不符**（首个：后半段第 1 行 `belief_hand[0]`）⇒ 判据有牙齿。
-- **编译/自检**：`trainer\build.ps1` 通过（clang 22.1.7）· `trainer --selftest` **PASS** · `python selfcheck.py` **1,028/0 PASS**（未改 Python）。行数：`v4policy.cpp` +1,544/−38、`v4policy.hpp` +95/−4、`policies.hpp` +4/−3、`v4features.cpp` +4/−89、新 `sha256.hpp` +180（§1 估 ≈925 ⇒ **超 2×**，归因见 §13.1）。
+- **编译/自检**：`trainer\build.ps1` 通过（clang 22.1.7）· `trainer --selftest` **PASS** · `python selfcheck.py` **1,028/0 PASS**（未改 Python）。行数：`v4policy.cpp` +1,547/−38、`v4policy.hpp` +95/−4、`policies.hpp` +4/−3、`v4features.cpp` +4/−89、新 `sha256.hpp` +180（净 **+1,696**；§1 估 ≈925 ⇒ **超 ≈1.8×**，归因见 §13.1）。
 - **资源（判据 20，按角色）**：本批无训练/采集相；`trainer*` committed 峰 **46.6 MB** / ws **49.5 MB**（`v4cache` 3,083 行 · 1.5 s 采样）；`python*` **1,658.5 MB** / **528.6 MB**（参考探针）；`node*`/闸门工具 **0**。
 - ⛔ **未动 Java**（`server/**` 是并行批次，工作区里它的改动不是本批）、⛔ 未动 `tools/policy-gate-check.mjs`、⛔ 未动 Python、未采集、未跑闸门、未发布、未改 `MV1-PLAN §1–§9`。
 

@@ -581,9 +581,9 @@ format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同�
 | 10 | 记忆体 | `policies.hpp` 分派 `format==2 → 3`（否则 format 3 会被送进 v3 的 `loadNet`） | +4/−3 | 关键一处（漏了就是"新包读成 v3"） |
 | 11 | sha256 抽出 | 新 `trainer/src/sha256.hpp`（`v4features.cpp` 的匿名实现搬进具名 namespace，两处共用） | +180/−89 | 风险 5 的"权重 sha"需要它 |
 
-**合计**：`v4policy.cpp` **+1,544/−38** · `v4policy.hpp` +95/−4 · `policies.hpp` +4/−3 ·
-`v4features.cpp` +4/−89 · 新 `sha256.hpp` +180。**净 +1,849**（§1 估 +724/−201 ⇒ 被改 ≈925）。
-⚠ **超预估 2×**，归因三条（都是结构性的，不是注水）：① §1 把 A− 的 tile/evt/融合写成"改现有函数"，
+**合计**：`v4policy.cpp` **+1,547/−38** · `v4policy.hpp` +95/−4 · `policies.hpp` +4/−3 ·
+`v4features.cpp` +4/−89 · 新 `sha256.hpp` +180。**净 +1,696**（§1 估 +724/−201 ⇒ 被改 ≈925）。
+⚠ **超预估 ≈1.8×**，归因三条（都是结构性的，不是注水）：① §1 把 A− 的 tile/evt/融合写成"改现有函数"，
 实际是**第二张完整图**（v4 的 `tile.enc.*`/`q_tile`/`q_evt`/gate/write/film/mem 在 A− 里一个都不存在）；
 ② arch 段解析 + 坏包文案 + `params` 校验位 ≈230 行（§1 只估 +75）；③ 换网负向判据（+120）与 sha 抽取（+180）
 不在 §1 表里。**逐函数对照**见上表，行数按 `git diff --numstat` 实测。
