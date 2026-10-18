@@ -6526,7 +6526,7 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 - **结论**：C2 让策略**抬头**（0.090 → 0.104，跨过 0.1）；600 步点仍 0.023 ≪ 0.1 ⇒ 短步点只同向 +41%，没有量级变化。
 - **纪律**：R-2 准入 3/3（before 15.51/15.94/15.28 GB、min 10.88–10.92 GB、0 拒绝）；峰值按角色 `python*` **4,198.5 / 4,306.6 / 4,323.6 MB**（判据 20；`peak_real_committed` 因 resolve 到短命子进程仅 1.4 MB，**不作判据**）；`--threads 8`、一次一个重负载、临时根 `.tmp\mv1-s20\`、只删自己创建的 `tools\__pycache__`。
 
-**第一百零一轮：MV1 C1-a = `fusion.out` 去掉末端 ReLU（**仅训练侧**；2026-10-18，⛔ 未同步三端 · 未跑闸门 · 未采集 · 未发布）**
+**第一百零一轮：MV1 C1-a = `fusion.out` 去掉末端 ReLU（仅训练侧；2026-10-18，⛔ 未同步三端 · 未跑闸门 · 未采集 · 未发布）**
 > 判据行 = `AGENTS.md` §6.5 第 23 条；改单 = `lab/mv1/ARCH-CHANGE-LIST.md` C1（T1，0 参数）。证据 = `.tmp\mv1-s21\`（`run.json` / stdout / `*.kl.json` / `c1_probe*.npz` / 重生成的 golden 夹具）+ `tools\build\mv1-s21-*\net.bin`；`init-val.jsonl` / `kl2.py` 从 s20 **逐字节拷贝**（sha256 已核）。
 
 - **实现**：`v4/model.py: Mlp(..., final_relu)`（缺省 `True`）+ `Fusion.out` 传 `False`（缺省 = 去掉）+ `pretrain --legacy-out-relu`（开 = 旧 `nn.ReLU()` 末端，**逐位**复旧）；`net.bin` 格式 / 张量名 / 形状 / 参数（1,397,992）**零变化**，旧网 `strict=True` 照常加载；`ctx`/`cand` 的 ReLU 与 **C2 的 mask-aware 池化一字未动**；`--legacy-out-relu` 同时进 π_ref/V_old 缓存键（否则会静默混用两份 logits）。
