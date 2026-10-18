@@ -151,6 +151,36 @@ def set_legacy_out_relu(flag: bool) -> None:
     LEGACY_OUT_RELU = bool(flag)
 
 
+#: **显式语义档**（丙，第一百零五轮）：把三处进程级开关打成一档，供
+#: `export.py golden --semantics` 重生成夹具、`tools/v4-forward-gpu.py --semantics` 驱动 R-4。
+#:
+#: 为什么必须显式：仓库夹具 `407BBE21…` 是 **C2 语义**（`fusion.out` 末端**有** ReLU），而
+#: 当前 Python 缺省是 **C1**（去 ReLU）+ **C3**（非零初始化）+ **B3**（`u_res` 残差）；
+#: Java `V4Policy` / C++ `v4policy.cpp` 至今仍按 C2 前向 ⇒ 用缺省语义重生成夹具必定 FAIL。
+#: ⛔ 那种 FAIL **不是**"对拍不通过"；也⛔ 不许反过来拿"夹具恰好与当前 Python 一致"当 PASS。
+#: 判据（本批冻写）：`c2` 重生 ⇒ Java/C++ **PASS 11/11**；`current` 重生 ⇒ **FAIL 并如实报**。
+SEMANTICS: dict[str, tuple[bool, bool, bool]] = {
+    #            legacy_out_relu, legacy_zero_init, legacy_u_res
+    "c2":        (True,            True,             True),   # 部署端语义：ReLU + 零初始化 + 无 B3
+    "c2b3":      (True,            True,             False),  # C2 的**输出语义** + B3 架构（驱动现有 B3 网）
+    "c1":        (False,           True,             True),   # C1：去末端 ReLU（其余同 C2）
+    "c3":        (False,           False,            True),   # C1+C3：小非零初始化
+    "b3":        (False,           True,             False),  # C1+B3：u 的 LN+残差
+    "current":   (False,           False,            False),  # 当前训练侧缺省（C1+C3+B3）
+}
+
+
+def apply_semantics(name: str) -> None:
+    """按名字设置三处进程级开关；未知名字**响亮报错**（⛔ 不静默退化成 current）。"""
+    try:
+        out_relu, zero_init, u_res = SEMANTICS[name]
+    except KeyError:
+        raise ValueError(f"未知语义档 {name!r}（可选：{sorted(SEMANTICS)}）") from None
+    set_legacy_out_relu(out_relu)
+    set_legacy_zero_init(zero_init)
+    set_legacy_u_res(u_res)
+
+
 @dataclass(frozen=True)
 class HeadSpec:
     """一个头的：形状 / 监督来源 / 损失 / 权重 / 是否**训练与契约必需**（设计 §6 的表）。

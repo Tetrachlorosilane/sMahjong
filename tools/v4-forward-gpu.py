@@ -1236,6 +1236,11 @@ def main(argv=None) -> int:
     ap.add_argument("--tmp", default=str(REPO / "python" / ".tmp" / "v4-forward-gpu"),
                     help="自检的临时目录（缺省在仓库内：工作区外建目录会被沙箱拒）")
     ap.add_argument("--selftest", action="store_true", help="跑八条自检（含五条负向）")
+    ap.add_argument("--semantics", choices=["c2", "c2b3", "c1", "c3", "b3", "current"], default="current",
+                    help="**显式语义档**（丙）：`c2` = 部署端语义（`fusion.out` 末端保留 ReLU）、"
+                         "`c2b3` = C2 输出语义 + B3 架构（**驱动现有 B3 网**用这一档）、"
+                         "`current` = 当前训练侧缺省（C1+C3+B3）。⛔ R-4 若拿 C1 语义驱动 Python，"
+                         "与 Java/C++ 不是同一个前向图，读数不算数")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -1245,6 +1250,12 @@ def main(argv=None) -> int:
         ap.error("要么给 --weights（+ --rows 或 --traces），要么给 --selftest")
     if bool(a.rows) == bool(a.traces):
         ap.error("--rows 与 --traces 必须**恰好给一个**（前者读既有张量，后者现场物化）")
+    # ⚠ 语义档必须在**建网之前**设（`V4Net.__init__` 把开关存成实例属性）。
+    from mahjong_ml.v4 import model as _M
+    _M.apply_semantics(a.semantics)
+    print(f"[v4-forward-gpu] 语义档 = {a.semantics}（fusion.out ReLU="
+          f"{_M.LEGACY_OUT_RELU} / zero-init={_M.LEGACY_ZERO_INIT} / u_res={not _M.LEGACY_U_RES}）",
+          file=sys.stderr)
     # ⚠ `--chunk ≤ 0` **一律报错**（哪怕这次的输入形态不走分块）：
     #   "0/负数是坏值"这条要在**入口**就成立 —— 否则 `--chunk 0` 会因为"这次没走分块"而静默变成
     #   "物化全部"，正是 `AGENTS.md` §6.5 第三条那个坑（用"看起来没事"掩盖"标志位含义搞反了"）。

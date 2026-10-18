@@ -495,11 +495,26 @@ def _tags(obs: Mapping[str, Any]) -> set[str]:
 
 def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
                  dims: Mapping[str, int] | None = None, seed: int = 20260928,
-                 scan_files: int = 8) -> Path:
-    """真实轨迹 → golden 夹具（小 v4 + 四张量 + 四个推理头输出）。"""
+                 scan_files: int = 8, semantics: str = "current") -> Path:
+    """真实轨迹 → golden 夹具（小 v4 + 四张量 + 四个推理头输出）。
+
+    `semantics` = **显式语义档**（`c2|c2b3|c1|c3|b3|current`，见 `model.SEMANTICS`）：夹具的权重与
+    Python 参考输出必须按**指定**语义生成，⛔ 不许"生成时恰好是缺省语义"就当对拍通过。
+    仓库夹具 `407BBE21…` 是 `c2`（部署端 `fusion.out` 仍带 ReLU）；`current` 重生会**故意 FAIL**
+    （Java/C++ 未同步 C1）—— 那正是本开关要能区分的东西。
+    """
     d = dict(dims or GOLDEN_DIMS)
-    torch.manual_seed(seed)
-    net = M.build(seed, **d)
+    saved = (M.LEGACY_OUT_RELU, M.LEGACY_ZERO_INIT, M.LEGACY_U_RES)
+    M.apply_semantics(semantics)
+    try:
+        torch.manual_seed(seed)
+        net = M.build(seed, **d)
+    finally:
+        # 只影响**构造**：`Fusion`/`V4Model` 在 __init__ 里已把开关存成实例属性，
+        # 后续前向（夹具的参考输出）不受进程级全局影响 ⇒ 立刻还原，避免污染同进程的别的网。
+        M.set_legacy_out_relu(saved[0])
+        M.set_legacy_zero_init(saved[1])
+        M.set_legacy_u_res(saved[2])
     # ⚠ **夹具必须显式扰动"零初始化"的张量**，否则那条路径根本没被测到（"假接入"的温床）。
     #   第五十七轮的手写版只扰动了 `policy_gate`；W1 起改成**通用规则**（`VALVES-AND-FIXTURES`
     #   §2.1 铁律①）：凡 `state_dict()` 里 `max|·| == 0` 的参数一律 `normal_(0, 0.5)` ——
@@ -652,6 +667,7 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     p.write_bytes(head_b + blob + bytes(body))
     meta = {"cases": len(rows), "format": GOLDEN_FORMAT, "dims": d, "net_bytes": len(blob),
             "bytes": p.stat().st_size, "trace": str(trace_dir), "seed": seed,
+            "semantics": semantics,
             "blocks_fingerprint": fingerprint_of(),
             "case_kinds": [f"{r[2].get('kind')}" for r in rows],
             "coverage": sorted(covered), "required_tags": list(REQUIRED_TAGS),
@@ -683,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--scan-files", type=int, default=8, help="最多扫几个轨迹文件来找齐覆盖面")
     g.add_argument("--full", action="store_true", help="用上线架构（192/64/4/51）而不是小网络")
     g.add_argument("--seed", type=int, default=20260928)
+    g.add_argument("--semantics", choices=sorted(M.SEMANTICS), default="current",
+                   help="夹具按哪一档语义重生成（C2 = 部署端 ReLU 语义；缺省 current = 当前训练侧）")
     a = ap.parse_args(argv)
 
     if a.cmd == "weights":
@@ -701,7 +719,8 @@ def main(argv: list[str] | None = None) -> int:
               f"--policy net:{p},teacher,teacher,teacher --out <dir>")
     else:
         p = build_golden(a.trace, a.out, cases=a.cases, scan_files=a.scan_files,
-                         dims=FULL_DIMS if a.full else GOLDEN_DIMS, seed=a.seed)
+                         dims=FULL_DIMS if a.full else GOLDEN_DIMS, seed=a.seed,
+                         semantics=a.semantics)
         # ⚠ 用例数可能**多于** `--cases`：`_iter_cases` 要凑齐覆盖闸门（含"事件流长于窗口"那条）
         #   才会停 ⇒ 报数从写出的 meta 读，别报 `--cases`（那会与实际不符）。
         n = json.loads(p.with_suffix(".json").read_text(encoding="utf-8"))["cases"]

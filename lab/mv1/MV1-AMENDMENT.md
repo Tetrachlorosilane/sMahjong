@@ -235,3 +235,14 @@
   step-1 aux 头 `‖ΔW‖` **0.027327 vs 0.081980 = 3.00×**（step-2 0.021714 vs 0.033517 ≈ 1.54×，受 Adam
   二阶矩影响）；step 0 的梯度**逐位不受 lr 影响**（两跑同值）⇒ `--head-lr-mult` 放大的是**参数更新**，
   不是梯度本身，且它作用于**全部 heads**（不是只 aux）。
+
+## 8 第一百零五轮跑后读数：R2 闸门执行 + 双口径裁决（2026-10-18；只追加，上文一字不改）
+
+- **执行口径**：3 族（seed `53610001`/`53610002`/`53610003`）× 849 场/族/臂 = **5,094 场**、**n 2,547 配对**；`--metric score` 主采，`--family` 三族零采集复算 `rank_points`；`--workers 8`、`--budget-min 60`、R-2 准入 `--adm-peak-gb 4.5`（need 6.75 GB）。实测墙钟 **2,558.3 s（42.6 min）≤ 60 min**、`wall_clock_ok=true`、`errors=[]`、收尾 0 训练进程。
+- ⚠ **引擎口径变更（前置不可用，父 agent 已批准）**：冻结命令里的 `S:\mahjong-training\tools\trainer\trainer.exe`（2026-10-12、sha256 `ECA79284…3081E`）**不认识 B3 三张量** ⇒ 第 1 局 fail-closed 退出码 2；改用仓库当前构建 `trainer\build\trainer.exe`（2026-10-18 19:50、sha256 `F6AAA307…2A83C`，已由 R-4 独立验证）。两臂同一引擎 ⇒ base vs aux 内部可比；⛔ **跨轮不可比**（换引擎构建）。
+- **score（主采）**：Δ **+273.22 点（+0.273 千点）**、CI95 [−673.11, +1203.77]、CI_Bonf(z=2.394) **[−871.49, +1417.94]**、MDE **1,340 点** / **MDE_Bonf 1,547 点（1.55 千点）**；逐族 Δ **+2,101.06 / −161.72 / −1,119.67**（不同号）。
+- **rank_points（复算）**：Δ **+0.744**、CI95 [−1.500, +2.940]、CI_Bonf **[−2.002, +3.491]**、MDE **3.214** / **MDE_Bonf 3.712**；逐族 Δ **+4.893 / +0.745 / −3.405**（不同号）。
+- **§4 逐条裁决**：有效 ✗（两口径 CI 下界均 <0）· 反向 ✗（上界均 >0）· 口径冲突 ✗（两口径都含 0，不是一含一不含）· 真阴性 ✗（都含 0 但两口径 **MDE_Bonf 都 >1.0**）⇒ **测不出**。⚠ 工具自报的是 95% CI/未校正 MDE；Bonferroni 换算与裁决轨迹见 `tools\build\mv1-s25-evidence\verdict-bonf.json`（结论不变）。⚠ 预注册已写"rank_points 的 MDE_Bonf 预计 >1.0 ⇒ 结构上不可能判真阴性"；实测 **score 的 sd 24.132 千点 > 计划 21.071 千点 ⇒ score MDE_Bonf 也 >1.0**。
+- **护栏**：`wins` tol 0.10 / MDE 0.0958 / `tol/MDE=1.044` / `usable_as_veto=true` / ok；`deals` tol 0.10 / MDE 0.0979 / 1.021 / true / ok；`win_points` tol 150 / MDE 874.3 / **0.172 ⇒ `usable_as_veto=false`**（照实记越界，不当否决依据）。
+- **安慰剂**：主口径零和（`max|Σ|=0`）⇒ **`usable_for_veto=false` + `why_zero_sum`**（ratio 1.202 是再分配）；替代口径 `wins` 不显著。`crosscheck=null` ⇒ **无旧读数**（本轮 mode=collect，无旧 verdict）。
+- **条件**：判决**只条件于这三族牌山**，⛔ **不跨族外推**；⛔ 不与旧引擎闸门读数直接比。归档 = `tools\build\mv1-s25-evidence\`（`verdict.json` + `verdict-rank_points.json` + `verdict-bonf.json` + 6 份 `summary.json` + `engine-caliber.json`）；⛔ 未重采、⛔ 未发布。
