@@ -57,6 +57,12 @@ const int kBlockWidths[16] = {
 };
 const char *const kWinNotesV4[2] = {"furiten", "no_yaku"};
 
+/**
+ * **E3（第一百一十三轮）**：`cand[96..98]` 的归一化分母 —— ⑨ `/32000`（点）、⑩⑪ `/100`（危险度）。
+ * 与 Python `blocks._CAND_V4_SCALE`、Java `V4Features.CAND_V4_SCALE` 逐位相同。
+ */
+constexpr float kCandV4Scale[kPerCandidateV4] = {32000.f, 100.f, 100.f};
+
 namespace {
 
 constexpr int kKind = kKindCount;                 // 34
@@ -907,17 +913,30 @@ void ctxVector(const JVal &obs, std::array<float, kCCtx> &v) {
 }
 
 // ---------------------------------------------------------------- cand
-/** `[n][128]` = 基础 88（沿用 v3）+ 派生 8（v3）+ v4 新 3（恒 0）+ 预留 29。 */
+/**
+ * `[n][128]` = 基础 88（沿用 v3）+ 派生 11（①–⑧ v3 + ⑨–⑪，E3 接线）+ 预留 29。
+ *
+ * <p>⑨–⑪ 的原始整数由 `obffeatures.hpp:perCandidateV4` 给（打分与危险度都是引擎算的），
+ * 这里只按 `kCandV4Scale` 做除法 —— 与 Python `blocks._cand_v4_dims` / Java 同一套定义。
+ */
 bool candMatrix(const FeatureView &view, const std::vector<std::string> &legal,
                 std::vector<std::array<float, kCCand>> &out) {
     out.assign(legal.size(), std::array<float, kCCand>{});
+    const int pts = valuePoints(view);          // ① 每条决策只算一次（⑨ 用它）
     for (size_t i = 0; i < legal.size(); i++) {
         // `Features.candidate(key, perCandidate(view, key))` = 96 列（88 基础 + 8 派生），
         // 这里按 Java `System.arraycopy(base, 0, out[i], 0, min(96, 128))` 拷前 96 列。
-        const std::vector<float> base = netCandidateVector(legal[i], perCandidate(view, legal[i]));
+        const std::array<int, kPerCandidate> per8 = perCandidate(view, legal[i]);
+        const std::vector<float> base = netCandidateVector(legal[i], per8);
         const size_t n = std::min(base.size(), static_cast<size_t>(kCCand));
         for (size_t c = 0; c < n; c++) {
             out[i][c] = base[c];
+        }
+        // ② ⑨–⑪（cand[96..98]）—— 逐候选危险度在这里算
+        const std::array<int, kPerCandidateV4> v4 = perCandidateV4(view, legal[i], per8, pts);
+        for (int d = 0; d < kPerCandidateV4; d++) {
+            out[i][static_cast<size_t>(kCandBase + kPerCandidate + d)]
+                    = static_cast<float>(v4[static_cast<size_t>(d)]) / kCandV4Scale[d];
         }
     }
     return true;

@@ -152,13 +152,15 @@ SEG_TILE, SEG_EVT, SEG_MEM = 0, 1, 2
 DANGER_COEF = 1.0
 DANGER_EPS = 1e-6
 
-#: `u` 的死维 / 恒等维**不进首层**（`ARCH-REDESIGN` §2.1：ctx 删 9、cand 删 32）——
+#: `u` 的死维 / 恒等维**不进首层**（`ARCH-REDESIGN` §2.1：ctx 删 9、cand 删 29）——
 #: 做法 = 在首层前乘一个**非持久 buffer 掩码**（`persistent=False` ⇒ 不进 `state_dict` ⇒
 #: 不进 `net.bin`，参数账一个数都不变），被掩列**永远拿不到梯度**（不是"初始化成 0 等它学回来"）。
 #: 依据：`ctx[17]≡ctx[8]`（恒等）、`ctx[35]/ctx[37]` 恒 0、`ctx[58..63]` 预留恒 0；
-#: `cand[96..98]` 三端恒 0、`cand[99..127]` 预留恒 0。
+#: `cand[99..127]` 预留恒 0。
+#: ⚠ **E3（第一百一十三轮）**：`cand[96..98]`（打点期望 / 打后危险度两口径）已三端接线
+#: ⇒ 从死维里**只**摘掉 96–98（32 → 29 列）；⛔ 99–127 的 29 个预留位**仍然要掩**。
 CTX_DEAD_DIMS: tuple[int, ...] = (17, 35, 37, 58, 59, 60, 61, 62, 63)
-CAND_DEAD_DIMS: tuple[int, ...] = tuple(range(96, 128))
+CAND_DEAD_DIMS: tuple[int, ...] = tuple(range(99, 128))
 
 
 def set_arch(name: str) -> None:

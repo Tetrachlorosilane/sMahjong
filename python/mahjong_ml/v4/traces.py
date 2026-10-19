@@ -123,7 +123,12 @@ def sidecar_dict(sc: Mapping[str, Any], i: int) -> dict[str, Any]:
     if cand.shape[0] != n_legal:
         raise spec.ContractError(
             f"sidecar 第 {i} 条：逐候选段 {cand.shape[0]} 行 != nLegal {n_legal} —— sidecar 坏了")
-    return {
+    # E3（第一百一十三轮）：⑨⑩⑪（`cand[96..98]`）要 **A 段逐决策派生量**（71 维：
+    # `danger_worst` / `danger_riichi` / `value_han` / `value_points`）—— 它们本来就在 sidecar 里
+    # （`sc["danger"]`，int16），只是以前没转进这张表。⛔ 不在 Python 里重算（重算必然与 Java 漂移）。
+    # ⚠ 只给"有 A 段"的 sidecar 加这一项：手工拼的最小 sidecar（自检夹具）没有 `danger`
+    #   ⇒ 让 `blocks.cand_matrix` 走"缺 → 记 degraded + 填 0"那条路，而不是在这里 KeyError。
+    out = {
         "derived_version": spec.DERIVED_VERSION_V4,
         "danger_per_seat": np.asarray(sc["danger_per_seat"][i], dtype=np.float32),
         "danger_riichi_per_seat": np.asarray(sc["danger_riichi_per_seat"][i], dtype=np.float32),
@@ -131,6 +136,9 @@ def sidecar_dict(sc: Mapping[str, Any], i: int) -> dict[str, Any]:
         "suji_per_seat": unpack_bitmap(sc["suji_per_seat"][i]).astype(np.float32),
         "cand": cand,
     }
+    if "danger" in sc:                      # A 段（逐决策 71 维）；最小夹具没有它
+        out["decision"] = np.asarray(sc["danger"][i], dtype=np.float32)
+    return out
 
 
 __all__ = ["REQUIRED_OBS_VERSION", "gate_obs", "data_dir", "trace_files", "iter_decisions",

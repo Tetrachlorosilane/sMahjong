@@ -466,6 +466,41 @@ std::array<int, kPerCandidate> perCandidate(const FeatureView &v, const std::str
     return out;
 }
 
+int valuePoints(const FeatureView &v) {
+    Bot::HandState st;                       // 只填 estimatedHan 要用的那几个字段
+    st.counts = v.hand;
+    st.melds = v.melds;
+    st.doraIndicators = v.dora;
+    st.akaInHand = v.akaInHand;
+    st.selfRiichi = v.selfRiichi;
+    st.kuitan = v.kuitan;
+    st.roundWind = v.roundWind;
+    st.seat = v.seat;
+    st.dealer = v.dealer;
+    const int han = Bot::estimatedHan(st, v.hand, v.melds);
+    return Bot::hanToPoints(han);
+}
+
+std::array<int, kPerCandidateV4> perCandidateV4(const FeatureView &v, const std::string &key,
+                                                const std::array<int, kPerCandidate> &per8,
+                                                int valuePoints) {
+    std::array<int, kPerCandidateV4> out{};
+    out.fill(0);
+    bool parsed = false;
+    const Action a = actionParse(key, parsed);
+    int k = -1;
+    if (parsed && (a.type == kActDiscard || a.type == kActRiichi)) {
+        k = parseKind(a.tile);
+    }
+    if (k >= 0 && k < kKindCount) {
+        out[1] = dangerWorst(k, v.visible, v.rivers, v.riichi, v.turn, v.seat);
+        out[2] = dangerWorstAgainstRiichi(k, v.visible, v.rivers, v.riichi, v.turn, v.seat);
+    }
+    const int sh = per8[0];                  // 打后向听（听牌/和了形 = 0）
+    out[0] = valuePoints / (1 + (sh > 0 ? sh : 0));
+    return out;
+}
+
 std::string featureLayout() {
     return "ObsFeatures v" + std::to_string(kFeatureVersion)
             + " perDecision=" + std::to_string(kPerDecision)

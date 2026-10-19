@@ -456,6 +456,13 @@ def cand_matrix(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None,
     #   提到循环外 —— 逐元素除法与被除数/除数一个字都没变。
     scale = np.asarray(f3.DERIVED_SCALE_CAND, dtype=np.float32)
     nscale = scale.size
+    # v4 新增 3 维（⑨打点期望 / ⑩⑪打后危险度两种口径）—— **E3，第一百一十三轮接线**。
+    # 归一化分母与 Java `V4Features.CAND_V4_SCALE` / C++ `kCandV4Scale` 逐位相同。
+    scale_v4 = np.asarray(_CAND_V4_SCALE, dtype=np.float32)
+    # ⑨ 用**当前手**的打点粗估（= A 段 `value_points`，`perDecision[70]`，与押し引き同一把尺子）
+    # 与**打后**和了率粗估；⑩⑪ 是"这一候选打出的那张牌"的 A 段危险度（`perDecision[0:34]` /
+    # `[34:68]`）—— 两者都已在 sidecar 里，**不在 Python 里重算引擎量**（重算必然与 Java 漂移）。
+    decision = sidecar.get("decision") if sidecar else None   # [71] 逐决策派生（A 段）
     cache = _BASE_CAND_CACHE
     for i, key in enumerate(legal):
         base = cache.get(key) if type(key) is str else None
@@ -468,12 +475,46 @@ def cand_matrix(obs: Mapping[str, Any], sidecar: Mapping[str, Any] | None,
             d = np.asarray(per_cand[i], dtype=np.float32)[:f3.DERIVED_CANDIDATE]
             ds = d.size
             out[i, base_dim:base_dim + ds] = d / scale[:ds] if ds < nscale else d / scale
+            if decision is not None and d.size >= 1:
+                out[i, base_dim + f3.DERIVED_CANDIDATE:base_dim + CAND_DERIVED] = (
+                    _cand_v4_dims(decision, key, int(d[0])) / scale_v4)
+            else:
+                degrad.add("cand.derived")
         else:
             degrad.add("cand.derived")
-        # v4 新增 3 维（打点期望 / 打后危险度两种口径）在 sidecar v3 里；这里先留 0
         if not (sidecar and sidecar.get("derived_version") == spec.DERIVED_VERSION_V4):
             degrad.add("cand.derived")
     return out, legal
+
+
+#: v4 新增 3 维的归一化分母（⑨ /32000 点 · ⑩⑪ /100 危险度）—— 三端同名同值。
+_CAND_V4_SCALE: tuple[float, float, float] = (32000.0, 100.0, 100.0)
+
+
+def _cand_v4_dims(decision, key: str, shanten_after: int) -> np.ndarray:
+    """E3 的 3 个派生量（**原始整数**，未归一化）：入参全部来自引擎（sidecar A 段 / C 段）。
+
+    | # | 量 | 定义 | 值域 |
+    | --- | --- | --- | --- |
+    | ⑨ | `score_expected` | `floor(value_points / (1 + 打后向听))`（打点粗估 × 和了率粗估 `1/(1+sh)`） | 0..32000 |
+    | ⑩ | `danger_after_all` | 该候选**打出的那张牌**对四家的最坏危险度（A 段 `danger_worst[k]`） | 0..100 |
+    | ⑪ | `danger_after_riichi` | 同上，只对立直家（A 段 `danger_riichi[k]`） | 0..100 |
+
+    ⚠ ⑩⑪ **只对 `discard:` / `riichi:` 有定义**（这两个动作自己指定打哪张）；吃/碰/杠/过/和了
+    不指定要打的牌（引擎的后续打牌是另一条规则）⇒ 记 0。⑨ 对终局动作（`tsumo`/`ron`）自然等于
+    整个 `value_points`（C 段该行全 0 ⇒ 打后向听 0），即"和了已经发生"。
+    """
+    pts = int(decision[2 * f3.KIND_COUNT + 2])          # value_points
+    score = pts // (1 + max(int(shanten_after), 0))
+    d_all = 0
+    d_rii = 0
+    typ, tile, _tiles, _kan = f3.action_parts(key)
+    if typ in ("discard", "riichi") and tile:
+        k = f3.tile_kind(tile)
+        if 0 <= k < f3.KIND_COUNT:
+            d_all = int(decision[k])
+            d_rii = int(decision[f3.KIND_COUNT + k])
+    return np.asarray([score, d_all, d_rii], dtype=np.float32)
 
 
 # ------------------------------------------------------------------ 总装

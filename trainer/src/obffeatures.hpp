@@ -127,6 +127,28 @@ std::array<int, kPerDecision> perDecision(const FeatureView &v);
 /** 8 维：这一手做完（该打的也打完）之后的形态（= Java `ObsFeatures.perCandidate`）。 */
 std::array<int, kPerCandidate> perCandidate(const FeatureView &v, const std::string &key);
 
+/**
+ * **v4 新增的逐候选维数**（E3：⑨打点期望 / ⑩⑪打后危险度两口径）——
+ * 只进 `cand[96..98]`，**不进 sidecar 的 C 段**（C 段仍是 `kPerCandidate` 维 ⇒ `kFeatureVersion` 不变）。
+ * = Java `ObsFeatures.PER_CANDIDATE_V4`。
+ */
+inline constexpr int kPerCandidateV4 = 3;
+
+/** 打点粗估（点）= Java `ObsFeatures.valuePoints`（每条决策只算一次）。 */
+int valuePoints(const FeatureView &v);
+
+/**
+ * 3 维（**原始整数**，未归一化）= Java `ObsFeatures.perCandidateV4`：
+ * ⑨ `valuePoints / (1 + max(打后向听, 0))`（打点 × 和了率粗估，整数除）· ⑩ `danger_worst[k]` ·
+ * ⑪ `danger_riichi[k]`。⚠ ⑩⑪ 只对 `discard:` / `riichi:` 有定义（其余动作不指定打哪张 ⇒ 0）。
+ *
+ * @param per8        已经算好的 `perCandidate`（只用到第 0 维 = 打后向听）
+ * @param valuePoints 已经算好的 `valuePoints(v)`
+ */
+std::array<int, kPerCandidateV4> perCandidateV4(const FeatureView &v, const std::string &key,
+                                                const std::array<int, kPerCandidate> &per8,
+                                                int valuePoints);
+
 /** 手牌 + 副露里的宝牌张数（= Java `HandEval.doraCount`）。 */
 int doraCount(const Counts &counts, const std::vector<Meld> &melds, const std::vector<int> &dora);
 

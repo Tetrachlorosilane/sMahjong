@@ -759,6 +759,25 @@ format 3 = **64 B 头**（`format=3`，其余偏移与格式 2 逐字节相同�
 
 **缺口排序**（按影响正确性）：**E2 规则预设不可见**（トビ/食替/流局开关/赤五数/立直条件全不进 obs，`kuitan` 虽在 obs 但 v4 四张量零消费）> **C8 终局条件缺失**（All-Last/トビ/agari-yame）> **E3 每候选打点未落地**（`cand[96..98]` 留 0 且被 `CAND_DEAD_DIMS` 掩；修法 = 填这三列 + 掩码改 `99..127`，**零重建**）> **D1 振听只 1 位**（三种不可分）> **D9 吃组合**（可被 `tile.danger/safety` 大量抵消）> 食替/流局满贯/罚符额。前两项属**输入侧 T2**（要 `FEATURE_VERSION 5` + 全量重建），E3 属 T2 但**零重建**。
 
+## 16 E3：每候选打点三列接线（第一百一十三轮，2026-10-19，⛔ 未采集/未跑闸门/未发布）
+
+**做了什么**：把 `cand[96..98]`（⑨ 打点期望 / ⑩⑪ 打后危险度两口径）在**三端**填上、并把首层掩码从 `96..127` 改成 `99..127`（死维计数 **41/57 → 38/57**）。
+
+**为什么是"零重建"**：这三列是**已有引擎量的纯算术组合**，不需要新算任何量、也不改 sidecar 段长 / `FEATURE_VERSION` / 张量宽度：
+
+| # | 列 | 定义（三端逐字同式） | 来源（已在 sidecar / 引擎里） |
+| --- | --- | --- | --- |
+| ⑨ | 96 `score_expected` | `value_points / (1 + max(打后向听, 0))`（整数除），再 `/32000` | A 段 `perDecision[70]` + C 段 `perCandidate[0]` |
+| ⑩ | 97 `danger_after_all` | 该候选**打出的那张牌** `k` 的 `Danger.worst(k)`，再 `/100` | A 段 `danger_worst[k]` |
+| ⑪ | 98 `danger_after_riichi` | 同上 `Danger.worstAgainstRiichi(k)`，再 `/100` | A 段 `danger_riichi[k]` |
+
+**三端落点**：Python `v4/blocks.py:_cand_v4_dims` + `v4/traces.py:sidecar_dict`（把 A 段 `decision` 带进表）；Java `ObsFeatures.perCandidateV4` / `valuePoints` + `V4Features.candMatrix` + `V4Policy.CAND_DEAD_DIMS`；C++ `obffeatures.cpp:perCandidateV4` / `valuePoints` + `v4features.cpp:candMatrix` + `v4policy.cpp:kCandDeadDimsFirst`。
+
+**实测**（同一批 240 用例 golden 夹具，`fixture_semantics=current`）：Java↔Python 的 `cand[96..98]` **2,780 行 × 3 列 = 8,340 格逐位相同（max|Δ| = 0）**；C++ `trainer v4golden` 特征 max|Δ| = **5.96e-08**（整张量最大差，来自 tile 通道）、`argmax 240/240`，负向对照（夹具 `cand[96]` +1e-3）两端都报 `c[0].cand[row0][col96]`。`java --selftest` **1593/0**、`trainer --selftest` PASS、`python selfcheck.py` **1,028/0**。新建 compact（1,180 决策 / 10,244 候选行）三列 std = 0.027 / 0.148 / 0.156 且非零行 98.6% / 94.2% / 91.3%。
+
+**兼容性（⛔ 不许静默）**：**旧紧凑集的这 3 列仍是 0**（建集时还没接线）⇒ 用旧数据训练时它们是常量 0（等于没接）。`v4/dataset.load_split` 读到"整段全 0"会**响亮告警**并点名重建方式（`dataset build`，零采集）；新集/新轨迹自动有值。⚠ `tools/v4-derived-check.mjs` 按本轮纪律**未改**（它锚的是"声明 88/11/29/128 + blocks 截断 + 文档锚点"，改后仍绿；但其摘要文案「⑨⑩⑪ 恒 0」已过时）。
+
+
 
 
 

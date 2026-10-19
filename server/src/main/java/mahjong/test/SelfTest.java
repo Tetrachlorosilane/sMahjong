@@ -5013,12 +5013,13 @@ public final class SelfTest {
     }
 
     /**
-     * 审计盲区⑤的 **Java 端**：`cand` 派生段 ⑨⑩⑪ 恒 0（`FEATURES-V4.md` §4.3 / `blocks.py:473-475`）。
+     * 审计盲区⑤的 **Java 端**：`cand` 派生段 ⑨⑩⑪（`FEATURES-V4.md` §4.3 / `blocks.py` 的
+     * `_cand_v4_dims`）。
      *
      * <p>跨端（Python / Java / C++ / 文档）的**机械比对**在 `tools/v4-derived-check.mjs`；这里只钉
-     * Java 侧的**行为**，因为"定义一致"不等于"这一端真的留了 0"：① 派生 ①–⑧ 必须真的有非 0
-     * （否则"⑨⑩⑪ = 0"可能只是**整段都 0** 的假绿）；② ⑨⑩⑪（= 基础 88 + 已实现 8 起、共 3 列）
-     * 与预留 29 列必须全 0。
+     * Java 侧的**行为**：① 派生 ①–⑧ 必须真的有非 0（否则"⑨⑩⑪ 非 0"可能只是**整段非 0** 的假绿）；
+     * ② ⑨⑩⑪（= 基础 88 + 已实现 8 起、共 3 列）**第一百一十三轮（E3）起必须非 0**（接线前恒 0）；
+     * ③ 预留 29 列必须全 0。
      */
     private static void candDerivedTests() {
         eq("cand 基础段宽 88", mahjong.ai.V4Features.CAND_BASE, 88);
@@ -5046,7 +5047,8 @@ public final class SelfTest {
         final int v4From = mahjong.ai.V4Features.CAND_BASE + mahjong.ai.ObsFeatures.PER_CANDIDATE;
         final int v4To = mahjong.ai.V4Features.CAND_BASE + mahjong.ai.V4Features.CAND_DERIVED;
         boolean implementedNonZero = false;
-        boolean v4Zero = true;
+        boolean v4NonZero = false;
+        boolean v4InRange = true;
         boolean reservedZero = true;
         for (float[] row : tf.cand) {
             for (int x = mahjong.ai.V4Features.CAND_BASE; x < v4From; x++) {
@@ -5056,7 +5058,10 @@ public final class SelfTest {
             }
             for (int x = v4From; x < v4To; x++) {
                 if (row[x] != 0f) {
-                    v4Zero = false;
+                    v4NonZero = true;
+                }
+                if (!(row[x] >= 0f && row[x] <= 1f)) {
+                    v4InRange = false;           // 三个量都在 [0,1]（⑨/32000、⑩⑪/100）
                 }
             }
             for (int x = v4To; x < mahjong.ai.V4Features.C_CAND; x++) {
@@ -5067,7 +5072,8 @@ public final class SelfTest {
         }
         check("cand 派生 ①–⑧ 真的进张量（" + tf.cand.length + " 个候选里至少一个非 0，正向对照）",
                 implementedNonZero);
-        check("cand 派生 ⑨⑩⑪（列 " + v4From + "–" + (v4To - 1) + "）恒 0", v4Zero);
+        check("cand 派生 ⑨⑩⑪（列 " + v4From + "–" + (v4To - 1) + "）非 0 且 ∈[0,1]（E3 已接线）",
+                v4NonZero && v4InRange);
         check("cand 预留段（列 " + v4To + "–127）恒 0", reservedZero);
     }
 

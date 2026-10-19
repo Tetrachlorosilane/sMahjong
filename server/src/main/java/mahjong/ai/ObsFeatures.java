@@ -72,6 +72,12 @@ public final class ObsFeatures {
     public static final int PER_DECISION = 2 * Tiles.KIND_COUNT + 3;
     /** 逐候选段长度。 */
     public static final int PER_CANDIDATE = 8;
+    /**
+     * **v4 新增的逐候选维数**（E3：⑨打点期望 / ⑩⑪打后危险度两口径）——
+     * 只进 {@code cand[96..98]}，**不进 sidecar 的 C 段**（C 段仍是 {@link #PER_CANDIDATE} 维，
+     * 所以 {@code FEATURE_VERSION} 不变 = 旧轨迹不用重新 featurize）。
+     */
+    public static final int PER_CANDIDATE_V4 = 3;
 
     /** 逐家段的**对手数**（下标 0 = 下家 / 1 = 対面 / 2 = 上家，**相对方位**）。 */
     public static final int SEATS = 3;
@@ -429,6 +435,19 @@ public final class ObsFeatures {
         return out;
     }
 
+    /**
+     * 打点粗估（**点**）—— 与 {@link #perDecision} 的第 70 维**同一把尺子**
+     * （{@code HandEval.estimatedHan} → {@code hanToPoints}）。
+     *
+     * <p>为什么单独给一个入口：v4 的 {@code cand[96]}（E3 的打点期望）**每个候选都要用**它，
+     * 但 {@code perDecision} 还会顺带跑 68 次危险度（那是状态段的事，逐候选不需要）。
+     */
+    public static int valuePoints(View v) {
+        int han = HandEval.estimatedHan(v.hand, v.melds, v.dora, v.akaInHand, v.selfRiichi, v.kuitan,
+                v.roundWind, (v.seat - v.dealer + 4) % 4);
+        return HandEval.hanToPoints(han);
+    }
+
     // ================================================================= 逐候选
 
     /**
@@ -534,6 +553,48 @@ public final class ObsFeatures {
         out[5] = snap.goodWaitTypes;
         out[6] = snap.goodWaitTiles;
         out[7] = HandEval.doraCount(counts, melds, v.dora);
+        return out;
+    }
+
+    /**
+     * **E3（第一百一十三轮）**：`cand[96..98]` 的 3 个派生量（**原始整数**，未归一化）。
+     *
+     * <table>
+     *   <caption>定义与值域（三端逐字相同：Python {@code blocks._cand_v4_dims} /
+     *   C++ {@code obffeatures.cpp:perCandidateV4}）</caption>
+     *   <tr><th>#</th><th>量</th><th>定义</th><th>值域</th></tr>
+     *   <tr><td>⑨</td><td>{@code score_expected}</td>
+     *       <td>{@code valuePoints / (1 + max(打后向听, 0))} —— 打点粗估 × 和了率粗估
+     *           {@code 1/(1+sh)}（整数除，向下取整）</td><td>0..32000</td></tr>
+     *   <tr><td>⑩</td><td>{@code danger_after_all}</td>
+     *       <td>该候选**打出的那张牌**对四家的最坏危险度（{@link Danger#worst}，
+     *           与 {@link #perDecision} 的 {@code danger_worst[k]} 同一把尺子）</td><td>0..100</td></tr>
+     *   <tr><td>⑪</td><td>{@code danger_after_riichi}</td>
+     *       <td>同上，只对立直家（{@link Danger#worstAgainstRiichi}）</td><td>0..100</td></tr>
+     * </table>
+     *
+     * <p>⚠ ⑩⑪ **只对 {@code discard:} / {@code riichi:} 有定义**（这两个动作自己指定打哪张）；
+     * 吃/碰/杠/过/和了 不指定要打的牌（引擎的"后续打牌"是另一条规则）⇒ 记 0。
+     * ⑨ 对终局动作（{@code tsumo}/{@code ron}）自然等于整个打点（{@code per8} 该行全 0
+     * ⇒ 打后向听 0），语义是"和了已经发生"。
+     *
+     * @param per8        已经算好的 {@link #perCandidate}（只用到第 0 维 = 打后向听）
+     * @param valuePoints 已经算好的 {@link #valuePoints}（每条决策只算一次，别逐候选重跑）
+     */
+    public static int[] perCandidateV4(View v, String key, int[] per8, int valuePoints) {
+        int[] out = new int[PER_CANDIDATE_V4];
+        Action a = Action.parse(key);
+        int k = -1;
+        if (a != null && ("discard".equals(a.type) || "riichi".equals(a.type))) {
+            k = Tiles.parseKind(a.tile);
+        }
+        if (k >= 0 && k < Tiles.KIND_COUNT) {
+            out[1] = Danger.worst(k, v.visible, v.rivers, v.riichi, v.turn, v.seat).score;
+            out[2] = Danger.worstAgainstRiichi(k, v.visible, v.rivers, v.riichi, v.turn,
+                    v.seat).score;
+        }
+        int sh = per8 != null && per8.length > 0 ? per8[0] : 0;
+        out[0] = valuePoints / (1 + Math.max(sh, 0));
         return out;
     }
 

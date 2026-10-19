@@ -201,13 +201,27 @@ v4 改成**贴着人类玩家的视野**：teacher 只在训练初期当**起点
 | 预留 | 29 | 0 |
 | **合计** | **128** | = 88 + 11 + 29（⚠ 早期草案写的"24 + 16"是**拍的分法**，落地时按"只留有名有姓的维"改成 11 + 29） |
 
-⚠ **落地现状（2026-09-27 实测，别当成"已经全给了"）**：
+⚠ **落地现状（2026-09-27 实测 + 2026-10-19 E3 接线）**：
 - **①~⑧（= v3 的逐候选 8 维）确实进 `cand[88:96]`** —— 但这是**修好之后**的事：
   在此之前 `v4/traces.sidecar_dict` 没把 C 段带进来，`compact/v4-bc-001/002` 的
   **`cand[88:128]` 整整 40 列全是 0**（`degraded` 记了但没人查）。修 `sidecar_dict` +
   在 `v4/dataset` 里**硬拒 `Tensors.degraded` 非空**之后重采重训，教师一致率 0.619 → **0.903**。
-- **⑨⑩⑪ 目前恒 0**（离线 sidercar 的 C 段只有 8 维，Java/C++ 的实时实现也留 0）——
-  三端一致、不构成漂移，但这三维是"设计里承诺、尚未接线"的欠账（填它们要 sidecar 段长 +1 版）。
+- **⑨⑩⑪ 自第一百一十三轮（E3）起不再恒 0** —— 三端接线，**定义/归一化逐字相同**
+  （Python `v4/blocks.py:_cand_v4_dims` · Java `ObsFeatures.perCandidateV4` · C++
+  `obffeatures.cpp:perCandidateV4`）：
+
+  | # | 列 | 定义（**原始整数**，再除分母） | 分母 / 值域 |
+  | --- | --- | --- | --- |
+  | ⑨ | `cand[96]` | `score_expected` = `value_points / (1 + max(打后向听, 0))`（整数除、向下取整）= **打点粗估 × 和了率粗估** `1/(1+sh)`；`value_points` = `HandEval.hanToPoints(estimatedHan(当前手))`，与 A 段 `perDecision[70]` 同一把尺子；打后向听 = 同一条 `perCandidate` 的第 0 维 | `/32000`，0..1 |
+  | ⑩ | `cand[97]` | `danger_after_all` = `Danger.worst(k)`（该候选**打出的那张牌** `k` 对四家的最坏危险度）= A 段 `danger_worst[k]` | `/100`，0..1 |
+  | ⑪ | `cand[98]` | `danger_after_riichi` = `Danger.worstAgainstRiichi(k)` = A 段 `danger_riichi[k]` | `/100`，0..1 |
+
+  ⚠ ⑩⑪ **只对 `discard:` / `riichi:` 有定义**（这两个动作自己指定打哪张）；吃/碰/杠/过/和了
+  不指定要打的牌 ⇒ 记 0。⑨ 对 `tsumo`/`ron` 自然等于整个 `value_points`（C 段该行全 0 ⇒ 打后向听 0）。
+  ⚠ **零重建**：这 3 列是 A 段 / C 段的**纯算术组合**，sidecar 段长与 `FEATURE_VERSION` 都没变
+  （旧轨迹**不用重新 featurize**）；但**旧紧凑集里这 3 列是 0**（建的时候还没接线）⇒
+  `dataset.load_split` 会**响亮告警**"该 3 列整段全 0 ⇒ 本轮训练里是常量 0"。要它们有值请
+  `dataset build`（复用既有轨迹，零采集）。
 
 > **权威清单现场打印**：`python -m mahjong_ml.v4 spec`（块 id / 宽度 / 依赖的 obs 字段 / 版本），
 > `python -m mahjong_ml.v4 fingerprint` 给块清单指纹（写进 `net.bin` 格式 2）。

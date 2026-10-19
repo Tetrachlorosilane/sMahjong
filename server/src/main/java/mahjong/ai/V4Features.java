@@ -44,10 +44,15 @@ public final class V4Features {
     public static final int C_CAND = 128;
     public static final int K_EVT = 60;
 
-    /** 候选段：v3 的基础 88 + 派生 11（**v4 新 3 维目前恒 0**）+ 预留 29。 */
+    /** 候选段：v3 的基础 88 + 派生 11（⑨–⑪ 见 {@link #CAND_V4_SCALE}）+ 预留 29。 */
     public static final int CAND_BASE = 88;
     public static final int CAND_DERIVED = 11;
     public static final int CAND_RESERVED = C_CAND - CAND_BASE - CAND_DERIVED;
+    /**
+     * **E3（第一百一十三轮）**：`cand[96..98]` 的归一化分母 —— ⑨ `/32000`（点）、
+     * ⑩⑪ `/100`（危险度 0..100）。与 Python `blocks._CAND_V4_SCALE`、C++ `kCandV4Scale` 逐位相同。
+     */
+    public static final float[] CAND_V4_SCALE = {32000f, 100f, 100f};
 
     public static final int N_PLAYERS = 4;
     public static final int KIND_COUNT = Tiles.KIND_COUNT;
@@ -604,15 +609,29 @@ public final class V4Features {
     }
 
     // ---------------------------------------------------------------- cand
-    /** [n][128] = 基础 88（沿用 v3）+ 派生 8（v3，逐维分母不同）+ v4 新 3（恒 0）+ 预留 29。 */
+    /**
+     * [n][128] = 基础 88（沿用 v3）+ 派生 11（①–⑧ 逐维分母不同 + ⑨–⑪，E3 接线）+ 预留 29。
+     *
+     * <p>⑨–⑪ 的归一化分母 {@link #CAND_V4_SCALE} 与 Python `blocks._CAND_V4_SCALE`、C++
+     * `kCandV4Scale` **逐位相同**；它们的原始整数由 {@link ObsFeatures#perCandidateV4} 给
+     * （打分与危险度都是引擎算的，这里只做除法）。
+     */
     static float[][] candMatrix(Map<String, Object> obs, ObsFeatures.View view) {
         List<String> legal = legalOf(obs);
         float[][] out = new float[legal.size()][C_CAND];
+        // ① 打点粗估每条决策只算一次（⑨ 用它）；② 危险度逐候选算（⑩⑪）
+        final int valuePoints = ObsFeatures.valuePoints(view);
         for (int i = 0; i < legal.size(); i++) {
             String key = legal.get(i);
-            float[] base = Features.candidate(key, ObsFeatures.perCandidate(view, key));
+            int[] per8 = ObsFeatures.perCandidate(view, key);
+            float[] base = Features.candidate(key, per8);
             System.arraycopy(base, 0, out[i], 0, Math.min(base.length, C_CAND));
             // ⚠ `Features.candidate` 已经按 `DERIVED_CAND_SCALE` 归一化过派生段（与 Python 同一把尺子）
+            int[] v4 = ObsFeatures.perCandidateV4(view, key, per8, valuePoints);
+            int from = CAND_BASE + ObsFeatures.PER_CANDIDATE;
+            for (int d = 0; d < ObsFeatures.PER_CANDIDATE_V4; d++) {
+                out[i][from + d] = v4[d] / CAND_V4_SCALE[d];
+            }
         }
         return out;
     }

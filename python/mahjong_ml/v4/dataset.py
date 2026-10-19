@@ -1538,6 +1538,16 @@ def load_split(out_dir: str | Path, split: str) -> dict:
         #   老紧凑集/没开塑形的紧凑集都没有它们 —— 训练端据此**硬拒**或**一行都不走**
         #   （见 `pretrain.train`），不静默退化成冷启动、也不静默把塑形当成 0。
         out[name] = np.load(p, mmap_mode="r") if p.is_file() else None
+    # ⚠ **E3 接线（第一百一十三轮）**：`cand[96..98]`（打点期望 / 打后危险度两口径）是
+    # 2026-10-19 才三端接线的。**接线前建的紧凑集这三列恒 0** ⇒ 本轮训练里它们是常量 0
+    # （首层含 LN 的掩码已摘掉 96–98，会读到这个常量）—— 等于"没接"，而指标照样出。
+    # ⛔ 不许静默：训练一读就喊出来（重建很便宜：`dataset build` 复用既有轨迹，零采集）。
+    cand_mm = out.get("cand")
+    if cand_mm is not None and getattr(cand_mm, "ndim", 0) == 3 and cand_mm.shape[-1] >= 99:
+        if not bool(np.any(cand_mm[..., 96:99])):
+            print(f"[dataset] ⚠ {split}：cand[96..98]（打点期望 / 打后危险度 ×2）**整段全 0** —— "
+                  "这是 E3 接线之前建的紧凑集，这三列在本轮训练里是常量 0（等于没接）。"
+                  "要它们有值：用既有轨迹重建紧凑集（`dataset build`，零采集）。", flush=True)
     return out
 
 
