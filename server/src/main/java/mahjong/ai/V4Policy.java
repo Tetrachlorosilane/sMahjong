@@ -74,7 +74,7 @@ public final class V4Policy implements LogitPolicy {
     static final float DANGER_EPS = 1e-6f;
     /** 死维/恒等维（`v4/model.py` 的 `CTX_DEAD_DIMS` / `CAND_DEAD_DIMS`；非持久 ⇒ 不在 net.bin 里）。 */
     static final int[] CTX_DEAD_DIMS = {17, 35, 37, 58, 59, 60, 61, 62, 63};
-    static final int[] CAND_DEAD_DIMS = java.util.stream.IntStream.range(96, 128).toArray();
+    static final int[] CAND_DEAD_DIMS = java.util.stream.IntStream.range(99, 128).toArray();
 
     /**
      * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）。

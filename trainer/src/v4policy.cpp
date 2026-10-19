@@ -69,7 +69,7 @@ constexpr float kDangerEps = 1e-6f;
  * 判据 = G2 的逐行 argmax/max|Δ|。
  */
 constexpr int kCtxDeadDims[] = {17, 35, 37, 58, 59, 60, 61, 62, 63};
-constexpr int kCandDeadDimsFirst = 96;     // = 96..127（`C_CAND` 的后 32 列）
+constexpr int kCandDeadDimsFirst = 99;     // = 96..127（`C_CAND` 的后 32 列）
 
 /** 小端读取器：**显式按字节拼**（不依赖宿主字节序，也不做未对齐访问）。 */
 struct Reader {
