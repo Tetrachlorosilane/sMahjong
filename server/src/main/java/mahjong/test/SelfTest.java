@@ -4461,9 +4461,18 @@ public final class SelfTest {
         byte[] cut = java.util.Arrays.copyOf(good, good.length - 7);
         expectWeightError("⑥ 截断 7 B", cut, "截断");
         // 附加：保留区 / 保留位 / 未知 topoId / archVersion / 头↔arch 版本不等
+        // ⚠ 第一百一十六轮：核心保留区从 70 起缩到 **72** 起（70/71 已是 `evtReadout`/`evtLn`）
         b = good.clone();
-        b[64 + 70] = 1;
+        b[64 + 72] = 1;
         expectWeightError("附：arch 核心保留区非 0", b, "保留区");
+        // ★ 第一百一十六轮：两个新字段的**双向**闸门。夹具本身 `evtReadout=1`/`evtLn=1`
+        //   ⇒ 负向只能往"清零"那一侧打：声明 0 而包里有张量 ⇒ 必须报错（⛔ 不许静默跑别的分支）。
+        b = good.clone();
+        b[64 + 70] = 0;
+        expectWeightError("附：evtReadout=0 但包里有 fusion.evt_kv.weight", b, "evtReadout");
+        b = good.clone();
+        b[64 + 71] = 0;
+        expectWeightError("附：evtLn=0 但包里有 event.norm0.weight", b, "evtLN");
         b = good.clone();
         java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(64 + 6, (short) 9);
         expectWeightError("附：未知 topoId", b, "topoId");

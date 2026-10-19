@@ -110,6 +110,14 @@ FLAG_B3 = 1 << 0
 FLAG_TILE_ID = 1 << 1
 FLAG_FILM = 1 << 2
 FLAG_MEM_GATE = 1 << 3
+#: ★ 第一百一十六轮：arch 段的**保留区**（偏移 70/71，原来是"必须全 0"的 26 B）里新开的两个字段。
+#: ⚠ **不升 format**（`format` 仍是 3、`archVersion` 仍是 1、`archLen` 仍是 2,048）——
+#: 保留区的语义从"必须全 0"缩到"72..95 必须全 0"。旧二进制读到这些字节非 0 会**响亮报错**
+#: （这是刻意的：它们不认识这个分支，绝不能静默当成 0 继续跑）。
+#: · `evtReadout` = 1 ⇒ 有 S1 的逐候选事件读出（`fusion.evt_kv.*` / `fusion.evt_gamma`）
+#: · `evtLN`      = 1 ⇒ `evt` 首层有 LayerNorm（`event.norm0.*`，P4）
+EVT_READOUT_KEYS = ("fusion.evt_kv.weight", "fusion.evt_gamma")
+EVT_LN_KEYS = ("event.norm0.weight", "event.norm0.bias")
 
 #: 夹具缺省用**小网络**（能进仓库；真权重是 v4 192/64/4/51 · A− 128/160/4/81）
 GOLDEN_DIMS: dict[str, int] = {"d_model": 32, "tile_d": 16, "n_heads": 2, "value_bins": 5}
@@ -183,7 +191,10 @@ _ARCH_FIELDS: tuple[tuple[int, str, str, int], ...] = (
     (64, "kEvt", "u16", 2),
     (66, "cCtx", "u16", 2),
     (68, "cCand", "u16", 2),
-    # 70..95 = 26 B 保留（archVersion=1 时非 0 ⇒ 报错）
+    # ★ 第一百一十六轮：**保留区里新开的两位**（不升 format；见 `EVT_READOUT_KEYS` 的注释）
+    (70, "evtReadout", "u8", 1),
+    (71, "evtLN", "u8", 1),
+    # 72..95 = 24 B 保留（archVersion=1 时非 0 ⇒ 报错）
 )
 
 
@@ -219,6 +230,8 @@ def arch_profile(arch: str, d: Mapping[str, int], *, have: Any = ()) -> dict[str
                 "valueRange": float(M.A_VALUE_RANGE),
                 "tileKernel0": 5, "tileKernel1": 5, "tileKernel2": 3, "tileKernel3": 3,
                 "nSeg": int(M.N_SEG), "pad": 0, "pad2": 0, "pad3": 0,
+                "evtReadout": 1 if all(k in names for k in EVT_READOUT_KEYS) else 0,
+                "evtLN": 1 if all(k in names for k in EVT_LN_KEYS) else 0,
                 "flags": (FLAG_B3 if all(k in names for k in _B3_KEYS) else 0)
                          | (FLAG_TILE_ID if "tile.tile_id" in names else 0)}
     return {**common,
@@ -229,6 +242,7 @@ def arch_profile(arch: str, d: Mapping[str, int], *, have: Any = ()) -> dict[str
             "valueRange": float(M.VALUE_RANGE),
             "tileKernel0": 0, "tileKernel1": 0, "tileKernel2": 0, "tileKernel3": 0,
             "nSeg": 0, "pad": 0, "pad2": 0, "pad3": 0,
+            "evtReadout": 0, "evtLN": 0,
             "flags": (FLAG_B3 if all(k in names for k in _B3_KEYS) else 0)
                      | (FLAG_TILE_ID if "tile.tile_id" in names else 0)
                      | (FLAG_MEM_GATE if "fusion.mem.weight" in names else 0)}
@@ -341,11 +355,19 @@ def _unpack_arch_segment(raw: bytes, *, feat: int, obs: int, derived: int,
         raise NetFormatError(
             f"`valueRange`={got['valueRange']} 与 arch `{arch}` 的声明 "
             f"{prof['valueRange']} 不符（① fail-loud）")
-    # 保留：核心 70..95（26 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+    # 保留：核心 72..95（24 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+    # ⚠ 第一百一十六轮：70/71 已是 `evtReadout`/`evtLN` 两个具名字段（不再是保留区）。
     if seg[46] or seg[47]:
         raise NetFormatError(f"arch 段的 pad 字节非 0（{seg[46]}/{seg[47]}）")
-    if any(seg[70:ARCH_CORE_BYTES]):
-        raise NetFormatError("arch 段的保留区（偏移 70–95，26 B）非 0（§3：archVersion=1 必须全 0）")
+    for name in ("evtReadout", "evtLN"):
+        if int(got[name]) not in (0, 1):
+            raise NetFormatError(f"arch 段的 `{name}`={got[name]} 未注册（只认 0 / 1）")
+    if arch == M.ARCH_V4 and (int(got["evtReadout"]) or int(got["evtLN"])):
+        raise NetFormatError(
+            f"arch 段的 `evtReadout`/`evtLN` = {got['evtReadout']}/{got['evtLN']}：v4 的图里"
+            f"没有这两条路径（只有 a- 有）")
+    if any(seg[72:ARCH_CORE_BYTES]):
+        raise NetFormatError("arch 段的保留区（偏移 72–95，24 B）非 0（§3：archVersion=1 必须全 0）")
     if alen > ARCH_CORE_BYTES and any(seg[ARCH_CORE_BYTES:alen]):
         raise NetFormatError(
             f"arch 段的保留尾（偏移 96–{alen - 1}）非 0 —— 写端必须全 0")
@@ -494,6 +516,14 @@ def _expected_shapes_a(d: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
         # ★ B3 按 128 重算（+2×128+128 = +384）：**可缺**（`--legacy-u-res` 的网不建）
         "fusion.u_norm.weight": (None, (dm,)), "fusion.u_norm.bias": (None, (dm,)),
         "fusion.u_res": (None, (dm,)),
+        # ★ S1（第一百一十六轮）：逐候选事件读出 = `Linear(d→2d, bias=False)` + `gamma(d)`
+        #   = 32,768 + 128 = **32,896**。**可缺**（旧包没有 ⇒ arch 段 `evtReadout=0` ⇒ 不建）。
+        "fusion.evt_kv.weight": (None, (2 * dm, dm)),
+        "fusion.evt_gamma": (None, (dm,)),
+        # ★ P4（第一百一十六轮）：`evt` 首层 LayerNorm(C_EVT) = 2×96 = **+192**。
+        #   **可缺**（旧包没有 ⇒ arch 段 `evtLN=0` ⇒ 不建）。
+        "event.norm0.weight": (None, (ce,)),
+        "event.norm0.bias": (None, (ce,)),
         # 头（26,054）
         "heads.policy.weight": (1, dm), "heads.policy.bias": (1,),
         "heads.policy_gate.weight": (dm, 3), "heads.policy_gate.bias": (dm,),
@@ -654,14 +684,16 @@ def save_net(sd: Mapping[str, torch.Tensor], dims: Mapping[str, int], out: str |
 
 
 def _check_shapes_f3(sd: Mapping[str, Any], d: Mapping[str, int], arch: str, flags: int,
-                     what: str) -> None:
-    """格式 3 读端的形状/张量集审计：**可缺组由 arch 段的 flags 决定**。
+                     what: str, arch_info: Mapping[str, Any] | None = None) -> None:
+    """格式 3 读端的形状/张量集审计：**可缺组由 arch 段的 flags / 两个新字段决定**。
 
     与 `_check_shapes` 的区别（这是 §3 fail-loud ②③④ 的落点）：
       · `flags` 说"有" ⇒ 该组**必须存在**（缺 ⇒ 报"arch 声称有 … 但缺"）；
       · `flags` 说"没有" ⇒ 该组**必须不存在**（在 ⇒ 报"arch 没声明 … 但包里有"）；
       · 除这些组之外，名字/形状必须与 `expected_shapes(d, arch)`**逐条相等**（多/缺/形状不符都报）。
     ⚠ 不许退化成"可缺张量缺了就补 0"：补 0 会让前向跑一个 arch 没声明的分支。
+    ⚠ 第一百一十六轮：`evtReadout`/`evtLN` 不是 `flags` 的位（它们占的是 arch 段保留区的两个字节）
+    ⇒ 同一把双向尺子在这里也要对它们跑一遍（`arch_info` 缺席 ⇒ 只当 0，但 `read_net` 一定传）。
     """
     want = dict(expected_shapes(d, arch))
     required: list[tuple[str, int, tuple[str, ...], str]] = [
@@ -695,6 +727,25 @@ def _check_shapes_f3(sd: Mapping[str, Any], d: Mapping[str, int], arch: str, fla
                         raise NetFormatError(
                             f"arch 段声明 {label}=0（无{human}），但包里**有** `{k}` —— "
                             f"文件与水印（flags）不符")
+    ai = arch_info or {}
+    for label, keys, human in (("evtReadout", EVT_READOUT_KEYS,
+                                "S1 逐候选事件读出（`fusion.evt_kv.*`/`fusion.evt_gamma`）"),
+                               ("evtLN", EVT_LN_KEYS, "evt 首层 LN（`event.norm0.*`）")):
+        claimed = bool(int(ai.get(label, 0) or 0))
+        for k in keys:
+            spec_ = want.get(k)
+            alts = _shape_alts(spec_) if spec_ is not None else ()
+            if claimed:
+                if k not in got:
+                    raise NetFormatError(
+                        f"arch 段声明 `{label}`=1（{human}），但包里**缺** `{k}`"
+                        f"（⛔ 不补 0：那等于让前向跑一个 arch 没声明的分支）")
+            else:
+                want.pop(k, None)
+                if k in got:
+                    raise NetFormatError(
+                        f"arch 段声明 `{label}`=0（无{human}），但包里**有** `{k}` —— "
+                        f"文件与水印不符")
     for k, s in want.items():
         alts = _shape_alts(s)
         if k not in got:
@@ -833,7 +884,8 @@ def read_net(path: str | Path) -> dict[str, Any]:
             f"头部的 `params`={params:,} 与张量表实算 {actual:,} 不符（差 {actual - params:+,}）")
     # ④ 名字/形状 ↔ arch；②③ 可缺组与段嵌入
     _check_shapes_f3(tensors, {"d_model": dm, "tile_d": td, "n_heads": nh,
-                              "value_bins": vb}, arch, int(arch_info["flags"]), "read_net")
+                              "value_bins": vb}, arch, int(arch_info["flags"]), "read_net",
+                    arch_info=arch_info)
     # ⚠ 双路一致性断言：arch 段是**判据**，`arch_of` 只做交叉复核（⛔ 不许靠反推决定前向分支）
     by_names = arch_of({k: torch.from_numpy(np.ascontiguousarray(v))
                         for k, v in tensors.items()})
@@ -845,6 +897,9 @@ def read_net(path: str | Path) -> dict[str, Any]:
             "derived_version": derived,
             "dims": {"d_model": dm, "tile_d": td, "n_heads": nh, "value_bins": vb},
             "arch": arch, "arch_info": arch_info, "flags": int(arch_info["flags"]),
+            # ★ 第一百一十六轮：两个**结构开关**（`build()` 直接吃它们；缺省都是 False = 旧图）
+            "evt_readout": bool(int(arch_info["evtReadout"])),
+            "evt_ln": bool(int(arch_info["evtLN"])),
             "blocks": bl, "fingerprint": fp, "params": params, "tensors": tensors,
             "arch_segment_bytes": int(arch_info["archLen"]), "bytes": len(raw)}
 
@@ -898,6 +953,9 @@ def normalize_state(sd: Mapping[str, torch.Tensor], arch: str | None = None
         # `tile.tile_id` 是 `--legacy-tile-id` 的**构造期**开关：缺 ⇒ 0 = 恒等（`tile + 0`）
         if "tile.tile_id" not in out:
             out["tile.tile_id"] = torch.zeros(34, spec.C_TILE, dtype=dtype)
+        # ★ 第一百一十六轮：S1 读出 / evt LN 也是**构造期**开关（`arch_kwargs` 从这里/`read_net`
+        #   的 arch 段决定建不建）。⛔ 这里**不补**它们：补一组 0 会让前向跑一个 arch 没声明的
+        #   分支（B3 的教训），而 `adapt_to_model` 会把"目标网没有、字典里有"的那几组丢掉。
         return out
     # 可缺张量（旧网没有）⇒ 补"恒等"：加新的可缺张量时**只需要动这张表**。
     # ⚠ 第三列是**补什么**：0 ⇒ 恒等门（`1+tanh(0)=1` / `u+tanh(0)·…=u`）；
@@ -930,7 +988,19 @@ def state_from_net(parsed: Mapping[str, Any]) -> dict[str, torch.Tensor]:
 _B3_KEYS = ("fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res")
 #: 同理：`--legacy-tile-id` 的网没有 `tile.tile_id`（#0 在构造期就不建）⇒ 新包载入它时只多这一组。
 _TILE_ID_KEYS = ("tile.tile_id",)
-_OPTIONAL_KEYS = _B3_KEYS + _TILE_ID_KEYS
+#: 第一百一十六轮：S1 读出 / P4 的 evt LN 同样是**构造期可缺**的两组（`--legacy-evt-readout` /
+#: `--legacy-evt-ln` 或旧包）。新包载入"不建这两条路径"的网时只允许这四组多出来。
+_OPTIONAL_KEYS = _B3_KEYS + _TILE_ID_KEYS + EVT_READOUT_KEYS + EVT_LN_KEYS
+
+
+def arch_kwargs(src: Mapping[str, Any]) -> dict[str, Any]:
+    """`build()` 的**结构开关**（从 `read_net` 的结果或 ckpt 的 `config` 里取；缺 ⇒ 旧图）。
+
+    ⚠ 用途是**让建成什么图跟着包走**：旧包（`evtReadout=0`/`evtLN=0`）⇒ 不建那两组张量 ⇒
+    `strict=True` 能载、且前向**逐位**走旧路（不是"建了再靠 0 抵消"）。
+    """
+    return {"evt_readout": bool(src.get("evt_readout", False)),
+            "evt_ln": bool(src.get("evt_ln", False))}
 
 
 def adapt_to_model(sd: Mapping[str, torch.Tensor], model: torch.nn.Module,
@@ -1097,7 +1167,14 @@ def build_golden(trace_dir: str | Path, out: str | Path, *, cases: int = 8,
     M.set_arch(arch)
     try:
         torch.manual_seed(seed)
-        net = M.build(seed, arch=arch, **d)
+        # ★ 第一百一十六轮：a- 的夹具**必须带上**两条新结构（S1 读出 + evt LN）——
+        #   否则"新路径一个字都没被测到"正是最贵的假绿；v4 的图里没有它们，严格不传。
+        #   ⚠ `evt_readout_init="zero"` 是**故意的**：下面那条"凡 max|·|==0 的参数一律
+        #   `normal_(0,0.5)`"才会把 `evt_gamma` 扰动成**非恒等**（照缺省 `small` 建的话
+        #   γ≈1e-3 ⇒ tanh(γ)≈1e-3 ⇒ 读出路径在夹具里几乎不起作用，等于没测）。
+        net = M.build(seed, arch=arch, **d,
+                      **({"evt_readout": True, "evt_ln": True, "evt_readout_init": "zero"}
+                         if arch == M.ARCH_A else {}))
     finally:
         # 只影响**构造**：`Fusion`/`V4Model` 在 __init__ 里已把开关存成实例属性，
         # 后续前向（夹具的参考输出）不受进程级全局影响 ⇒ 立刻还原，避免污染同进程的别的网。

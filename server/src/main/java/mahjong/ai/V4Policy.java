@@ -77,6 +77,12 @@ public final class V4Policy implements LogitPolicy {
     // ⚠ E3（第一百一十三轮）：`cand[96..98]` 已三端接线 ⇒ 只掩 99..127（预留 29 列）。
     static final int[] CAND_DEAD_DIMS = java.util.stream.IntStream.range(99, 128).toArray();
 
+    // ★ 第一百一十六轮（P4）：`evt` 的**恒 0 / 零信息**槽 —— 与 `v4/model.py` 的
+    //   `EVT_DEAD_DIMS` 逐项相同。0/6/7 = 服务端从不进窗口的 3 个事件类型
+    //   （draw/agari/ryuukyoku，实测全量恒 0）；95 = `seq_delta`（服务端从不发 ⇒ 恒 0.125 ⇒ 方差 0）。
+    //   ⚠ 只在 `evtLN=1` 的包上生效（**掩码与 LN 同一个开关**：旧包连掩码都不乘 ⇒ 逐位不变）。
+    static final int[] EVT_DEAD_DIMS = {0, 6, 7, 95};
+
     /**
      * **推理必需**的头 = 前向路径**实际读取**的头（⛔ 不是"训练过"的头）。
      *
@@ -101,6 +107,10 @@ public final class V4Policy implements LogitPolicy {
     /** 头部 + arch 段（格式 3 的判据）：拓扑与开关**只认 arch 段**，⛔ 不靠张量名反推。 */
     private final int topoId;
     private final int archFlags;
+    /** ★ S1（第一百一十六轮）：arch 段 `evtReadout=1` ⇒ 有逐候选事件读出（`fusion.evt_kv`/`evt_gamma`）。 */
+    private final boolean evtReadout;
+    /** ★ P4（第一百一十六轮）：arch 段 `evtLn=1` ⇒ `evt` 首层有 LayerNorm（`event.norm0.*`）。 */
+    private final boolean evtLn;
     private final float valueRange;
 
     private final int dModel;
@@ -138,15 +148,19 @@ public final class V4Policy implements LogitPolicy {
     private float[] padQkvRow;
     /** A− 的 sin/cos 相对位置编码（0 参数、非持久 ⇒ 不进 `net.bin`；按窗口形状缓存）。 */
     private float[][] peCache;
+    /** `EVT_DEAD_DIMS` 对应的 0/1 掩码（P4；非持久 ⇒ 不进 `net.bin`）。 */
+    private float[] evtMaskCache;
 
     // ---------------------------------------------------------------- 加载
-    private V4Policy(int topoId, int archFlags, float valueRange,
+    private V4Policy(int topoId, int archFlags, int evtReadout, int evtLn, float valueRange,
                      int dModel, int tileD, int nHeads, int valueBins, String fingerprint,
                      List<String> blocks, Set<String> missingBlocks,
                      Map<String, float[][]> mats, Map<String, float[]> vecs,
                      Map<String, float[][][]> mats3, Set<String> allNames) throws IOException {
         this.topoId = topoId;
         this.archFlags = archFlags;
+        this.evtReadout = evtReadout != 0;
+        this.evtLn = evtLn != 0;
         this.valueRange = valueRange;
         this.dModel = dModel;
         this.tileD = tileD;
@@ -342,7 +356,8 @@ public final class V4Policy implements LogitPolicy {
         }
         // ① `valueBins` 三处（头 / arch / heads.value.weight 行数）—— 前两处已在 readArch 核过，
         //    第三处由 bindAll 的 `mat("heads.value.weight", vb, dm)` 钉住。
-        return new V4Policy(arch.topoId, arch.flags, arch.valueRange, dModel, tileD, nHeads,
+        return new V4Policy(arch.topoId, arch.flags, arch.evtReadout, arch.evtLn, arch.valueRange,
+                dModel, tileD, nHeads,
                 valueBins, fingerprint, blocks, missing, mats, vecs, mats3, names);
     }
 
@@ -387,6 +402,9 @@ public final class V4Policy implements LogitPolicy {
         float lnEps;
         int[] tileKernel = new int[4];
         int nSeg;
+        // ★ 第一百一十六轮：arch 段**保留区（偏移 70/71）里新开的两个字段**（不升 format）
+        int evtReadout;
+        int evtLn;
     }
 
     /**
@@ -450,6 +468,8 @@ public final class V4Policy implements LogitPolicy {
         int kEvt = s.getShort(64) & 0xFFFF;
         int cCtx = s.getShort(66) & 0xFFFF;
         int cCand = s.getShort(68) & 0xFFFF;
+        a.evtReadout = s.get(70) & 0xFF;
+        a.evtLn = s.get(71) & 0xFF;
 
         if (a.archVersion != ARCH_VERSION) {
             throw new IOException("archVersion=" + a.archVersion + " 不支持（本实现只认 " + ARCH_VERSION + "）");
@@ -536,13 +556,22 @@ public final class V4Policy implements LogitPolicy {
             throw new IOException("`valueRange`=" + a.valueRange + " 与 arch `"
                     + (isA ? "a-" : "v4") + "` 的声明 " + vrange + " 不符（① fail-loud）");
         }
-        // 保留：核心 70..95（26 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+        // 保留：核心 72..95（24 B）+ 2 个 pad + 保留尾 96..archLen 全 0
+        // ⚠ 第一百一十六轮：70/71 已是 `evtReadout`/`evtLn` 两个具名字段（不再是保留区）。
         if (pad45 != 0 || pad46 != 0 || pad47 != 0) {
             throw new IOException("arch 段的 pad 字节非 0（" + pad45 + "/" + pad46 + "/" + pad47 + "）");
         }
-        for (int i = 70; i < ARCH_CORE_BYTES; i++) {
+        if (a.evtReadout > 1 || a.evtLn > 1) {
+            throw new IOException("arch 段的 `evtReadout`/`evtLn` = " + a.evtReadout + "/" + a.evtLn
+                    + " 未注册（只认 0 / 1）");
+        }
+        if (!isA && (a.evtReadout != 0 || a.evtLn != 0)) {
+            throw new IOException("arch 段的 `evtReadout`/`evtLn` = " + a.evtReadout + "/" + a.evtLn
+                    + "：v4 的图里没有这两条路径（只有 a- 有）");
+        }
+        for (int i = 72; i < ARCH_CORE_BYTES; i++) {
             if (s.get(i) != 0) {
-                throw new IOException("arch 段的保留区（偏移 70–95，26 B）非 0（§3：archVersion=1 必须全 0）");
+                throw new IOException("arch 段的保留区（偏移 72–95，24 B）非 0（§3：archVersion=1 必须全 0）");
             }
         }
         for (int i = ARCH_CORE_BYTES; i < alen; i++) {
@@ -564,6 +593,12 @@ public final class V4Policy implements LogitPolicy {
                 "#0 身份嵌入（`tile.tile_id`）");
         checkFlag("hasMemGate", FLAG_MEM_GATE, new String[]{"fusion.mem.weight", "fusion.mem.bias"},
                 "长程记忆门（`fusion.mem.*`）");
+        // ★ 第一百一十六轮：两个**新字段**（不是 flags 的位）走同一把双向尺子。
+        checkFlag2("evtReadout", evtReadout,
+                new String[]{"fusion.evt_kv.weight", "fusion.evt_gamma"},
+                "S1 逐候选事件读出（`fusion.evt_kv.*`/`fusion.evt_gamma`）");
+        checkFlag2("evtLN", evtLn, new String[]{"event.norm0.weight", "event.norm0.bias"},
+                "evt 首层 LN（`event.norm0.*`）");
         if (topoId == TOPO_A) {
             // `a-` 的 B3 / `policy_gate` 是 T1 参数账的一部分：⛔ 缺 ⇒ 必须报错（补 0 = 静默换语义）
             for (String n : new String[]{"fusion.u_norm.weight", "fusion.u_norm.bias", "fusion.u_res",
@@ -587,6 +622,22 @@ public final class V4Policy implements LogitPolicy {
             if (!claimed && has) {
                 throw new IOException("arch 段声明 " + label + "=0（无" + human + "），但包里**有** `"
                         + k + "` —— 文件与水印（flags）不符");
+            }
+        }
+    }
+
+    /** 与 {@link #checkFlag} 同一把尺子，只是"claimed"来自 arch 段的**具名字段**而不是 `flags` 的位。 */
+    private void checkFlag2(String label, boolean claimed, String[] keys, String human)
+            throws IOException {
+        for (String k : keys) {
+            boolean has = allNames.contains(k);
+            if (claimed && !has) {
+                throw new IOException("arch 段声明 `" + label + "`=1（" + human + "），但包里**缺** `"
+                        + k + "`（⛔ 不补 0：那等于让前向跑一个 arch 没声明的分支）");
+            }
+            if (!claimed && has) {
+                throw new IOException("arch 段声明 `" + label + "`=0（无" + human + "），但包里**有** `"
+                        + k + "` —— 文件与水印不符");
             }
         }
     }
@@ -798,6 +849,43 @@ public final class V4Policy implements LogitPolicy {
         used.add("tile.tile_id");
     }
 
+    /**
+     * ★ S1（第一百一十六轮）：`fusion.evt_kv.weight`（`[2d, d]`，**无 bias**）+ `fusion.evt_gamma`（`[d]`）。
+     * 两组**可缺**（旧包没有 ⇒ `evtReadout=0` ⇒ 前向不跑这条读出）。
+     * ⚠ K/V **没有 bias** 是刻意的：`v` 的 bias 在 `Σ_j a_ij = 1` 下是**逐行常数** ⇒ 对 softmax 空操作。
+     */
+    private void bindEvtReadout() throws IOException {
+        float[][] w = mats.get("fusion.evt_kv.weight");
+        if (w == null) {
+            return;
+        }
+        int dm = dModel;
+        if (w.length != 2 * dm) {
+            throw new IOException("张量 fusion.evt_kv.weight 行数 " + w.length + " != " + (2 * dm));
+        }
+        for (int r = 0; r < w.length; r++) {
+            if (w[r].length != dm) {
+                throw new IOException("张量 fusion.evt_kv.weight 第 " + r + " 行列数 " + w[r].length
+                        + " != " + dm);
+            }
+        }
+        if (allNames.contains("fusion.evt_kv.bias")) {
+            throw new IOException("fusion.evt_kv 不该有 bias（K/V 的 bias 是逐行常数 ⇒ 对 softmax 空操作；"
+                    + "导出器与本前向不同版本）");
+        }
+        used.add("fusion.evt_kv.weight");
+        vec("fusion.evt_gamma", dm);
+    }
+
+    /** ★ P4（第一百一十六轮）：`event.norm0.weight/bias`（`LayerNorm(C_EVT)`）—— **可缺**。 */
+    private void bindEvtLn() throws IOException {
+        if (!allNames.contains("event.norm0.weight")) {
+            return;
+        }
+        vec("event.norm0.weight", V4Features.C_EVT);
+        vec("event.norm0.bias", V4Features.C_EVT);
+    }
+
     /** v4（`topoId=2`）的张量表：与格式 2 的 81 张量逐个相同（另加可缺的 `tile.tile_id`）。 */
     private void bindAllV4() throws IOException {
         int dm = dModel;
@@ -981,6 +1069,9 @@ public final class V4Policy implements LogitPolicy {
         vec("fusion.out_norm.weight", 3 * dm);
         vec("fusion.out_norm.bias", 3 * dm);
         bindUNorm(dm);                                    // B3：**a- 必需**（checkFlags 会再核）
+        // ★ 第一百一十六轮：S1 读出 / P4 的 evt LN 都是**可缺组**（`evtReadout`/`evtLn` 决定）
+        bindEvtReadout();
+        bindEvtLn();
 
         // 头（26,054）：d=128 · value 81 bin（±60）· policy_gate 逐候选门控
         mat("heads.policy.weight", 1, dm);
@@ -1231,11 +1322,29 @@ public final class V4Policy implements LogitPolicy {
         return padQkvRow;
     }
 
-    /** 一条事件 token 行 → 事件编码器输出（v4：两层 MLP，**末尾没有 ReLU**；a-：Linear+GELU）。 */
+    /** 一条事件 token 行 → 事件编码器输出（v4：两层 MLP，**末尾没有 ReLU**；a-：Linear+GELU）。
+     *
+     * <p>★ P4（第一百一十六轮）：`evtLn=1` 时先过 **LayerNorm(C_EVT) + 死维掩码**（掩码前后各一次，
+     * 与 `amlp` 同一条判据：只在 LN 前掩 ⇒ LN 的 `bias`/均值会把死维变成非 0）。
+     * `evtLn=0`（旧包）⇒ 连掩码都不乘 ⇒ 与改动前**逐位**相同。
+     */
     private float[] eventMlpRow(float[] tok) throws IOException {
         if (topoId == TOPO_A) {
+            float[] x = tok;
+            if (evtLn) {
+                float[] m = evtMask();
+                x = new float[V4Features.C_EVT];
+                for (int i = 0; i < x.length; i++) {
+                    x[i] = tok[i] * m[i];
+                }
+                layerNorm(x, vec("event.norm0.weight", V4Features.C_EVT),
+                        vec("event.norm0.bias", V4Features.C_EVT));
+                for (int i = 0; i < x.length; i++) {
+                    x[i] *= m[i];
+                }
+            }
             float[] e = new float[dModel];
-            linear(e, tok, mat("event.enc.weight", dModel, V4Features.C_EVT),
+            linear(e, x, mat("event.enc.weight", dModel, V4Features.C_EVT),
                     vec("event.enc.bias", dModel));
             gelu(e);
             return e;
@@ -1830,6 +1939,63 @@ public final class V4Policy implements LogitPolicy {
             }
         }
 
+        // ---- ★ S1（第一百一十六轮）：`h_evt` 的**逐候选**读出 ------------------------------
+        // `KV = h_evt ⊕ e_tokens`（60+1 = 61 行）· `Q = q`（= `LN(cand_i)`，与 cross 用的是同一个）
+        // `r_i = softmax(q_i·Kᵀ/√d)·V` · `u_i += tanh(γ) ⊙ r_i`
+        // ⚠ **逐候选**是硬条件：`q_i` 逐候选不同 ⇒ `r_i` 不同 ⇒ 对 softmax 有真实影响
+        //   （若 query 用逐行共享量，`u_i += 常数` 对 softmax 是空操作 —— NOTES 第五十/五十五轮）。
+        if (evtReadout) {
+            int nkv = kev + 1;
+            float[][] kvW = mat("fusion.evt_kv.weight", 2 * dm, dm);
+            float[] kvB = new float[2 * dm];                       // **无 bias**（见 bindEvtReadout）
+            float[][] kv = new float[nkv][2 * dm];
+            float[] src = new float[dm];
+            for (int ti = 0; ti < nkv; ti++) {
+                if (ti < kev) {
+                    System.arraycopy(eTokens[ti], 0, src, 0, dm);
+                } else {
+                    System.arraycopy(hEvt, 0, src, 0, dm);          // 第 95 个 token = h_evt
+                }
+                linear(kv[ti], src, kvW, kvB);
+            }
+            float[] gamma = vec("fusion.evt_gamma", dm);
+            float[] gT = new float[dm];
+            for (int j = 0; j < dm; j++) {
+                gT[j] = (float) Math.tanh(gamma[j]);
+            }
+            float inv = (float) (1.0 / Math.sqrt(dm));
+            float[] logits = new float[nkv];
+            float[] acc = new float[dm];
+            for (int i = 0; i < n; i++) {
+                float maxv = Float.NEGATIVE_INFINITY;
+                for (int ti = 0; ti < nkv; ti++) {
+                    double s = 0.0;
+                    for (int j = 0; j < dm; j++) {
+                        s += (double) q[i][j] * kv[ti][j];           // k = kv[ti][0..dm)
+                    }
+                    logits[ti] = (float) s * inv;
+                    if (logits[ti] > maxv) {
+                        maxv = logits[ti];
+                    }
+                }
+                double sum = 0.0;
+                for (int ti = 0; ti < nkv; ti++) {
+                    logits[ti] = (float) Math.exp(logits[ti] - maxv);
+                    sum += logits[ti];
+                }
+                Arrays.fill(acc, 0f);
+                for (int ti = 0; ti < nkv; ti++) {
+                    float a = (float) (logits[ti] / sum);
+                    for (int j = 0; j < dm; j++) {
+                        acc[j] += a * kv[ti][dm + j];                // v = kv[ti][dm..2dm)
+                    }
+                }
+                for (int j = 0; j < dm; j++) {
+                    u[i][j] += gT[j] * acc[j];
+                }
+            }
+        }
+
         // ---- 头：state = 逐候选均值（无 padding ⇒ 分母 = n）；danger 以 0 参数通道进 policy
         float[][] danW = mat("heads.danger.weight", 4, dm);
         float[] danB = vec("heads.danger.bias", 4);
@@ -1934,6 +2100,18 @@ public final class V4Policy implements LogitPolicy {
         }
         peCache = pe;
         return pe;
+    }
+
+    /** `EVT_DEAD_DIMS` 的 0/1 掩码（按包缓存；非持久 ⇒ 不进 `net.bin`）。 */
+    private float[] evtMask() {
+        if (evtMaskCache == null) {
+            float[] m = filled(V4Features.C_EVT, 1f);
+            for (int i : EVT_DEAD_DIMS) {
+                m[i] = 0f;
+            }
+            evtMaskCache = m;
+        }
+        return evtMaskCache;
     }
 
     /** 时间轴在行上的转置：`[rows][cols] → [cols][rows]`。 */
@@ -2223,7 +2401,8 @@ public final class V4Policy implements LogitPolicy {
         bias[0] += delta;
         v2.put("heads.policy.bias", bias);
         try {
-            return new V4Policy(topoId, archFlags, valueRange, dModel, tileD, nHeads, valueBins,
+            return new V4Policy(topoId, archFlags, evtReadout ? 1 : 0, evtLn ? 1 : 0, valueRange,
+                    dModel, tileD, nHeads, valueBins,
                     fingerprint, blocks, missingBlocks, new HashMap<>(mats), v2,
                     new HashMap<>(mats3), new HashSet<>(allNames));
         } catch (IOException e) {
@@ -2281,7 +2460,8 @@ public final class V4Policy implements LogitPolicy {
             }
         }
         try {
-            return new V4Policy(topoId, archFlags, valueRange, dModel, tileD, nHeads, valueBins,
+            return new V4Policy(topoId, archFlags, evtReadout ? 1 : 0, evtLn ? 1 : 0, valueRange,
+                    dModel, tileD, nHeads, valueBins,
                     fingerprint, blocks, missingBlocks, m2, v2, m3, new HashSet<>(allNames));
         } catch (IOException e) {
             throw new IllegalStateException(e);
@@ -2291,7 +2471,8 @@ public final class V4Policy implements LogitPolicy {
     public String describe() {
         return "V4Policy（" + paramCount() + " 参数，格式 " + FORMAT_VERSION + "，topoId=" + topoId
                 + "（" + (topoId == TOPO_A ? "a-" : "v4") + "），flags="
-                + String.format("%#04x", archFlags) + "，valueRange=" + valueRange
+                + String.format("%#04x", archFlags) + "，evtReadout=" + (evtReadout ? 1 : 0)
+                + "，evtLN=" + (evtLn ? 1 : 0) + "，valueRange=" + valueRange
                 + "，dims=" + dims()
                 + "，块 " + blocks.size() + " / 注册表 " + V4Features.BLOCK_IDS.length
                 + "，指纹 " + fingerprint + "）";

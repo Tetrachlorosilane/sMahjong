@@ -613,14 +613,16 @@ def _load_behaviour(spec: str, device: str) -> M.V4Model:
         parsed = v4export.read_net(p)
         # ⚠ `arch` **显式传**：A− 训练里拿来当 `--behaviour` 的可能仍是 v4 的现任网
         #   （新拓扑没有 v4→a- 的权重映射，不能 warm-start，但"数据由谁生成"没变）。
-        model = M.build(1, arch=parsed.get("arch"), **parsed["dims"])
+        model = M.build(1, arch=parsed.get("arch"), **parsed["dims"],
+                        **v4export.arch_kwargs(parsed))
         model.load_state_dict(v4export.adapt_to_model(v4export.state_from_net(parsed), model, what=str(p)), strict=True)
     else:
         from . import export as v4export
         ck = torch.load(p, map_location="cpu", weights_only=False)
         cfg = ck.get("config", {}) or {}
         model = M.build(1, arch=cfg.get("arch"),
-                        **(cfg.get("dims") or M.build(1).dims()))
+                        **(cfg.get("dims") or M.build(1).dims()),
+                        **v4export.arch_kwargs(cfg))
         # ⚠ 旧 ckpt 没有门控张量 ⇒ `normalize_state` 补 0（门控恒等）；policy 宽度也在这里归一。
         model.load_state_dict(v4export.adapt_to_model(v4export.normalize_state(ck["model"]), model, what=str(p)), strict=True)
     return model.to(device).eval()
@@ -1648,7 +1650,11 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict,
           # ⚠ `arch` 与 `dims` 一起落盘：A− 的张量集与 v4 不同，加载时必须建对塔
           #   （缺省 v4 ⇒ 旧 ckpt 逐字节/逐行为不变）。
           "config": {"model": "v4", "arch": getattr(model, "arch", M.ARCH_V4),
-                     "params": model.param_count(), "dims": model.dims()},
+                     "params": model.param_count(), "dims": model.dims(),
+                     # ★ 第一百一十六轮：a- 的两条新结构也进 ckpt（否则续训/导出会建错图）
+                     "evt_readout": bool(getattr(getattr(model, "fusion", None),
+                                                 "evt_readout", False)),
+                     "evt_ln": bool(getattr(getattr(model, "event", None), "evt_ln", False))},
           "dataset_meta": meta,
           "feature_version": spec.FEATURE_VERSION_V4,
           "blocks_fingerprint": spec.fingerprint(),
@@ -1962,6 +1968,27 @@ def train(args) -> dict:
     # ⚠ 三端（Java/C++）**未同步** ⇒ a- 的网**不得**上线/上闸门。
     _arch = str(getattr(args, "arch", M.ARCH_V4) or M.ARCH_V4)
     M.set_arch(_arch)
+    # ---- ★ S1 / P4（第一百一十六轮）：a− 的**两条新结构**（逐候选事件读出 + evt 首层 LN）----
+    # 口径（三条，写死在这里免得每个调用点各猜一次）：
+    #   ① `--legacy-evt-readout` / `--legacy-evt-ln` ⇒ **关**（逐位复现改动前的图）；
+    #   ② 其它情况 **a− 一律开**（这是本批确立的新基线；v4 图没有这两条路径，`V4Model` 会拒）；
+    #   ③ `--init` 是**旧包**时：四组新张量不在包里 ⇒ 保留本网初值（= 出生恒等 / 小非零），
+    #      其余张量逐位载入（见下面的 `_warm_start`）。⚠ 这条只放宽**这四组**，别的一律 fail-closed。
+    _legacy_evt_readout = bool(getattr(args, "legacy_evt_readout", False))
+    _legacy_evt_ln = bool(getattr(args, "legacy_evt_ln", False))
+    _evt_readout = (not _legacy_evt_readout) and _arch == M.ARCH_A
+    _evt_ln = (not _legacy_evt_ln) and _arch == M.ARCH_A
+    _evt_init = str(getattr(args, "evt_readout_init", "small") or "small")
+    M.set_evt_readout(_evt_readout, init=_evt_init)
+    M.set_evt_ln(_evt_ln)
+    if _arch == M.ARCH_A:
+        print("S1 逐候选事件读出：" + (
+            f"**关**（`--legacy-evt-readout`；⛔ 只用于逐位复现改动前）" if not _evt_readout else
+            f"**开**（+{2 * M.A_D_MODEL * M.A_D_MODEL + M.A_D_MODEL:,} 参数 = K/V 32,768 + γ 128；"
+            f"初始化 `{_evt_init}`）"))
+        print("evt 首层 LN（P4）：" + (
+            "**关**（`--legacy-evt-ln`；⛔ 只用于逐位复现改动前）" if not _evt_ln else
+            f"**开**（LayerNorm({M.C_EVT})，+{2 * M.C_EVT} 参数；死维掩码 = {M.EVT_DEAD_DIMS}）"))
     print("网络图 arch：" + (
         "**v4（现有图，逐位不变）**" if _arch == M.ARCH_V4 else
         f"**a-（T1 新图）**：tile 34 轴卷积+轴向注意力（{M.A_TILE_D}→{M.A_D_MODEL}）· "
@@ -2077,8 +2104,21 @@ def train(args) -> dict:
     init_spec = getattr(args, "init", None)
     if init_spec:
         src = _load_behaviour(init_spec, device)
-        model.load_state_dict(src.state_dict(), strict=True)
-        print(f"初始化：从 {init_spec} 载入权重")
+        src_sd = src.state_dict()
+        # ★ 第一百一十六轮：`--init` 是**旧包**时，四组**新结构**张量不在包里 ⇒ 保留本网初值
+        #   （`evt_kv`/`evt_gamma`/`event.norm0.*`）。⛔ 只放宽这四组（`_OPTIONAL_KEYS` 之外
+        #   的缺键仍是 fail-closed），且**必须响亮报**——否则"warm-start 其实换了图"没人看得见。
+        from . import export as _v4x
+        _allowed_new = set(_v4x.EVT_READOUT_KEYS) | set(_v4x.EVT_LN_KEYS)
+        _missing = [k for k in model.state_dict() if k not in src_sd]
+        if _missing and set(_missing) <= _allowed_new:
+            model.load_state_dict(src_sd, strict=False)
+            print(f"初始化：从 {init_spec} 载入权重；⚠ 包里没有 {len(_missing)} 个**新结构**张量 "
+                  f"（{sorted(_missing)}）⇒ 保留本网初值（`--evt-readout-init {_evt_init}`），"
+                  f"其余张量逐位载入")
+        else:
+            model.load_state_dict(src_sd, strict=True)
+            print(f"初始化：从 {init_spec} 载入权重")
     # ---- ★ BL-04：**优化器状态续跑**（`--resume-optimizer`；不给 ⇒ 这一段一行都不走）----------
     # ⚠ 顺序：SSL 头**只有存档里有**（`--init` 不管它）⇒ 无条件先从存档载，再核对"权重是不是
     #   存档那一刻的那一份"（JSON 哈希对不上就是「拿 A 的权重套 B 的优化器状态」= 无意义轨迹）。
@@ -3331,6 +3371,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--legacy-tile-id", action="store_true",
                     help="⛔ 只用来自证/复现：不建 `tile.tile_id` 身份嵌入（34 行不可区分）。"
                          "缺省 = 建（+1,632 参数；旧包缺张量 ⇒ 补 0 ⇒ 逐位不变）")
+    # ★ S1 / P4（第一百一十六轮）：a− 的两条新结构。缺省 = **a- 一律开**（v4 图没有它们）。
+    ap.add_argument("--evt-readout-init", choices=["zero", "small"], default="small",
+                    help="S1 逐候选事件读出的 γ 初始化：small = N(0, 1e-3²)（C3 同一理由；缺省）"
+                         "/ zero = 精确 0（出生**逐位**恒等，事件敏感性只来自原有通路）")
+    ap.add_argument("--legacy-evt-readout", action="store_true",
+                    help="⛔ 只用来自证/复现：**不建** S1 的逐候选事件读出（`fusion.evt_kv`/`evt_gamma`）")
+    ap.add_argument("--legacy-evt-ln", action="store_true",
+                    help="⛔ 只用来自证/复现：**不建** evt 首层 LayerNorm（P4；`event.norm0.*`）")
     # P3 开局：自对弈数据的两个开关（学生掩码 + 回报加权）
     ap.add_argument("--rwr-beta", type=float, default=0.0,
                     help="RWR 温度（**千点**，例如 8）：权重 = exp(clip(本小局收支/β, -2, 2))；"

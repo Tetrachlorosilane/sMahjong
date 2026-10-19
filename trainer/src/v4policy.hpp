@@ -105,6 +105,10 @@ struct V4Policy {    int dModel = 0;
     int arch = 0;
     /** arch 段里的 `flags`（B3 / #0 / FiLM / mem 门）与 `valueRange`（诊断用）。 */
     int flags = 0;
+    /** ★ S1（第一百一十六轮）：arch 段 `evtReadout=1` ⇒ 有逐候选事件读出（`fusion.evt_kv`/`evt_gamma`）。 */
+    bool evtReadout = false;
+    /** ★ P4（第一百一十六轮）：arch 段 `evtLn=1` ⇒ `evt` 首层有 LayerNorm（`event.norm0.*`）。 */
+    bool evtLn = false;
     float valueRange = 0.f;
     /** arch 段里"文件声明的"结构字段（与代码常量交叉校验过才留在这里）。 */
     int dTile = 0;
@@ -287,6 +291,8 @@ struct V4Scratch {
     std::vector<float> eTokens;    // kKEvt × dModel（Transformer 输出 / A− 的卷积输出）
     std::vector<float> carry;      // dModel（事件塔的 GRU 隐状态）
     std::vector<float> tok;        // kCEvt（一条事件 token 行）
+    /** ★ P4（第一百一十六轮）：`evt` 首层 LN 的输入中转（len × kCEvt；掩码前后各一次）。 */
+    std::vector<float> evtLnTmp;
     std::vector<float> rowTmp;     // dModel（单行事件编码输出）
     std::vector<float> encTmp;     // 事件编码器第二层的别名中转
     std::vector<float> aliasTmp;   // 任意"输出与输入同一块"的批量线性层的中转
@@ -301,6 +307,8 @@ struct V4Scratch {
     std::vector<float> kvTile;     // kKindCount × dModel
     std::vector<float> uTile;      // n × dModel
     std::vector<float> uEvt;       // n × dModel
+    /** ★ S1（第一百一十六轮）：`fusion.evt_kv` 的 K/V（(kev+1) × 2·dModel）。 */
+    std::vector<float> kvEvt;
     std::vector<float> u;          // n × dModel
     std::vector<float> danger;     // n × 4
     std::vector<float> effect;     // n × 3

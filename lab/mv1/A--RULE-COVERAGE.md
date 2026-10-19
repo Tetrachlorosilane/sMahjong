@@ -51,9 +51,19 @@
 ## 3 ⭐ 五条已知缺口的再确认
 **① 副露身份 —— 部分可重建。** `evt` 每条带 `meld_kind`（**5 种**：`chi/pon/ankan/kakan/daiminkan`，`spec.py:58`）+`called_kind`（43..77）+`actor`（78）+`from`（82）；因此**碰/大明杠/暗杠/加杠的身份完全可定**（同一牌种 3~4 张，被鸣牌即身份）。**但 `chi` 的具体组合不可重建**：整副牌码数组 `tiles` 在 obs 里有（PROTOCOL §8.2），`blocks.py:322-354` 的 `event_matrix` **只写 `tile`/`called_tile` 两个单张槽、从不写 `tiles`** ⇒ 被吃牌是"顺子里的哪一头"（3 选 1）丢失；`tile` 塔每对手只有 `meld_count` 1 通道（`blocks.py:142/219`），补不回来。判据：**能从 evt 重建"副露的种类+被鸣牌+来源座位"，不能重建"吃的三张是哪三张"**。
 **② 牌河顺序 —— 窗口内够、整手不够。** `tile` 塔只有聚合计数（river_all/before/after/tedashi/tsumogiri，`blocks.py:195-219`）；**顺序**只在 `evt`：每条 `discard` 带 `tile`+`turn`+`tsumogiri`+`sideways` 且事件有序（`blocks.py:322-354`）。所以"哪一巡打了哪张"在 K=60 窗口里完整、窗口外只剩 `h_evt` 的压缩记忆 + `ctx` 的永久摘要（`riichi_turn`、`riichi`）。⇒ 结论：**顺序信息在窗口内充足，跨整手依赖 carry**。
-**③ `ctx.points` 量纲 —— 首层 LN 真的做了。** a− 的 ctx 编码器是 `AMlp`：`self.norm = nn.LayerNorm(cin)`（`model.py:473`）+ `self.norm(x*mask)*mask`（`model.py:485`），实例化在 `model.py:959`（`AMlp(C_CTX, d_model, CTX_DEAD_DIMS)`）。写入侧是 `(x−25000)/1000`（`blocks.py:386-393`）⇒ ±75 量级（std ~11.8）在**进 `fc1` 之前**被逐样本 LN 消掉；`ctx` 出现在 `AFusion` 的 `out` 拼接里（688/692）。⚠ 判据 9 量到的 `ctx 列 std 比 180.9×` 是 **LN 之前**的输入列，两件事不矛盾。
-**④ 死维/恒等维 —— 只做了 41/57。** `CTX_DEAD_DIMS = (17,35,37,58..63)` 9 维、`CAND_DEAD_DIMS = 96..127` 32 维（`model.py:160-161`），掩码在 `AMlp.__init__/forward`（471-479/485）⇒ **41 维真的不进首层**（`ctx[17]≡ctx[8]`、`ctx[35]/[37]` 恒 0、`ctx[58..63]` 预留、`cand[96..98]` 恒 0、`cand[99..127]` 预留）。**`tile` 的 13 维（river_all 3 + before_riichi 3 + unseen/drawable/is_yakuhai/suit_s + reserved 3）与 `evt` 的 3 个 type 槽（`draw/agari/ryuukyoku`，服务端从不发）没有掩**：`ATileTower.stem = Conv1d(C_TILE=48,…)`（548）读全 48 通道、`AEventTower.enc = Linear(C_EVT→d)`（583）读全 96 ⇒ §2.1"只让首层不读这 57 维"**在实现上是 41/57**。差别：evt 那 3 槽恒 0（数值等价于已掩）；tile 那 13 维是**冗余但有信息**（真掩会改行为，要删得等 `FEATURE_VERSION 5`）。
-**⑤ 事件窗口 K=60 —— carry 确实进模型（但只经一个 token）。** 一手约 70–125 条公开事件 ⇒ 60 条窗口装不下整手。补偿链：`h`（**窗口之前**的 GRU carry，数据侧 `h0[128]`，S30 非零率 5.19%）→ `AEventTower.forward` 从 `h` 起逐事件推进（`model.py:600-606`，真实行掩码 `real`）→ `h_evt` = **窗口之后**的 carry → `AFusion` 把它当**第 95 个 token**（`model.py:678-681`）进 joint attention（683-685）。⇒ **是，carry 真的进前向**（不是死参数：0 参数但参与注意力）；⚠ 局限在 §14.3 已实测：顺序敏感性只有 1.37%/0.0084 ⇒ 这条通道的**梯度太弱**，不是"没接"。
+**③ `ctx.points` 量纲 —— 首层 LN 真的做了。** a− 的 ctx 编码器是 `AMlp`：`self.norm = nn.LayerNorm(cin)`（`model.py:473`）+ `self.norm(x*mask)*mask`（`model.py:485`），实例化在 `model.py:959`（`AMlp(C_CTX, d_model, CTX_DEAD_DIMS)`）。写入侧是 `(x−25000)/1000`（`blocks.py:386-393`）⇒ ±75 量级（std ~11.8）在**进 `fc1` 之前**被逐样本 LN 消掉；`ctx` 出现在 `AFusion` 的 `out` 拼接里（688/692）。⚠ 判据 9 量到的 `ctx 列 std 比 180.9×` 是 **LN 之前**的输入列，两件事不矛盾。**第一百一十六轮（P4）对账**：`ctx` / `cand` 的首层 LN **已存在**（`AMlp.norm`）⇒ **不重复加**，如实标"已存在"；**`evt` 原本没有** ⇒ 本批新增 `event.norm0`（`LayerNorm(96)`，+192 参数，**可缺** ⇒ 旧包逐位不变）。⚠ 判据 9 的读数**不会**因"加 LN"而变（它量 LN **之前**的输入列，实测前后逐位相同）⇒ 该判据要么改口径、要么等 T2。
+**④ 死维/恒等维 —— 第一百一十六轮（P4）后：已掩 42 维；`tile` 的 13 维**待 T2**。**
+`CTX_DEAD_DIMS = (17,35,37,58..63)` 9 维 + `CAND_DEAD_DIMS = 99..127` 29 维（E3 摘掉 96..98 之后）
++ **`EVT_DEAD_DIMS = (0,6,7,95)` 4 维（本批新增）** ⇒ 掩码在 `AMlp.__init__/forward`（471-479/485）
+与 `AEventTower._encode`（**与 evt 首层 LN 同一个构造期开关** `evt_ln`）。
+- **已修（零重建）**：`evt` 的 3 个"服务端从不进窗口"的 type 槽（`draw`/`agari`/`ryuukyoku`；
+  全量 33,615 决策 × 60 行实测**最大绝对值恒 0**）+ `seq_delta`（**恒 0.125**、方差 0 ⇒ 零信息维，
+  与 `ctx[17]≡ctx[8]` 同一类）。⛔ 另外 11 个"小样本看着是 0"的列（`called_kind` 9 个 + `called_aka`
+  等）在全量上最大绝对值是 **1.0** ⇒ **不掩**（掩了就是真丢信息）。
+- **待 T2（`FEATURE_VERSION 5` + 重建/重采）**：`tile` 的 13 个冗余维（river_all 3 / before_riichi 3 /
+  unseen / drawable / is_yakuhai / suit_s / reserved 3）—— 它们**冗余但有信息**，真删要换特征版本。
+- 判据 2 的分母随之从 evt 96 → **92**（前后对比表见 `ARCH-REDESIGN` §14.4）。
+**⑤ 事件窗口 K=60 —— carry 确实进模型（但只经一个 token）。** 一手约 70–125 条公开事件 ⇒ 60 条窗口装不下整手。补偿链：`h`（**窗口之前**的 GRU carry，数据侧 `h0[128]`，S30 非零率 5.19%）→ `AEventTower.forward` 从 `h` 起逐事件推进（`model.py:600-606`，真实行掩码 `real`）→ `h_evt` = **窗口之后**的 carry → `AFusion` 把它当**第 95 个 token**（`model.py:678-681`）进 joint attention（683-685）。⇒ **是，carry 真的进前向**（不是死参数：0 参数但参与注意力）；⚠ 局限在 §14.3 已实测：顺序敏感性只有 1.37%/0.0084 ⇒ 这条通道的**梯度太弱**，不是"没接"。**第一百一十六轮（S1）**：已加 `h_evt` 的**逐候选读出**（`fusion.evt_kv`+`evt_gamma`，+32,896 参数，三端跑在 3,083/3,083 上）；**但** 1,200 步 BC 短训后事件打乱仍只有 **1.66% / KL 0.0037**（<5% / <0.02）⇒ 判据 3 **仍未达标**，归因见 `ARCH-REDESIGN` §14.5。
 ## 4 结论与缺口排序
 **一句话**：a− 覆盖了**回合与鸣牌段的全部动作/役种判定入口**（动作空间、宝牌、振听、点数顺位、巡目、副露"够用"的那部分），但**不覆盖"规则预设/终局条件/每候选打点"三类语义**，且副露组合、振听种类、牌河跨手顺序是**部分**。
 **缺口按"是否影响正确性"排序**（①最重）：

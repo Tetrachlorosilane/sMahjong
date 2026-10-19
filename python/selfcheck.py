@@ -2232,7 +2232,8 @@ eq("A−：net.bin 格式 = 3（段 2 硬切后的唯一格式）", _pr["format"
 eq("A−：arch 段总长 2,048 B（96 B 核心 + 1,952 B 保留尾）", _pr["arch_segment_bytes"], 2048)
 eq("A−：net.bin 头里的 params == 959,078", _pr["params"], 959078)
 eq("A−：net.bin 张量数（93 = 92 + 可缺的 tile.tile_id）", len(_pr["tensors"]), 93)
-eq("A−：A− 期望张量表条数", len(_v4ex.expected_shapes(_a.dims(), v4_model.ARCH_A)), 93)
+eq("A−：A− 期望张量表条数（93 必需 + 4 可缺：S1 读出 2 + evt LN 2）",
+   len(_v4ex.expected_shapes(_a.dims(), v4_model.ARCH_A)), 97)
 eq("A−：v4 期望张量表条数（不变）", len(_v4ex.expected_shapes(dict(_v4m.dims()))), 82)
 
 
@@ -3087,9 +3088,10 @@ for _off, _nm, _kind, _size in v4_export._ARCH_FIELDS:
     if _off != _f3_walk:
         _f3_gaps.append(f"{_nm}@{_off}!={_f3_walk}")
     _f3_walk = _off + _size
-# 命名字段走到 70，剩下 70–95 的 26 B 是**保留区**（必须全 0）⇒ 70 + 26 = 96
-eq("段 2：arch 字段表首尾相接，命名字段 70 B + 26 B 保留 == 96 B",
-   (_f3_gaps, _f3_walk, v4_export.ARCH_CORE_BYTES - _f3_walk), ([], 70, 26))
+# 命名字段走到 **72**，剩下 72–95 的 **24 B** 是**保留区**（必须全 0）⇒ 72 + 24 = 96
+# ⚠ 第一百一十六轮：70/71 已是 `evtReadout`/`evtLN` 两个具名字段（保留区从 26 B 缩到 24 B）
+eq("段 2：arch 字段表首尾相接，命名字段 72 B + 24 B 保留 == 96 B",
+   (_f3_gaps, _f3_walk, v4_export.ARCH_CORE_BYTES - _f3_walk), ([], 72, 24))
 eq("段 2：arch 段总长 = 96 B 核心 + 1,952 B 保留尾",
    (v4_export.ARCH_CORE_BYTES, v4_export.ARCH_SEG_BYTES), (96, 2048))
 # ② 写端：v4 小网也写 format 3，且**字节账** = 64 + 2048 + 块表 + 张量表（独立公式复算）
@@ -3171,8 +3173,11 @@ _f3_expect_error(_f3_v4raw[:-7], ("截断",), "fail-loud⑥：文件被截断 �
 # 附加：保留区/保留位/topoId/版本号四处（§3「archVersion=1 时非 0 ⇒ 报错」等）
 _b = bytearray(_f3_v4raw); _b[64 + 27] |= 0x80
 _f3_expect_error(bytes(_b), ("保留位",), "段 2：`flags` 用了 bit4–7 保留位 ⇒ 报错")
+_b = bytearray(_f3_v4raw); _b[64 + 72] = 1
+_f3_expect_error(bytes(_b), ("保留区",), "段 2：arch 核心的保留区（72–95）非 0 ⇒ 报错")
+# ★ 第一百一十六轮：两个新字段的**双向**闸门（v4 图里不该有它们 ⇒ 置 1 必须报错）
 _b = bytearray(_f3_v4raw); _b[64 + 70] = 1
-_f3_expect_error(bytes(_b), ("保留区",), "段 2：arch 核心的保留区（70–95）非 0 ⇒ 报错")
+_f3_expect_error(bytes(_b), ("evtReadout",), "段 2：v4 的 `evtReadout`=1 ⇒ 报错（v4 没有这条路径）")
 _b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 6, 9)
 _f3_expect_error(bytes(_b), ("topoId",), "段 2：未注册的 topoId ⇒ 报错")
 _b = bytearray(_f3_v4raw); struct.pack_into("<H", _b, 64 + 4, 2)

@@ -71,6 +71,19 @@ constexpr float kDangerEps = 1e-6f;
 constexpr int kCtxDeadDims[] = {17, 35, 37, 58, 59, 60, 61, 62, 63};
 // ⚠ E3（第一百一十三轮）：`cand[96..98]` 已三端接线 ⇒ 只掩 99..127（预留 29 列）。
 constexpr int kCandDeadDimsFirst = 99;     // = 99..127（`C_CAND` 的后 29 列）
+//: ★ 第一百一十六轮（P4）：`evt` 的恒 0 / 零信息槽（= `v4/model.py` 的 `EVT_DEAD_DIMS`）。
+//: 0/6/7 = 服务端从不进窗口的 3 个事件类型；95 = `seq_delta`（恒 0.125 ⇒ 方差 0）。
+constexpr int kEvtDeadDims[] = {0, 6, 7, 95};
+
+/** `j` 是否在 `kEvtDeadDims` 里（P4 的 evt 死维掩码）。 */
+inline bool evtDeadMask(int j) {
+    for (int d : kEvtDeadDims) {
+        if (d == j) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /** 小端读取器：**显式按字节拼**（不依赖宿主字节序，也不做未对齐访问）。 */
 struct Reader {
@@ -816,6 +829,12 @@ bool V4Policy::bindAllA(std::string &err) {
     V("event.conv2.bias", dm);
     V("event.norm2.weight", dm);
     V("event.norm2.bias", dm);
+    // ★ 第一百一十六轮（P4）：`evt` 首层 LN —— **可缺**（旧包 ⇒ `evtLn=0` ⇒ 不建/不跑）
+    const bool hasEvtLn = vecs.count("event.norm0.weight") != 0;
+    if (hasEvtLn) {
+        V("event.norm0.weight", kCEvt);
+        V("event.norm0.bias", kCEvt);
+    }
 
     // ---- ctx / cand 编码器（首层 LN + 死维掩码）
     V("ctx.norm.weight", kCCtx);
@@ -853,6 +872,17 @@ bool V4Policy::bindAllA(std::string &err) {
     V("fusion.out.bias", dm);
     V("fusion.out_norm.weight", 3 * dm);
     V("fusion.out_norm.bias", 3 * dm);
+    // ★ 第一百一十六轮（S1）：逐候选事件读出 —— **可缺**（旧包 ⇒ `evtReadout=0` ⇒ 不建/不跑）
+    const bool hasEvtReadout = mats.count("fusion.evt_kv.weight") != 0;
+    if (hasEvtReadout) {
+        M("fusion.evt_kv.weight", 2 * dm, dm);
+        if (mats.count("fusion.evt_kv.bias") != 0) {
+            err = "fusion.evt_kv 不该有 bias（K/V 的 bias 是逐行常数 ⇒ 对 softmax 空操作；"
+                  "导出器与本前向不同版本）";
+            return false;
+        }
+        V("fusion.evt_gamma", dm);
+    }
 
     // ---- 头（26,054）：`policy_gate` 与 B3 在 A− 里是**拓扑必需**（不是"可缺"）
     M("heads.policy.weight", 1, dm);
@@ -898,6 +928,20 @@ bool V4Policy::bindAllA(std::string &err) {
               "**不存在**（`h_evt` 已是第 95 个 token）⇒ 文件与拓扑不符";
         return false;
     }
+    // ★ 第一百一十六轮：两个**具名字段** ↔ 张量表（双向、与 flags 同一把尺子）
+    if (evtReadout != hasEvtReadout) {
+        err = std::string("arch 段的 `evtReadout`=") + (evtReadout ? "1" : "0")
+              + " 与张量表自相矛盾：`fusion.evt_kv.weight` "
+              + (hasEvtReadout ? "在" : "不在")
+              + "（⛔ 不补 0：那等于让前向跑一个 arch 没声明的分支）";
+        return false;
+    }
+    if (evtLn != hasEvtLn) {
+        err = std::string("arch 段的 `evtLn`=") + (evtLn ? "1" : "0")
+              + " 与张量表自相矛盾：`event.norm0.weight` " + (hasEvtLn ? "在" : "不在")
+              + "（⛔ 不补 0）";
+        return false;
+    }
     return err.empty();
 }
 
@@ -923,6 +967,8 @@ struct ArchInfo {
     int nSeg = 0;
     int featVersion = 0, obsVersion = 0, derivedVersion = 0;
     int cTile = 0, cEvt = 0, kEvt = 0, cCtx = 0, cCand = 0;
+    // ★ 第一百一十六轮：arch 段**保留区（偏移 70/71）里新开的两个字段**（不升 format）
+    int evtReadout = 0, evtLn = 0;
 };
 
 /** 该拓扑在给定宽度下的**期望**字段（= `export.arch_profile`，逐字段同值）。 */
@@ -1056,6 +1102,8 @@ bool parseArchSegment(const std::vector<uint8_t> &raw, const std::string &what, 
     out.kEvt = rd16(base + 64);
     out.cCtx = rd16(base + 66);
     out.cCand = rd16(base + 68);
+    out.evtReadout = base[70];
+    out.evtLn = base[71];
 
     if (out.archVersion != 1) {
         err = "archVersion=" + std::to_string(out.archVersion) + " 不支持（本实现只认 1）：" + what;
@@ -1156,15 +1204,26 @@ bool parseArchSegment(const std::vector<uint8_t> &raw, const std::string &what, 
               + std::to_string(bad.size()) + " 条）：" + joinNames(bad, 8) + "：" + what;
         return false;
     }
-    // 保留：pad 两字节 + 核心 70..95 + 保留尾 96..archLen 必须全 0
+    // 保留：pad 两字节 + 核心 72..95 + 保留尾 96..archLen 必须全 0
+    // ⚠ 第一百一十六轮：70/71 已是 `evtReadout`/`evtLn` 两个具名字段（不再是保留区）。
     if (base[45] != 0 || base[46] != 0 || base[47] != 0) {
         err = "arch 段的 pad 字节非 0（" + std::to_string(base[45]) + "/" + std::to_string(base[46])
               + "/" + std::to_string(base[47]) + "）：" + what;
         return false;
     }
-    for (int i = 70; i < kV4ArchCoreBytes; i++) {
+    if (out.evtReadout > 1 || out.evtLn > 1) {
+        err = "arch 段的 `evtReadout/evtLn`=" + std::to_string(out.evtReadout) + "/"
+              + std::to_string(out.evtLn) + " 未注册（只认 0/1）：" + what;
+        return false;
+    }
+    if (out.topoId != kTopoA && (out.evtReadout != 0 || out.evtLn != 0)) {
+        err = "arch 段的 `evtReadout/evtLn`=" + std::to_string(out.evtReadout) + "/"
+              + std::to_string(out.evtLn) + "：v4 的图里没有这两条路径（只有 a- 有）：" + what;
+        return false;
+    }
+    for (int i = 72; i < kV4ArchCoreBytes; i++) {
         if (base[i] != 0) {
-            err = "arch 段的保留区（偏移 70–95，26 B）非 0（archVersion=1 必须全 0）：" + what;
+            err = "arch 段的保留区（偏移 72–95，24 B）非 0（archVersion=1 必须全 0）：" + what;
             return false;
         }
     }
@@ -1315,6 +1374,8 @@ bool v4LoadPolicyBytes(const std::vector<uint8_t> &raw, const std::string &what,
     p.format = static_cast<int>(fmt);
     p.arch = ai.topoId;
     p.flags = ai.flags;
+    p.evtReadout = ai.evtReadout != 0;
+    p.evtLn = ai.evtLn != 0;
     p.valueRange = ai.valueRange;
     p.dTile = ai.dTile;
     p.dEvt = ai.dEvt;
@@ -1694,6 +1755,9 @@ struct EventEnc {
     const std::vector<float> *b2 = nullptr;
     /** `topoId`：A− 的编码器是单个 `Linear(C_EVT→d)` + GELU（`AEventTower.enc`）。 */
     int arch = kTopoV4;
+    /** ★ P4（第一百一十六轮）：`evt` 首层 LayerNorm（可缺；旧包 ⇒ nullptr ⇒ 逐位走旧路）。 */
+    const std::vector<float> *n0g = nullptr;
+    const std::vector<float> *n0b = nullptr;
 
     /** 绑定一次、逐行复用：逐行重放是热路径，没必要每行再查 4 次表 + 核形状。 */
     bool bind(const V4Policy &p, std::string &err) {
@@ -1702,6 +1766,10 @@ struct EventEnc {
         if (arch == kTopoA) {
             w1 = p.mat("event.enc.weight", dm, kCEvt, err);
             b1 = p.vec("event.enc.bias", dm, err);
+            if (p.evtLn) {
+                n0g = p.vec("event.norm0.weight", kCEvt, err);
+                n0b = p.vec("event.norm0.bias", kCEvt, err);
+            }
             return err.empty();
         }
         w1 = p.mat("event.enc.0.weight", dm, kCEvt, err);
@@ -1779,7 +1847,34 @@ void EventEnc::row(const float *tok, float *out, V4Scratch &sc) const {
 
 void EventEnc::rows(const float *tok, int len, int tokStride, float *out, V4Scratch &sc) const {
     const int dm = w1->rows;
-    linearBatchFast(out, dm, tok, tokStride, len, static_cast<size_t>(kCEvt), *w1, b1->data(), 0,
+    const float *src = tok;
+    int stride = tokStride;
+    // ★ P4：首层 LN + 死维掩码（掩码**前后各一次**，与 `amlp` 同一条判据）。
+    //   `n0g == nullptr`（旧包 `evtLn=0`）⇒ 连掩码都不乘 ⇒ 与改动前**逐位**相同。
+    if (n0g != nullptr) {
+        const int kd = kCEvt;
+        const size_t need = static_cast<size_t>(len) * static_cast<size_t>(kd);
+        if (sc.evtLnTmp.size() < need) {
+            sc.evtLnTmp.resize(need);
+        }
+        float *dst = sc.evtLnTmp.data();
+        for (int t = 0; t < len; t++) {
+            const float *row = tok + static_cast<size_t>(t) * static_cast<size_t>(tokStride);
+            float *d = dst + static_cast<size_t>(t) * static_cast<size_t>(kd);
+            for (int j = 0; j < kd; j++) {
+                d[j] = evtDeadMask(j) ? 0.f : row[j];
+            }
+            layerNormBuf(d, kd, n0g->data(), n0b->data());
+            for (int j = 0; j < kd; j++) {
+                if (evtDeadMask(j)) {
+                    d[j] = 0.f;
+                }
+            }
+        }
+        src = dst;
+        stride = kd;
+    }
+    linearBatchFast(out, dm, src, stride, len, static_cast<size_t>(kCEvt), *w1, b1->data(), 0,
                     dm);
     if (arch == kTopoA) {
         // A−：`GELU(Linear(C_EVT→d))`，**没有第二层**（`AEventTower.enc`）
@@ -2762,6 +2857,73 @@ bool V4Policy::forwardA(const JVal &obs, std::map<std::string, std::vector<float
             layerNormBuf(sc.gu.data(), dm, unG->data(), unB->data());
             for (int j = 0; j < dm; j++) {
                 ui[j] += uResT[static_cast<size_t>(j)] * sc.gu[static_cast<size_t>(j)];
+            }
+        }
+    }
+
+    // ---- ★ S1（第一百一十六轮）：`h_evt` 的**逐候选**读出 ------------------------------
+    // `KV = h_evt ⊕ e_tokens`（kev+1 行）· `Q = q`（`sc.uEvt`；= `LN(cand_i)`，与 cross 同一个）
+    // `r_i = softmax(q_i·Kᵀ/√d)·V` · `u_i += tanh(γ) ⊙ r_i`
+    // ⚠ **逐候选**是硬条件：`q_i` 逐候选不同 ⇒ `r_i` 不同 ⇒ 对 softmax 有真实影响。
+    if (evtReadout) {
+        const Mat *kvW = matOf("fusion.evt_kv.weight", 2 * dm, dm);
+        const std::vector<float> *gamma = vecOf("fusion.evt_gamma", dm);
+        if (kvW == nullptr || gamma == nullptr) {
+            return false;
+        }
+        const int nkv = kKEvt + 1;
+        const size_t nkvD = static_cast<size_t>(nkv) * static_cast<size_t>(2 * dm);
+        if (sc.kvEvt.size() < nkvD) {
+            sc.kvEvt.resize(nkvD);
+        }
+        // K/V：逐行 `W·x`（**没有 bias**）
+        for (int ti = 0; ti < nkv; ti++) {
+            const float *srcRow = (ti < kKEvt)
+                    ? eTokens + static_cast<size_t>(ti) * static_cast<size_t>(dm)
+                    : hEvt;
+            linearFast(sc.kvEvt.data() + static_cast<size_t>(ti) * static_cast<size_t>(2 * dm),
+                       srcRow, static_cast<size_t>(dm), *kvW, nullptr, 0, 2 * dm);
+        }
+        if (sc.scores.size() < static_cast<size_t>(nkv)) {
+            sc.scores.resize(static_cast<size_t>(nkv));
+        }
+        const double inv = 1.0 / std::sqrt(static_cast<double>(dm));
+        for (int i = 0; i < n; i++) {
+            const float *qi = sc.uEvt.data() + static_cast<size_t>(i) * dm;
+            double maxv = -1e30;
+            for (int ti = 0; ti < nkv; ti++) {
+                const float *krow = sc.kvEvt.data() + static_cast<size_t>(ti) * static_cast<size_t>(2 * dm);
+                double s = 0.0;
+                for (int j = 0; j < dm; j++) {
+                    s += static_cast<double>(qi[j]) * static_cast<double>(krow[j]);
+                }
+                const float v = static_cast<float>(s * inv);
+                sc.scores[static_cast<size_t>(ti)] = v;
+                if (v > maxv) {
+                    maxv = v;
+                }
+            }
+            double sum = 0.0;
+            for (int ti = 0; ti < nkv; ti++) {
+                const float v = static_cast<float>(
+                    std::exp(static_cast<double>(sc.scores[static_cast<size_t>(ti)]) - maxv));
+                sc.scores[static_cast<size_t>(ti)] = v;
+                sum += v;
+            }
+            std::fill(sc.gu.begin(), sc.gu.begin() + dm, 0.f);
+            for (int ti = 0; ti < nkv; ti++) {
+                const float a = static_cast<float>(sc.scores[static_cast<size_t>(ti)] / sum);
+                const float *vrow = sc.kvEvt.data()
+                        + static_cast<size_t>(ti) * static_cast<size_t>(2 * dm) + dm;
+                for (int j = 0; j < dm; j++) {
+                    sc.gu[static_cast<size_t>(j)] += a * vrow[j];
+                }
+            }
+            float *ui = sc.u.data() + static_cast<size_t>(i) * dm;
+            for (int j = 0; j < dm; j++) {
+                const float g = static_cast<float>(
+                    std::tanh(static_cast<double>((*gamma)[static_cast<size_t>(j)])));
+                ui[j] += g * sc.gu[static_cast<size_t>(j)];
             }
         }
     }

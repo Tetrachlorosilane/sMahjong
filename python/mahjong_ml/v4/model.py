@@ -162,6 +162,50 @@ DANGER_EPS = 1e-6
 CTX_DEAD_DIMS: tuple[int, ...] = (17, 35, 37, 58, 59, 60, 61, 62, 63)
 CAND_DEAD_DIMS: tuple[int, ...] = tuple(range(99, 128))
 
+#: `evt` 的**恒 0 / 零信息**槽（P4，第一百一十六轮；零重建 = **只加掩码**，`C_EVT` 仍是 96）。
+#:
+#: | 槽 | 字段 | 为什么它是死维 | 实测（全量 val 33,615 决策 × 60 行） |
+#: | --- | --- | --- | --- |
+#: | 0 | `type` = `draw` | 服务端的 `events` 流**从不发 draw**（摸牌由 `turn`/`drawn` 表达） | 最大绝对值恒 **0** |
+#: | 6 | `type` = `agari` | 和了是**终局**事件，决策窗口里永远没有它 | 最大绝对值恒 **0** |
+#: | 7 | `type` = `ryuukyoku` | 同上（流局也是终局） | 最大绝对值恒 **0** |
+#: | 95 | `seq_delta` | 服务端**从不发**（`blocks.py` 取 `e.get("seq_delta", 1)` 之外的值）⇒ 恒 0.125 ⇒ **方差 0** | 常量 **0.125** |
+#:
+#: ⚠ 判据是"**数值**上恒 0 / 零信息"，⛔ **不是**"这 4,096 行里没出现"。全量实测否掉了 11 个
+#: "小样本看着是 0"的列（`called_kind[3,4,7,13,18,19,22,23,24]` 与 `called_aka` —— 它们的全量
+#: 最大绝对值是 **1.0**，掩掉就是真的丢信息）。⇒ 掩码表里只有这 4 个。
+EVT_DEAD_DIMS: tuple[int, ...] = (0, 6, 7, 95)
+
+
+#: S1 的**逐候选事件读出**（`ARCH-REDESIGN` §2.5 / 第一百一十六轮）：`u_i ← u_i + tanh(γ) ⊙ r_i`，
+#: 其中 `r_i = softmax(q_i·Kᵀ/√d)·V`、`q_i = LN(cand_i)`、`K/V = Linear(h_evt ⊕ e_tokens)`。
+#: ⚠ **进程级**（与 `--legacy-u-res` 同一个理由：一次训练建好几张网，只设主网会让参照网换图）。
+#: ⚠ 缺省 **False** ⇒ 不建这两组张量 ⇒ 旧包/旧调用点**逐位不变**；`pretrain --arch a-` 会打开它
+#: （除 `--legacy-evt-readout`），而**载入旧包**时按 arch 段的 `evtReadout=0` 建 ⇒ 也不建。
+EVT_READOUT = False
+#: 新路径的初始化档：`small` = `N(0, 1e-3²)`（C3 的同一理由：出生即有微弱的、可学的梯度）；
+#: `zero` = 精确 0（出生**逐位**恒等，事件敏感性只来自原有通路）。
+EVT_READOUT_INIT = "small"
+#: 事件塔**首层 LayerNorm**（P4，判据 9）：`evt[96]` 直接过 `LayerNorm(96)` 再进 `Linear(96→128)`。
+#: 缺省 **False** ⇒ 不建 ⇒ 旧包逐位不变。
+EVT_LN = False
+
+
+def set_evt_readout(flag: bool, init: str | None = None) -> None:
+    """**进程级** S1 读出开关（`pretrain` 在 `train()` 开头设一次；见 `EVT_READOUT` 的注释）。"""
+    global EVT_READOUT, EVT_READOUT_INIT
+    EVT_READOUT = bool(flag)
+    if init is not None:
+        if init not in ("zero", "small"):
+            raise ValueError(f"未知 evt-readout 初始化 {init!r}（可选：zero / small）")
+        EVT_READOUT_INIT = init
+
+
+def set_evt_ln(flag: bool) -> None:
+    """**进程级** evt 首层 LN 开关（P4；见 `EVT_LN` 的注释）。"""
+    global EVT_LN
+    EVT_LN = bool(flag)
+
 
 def set_arch(name: str) -> None:
     """**进程级** arch 开关（`pretrain --arch a-` 在 `train()` 开头设一次）。
@@ -580,14 +624,35 @@ class AEventTower(nn.Module):
     （⛔ 不要把它写成"卷积输出进 GRU"：那会让 `h` 依赖窗口起点，缓存立刻陈旧）。
     """
 
-    def __init__(self, d: int = A_D_MODEL) -> None:
+    def __init__(self, d: int = A_D_MODEL, *, evt_ln: bool | None = None) -> None:
         super().__init__()
+        self.evt_ln = EVT_LN if evt_ln is None else bool(evt_ln)
+        #: 死维掩码（非持久 ⇒ 不进 `state_dict`/`net.bin` ⇒ 参数账一个数都不变）
+        m = torch.ones(C_EVT)
+        for i in EVT_DEAD_DIMS:
+            m[i] = 0.0
+        self.register_buffer("evt_mask", m, persistent=False)
+        self.norm0 = nn.LayerNorm(C_EVT) if self.evt_ln else None
         self.enc = nn.Linear(C_EVT, d)
         self.cell = nn.GRUCell(d, d)
         self.conv1 = nn.Conv1d(d, d, kernel_size=3, padding=1)
         self.norm1 = nn.LayerNorm(d)
         self.conv2 = nn.Conv1d(d, d, kernel_size=3, padding=1)
         self.norm2 = nn.LayerNorm(d)
+
+    def _encode(self, evt: torch.Tensor) -> torch.Tensor:
+        """`evt[..., 96] → GELU(Linear(96→128))`；**首层 LN（P4）+ 死维掩码**都在这里。
+
+        ⚠ 掩码**前后各一次**（与 `AMlp` 同一条判据）：只在 LN 前掩，LN 的 `bias`/均值会把死维
+        变成非 0 ⇒ `enc` 的那几列照样拿得到梯度（"不进首层"当场红）。
+        ⚠ **掩码与 LN 挂在同一个开关上**（`evt_ln`）：`EVT_DEAD_DIMS` 里的 `seq_delta` 是**常量
+        0.125**（不是 0）⇒ 对旧图乘 0 会**真的改变 logits**（实测：3,083 决策逐位不再相同）。
+        旧包 `evt_ln=0` ⇒ 连掩码都不乘 ⇒ **逐位不变**；新 a- 网 `evt_ln=1` ⇒ LN + 掩码一起上。
+        """
+        if not self.evt_ln:
+            return GELU(self.enc(evt))
+        x = self.norm0(evt * self.evt_mask) * self.evt_mask
+        return GELU(self.enc(x))
 
     def _tokens(self, e: torch.Tensor) -> torch.Tensor:
         # ⚠ `LayerNorm(d)` 归一化的是**最后一维** ⇒ 每次 LN 前先转成 `[B,T,d]`，conv 前再转回。
@@ -599,7 +664,7 @@ class AEventTower(nn.Module):
 
     def forward(self, evt: torch.Tensor, h: torch.Tensor | None = None
                 ) -> tuple[torch.Tensor, torch.Tensor]:
-        e = GELU(self.enc(evt))                                      # [B,K,128]
+        e = self._encode(evt)                                        # [B,K,128]
         if h is None:
             h = torch.zeros(e.shape[0], e.shape[2], dtype=e.dtype, device=e.device)
         real = evt.abs().sum(dim=-1) > 0
@@ -608,7 +673,7 @@ class AEventTower(nn.Module):
         return self._tokens(e), h
 
     def step(self, new_evt: torch.Tensor, h: torch.Tensor | None):
-        e = GELU(self.enc(new_evt))
+        e = self._encode(new_evt)
         for t in range(e.shape[1]):
             h = self.cell(e[:, t], h)
         return h
@@ -651,7 +716,9 @@ class AFusion(nn.Module):
     """
 
     def __init__(self, d: int = A_D_MODEL, n_heads: int = A_N_HEADS,
-                 legacy_u_res: bool | None = None) -> None:
+                 legacy_u_res: bool | None = None, *,
+                 evt_readout: bool | None = None,
+                 evt_readout_init: str | None = None) -> None:
         super().__init__()
         self.seg = nn.Parameter(torch.empty(N_SEG, d))
         nn.init.normal_(self.seg, mean=0.0, std=0.02)
@@ -672,6 +739,38 @@ class AFusion(nn.Module):
         else:
             self.u_norm = nn.LayerNorm(d)
             self.u_res = nn.Parameter(torch.zeros(d))
+        # ---- ★ S1：`h_evt` 的**逐候选**读出（判据 3，第一百一十六轮）------------------------
+        # `evt_kv = Linear(d → 2d, bias=False)`（32,768）+ `evt_gamma`（128）= **+32,896**（≈ +32.9k，
+        # 与 `NEXT-STEPS-AFTER-AREFACTOR` P2 ① 的预注册同量级：那里是 `Linear(256→128)` = 32,896，
+        # 逐字节相同的**参数个数**，只是换成"注意力"形式）。
+        # ⚠ **K/V 不带 bias**：`v` 的 bias 在 `Σ_j a_ij = 1` 下会变成**逐行常数** ⇒ 对 softmax 是
+        #   空操作（NOTES 第五十/五十五轮的红证）；`k` 的 bias 对 softmax 只改温度。⇒ 省掉它既守
+        #   预注册的参数账，也避免一个"看着在学、其实什么都没做"的通道。
+        # ⚠ **逐候选**是硬条件：`r_i` 以 `q_i = LN(cand_i)` 为 query ⇒ 每个候选拿到不同的读出；
+        #   若 query 用逐行共享量（`h_evt`/`ctx`），`u_i += 常数` 对 softmax 就是**空操作**。
+        self.evt_readout = EVT_READOUT if evt_readout is None else bool(evt_readout)
+        if self.evt_readout:
+            self.evt_kv = nn.Linear(d, 2 * d, bias=False)
+            init = EVT_READOUT_INIT if evt_readout_init is None else str(evt_readout_init)
+            if init not in ("zero", "small"):
+                raise ValueError(f"未知 evt-readout 初始化 {init!r}（可选：zero / small）")
+            self.evt_init = init
+            if init == "zero":
+                self.evt_gamma = nn.Parameter(torch.zeros(d))
+            else:
+                # ⚠ 与 `_init_gate_`/`_init_tile_id_` 同一条纪律：**先存/后恢复 RNG**，
+                #   否则同一 seed 下其余层的初值会整体漂移，"出生影响"就分不清是谁的。
+                st = torch.get_rng_state()
+                try:
+                    g = torch.empty(d)
+                    nn.init.normal_(g, mean=0.0, std=ZERO_INIT_STD)
+                finally:
+                    torch.set_rng_state(st)
+                self.evt_gamma = nn.Parameter(g)
+        else:
+            self.evt_kv = None
+            self.evt_gamma = None
+            self.evt_init = "off"
 
     def forward(self, h_tile: torch.Tensor, h_tile_pool: torch.Tensor,
                 e_tokens: torch.Tensor, h_evt: torch.Tensor,
@@ -692,9 +791,17 @@ class AFusion(nn.Module):
         # ⚠ `out_norm` 是 **LN(3Df)**：按 §0.1 的 `out Linear(3Df→Df)+LN(3Df)`，LN 在**入口**
         #   （pre-LN），归一化的是 384 维拼接输入 —— 不是 linears 的输出。
         u = self.out(self.out_norm(torch.cat([cross, pool_b, ctx_b], dim=-1)))
-        if self.legacy_u_res:
-            return u
-        return u + torch.tanh(self.u_res) * self.u_norm(u)
+        if not self.legacy_u_res:
+            u = u + torch.tanh(self.u_res) * self.u_norm(u)
+        # ---- ★ S1：逐候选事件读出（只在 arch 段 `evtReadout=1` / 包里真有张量时跑）----------
+        # KV = `h_evt ⊕ e_tokens`（61 行）；Q = `q`（= `LN(cand)`，与 cross 用的是同一个 q）。
+        # `r_i` 逐候选不同 ⇒ `u_i += tanh(γ) ⊙ r_i` **不是**逐行常数 ⇒ 对 softmax 有真实影响。
+        if self.evt_kv is not None:
+            kv = self.evt_kv(torch.cat([e_tokens, h_evt.unsqueeze(1)], dim=1))  # [B,61,2d]
+            k, v = kv.chunk(2, dim=-1)
+            att = torch.softmax((q @ k.transpose(1, 2)) * (1.0 / math.sqrt(k.shape[-1])), dim=-1)
+            u = u + torch.tanh(self.evt_gamma) * (att @ v)
+        return u
 
     def ffn(self, x: torch.Tensor) -> torch.Tensor:
         """`FFN(128→128→128)`（两个 Linear + GELU，pre-LN 残差在 `forward` 里加）。"""
@@ -934,7 +1041,10 @@ class V4Model(nn.Module):
                  tile_d: int | None = None, n_heads: int | None = None,
                  value_bins: int | None = None, legacy_pool: bool | None = None,
                  legacy_out_relu: bool | None = None,
-                 legacy_u_res: bool | None = None) -> None:
+                 legacy_u_res: bool | None = None,
+                 evt_readout: bool | None = None,
+                 evt_readout_init: str | None = None,
+                 evt_ln: bool | None = None) -> None:
         super().__init__()
         # ★ A−（T1）：`arch` 只决定**建哪一套塔**；缺省 v4 = 现有图（逐位不变）。
         self.arch = ARCH if arch is None else str(arch)
@@ -957,12 +1067,16 @@ class V4Model(nn.Module):
         self.value_range = value_range(self.arch)
         if self.arch == ARCH_A:
             self.tile = ATileTower(tile_d, d_model, n_heads)
-            self.event = AEventTower(d_model)
+            self.event = AEventTower(d_model, evt_ln=evt_ln)
             self.ctx = AMlp(C_CTX, d_model, CTX_DEAD_DIMS)
             self.cand = AMlp(C_CAND, d_model, CAND_DEAD_DIMS)
-            self.fusion = AFusion(d_model, n_heads, legacy_u_res=legacy_u_res)
+            self.fusion = AFusion(d_model, n_heads, legacy_u_res=legacy_u_res,
+                                  evt_readout=evt_readout,
+                                  evt_readout_init=evt_readout_init)
             self.heads = AHeads(d_model, value_bins)
         else:
+            if evt_readout or evt_ln:
+                raise ValueError("`evt_readout` / `evt_ln` 只属于 a-（v4 的图里没有这两条路径）")
             self.tile = TileTower(tile_d, n_heads, d_model)
             self.event = EventTower(d_model, n_heads)
             self.ctx = Mlp(C_CTX, d_model)
@@ -1022,9 +1136,13 @@ def build(seed: int = 20260927, arch: str | None = None, **dims: int) -> V4Model
 
     ⚠ `arch` 缺省 = **进程级 `ARCH`**（`pretrain --arch a-` 设；缺省 v4）—— 这样
     `M.build(seed)` 与 `M.build(seed, **net.bin 的 dims)` 两条路径在 a- 训练里都建同一套塔。
+    ⚠ `evt_readout` / `evt_readout_init` / `evt_ln` 是**结构开关**（不是宽度），缺省取进程级
+    的 `EVT_READOUT` / `EVT_READOUT_INIT` / `EVT_LN`；载入旧包时调用方按 arch 段把它们传成 False。
     """
     torch.manual_seed(seed)
-    m = V4Model(arch=arch, **dims)
+    kw = {k: dims[k] for k in ("evt_readout", "evt_readout_init", "evt_ln") if k in dims}
+    dims = {k: v for k, v in dims.items() if k not in kw}
+    m = V4Model(arch=arch, **dims, **kw)
     m.eval()
     return m
 
