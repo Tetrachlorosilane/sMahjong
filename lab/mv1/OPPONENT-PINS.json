@@ -1,0 +1,23 @@
+{
+  "schema": "opponent-pin/1",
+  "frozen": true,
+  "frozen_at": "2026-10-19",
+  "note": "P1 对手池 = def7 / win2 / atk3-g10（`tools/build/v4-expert-*-g10/net.bin`）。sha256 由 `tools/ceiling-gate.py --opponent-pin` 逐字校验；任何不在本白名单里的对手、或与本族/本产品线同支的对手 ⇒ 测量有效性拒判（退出码 5）。",
+  "allowed": {
+    "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796": {
+      "name": "v4-expert-def7-g10",
+      "line": "v4-expert-def7",
+      "source": "tools/build/v4-expert-def7-g10/net.bin"
+    },
+    "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f": {
+      "name": "v4-expert-win2-g10",
+      "line": "v4-expert-win2",
+      "source": "tools/build/v4-expert-win2-g10/net.bin"
+    },
+    "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482": {
+      "name": "v4-expert-atk3-g10",
+      "line": "v4-expert-atk3",
+      "source": "tools/build/v4-expert-atk3-g10/net.bin"
+    }
+  }
+}

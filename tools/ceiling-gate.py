@@ -40,25 +40,41 @@
 判决（逐字写进产物的 `verdict`）：
 
     过     ⇔ 主口径 **CI 下界 > 0** ∧ 所有**可用**护栏未越界 ∧ 安慰剂不显著 ∧ 族数 ≥ `--min-walls`
-             ∧ 各族 Δ 逐族为正 ∧ |ρ| < 0.9 ∧ 墙钟 ≤ 预算。
+             ∧ 各族 Δ 逐族为正 ∧ |ρ| < 0.9 ∧ 墙钟 ≤ 预算 ∧ **测量有效性四条全过**（见下）。
     不过   ⇔ 主口径 **CI 上界 < 0**（候选在坏方向显著）。
     测不出 ⇔ 其余（CI 含 0 / 单族 / 安慰剂与主口径不可分辨 / ρ 报警 / 超预算 / SE 取不到）。
     ERROR  ⇔ **任何必需探针取不到**（目录 / `summary.json` / `per_game` / 权重文件 / 族数 0 / 进程扫描失败 …）。
     ⛔ fail-closed：**取不到就 ERROR 且退出码非 0**，⛔ 不许"取不到就当干净/当通过"。
 
-退出码：**0 = 过**；**3 = 不过**；**4 = 测不出**；**2 = ERROR**（用法/文件/探针坏）。
+⭐ **测量有效性硬前置（项目方 2026-10-19；原话与判据见 `lab/mv1/MEASUREMENT-VALIDITY.md`）**：
+ ① **24 排列**：每族每臂 `A^4_4 = 24` 种全排列都要出现，且每种场次 ≥ `max(1, floor(n/24×0.8))`
+    （`seat_perm`）。缺一 ⇒ **拒判（退出码 5）**。
+ ② **共轭三条**：① candidate 与 baseline **绝不同桌**（`arm_isolation`）；② 对手池必须**冻结 + sha256
+    白名单 + 非本族/本产品线**（`--opponent-pin`，`opponent_pool`）；③ 同支邻家顺位优势 ≤ 非同支
+    邻家的 **1.2×**（`adjacency_conditional`，同支邻家胜率同样 ≤1.2×）。
+ ③ **护栏**：`self_win_rate` / `deal_in_rate` / `meld_rate` / `avg_hand_value` /
+    `adjacency_conditional` 必须进 `verdict.json`；`summary.json` 缺的字段记 `null` + `available:false`
+    + 警告（⛔ 不伪造）。
+ ④ **向后兼容**：旧证据没有四席身份（`per_game[].policies`）⇒ `seat_perm = null` + 判决里警告
+    **"座次覆盖不可证"**，⛔ **不许当成通过**。
+
+退出码：**0 = 过**；**3 = 不过**；**4 = 测不出**；**2 = ERROR**（用法/文件/探针坏）；
+**5 = 测量有效性硬前置不满足**（座次覆盖 / 臂隔离 / 对手池 / 共轭嫌疑）——拒绝出判决（fail-closed）。
 ⛔ 本工具**不训练**：`--collect` 只跑自对弈采集（`style-vector.py` → `trainer.exe selfplay`），
 并自带"零训练进程"自证（起跑/收尾各扫一次全部进程的**命令行**，命中任何训练特征 ⇒ ERROR）。
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
+import itertools
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -121,6 +137,12 @@ DEFAULT_GUARDS = "wins:0.10,deals:0.10,win_points:150"   # = `gate.QUALITY_TOL`�
 MAX_WORKERS = 8                      # 本任务纪律：`--workers ≤8`
 MIN_COMMIT_FREE_GB = 8.0             # **旧口径**（只在 `--mem-kill` 打开时用；R-2 起缺省=准入控制）
 QUIET_MIN_MB = 200.0                 # G7 静窗：python/java 只算"重"的（b1-overlap 既有判据）
+
+#: ⭐ 测量有效性硬前置（项目方 2026-10-19）。判据本体见 `lab/mv1/MEASUREMENT-VALIDITY.md`。
+SEAT_PERMS = tuple(itertools.permutations(range(4)))     # 4! = 24，字典序（与 C++ `kPerm24` 同序）
+SEAT_MIN_FRACTION = 0.8              # 每种排列场次 ≥ max(1, floor(n/24 × 0.8))
+ADJ_RATIO_MAX = 1.2                  # 同支邻家顺位/胜率优势 ≤ 非同支邻家的 1.2×
+EXIT_MEASUREMENT_VALIDITY = 5        # 专用退出码：测量有效性拒判（fail-closed）
 
 #: ★ **零训练进程**的判据 = **引擎/解释器镜像 ∧ 命令行特征**（两个条件同时成立才命中）。
 #:   · 镜像必须是 `python*` / `trainer*` —— 本仓的训练入口都是 Python（`-m mahjong_ml.v4.loop`、
@@ -533,6 +555,453 @@ def weight_probe(families: list, probes: Probes) -> list:
 
 
 # ---------------------------------------------------------------------------
+# ⭐ 测量有效性硬前置（项目方 2026-10-19 两条要求）
+#   · 24 排列覆盖（seat_perm）
+#   · 共轭三条：candidate≠baseline 同桌 / 对手池冻结且非本族 / 同支邻家优势 ≤1.2×
+#   · 新护栏：self_win_rate / deal_in_rate / meld_rate / avg_hand_value / adjacency_conditional
+# 全部 **fail-closed**：取不到 / 不可证 ⇒ `measurement_validity.ok=false` ⇒ judge 退出码 5。
+# ---------------------------------------------------------------------------
+def _policy_line(label_or_path: str) -> str:
+    """策略串 / 权重路径 → **支线标识**（启发式；`--opponent-pin` 的 `line` 优先）。
+
+    只做三件事：取权重所在目录名；去掉代际/版本后缀（`-g10` / `-v3`）；去掉变体后缀
+    （`-BASE` / `-cand` / `-AUX03`）。例：`mv1-s24-BASE` 与 `mv1-s24-AUX03` ⇒ `mv1-s24`
+    （同一支）；`v4-expert-def7-g10` ⇒ `v4-expert-def7`（不同风格 = 不同支）。
+    ⚠ 这是**结构性检测**，不是训练血统的证明；所以对手池还必须过 sha256 白名单。
+    """
+    p = str(label_or_path or "")
+    if p.startswith("net:"):
+        p = _net_path(p)
+    name = Path(p).parent.name if p else ""
+    if not name:
+        name = Path(p).stem if p else ""
+    name = re.sub(r"-(?:g|G)\d+$", "", name)
+    name = re.sub(r"-(?:v|V)\d+$", "", name)
+    name = re.sub(r"-(?:BASE|base|CAND|cand|AUX\d*)$", "", name)
+    return name
+
+
+def _family_runs_tagged(f: dict) -> list:
+    """一族里可核的采集：`--gate-dir` 一条；`--family` 基准/候选各一条。"""
+    out = []
+    if f.get("_run") is not None:
+        out.append(("gate-dir", f["_run"]))
+    if f.get("_base_run") is not None:
+        out.append(("base", f["_base_run"]))
+    if f.get("_cand_run") is not None:
+        out.append(("cand", f["_cand_run"]))
+    return out
+
+
+def _arm_labels_for(f: dict) -> tuple[str, str]:
+    """`(candidate, baseline)` 的完整策略标签（两种口径的键名统一）。"""
+    pol = f.get("policies") or {}
+    if "candidate" in pol or "incumbent" in pol:
+        return str(pol.get("candidate") or ""), str(pol.get("incumbent") or "")
+    return str(pol.get("cand") or ""), str(pol.get("base") or "")
+
+
+def _seat_perm_for_run(run, arm_label: str, family: str) -> dict:
+    """一条采集的四席排列覆盖：**A^4_4=24** 种全排列 + 每种场次下限。
+
+    判据（`AGENTS.md` §6.5 判第 24 条）：
+      · `achievable` = 桌上**不同策略**数的多重集排列数；< 24 ⇒ 永远凑不出 24 ⇒ unusable
+        （例：`a,a,b,b` 的 2+2 对开最多 6 种，**不是**项目方要的 4 个模型各坐一次）。
+      · `coverage = k/24`，`k` = 实际出现的排列数；
+      · `min_count_required = max(1, floor(n_games/24 × 0.8))` —— 0.8 的理由：24 种排列里
+        允许"场数不是 24 的整数倍"带来的余数抖动，但不允许某一种只出现 1–2 次就被均值掩盖；
+        用 floor 而不是 round，保证小样本（n<24）也不会把门槛降成 0（`max(1, …)`）。
+      · `usable ⇔ achievable==24 ∧ k==24 ∧ min(counts) ≥ min_count_required`。
+    """
+    pg = list(run.per_game or [])
+    counts: dict = {}
+    missing = 0
+    for g in pg:
+        pols = g.get("policies")
+        if not pols or len(pols) != 4:
+            missing += 1
+            continue
+        key = tuple(str(x) for x in pols)
+        counts[key] = counts.get(key, 0) + 1
+    base = {"family": family, "arm": arm_label, "n_games": sum(counts.values()),
+            "expected": 24, "min_fraction": SEAT_MIN_FRACTION,
+            "min_count_required": max(1, int(math.floor(sum(counts.values()) / 24.0
+                                                         * SEAT_MIN_FRACTION)))}
+    if not counts:
+        base.update({"available": False, "usable": False, "coverage": "0/24", "coverage_k": 0,
+                     "counts": {}, "min": 0, "max": 0, "achievable": 0,
+                     "reason": "per_game 没有四席身份（policies）⇒ 座次覆盖不可证（旧证据）"})
+        return base
+    first = next(iter(counts))
+    roster = list(first)
+    n_distinct = len(set(first))
+    mult = collections.Counter(first)
+    achievable = math.factorial(4) // math.prod(math.factorial(v) for v in mult.values())
+    mismatch = sum(1 for k in counts if set(k) != set(roster))
+    if n_distinct == 4 and mismatch == 0:
+        all_perms = {p: 0 for p in SEAT_PERMS}
+        for key, c in counts.items():
+            all_perms[tuple(roster.index(x) for x in key)] += c
+        counts_out = {",".join(str(i) for i in p): v for p, v in sorted(all_perms.items())}
+        k_obs = sum(1 for v in all_perms.values() if v > 0)
+        mn, mx = min(all_perms.values()), max(all_perms.values())
+    else:
+        #: 2 个（或 3 个）不同策略：只能按**实际标签元组**记账；`achievable < 24` ⇒ unusable
+        counts_out = {"|".join(k): v for k, v in sorted(counts.items(), key=lambda kv: -kv[1])}
+        k_obs = len(counts)
+        mn, mx = min(counts.values()), max(counts.values())
+    usable = bool(achievable == 24 and k_obs == 24 and mismatch == 0
+                  and mn >= base["min_count_required"])
+    if usable:
+        why = (f"{k_obs}/24；每种 {mn}–{mx} 场 ≥ 门槛 {base['min_count_required']}"
+               f"（n={base['n_games']}）")
+    elif achievable < 24:
+        why = (f"桌上只有 {n_distinct} 个不同策略 ⇒ 最多 {achievable} 种排列，"
+               f"凑不出 A^4_4=24（实测 {k_obs}/24）")
+    elif mismatch:
+        why = f"{mismatch} 场的四席名单不一致 ⇒ 排列不可比"
+    elif k_obs < 24:
+        why = f"只出现 {k_obs}/24 种排列（缺 {24 - k_obs} 种）"
+    else:
+        why = f"最少的一种只出现 {mn} 场 < 门槛 {base['min_count_required']}"
+    base.update({"available": True, "usable": usable, "roster": roster,
+                 "n_distinct": n_distinct, "achievable": achievable,
+                 "coverage": f"{k_obs}/24", "coverage_k": k_obs,
+                 "coverage_ratio": k_obs / 24.0, "counts": counts_out,
+                 "min": mn, "max": mx, "mismatch": mismatch, "reason": why})
+    if missing:
+        base["reason"] = f"{why}；另有 {missing} 场缺四席身份"
+        base["usable"] = False
+    return base
+
+
+def seat_perm_report(families: list) -> dict:
+    """每族每臂的 24 排列覆盖（顶层字段 = 项目方要求的那四个）。"""
+    arms = []
+    for f in families:
+        cand, base = _arm_labels_for(f)
+        for arm, run in _family_runs_tagged(f):
+            lab = cand if arm in ("cand", "candidate", "gate-dir") else base
+            arms.append(_seat_perm_for_run(run, lab or arm, str(f.get("name") or "?")))
+    if not arms:
+        return {"schema": "seat-perm/1", "expected": 24, "min_fraction": SEAT_MIN_FRACTION,
+                "coverages": [], "coverage": "0/24", "coverage_k": 0, "counts": {},
+                "min": 0, "max": 0, "available": False, "usable": False,
+                "reason": "没有可核的采集（seat_perm=null）⇒ 座次覆盖不可证"}
+    kmin = min(int(a.get("coverage_k") or 0) for a in arms)
+    mn = min(int(a.get("min") or 0) for a in arms)
+    mx = max(int(a.get("max") or 0) for a in arms)
+    avail = any(bool(a.get("available")) for a in arms)
+    usable = all(bool(a.get("usable")) for a in arms)
+    bad = [a for a in arms if not a.get("usable")]
+    return {"schema": "seat-perm/1", "expected": 24, "min_fraction": SEAT_MIN_FRACTION,
+            "min_count_rule": "max(1, floor(n_games/24 × 0.8))",
+            "coverage": f"{kmin}/24", "coverage_k": kmin,
+            "counts": {f"{a['family']}/{a['arm']}": a.get("counts") for a in arms},
+            "min": mn, "max": mx, "arms": arms, "available": avail, "usable": usable,
+            "reason": ("每族每臂均 24/24 且每种场次达标"
+                       if usable else "；".join(f"{a['family']}/{a['arm']}：{a.get('reason')}"
+                                              for a in bad))}
+
+
+def arm_isolation_report(families: list) -> dict:
+    """硬前置 ①：candidate 与 baseline **绝不同桌**（同一场里只能有一个被测臂）。"""
+    rows = []
+    for f in families:
+        cand, base = _arm_labels_for(f)
+        co = n = 0
+        no_id = 0
+        for _arm, run in _family_runs_tagged(f):
+            for g in run.per_game or []:
+                n += 1
+                pols = [str(x) for x in (g.get("policies") or [])]
+                if not pols:
+                    no_id += 1
+                    continue
+                if cand and base and cand in pols and base in pols:
+                    co += 1
+        ok = bool(cand and base and n > 0 and no_id == 0 and co == 0)
+        rows.append({"family": str(f.get("name") or "?"), "candidate": cand, "baseline": base,
+                     "n_games": n, "cooccur": co, "no_identity": no_id, "ok": ok,
+                     "reason": ("candidate 与 baseline 从未同桌" if ok else
+                                (f"{co}/{n} 场 candidate 与 baseline 同桌" if co else
+                                 ("四席身份不可证" if no_id else "臂标签缺失")))})
+    ok = bool(rows) and all(r["ok"] for r in rows)
+    return {"schema": "arm-isolation/1", "families": rows, "ok": ok,
+            "reason": ("candidate 与 baseline 从未同桌" if ok else
+                       "；".join(r["reason"] for r in rows if not r["ok"]))}
+
+
+def _load_opponent_pin(pin_path: str) -> tuple[dict | None, str]:
+    if not pin_path:
+        return None, "未提供 --opponent-pin（对手冻结与 sha256 白名单不可证）"
+    p = Path(str(pin_path))
+    if not p.is_file():
+        return None, f"pin 文件不存在：{p}"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return None, f"pin 文件读不了：{type(e).__name__}: {e}"
+    if d.get("schema") != "opponent-pin/1":
+        return None, f"pin schema={d.get('schema')!r} ≠ opponent-pin/1"
+    if d.get("frozen") is not True:
+        return None, "pin 未声明 `frozen: true`"
+    allowed = d.get("allowed")
+    if not isinstance(allowed, dict) or not allowed:
+        return None, "pin 的 `allowed` 为空/不是对象"
+    norm = {}
+    for sha, entry in allowed.items():
+        s = str(sha).strip().lower()
+        if len(s) != 64 or any(c not in "0123456789abcdef" for c in s):
+            return None, f"pin 里不是 sha256：{sha!r}"
+        norm[s] = dict(entry or {})
+    return {"path": str(p), "frozen": True, "frozen_at": d.get("frozen_at"),
+            "allowed": norm, "note": d.get("note")}, ""
+
+
+def opponent_pool_report(families: list, pin_path: str) -> dict:
+    """硬前置 ②：对手池**冻结 + sha256 白名单 + 非本族/本产品线**。
+
+    · `whitelisted`：对手 sha256 必须逐字出现在 `--opponent-pin` 的 `allowed` 里；
+    · `same_branch`：对手 sha 等于任一被测臂，或对手 `line`（pin 优先，否则路径启发式）
+      等于被测臂的 `line` ⇒ 拒跑（"同支模型混入对手池"）；
+    · 没有 pin / pin 未 frozen / 有一项不在白名单 ⇒ `ok=false`（fail-closed）。
+    """
+    pin, why = _load_opponent_pin(pin_path)
+    arm_paths = set()
+    arm_shas = set()
+    armlines = set()
+    opp_labels: dict[str, str] = {}
+    for f in families:
+        cand, base = _arm_labels_for(f)
+        for lab in (cand, base):
+            p = _net_path(lab)
+            if p:
+                arm_paths.add(str(Path(p)))
+                if Path(p).is_file():
+                    arm_shas.add(_sha256(p))
+                armlines.add(_policy_line(p))
+        for _arm, run in _family_runs_tagged(f):
+            for g in run.per_game or []:
+                for lab in (g.get("policies") or []):
+                    lab = str(lab)
+                    if lab and lab not in (cand, base):
+                        opp_labels.setdefault(lab, _net_path(lab))
+    opps = []
+    for lab, p in sorted(opp_labels.items()):
+        sha = _sha256(p) if (p and Path(p).is_file()) else None
+        entry = (pin or {}).get("allowed", {}).get(sha or "", {})
+        line = str(entry.get("line") or _policy_line(p or lab))
+        whitelisted = bool(sha and pin and sha in pin["allowed"])
+        same_branch = bool((sha and sha in arm_shas)
+                           or (line and line in armlines)
+                           or (p and str(Path(p).parent) in {str(Path(x).parent) for x in arm_paths}))
+        opps.append({"label": lab, "path": p, "sha256": sha, "line": line,
+                     "name": entry.get("name") or (Path(p).parent.name if p else lab),
+                     "whitelisted": whitelisted, "same_branch": same_branch})
+    ok = bool(pin and pin.get("frozen") and opps
+              and all(o["whitelisted"] for o in opps)
+              and not any(o["same_branch"] for o in opps))
+    reasons = []
+    if why:
+        reasons.append(why)
+    if not opps:
+        reasons.append("没有解析出对手权重（对手池为空）")
+    for o in opps:
+        if not o["whitelisted"]:
+            reasons.append(f"对手不在白名单：{o['name']} sha={str(o['sha256'])[:12]}…")
+        if o["same_branch"]:
+            reasons.append(f"对手属本族/本产品线：{o['name']} line={o['line']}")
+    return {"schema": "opponent-pin-check/1", "pin": (pin or {}).get("path"),
+            "frozen": bool(pin and pin.get("frozen")), "frozen_at": (pin or {}).get("frozen_at"),
+            "whitelist_size": len((pin or {}).get("allowed") or {}),
+            "arm_shas": sorted(arm_shas), "arm_lines": sorted(armlines),
+            "opponents": opps, "ok": ok,
+            "reason": ("对手池已冻结、全部 sha256 在白名单、且无同支模型"
+                       if ok else "；".join(reasons) or "对手池不可证")}
+
+
+def _mean(xs: list) -> float | None:
+    return float(sum(xs)) / len(xs) if xs else None
+
+
+def _arm_guard_values(run, label: str) -> dict:
+    """一条采集里某臂的护栏原料。`summary.json` 没有的字段**明确记 null**。"""
+    bp = (run.by_policy or {}).get(label) or {}
+    hands = sum(int(g.get("hands") or 0) for g in run.per_game or [])
+    wins = deals = win_points = 0.0
+    for g in run.per_game or []:
+        pols = g.get("policies") or []
+        for i, lab in enumerate(pols):
+            if str(lab) != label:
+                continue
+            wins += float((g.get("wins") or [0] * 4)[i])
+            deals += float((g.get("deals") or [0] * 4)[i])
+            win_points += float((g.get("win_points") or [0] * 4)[i])
+    deal_in = bp.get("deal_in_rate")
+    if deal_in is None and hands:
+        deal_in = deals / hands
+    avg_val = bp.get("avg_win_score")
+    if avg_val is None and wins:
+        avg_val = win_points / wins
+    return {"self_win_rate": bp.get("self_win_rate"),          # summary 无 tsumo 计数
+            "deal_in_rate": float(deal_in) if deal_in is not None else None,
+            "meld_rate": bp.get("meld_rate"),                  # summary 无副露计数
+            "avg_hand_value": float(avg_val) if avg_val is not None else None}
+
+
+def measurement_guards(families: list) -> dict:
+    """护栏指标（**必须进 verdict.json**）：缺字段记 null + available:false + 警告。"""
+    rows = []
+    for f in families:
+        cand, base = _arm_labels_for(f)
+        runs = _family_runs_tagged(f)
+        c_run = next((r for a, r in runs if a == "cand"), runs[-1][1] if runs else None)
+        b_run = next((r for a, r in runs if a == "base"), runs[-1][1] if runs else None)
+        rows.append({"family": str(f.get("name") or "?"),
+                     "candidate": _arm_guard_values(c_run, cand) if c_run and cand else {},
+                     "baseline": _arm_guard_values(b_run, base) if b_run and base else {}})
+    def agg(key, arm="candidate"):
+        vals = [r[arm].get(key) for r in rows if r.get(arm)]
+        vals = [float(v) for v in vals if v is not None]
+        return _mean(vals)
+    out = {"schema": "measurement-guards/1", "families": rows,
+           "candidate": {"self_win_rate": agg("self_win_rate"),
+                         "deal_in_rate": agg("deal_in_rate"),
+                         "meld_rate": agg("meld_rate"),
+                         "avg_hand_value": agg("avg_hand_value")},
+           "baseline": {"self_win_rate": agg("self_win_rate", "baseline"),
+                        "deal_in_rate": agg("deal_in_rate", "baseline"),
+                        "meld_rate": agg("meld_rate", "baseline"),
+                        "avg_hand_value": agg("avg_hand_value", "baseline")},
+           "available": {"self_win_rate": False, "deal_in_rate": True,
+                         "meld_rate": False, "avg_hand_value": True},
+           "notes": []}
+    if out["candidate"]["self_win_rate"] is None:
+        notes = out["notes"]
+        notes.append("self_win_rate 取不到：trainer summary.json 只记 wins（荣和+自摸合计数），"
+                     "无 tsumo 计数 ⇒ 记 null（⛔ 不拿 wins/hands 冒充自摸率）")
+    if out["candidate"]["meld_rate"] is None:
+        out["notes"].append("meld_rate 取不到：summary.json 无副露计数 ⇒ 记 null（不重采；"
+                            "要该轴须在新采集摘要里加字段）")
+    if out["candidate"]["deal_in_rate"] is not None:
+        out["notes"].append("deal_in_rate / avg_hand_value 取自 by_policy 的 deal_in_rate / "
+                            "avg_win_score（与 per_game 逐项对账）；avg_hand_value 含本场棒/供託")
+    return out
+
+
+def _adj_ratio(a: float | None, b: float | None) -> float | None:
+    if a is None or b is None or not math.isfinite(a) or not math.isfinite(b) or b <= 0:
+        return None
+    return a / b
+
+
+def _adj_row(run, label: str, family: str) -> dict:
+    """同支邻家 vs 非同支邻家的候选读数（顺位点 + 和了次数）。
+
+    `same` = 候选的**任一邻家**（`i±1 mod 4`）与其同一支线（`_policy_line`）。
+    判据：`adv_same ≤ 1.2 × adv_other`；`adv_other ≤ 0` 时比值无意义 ⇒ 只要
+    `adv_same > adv_other` 就判嫌疑（fail-closed，不给"负数比值"钻空子）。
+    """
+    line = _policy_line(_net_path(label) or label)
+    y_s, y_o, w_s, w_o = [], [], [], []
+    for g in run.per_game or []:
+        pols = [str(x) for x in (g.get("policies") or [])]
+        if len(pols) != 4:
+            continue
+        for i, lab in enumerate(pols):
+            if lab != label:
+                continue
+            nb = [pols[(i - 1) % 4], pols[(i + 1) % 4]]
+            same = any(_policy_line(_net_path(x) or x) == line for x in nb)
+            (y_s if same else y_o).append(float((g.get("rank_points") or [0] * 4)[i]))
+            (w_s if same else w_o).append(float((g.get("wins") or [0] * 4)[i]))
+    adv_s, adv_o = _mean(y_s), _mean(y_o)
+    win_s, win_o = _mean(w_s), _mean(w_o)
+    r_rank = _adj_ratio(adv_s, adv_o)
+    r_win = _adj_ratio(win_s, win_o)
+    suspect_rank = bool((r_rank is not None and r_rank > ADJ_RATIO_MAX)
+                        or (r_rank is None and adv_s is not None and adv_o is not None
+                            and adv_s > adv_o))
+    suspect_win = bool((r_win is not None and r_win > ADJ_RATIO_MAX)
+                       or (r_win is None and win_s is not None and win_o is not None
+                           and win_s > win_o))
+    available = bool(y_s) and bool(y_o)
+    vacuous = bool(y_o) and not y_s
+    ok = bool((not suspect_rank and not suspect_win) and (available or vacuous))
+    if vacuous:
+        why = ("桌上没有同支邻家（对手池全行外）⇒ 无可测的同支邻家优势；"
+               "由 opponent_pool.same_branch=false 保证")
+    elif not y_o:
+        why = "所有场次都有同支邻家 ⇒ 无非同支对照，无法证明 ≤1.2×"
+    elif suspect_rank or suspect_win:
+        why = (f"**共轭嫌疑**：同支邻家顺位优势 {adv_s:+.3f} vs 非同支 {adv_o:+.3f}"
+               f"（ratio={r_rank if r_rank is None else round(r_rank, 3)}，上限 {ADJ_RATIO_MAX}×）"
+               if suspect_rank else
+               f"**共轭嫌疑**：同支邻家胜率 {win_s:.3f} vs 非同支 {win_o:.3f}"
+               f"（ratio={r_win if r_win is None else round(r_win, 3)}，上限 {ADJ_RATIO_MAX}×）")
+    else:
+        why = (f"同支邻家顺位优势 {adv_s:+.3f} vs 非同支 {adv_o:+.3f}"
+               f"（ratio={r_rank if r_rank is None else round(r_rank, 3)} ≤ {ADJ_RATIO_MAX}×）")
+    return {"family": family, "arm": label, "line": line,
+            "n_same": len(y_s), "n_other": len(y_o),
+            "adv_same": adv_s, "adv_other": adv_o, "rank_ratio": r_rank,
+            "win_same": win_s, "win_other": win_o, "win_ratio": r_win,
+            "available": available, "vacuous": vacuous,
+            "suspect": bool(suspect_rank or suspect_win), "ok": ok, "reason": why}
+
+
+def adjacency_conditional(families: list) -> dict:
+    """`adjacency_conditional`：按"邻家是否同支"分组的候选顺位点/胜率差。"""
+    rows = []
+    for f in families:
+        cand, _base = _arm_labels_for(f)
+        runs = _family_runs_tagged(f)
+        c_run = next((r for a, r in runs if a == "cand"), runs[-1][1] if runs else None)
+        if c_run is not None and cand:
+            rows.append(_adj_row(c_run, cand, str(f.get("name") or "?")))
+    ok = bool(rows) and all(r["ok"] for r in rows)
+    avail = any(r["available"] for r in rows)
+    ratios = [r["rank_ratio"] for r in rows if r["rank_ratio"] is not None]
+    return {"schema": "adjacency-conditional/1",
+            "criterion": f"同支邻家顺位优势 ≤ 非同支邻家 {ADJ_RATIO_MAX}×"
+                         f"（胜率同样 ≤{ADJ_RATIO_MAX}×）",
+            "families": rows, "available": avail,
+            "suspect": any(r["suspect"] for r in rows),
+            "max_rank_ratio": (max(ratios) if ratios else None),
+            "ok": ok,
+            "reason": ("；".join(r["reason"] for r in rows if not r["ok"])
+                       if not ok else
+                       ("桌上无同支邻家（行外池）⇒ 本轴为空但由对手池检查兜底"
+                        if not avail else "同支邻家优势未超 1.2×"))}
+
+
+def measurement_validity(res: dict) -> dict:
+    """四条硬前置的合取（fail-closed）。`judge` 只认 `ok=true`。"""
+    reasons = []
+    sp = res.get("seat_perm")
+    if not sp:
+        reasons.append("座次覆盖取不到（seat_perm=null）⇒ 座次覆盖不可证")
+    elif not sp.get("usable"):
+        reasons.append("座次覆盖不达标/不可证：" + str(sp.get("reason") or sp.get("coverage")))
+    ai = res.get("arm_isolation")
+    if not ai or not ai.get("ok"):
+        reasons.append("candidate/baseline 同桌检查未过：" + str((ai or {}).get("reason") or "取不到"))
+    op = res.get("opponent_pool")
+    if not op or not op.get("ok"):
+        reasons.append("对手池冻结/白名单/非本族检查未过：" + str((op or {}).get("reason") or "取不到"))
+    adj = res.get("adjacency_conditional")
+    if not adj or not adj.get("ok"):
+        reasons.append("共轭（同支邻家）检查未过：" + str((adj or {}).get("reason") or "取不到"))
+    return {"schema": "measurement-validity/1", "ok": not reasons,
+            "checks": {"seat_perm": bool(sp and sp.get("usable")),
+                       "arm_isolation": bool(ai and ai.get("ok")),
+                       "opponent_pool": bool(op and op.get("ok")),
+                       "adjacency_conditional": bool(adj and adj.get("ok"))},
+            "reasons": reasons}
+
+
+# ---------------------------------------------------------------------------
 # 核心判定
 # ---------------------------------------------------------------------------
 def eval_from_series_per_family(families: list, metric: str, guards: list, args) -> dict:
@@ -840,6 +1309,11 @@ def judge(res: dict, args, elapsed: float, *, no_training: bool, quiet_ok: bool,
     reasons: list = []
     if res.get("errors"):
         return "ERROR", list(res["errors"]), 2
+    #: ⭐ 测量有效性硬前置：**先于任何统计判据**（座次/共轭/对手池不过 ⇒ 读数不作数）。
+    mv = res.get("measurement_validity")
+    if not mv or not mv.get("ok"):
+        rs = list((mv or {}).get("reasons") or ["测量有效性判据取不到"])
+        return "ERROR", [f"[测量有效性] {r}" for r in rs], EXIT_MEASUREMENT_VALIDITY
     if not no_training:
         return "ERROR", ["零训练进程取不到证（进程扫描失败，或真的命中训练特征）"], 2
     if not crosscheck_ok:
@@ -1189,7 +1663,8 @@ def build_collect_specs(args) -> list:
 def _synth_run(d: Path, seeds: list, delta: float, *, student_net: str, opp_nets: list,
                rng, sd_w: float = 50.0, sd_n: float = 3.0, deal_bias: float = 0.0,
                w_list: list = None, zero_sum: bool = False, redistribute: bool = False,
-               seat_offset: float = 0.0, sum_jitter: float = 0.0) -> None:
+               seat_offset: float = 0.0, sum_jitter: float = 0.0,
+               perm_mode: str = "perm24", boost_same: float = 0.0) -> None:
     """造一份 `summary.json`（**学生席口径**的形状：学生串带 `@`，三席对手同序）。
 
     `per_game[]` 必须带 `rank_points` / `wins` / `deals` / `win_points`（`eval.seat_values` 要它们）；
@@ -1198,11 +1673,17 @@ def _synth_run(d: Path, seeds: list, delta: float, *, student_net: str, opp_nets
     ⛔ 别让两条采集各自抽一份（那样"配对"就退化成两个独立样本了）。
     ⚠ `redistribute`：把学生席的位移**全部**记到 1 号对手头上（`[x,−x,0,0]` ⇒ 每场恒和 0，
     且"安慰剂 Δ ≡ −主口径 Δ"）—— 复现审计 §1-5 的结构性失效；`sum_jitter` 只给 2 号席加逐场噪声
-    （四席求和不再是常数 ⇒ **非结构性加和**，用来证明新口径只在结构性加和时降级、否则判决照旧）。
+    （四席求和不再是常数 ⇒ **非结构性求和**，用来证明新口径只在结构性加和时降级、否则判决照旧）。
+    ⚠ `perm_mode`：`perm24` = 按场号枚举 24 全排列（正向）；`cycle4` = 只循环移位 4 种
+    （**负向夹具**：座次覆盖必须被判不足）；`fixed` = 固定 `[学生, 对手…]`。
+    ⚠ `boost_same`：当学生席的**同支邻家**（`_policy_line` 相同）时给该席 rank_points 加这个量，
+    用来造"同支邻家优势 2×"的负向夹具。
     """
     d.mkdir(parents=True, exist_ok=True)
     stu = f"net:{student_net}@0#0.5"
     ops = [f"net:{t}" for t in opp_nets]
+    roster = [stu] + ops
+    stu_line = _policy_line(_net_path(stu) or stu)
     pg = []
     for i, s in enumerate(seeds):
         w = float(w_list[i]) if w_list is not None else float(rng.normal(0, sd_w))
@@ -1223,9 +1704,28 @@ def _synth_run(d: Path, seeds: list, delta: float, *, student_net: str, opp_nets
         #: 学生席刻意多加放铳 ⇒ 用来造一条"真越界"的护栏（`deals` 取负 ⇒ Δ = −bias）
         deals = [float(rng.integers(0, 2)) + deal_bias] + [float(rng.integers(0, 2))
                                                            for _ in ops]
-        pg.append({"game": i, "seed": int(s), "policies": [stu] + ops,
-                   "rank_points": rp, "wins": wins, "deals": deals,
-                   "win_points": [1000.0 * x for x in wins],
+        if perm_mode == "perm24":
+            perm = SEAT_PERMS[i % 24]
+        elif perm_mode == "cycle4":
+            perm = tuple((j + i) % 4 for j in range(4))
+        elif perm_mode == "fixed":
+            perm = (0, 1, 2, 3)
+        else:
+            raise ValueError(f"未知 perm_mode={perm_mode!r}")
+        #: 先把"按名单（学生在前）"的值算好，再按座位排列铺到四个座位上。
+        pols = [roster[perm[j]] for j in range(4)]
+        rp_seat = [rp[perm[j]] for j in range(4)]
+        wins_seat = [wins[perm[j]] for j in range(4)]
+        deals_seat = [deals[perm[j]] for j in range(4)]
+        wp_seat = [1000.0 * wins[perm[j]] for j in range(4)]
+        if boost_same:
+            si = pols.index(stu)
+            nb = [pols[(si - 1) % 4], pols[(si + 1) % 4]]
+            if any(_policy_line(_net_path(x) or x) == stu_line for x in nb):
+                rp_seat[si] += float(boost_same)
+        pg.append({"game": i, "seed": int(s), "policies": pols,
+                   "rank_points": rp_seat, "wins": wins_seat, "deals": deals_seat,
+                   "win_points": wp_seat,
                    "placement": [1, 2, 3, 4], "final_scores": [25000.0] * 4, "hands": 10})
     (d / "summary.json").write_text(json.dumps(
         {"games": len(pg), "hands": 10 * len(pg), "seed_base": seeds[0], "workers": 1,
@@ -1275,14 +1775,33 @@ def selftest() -> int:
     _say("== ceiling-gate 自检（离线：造数据 + 负向必红；⛔ 不采集、不训练、不出网）==")
     tmp = Path(tempfile.mkdtemp(prefix="ceiling-gate-selftest-"))
     rng = np.random.default_rng(20261013)
-    net_b, net_c = tmp / "base.bin", tmp / "cand.bin"
+    arms = tmp / "arms"
+    net_b = arms / "mv1-s24-BASE" / "net.bin"
+    net_c = arms / "mv1-s24-AUX03" / "net.bin"
+    net_b.parent.mkdir(parents=True, exist_ok=True)
+    net_c.parent.mkdir(parents=True, exist_ok=True)
     net_b.write_bytes(b"base")
     net_c.write_bytes(b"cand")
     opp = []
-    for k in range(3):
-        p = tmp / f"opp{k}.bin"
+    for k, name in enumerate(("v4-expert-def7-g10", "v4-expert-win2-g10",
+                              "v4-expert-atk3-g10")):
+        p = tmp / "opp" / name / "net.bin"
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(f"opp{k}".encode())
         opp.append(str(p))
+
+    def _write_pin(path: Path, paths: list) -> None:
+        allowed = {_sha256(p): {"name": Path(p).parent.name, "line": _policy_line(p)}
+                   for p in paths}
+        path.write_text(json.dumps({"schema": "opponent-pin/1", "frozen": True,
+                                    "frozen_at": "selftest", "allowed": allowed},
+                                   ensure_ascii=False), encoding="utf-8")
+
+    pin = tmp / "opponent-pin.json"
+    _write_pin(pin, opp)
+    #: 负向夹具用：把基线的权重也塞进对手池（与候选同一支 `mv1-s24`）。
+    pin_same = tmp / "opponent-pin-same.json"
+    _write_pin(pin_same, opp + [str(net_b)])
 
     class A:                                  # 判据函数要的 args 子集
         pass
@@ -1292,20 +1811,22 @@ def selftest() -> int:
     a.guards = [("deals", 0.10), ("wins", 0.10)]
     a.legacy_placebo = False
 
-    def mk(prefix, delta, n_games, sd_n=3.0, deal_bias=0.0, student=None, **kw):
+    def mk(prefix, delta, n_games, sd_n=3.0, deal_bias=0.0, student=None,
+           opp_nets=None, perm_mode="perm24", cand_boost=0.0, w_sd=50.0, **kw):
         seeds = [int(x) for x in rng.integers(1 << 40, 1 << 60, n_games)]
         #: ★ 两条采集共用同一份"牌山运气" w（真配对的前提）
-        w_list = [float(rng.normal(0, 50.0)) for _ in range(n_games)]
+        w_list = [float(rng.normal(0, w_sd)) for _ in range(n_games)]
         b = tmp / f"{prefix}-base"
         c = tmp / f"{prefix}-cand"
-        _synth_run(b, seeds, 0.0, student_net=str(net_b), opp_nets=opp, rng=rng,
-                   sd_n=sd_n, w_list=w_list, **kw)
-        _synth_run(c, seeds, delta, student_net=str(student or net_c), opp_nets=opp, rng=rng,
-                   sd_n=sd_n, deal_bias=deal_bias, w_list=w_list, **kw)
+        _synth_run(b, seeds, 0.0, student_net=str(net_b), opp_nets=opp_nets or opp, rng=rng,
+                   sd_n=sd_n, w_list=w_list, perm_mode=perm_mode, **kw)
+        _synth_run(c, seeds, delta, student_net=str(student or net_c), opp_nets=opp_nets or opp,
+                   rng=rng, sd_n=sd_n, deal_bias=deal_bias, w_list=w_list,
+                   perm_mode=perm_mode, boost_same=cand_boost, **kw)
         return f"{prefix}={b};{c}"
 
     def run_case(specs, metric="rank_points", guards=(("deals", 0.10), ("wins", 0.10)),
-                 legacy=False):
+                 legacy=False, pin_override=None):
         pr = Probes()
         fam, _meta = _read_family_specs(list(specs), metric, list(guards), pr)
         a.guards = list(guards)
@@ -1322,6 +1843,12 @@ def selftest() -> int:
                                  "trimmed": trimmed_deltas(dz, base)}
         res["wall_clock_ok"] = True
         res["errors"] = []
+        res["seat_perm"] = seat_perm_report(fam)
+        res["arm_isolation"] = arm_isolation_report(fam)
+        res["opponent_pool"] = opponent_pool_report(fam, str(pin_override or pin))
+        res["measurement_guards"] = measurement_guards(fam)
+        res["adjacency_conditional"] = adjacency_conditional(fam)
+        res["measurement_validity"] = measurement_validity(res)
         return pr, res, fam
 
     # ① 正向：真 Δ=+3、两族 ⇒ 主口径读回、MDE 有限、判「过」
@@ -1496,12 +2023,12 @@ def selftest() -> int:
         seeds = [int(x) for x in rng.integers(1 << 40, 1 << 60, 400)]
         _synth_gate_run(gd, seeds, 2.0, arm_a=str(net_c), arm_b=str(net_b), rng=rng)
     pr10 = Probes()
-    fam10, meta10 = _read_gate_families(tag, "base.bin", "cand.bin", "rank_points",
+    fam10, meta10 = _read_gate_families(tag, "mv1-s24-BASE", "mv1-s24-AUX03", "rank_points",
                                        [("deals", 0.10)], pr10)
     say(len(fam10) == 2, "⑩-a `--gate-dir` 逐族读通（零采集复算路径）", f"{len(fam10)} 族")
     runs10 = [ml_eval.load_run(g) for g in g_dirs]
-    lc = ml_eval.resolve_label(runs10[0], "cand.bin")
-    lb = ml_eval.resolve_label(runs10[0], "base.bin")
+    lc = ml_eval.resolve_label(runs10[0], "mv1-s24-AUX03")
+    lb = ml_eval.resolve_label(runs10[0], "mv1-s24-BASE")
     _, per_run = ml_eval.pool_diffs(runs10, lc, lb, "rank_points")
     #: 族级行（本工具）vs `eval.pool_diffs` 的行（既有、另一条拼装路径）
     rows = [_paired_from_series(f["name"], f["a"], f["b"], "rank_points") for f in fam10]
@@ -1543,6 +2070,69 @@ def selftest() -> int:
     say(mr_fam["identified"] is True and math.isfinite(mr_fam["rho"]),
         "⑭ 学生席口径（同座位、同牌山、只换权重）⇒ ρ 可识别",
         f"ρ={mr_fam['rho']:+.3f} n={mr_fam['n']}")
+    # ⑲ ★ 负向：只给 4 种循环移位（`--rotate` 旧口径）⇒ 座次覆盖必须判不足、拒判
+    specs_cyc = [mk("cyc0", 3.0, 240, perm_mode="cycle4"),
+                 mk("cyc1", 3.0, 240, perm_mode="cycle4")]
+    prcy, rescy, famcy = run_case(specs_cyc)
+    say(rescy["seat_perm"]["coverage"] == "4/24" and not rescy["seat_perm"]["usable"],
+        "⑲-a 只 4 种循环移位 ⇒ 座次覆盖 4/24、usable=false",
+        f"coverage={rescy['seat_perm']['coverage']} reason={rescy['seat_perm']['reason']}")
+    vcy, whycy, ccy = judge(rescy, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
+    say(vcy == "ERROR" and ccy == EXIT_MEASUREMENT_VALIDITY
+        and any("座次" in w for w in whycy),
+        "⑲-b 覆盖不足 ⇒ fail-closed 拒判（退出码 5，不是 0/3/4）",
+        f"verdict={vcy} exit={ccy} why={whycy[:1]}")
+    # ⑳ ★ 负向：同支邻家优势 2× ⇒ 必须判"共轭嫌疑"
+    specs_sb = [mk("sb0", 2.0, 1200, opp_nets=[str(net_b)] + opp[1:], cand_boost=2.0,
+                   w_sd=1.0)]
+    prsb, ressb, famsb = run_case(specs_sb, pin_override=pin_same)
+    adj = ressb["adjacency_conditional"]
+    say(adj["suspect"] is True and (adj["max_rank_ratio"] or 0) > 1.8,
+        "⑳-a 同支邻家顺位优势 ≈2× ⇒ adjacency_conditional 判共轭嫌疑",
+        f"ratio={adj['max_rank_ratio']} adv_same={adj['families'][0]['adv_same']:+.3f} "
+        f"adv_other={adj['families'][0]['adv_other']:+.3f}")
+    vsb, whysb, csb = judge(ressb, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
+    say(vsb == "ERROR" and csb == EXIT_MEASUREMENT_VALIDITY
+        and any(("共轭" in w) or ("邻家" in w) for w in whysb),
+        "⑳-b 共轭嫌疑 ⇒ fail-closed 拒判（退出码 5）",
+        f"verdict={vsb} exit={csb} why={whysb[:1]}")
+    # ㉑ 既有 `--gate-dir` 的 `a,a,b,b` 2+2 对开：最多 6 种排列、且两臂同桌 ⇒ 新判据下拒判
+    spg = seat_perm_report(fam10)
+    aig = arm_isolation_report(fam10)
+    say(spg["coverage"] != "24/24" and not spg["usable"]
+        and aig["families"][0]["cooccur"] > 0 and not aig["ok"],
+        "㉑ `a,a,b,b` 2+2 对开（历次 gate-dir）⇒ 排列天花板 6、candidate 与 baseline 同桌 ⇒ 拒判",
+        f"coverage={spg['coverage']} cooccur={aig['families'][0]['cooccur']}"
+        f"/{aig['families'][0]['n_games']}")
+    resg = dict(res10)
+    resg.update({"seat_perm": spg, "arm_isolation": aig,
+                 "opponent_pool": opponent_pool_report(fam10, str(pin)),
+                 "measurement_guards": measurement_guards(fam10),
+                 "adjacency_conditional": adjacency_conditional(fam10)})
+    resg["measurement_validity"] = measurement_validity(resg)
+    vg, whg, cg = judge(resg, a, 60.0, no_training=True, quiet_ok=True, crosscheck_ok=True)
+    say(vg == "ERROR" and cg == EXIT_MEASUREMENT_VALIDITY,
+        "㉑-b 该形状 ⇒ 退出码 5（⛔ 不许把历史 2+2 读数直接当 24 排列读数）",
+        f"verdict={vg} exit={cg}")
+    # ㉒ ★ 向后兼容：旧证据没有四席身份 ⇒ seat_perm=null 语义 + 警告，⛔ 不许当成通过
+    old = tmp / "old-base"
+    _synth_run(old, [123456789], 0.0, student_net=str(net_b), opp_nets=opp, rng=rng)
+    oj = json.loads((old / "summary.json").read_text(encoding="utf-8"))
+    for g in oj["per_game"]:
+        g.pop("policies", None)
+    (old / "summary.json").write_text(json.dumps(oj, ensure_ascii=False), encoding="utf-8")
+    sp_old = _seat_perm_for_run(ml_eval.load_run(old), "x", "old")
+    sp_rep = seat_perm_report([{"name": "old", "_base_run": ml_eval.load_run(old),
+                                "policies": {"base": "b", "cand": "c"}}])
+    say(sp_old["available"] is False and sp_old["usable"] is False
+        and "不可证" in sp_old["reason"] and sp_rep["available"] is False,
+        "㉒ 旧证据无四席身份 ⇒ seat_perm 不可证 + usable=false（⛔ 不当通过）",
+        sp_old["reason"])
+    # ㉓ 硬前置②：没有对手池 pin ⇒ 不能只凭"我没看到同支"就放行
+    op_nopin = opponent_pool_report(fam_f, "")
+    say(op_nopin["ok"] is False and "未提供" in op_nopin["reason"],
+        "㉓ 未提供 `--opponent-pin` ⇒ 对手冻结/白名单不可证（fail-closed）",
+        op_nopin["reason"])
     # ⑫ 结构性自证：本文件的子进程只有**两处**（进程扫描 / 采集执行），且采集只拼 `style-vector.py`
     import ast
     src = Path(__file__).read_text(encoding="utf-8")
@@ -1653,6 +2243,9 @@ def main(argv=None) -> int:
     ap.add_argument("--legacy-placebo", action="store_true",
                     help="回退旧安慰剂口径（零和主口径下也按 |placebo|≥|primary| 否决；"
                          "该开关下 placebo 字段与判决理由逐字节不变）")
+    ap.add_argument("--opponent-pin", default="",
+                    help="对手池冻结白名单（JSON：schema=opponent-pin/1、frozen=true、"
+                         "allowed={sha256:{name,line}}）；缺省 ⇒ 测量有效性 fail-closed（退出码 5）")
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -1748,6 +2341,19 @@ def main(argv=None) -> int:
     if miss_w:
         res["errors"].append(f"权重取不到：{miss_w}")
 
+    # ---- 测量有效性硬前置（先算，失败也照样落盘读数供复核）--------------------
+    if families:
+        sp = seat_perm_report(families)
+        #: ⛔ 向后兼容：旧证据没有四席身份 ⇒ **字面 null**（不是"看起来像通过"的空对象）
+        res["seat_perm"] = sp if sp.get("available") else None
+        if res["seat_perm"] is None:
+            res["seat_perm_note"] = sp.get("reason")
+        res["arm_isolation"] = arm_isolation_report(families)
+        res["opponent_pool"] = opponent_pool_report(families, args.opponent_pin)
+        res["measurement_guards"] = measurement_guards(families)
+        res["adjacency_conditional"] = adjacency_conditional(families)
+        res["measurement_validity"] = measurement_validity(res)
+
     # ---- 判定 -------------------------------------------------------------------
     if families and not res["errors"]:
         res.update(eval_from_series_per_family(families, args.metric, guards, args))
@@ -1808,6 +2414,13 @@ def main(argv=None) -> int:
                       "（跨族不自洽的不外推，AGENTS §6.5）",
             "零训练": "只有自对弈采集（`style-vector.py` → `trainer.exe selfplay`），"
                     "⛔ 无 PPO / 无 pretrain / 无 v4 loop",
+            "测量有效性": "项目方 2026-10-19 两条硬前置（fail-closed，退出码 5）："
+                        "① 每族每臂 24 排列覆盖 + 每种场次 ≥ max(1, floor(n/24×0.8))；"
+                        "② 共轭三条 = candidate≠baseline 同桌 / 对手池冻结+sha256 白名单+非本支 / "
+                        "同支邻家优势 ≤1.2×。旧证据无四席身份 ⇒ seat_perm=null + 警告，⛔ 不当通过。",
+            "护栏指标": "self_win_rate / deal_in_rate / meld_rate / avg_hand_value / "
+                      "adjacency_conditional 必须进本文件；summary.json 缺的字段记 null + "
+                      "available:false + warning（⛔ 不伪造）。",
         },
         "wall_clock_s": round(elapsed, 2),
         "wall_clock_budget_s": args.budget_min * 60.0,
@@ -1835,6 +2448,13 @@ def main(argv=None) -> int:
         "guards": res.get("guards"),
         "placebo": res.get("placebo"),
         "mean_reversion": res.get("mean_reversion"),
+        "seat_perm": res.get("seat_perm"),
+        "seat_perm_note": res.get("seat_perm_note"),
+        "arm_isolation": res.get("arm_isolation"),
+        "opponent_pool": res.get("opponent_pool"),
+        "measurement_guards": res.get("measurement_guards"),
+        "adjacency_conditional": res.get("adjacency_conditional"),
+        "measurement_validity": res.get("measurement_validity"),
         "crosscheck": res.get("crosscheck"),
         "reasons": reasons,
         "errors": res["errors"],
@@ -1860,3 +2480,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
