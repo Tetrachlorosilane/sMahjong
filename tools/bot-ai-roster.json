@@ -1,0 +1,56 @@
+{
+  "schema": "bot-ai-roster/1",
+  "updated_at": "2026-10-19",
+  "note": "`bot-ai/` 的**包清单/名册**（人读版 = docs/BOT-AI.md §9 + §9.1）。`tools/policy-gate-check.mjs --strict-current` 只对 status=current 的包判退化；status=retired = **除名**（退化、不得作为基线或现役），但**权重文件照旧保留**在 bot-ai/<包>/net.bin（不可复现产物，⛔ 不删）。`bot-ai/` 本身被 .gitignore，所以名册必须落在仓库里才有可复现的判据来源。",
+  "retired_policy": "除名 ≠ 删文件：权重与 net.json 原样保留（复现/取证用），只把包状态标为 retired；retired 包不得再被当作基线或现役，也不得进发布资产。",
+  "packages": {
+    "v4-bc-004": {
+      "status": "retired",
+      "retired_at": "2026-10-19",
+      "reason": "退化：`heads.policy_gate.weight` 与 bias 全 0、`fusion.mem.*` 整组缺失 ⇒ `belief_tenpai` 与 `h_evt` 都不在推理路径（退化为 `{policy}`）；不得作为基线或现役。",
+      "evidence": "node tools/policy-gate-check.mjs（2026-10-19 实测 max|w|=0 / bias max|b|=0 / fusion.mem 缺）"
+    },
+    "v4-league-g08": {
+      "status": "retired",
+      "retired_at": "2026-10-19",
+      "reason": "退化：`heads.policy_gate.weight` 与 bias 全 0、`fusion.mem.*` 整组缺失 ⇒ 退化为 `{policy}`；**撤销其「现任」称谓**，不得作为基线或现役。",
+      "evidence": "node tools/policy-gate-check.mjs（2026-10-19 实测 max|w|=0 / bias max|b|=0 / fusion.mem 缺）"
+    },
+    "v4-p3-001": {
+      "status": "retired",
+      "retired_at": "2026-10-19",
+      "reason": "退化：`heads.policy_gate.weight` 与 bias 全 0、`fusion.mem.*` 整组缺失 ⇒ 退化为 `{policy}`；不得作为基线或现役。",
+      "evidence": "node tools/policy-gate-check.mjs（2026-10-19 实测 max|w|=0 / bias max|b|=0 / fusion.mem 缺）"
+    },
+    "v4-ppo-001": {
+      "status": "retired",
+      "retired_at": "2026-10-19",
+      "reason": "退化：`heads.policy_gate.weight` 与 bias 全 0、`fusion.mem.*` 整组缺失 ⇒ 退化为 `{policy}`；不得作为基线或现役。",
+      "evidence": "node tools/policy-gate-check.mjs（2026-10-19 实测 max|w|=0 / bias max|b|=0 / fusion.mem 缺）"
+    },
+    "wl-dama": {
+      "status": "current",
+      "reason": "`policy_gate` 非退化（max|w|=0.0519），风格包；门控判据通过。"
+    },
+    "wl-meld": {
+      "status": "current",
+      "reason": "`policy_gate` 非退化（max|w|=0.0716），风格包；门控判据通过。"
+    },
+    "wl-p301b-g06": {
+      "status": "current",
+      "reason": "`policy_gate` 非退化（max|w|=0.0617），强度候选；门控判据通过。"
+    },
+    "wl-pon": {
+      "status": "current",
+      "reason": "`policy_gate` 非退化（max|w|=0.0509），风格包；门控判据通过。"
+    },
+    "wl-riichi": {
+      "status": "current",
+      "reason": "`policy_gate` 非退化（max|w|=0.0642），风格包；门控判据通过。"
+    },
+    "ppo-v3-g01-g01": {
+      "status": "current",
+      "reason": "v3 格式 1，`policy_gate` 这套判据不适用（⛔ 不是「已测在线」）。"
+    }
+  }
+}

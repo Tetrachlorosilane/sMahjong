@@ -2,7 +2,12 @@
   "schema": "opponent-pin/1",
   "frozen": true,
   "frozen_at": "2026-10-19",
+  "revision": 2,
   "note": "P1 对手池 = def7 / win2 / atk3-g10（`tools/build/v4-expert-*-g10/net.bin`）。sha256 由 `tools/ceiling-gate.py --opponent-pin` 逐字校验；任何不在本白名单里的对手、或与本族/本产品线同支的对手 ⇒ 测量有效性拒判（退出码 5）。",
+  "format3_mirrors": {
+    "why": "段 2 起 trainer.exe / Java 对 `net.bin` format 2 **硬切退役**（kV4FormatVersion=3），而 P1 的基线 `v4-expert-defrep-g10` 与三个对手池权重原本都是 format 2；`lab/mv1/frozen-format2/` 的冻结 jar/trainer 在本机不存在。⇒ 用旧读端 + 当前 `save_net(arch=v4)` 做**容器转换**（只加 2,048 B arch 段，张量逐位相同，82/82 断言），转换件落在 `.tmp/mv1-s35/nets/`。原 format 2 条目**保留**（可追溯），format 3 镜像另列，`converted_from` = 原文件 sha256。",
+    "verified": "四份转换件均 `tensors_equal=82/82`（python/mahjong_ml/v4/export 的 legacy read → save_net → read 回环）"
+  },
   "allowed": {
     "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796": {
       "name": "v4-expert-def7-g10",
@@ -18,6 +23,27 @@
       "name": "v4-expert-atk3-g10",
       "line": "v4-expert-atk3",
       "source": "tools/build/v4-expert-atk3-g10/net.bin"
+    },
+    "1080cf0016b238ada5e5495d36b0ffc3a02f0705b6b0f5b204078a49f886674c": {
+      "name": "v4-expert-def7-g10",
+      "line": "v4-expert-def7",
+      "source": ".tmp/mv1-s35/nets/v4-expert-def7-g10/net.bin",
+      "converted_from": "8349d0c0c7f5ee82dac812a37d101119df41e7ddad41559db0672b58fed30796",
+      "format": 3
+    },
+    "5f15a56f32d292a73258e9fe1fb1e833782b1fa3584e53711a22857a9d8e599d": {
+      "name": "v4-expert-win2-g10",
+      "line": "v4-expert-win2",
+      "source": ".tmp/mv1-s35/nets/v4-expert-win2-g10/net.bin",
+      "converted_from": "01f2eacde9bc47d9780fb8317b0a022874effd858746f119e1302b8af6de478f",
+      "format": 3
+    },
+    "6eaf1157d29434beae926a7c325145304a8c28edacb44595a2f8da7282c409ac": {
+      "name": "v4-expert-atk3-g10",
+      "line": "v4-expert-atk3",
+      "source": ".tmp/mv1-s35/nets/v4-expert-atk3-g10/net.bin",
+      "converted_from": "cac8381e0c61d3f7e750f11fce38d67400087cb408056148f3f01d75b440c482",
+      "format": 3
     }
   }
 }
