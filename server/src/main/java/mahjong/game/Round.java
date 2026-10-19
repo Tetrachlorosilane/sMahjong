@@ -798,6 +798,15 @@ public final class Round {
     }
 
     /**
+     * 供**训练侧特权 sidecar**：可摸牌山**剩余顺序**（隐藏信息，见 {@link Wall#liveRemaining()}）。
+     *
+     * <p>⛔ 不进 obs / `net.bin` / 推理；只有 `--priv` 采集时的记录器读它。
+     */
+    public int[] wallRemaining() {
+        return wall.liveRemaining();
+    }
+
+    /**
      * 最后一个「刚摸到牌」的座位（庄家开局第 14 张算他摸到的）——公开信息。
      *
      * <p>谁手里有 14 张是**看得见的**（张数），所以这不算泄密；它的用途是让

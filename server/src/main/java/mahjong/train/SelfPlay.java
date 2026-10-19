@@ -73,6 +73,13 @@ public final class SelfPlay {
          * <p>⚠ 它**不改轨迹**：同一颗种子开不开 `--aux`，`g*.jsonl` 必须逐字节相同。
          */
         public boolean aux;
+        /**
+         * 额外落**特权 sidecar** `g<n>.priv.npz`（MV-2 阶段 2；训练专用）。
+         *
+         * <p>逐决策 = 三家对手暗牌 · 牌山剩余顺序 · 里宝。⛔ 永不进 obs / `net.bin` / 推理；
+         * 只有 privileged critic 的离线训练脚本读它。
+         */
+        public boolean priv;
     }
 
     /** 单个策略的统计（按策略标签聚合，跨座位）。 */
@@ -343,7 +350,8 @@ public final class SelfPlay {
             t.addBot(i);
         }
         TraceRecorder rec = new TraceRecorder(g, seed, outDir, labels, rules.startScore,
-                c.sampleEvery, c.recordClaims, outDir != null, c.teacherLabel, c.aux);
+                c.sampleEvery, c.recordClaims, outDir != null, c.teacherLabel, c.aux,
+                c.priv);
         t.debugChoiceTap = rec::onChoice;
         t.debugEventTap = (recipient, ev) -> rec.onEvent(recipient, ev, t);
         t.playGame();

@@ -42,6 +42,8 @@ public final class Main {
         boolean selfplayTeacherLabel = false;
         // 标签侧文件（`g*.aux.npz`；训练专用，推理路径永不读它）
         boolean selfplayAux = false;
+        // 特权 sidecar（`g*.priv.npz`：对手暗牌 / 牌山剩余 / 里宝；训练专用，⛔ 不进 obs/推理）
+        boolean selfplayPriv = false;
         String preset = null;
         // ---- 训练接口（派生特征富化）：见 mahjong.train.TraceFeatures
         String featuresDir = null;
@@ -158,6 +160,11 @@ public final class Main {
                     // 对手手牌/听牌、放铳、和了、收支、顺位 —— ⚠ 不改轨迹本身
                     selfplayAux = true;
                     break;
+                case "--priv":
+                    // MV-2 阶段 2：特权 sidecar `g<n>.priv.npz`（对手暗牌 / 牌山剩余顺序 / 里宝）。
+                    // ⚠ 只在训练期用：⛔ 不进 obs、不进 net.bin、不进推理 —— 读侧只有 critic 训练脚本。
+                    selfplayPriv = true;
+                    break;
                 case "--hands":
                     if (i + 1 < args.length) {
                         selfplayHands = Integer.parseInt(args[++i]);
@@ -251,6 +258,7 @@ public final class Main {
             cfg.maxHands = selfplayHands;
             cfg.teacherLabel = selfplayTeacherLabel;
             cfg.aux = selfplayAux;
+            cfg.priv = selfplayPriv;
             cfg.preset = preset;
             Log.quiet = !Log.verbose;
             mahjong.train.SelfPlay.Summary sum;
@@ -368,6 +376,7 @@ public final class Main {
         System.out.println("  --preset <name>    规则预设：mleague|tenhou|majsoul|custom");
         System.out.println("  --teacher-label    DAgger：对学生座位额外记一次老师的动作（teacher/teacher_index）");
         System.out.println("  --aux              额外落**标签侧**文件（g*.aux.npz：对手手牌/听牌、放铳、和了、顺位；轨迹不动）");
+        System.out.println("  --priv             额外落**特权** sidecar（g*.priv.npz：对手暗牌/牌山剩余顺序/里宝；仅训练期，⛔ 不进 obs/推理）");
         System.out.println("  --features <dir>   给轨迹目录补**派生特征** sidecar（g*.feat.bin；轨迹本身不动）");
     }
 }

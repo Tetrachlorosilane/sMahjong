@@ -12,6 +12,7 @@ import mahjong.ai.Action;
 import mahjong.ai.Decision;
 import mahjong.ai.ObsFeatures;
 import mahjong.bot.Bot;
+import mahjong.core.Tiles;
 import mahjong.game.Round;
 import mahjong.game.Table;
 import mahjong.rules.Agari;
@@ -58,6 +59,14 @@ final class TraceRecorder {
      * 必须**逐字节相同**（自检里钉着这条）—— 标签只许进另一个文件。
      */
     private final boolean aux;
+    /**
+     * {@code --priv}：再落一份**特权 sidecar** `g<n>.priv.npz`（MV-2 阶段 2；训练专用）。
+     *
+     * <p>逐决策记录**只有服务端内存里才有**的三类量：三家对手暗牌计数、**牌山剩余顺序**
+     * （未来摸牌）、**里宝指示牌**。⛔ 绝不进 obs / `net.bin` / 推理 —— 读侧只有
+     * privileged critic 的训练脚本。与 {@code --aux} 独立：开不开它都不改 `g*.jsonl`。
+     */
+    private final boolean priv;
 
     /** 决策行（待回填）。 */
     private final List<Map<String, Object>> decisions = new ArrayList<>();
@@ -71,6 +80,29 @@ final class TraceRecorder {
      * 落到**另一个文件**里（推理路径永不读它，`FEATURES-V4.md` §5.2 的硬闸门）。
      */
     private final List<AuxRow> auxRows = new ArrayList<>();
+
+    /** `--priv` 的逐决策特权行（与 {@link #decisions} 同序同长）。 */
+    private final List<PrivRow> privRows = new ArrayList<>();
+
+    /**
+     * 一条**特权**记录（训练期 privileged critic 的输入；推理永不读）。
+     *
+     * <p>只有这三类是"公开信息推不出来"的：①三家对手暗牌 ②牌山剩余顺序 ③里宝。
+     * 公开量（自家手牌 / 牌河 / 分数）一律不重复存 —— 它们已经能在轨迹与 compact 里拿到。
+     */
+    private static final class PrivRow {
+        /** 行键四件套（与 compact 的 `game/hand_no/step/seat` 同一套编号）。 */
+        int game;
+        int handNo;
+        int step;
+        int seat;
+        /** 三家对手暗牌计数（相对方位：0 = 下家），长度 3×34。 */
+        final int[] oppHand = new int[3 * 34];
+        /** 可摸牌山**剩余顺序**的前 {@link #PRIV_WALL_K} 张（牌种 0..33；不足补 255）。 */
+        final int[] wallNext = new int[PRIV_WALL_K];
+        /** 里宝指示牌（已翻开的张数 1..5；牌种；未翻开的槽 = 255）。 */
+        final int[] ura = new int[5];
+    }
 
     /** 一条标签侧记录（字段与 `FEATURES-V4.md` §5.2 的表一一对应）。 */
     private static final class AuxRow {
@@ -119,6 +151,13 @@ final class TraceRecorder {
     TraceRecorder(int gameIndex, long seed, Path dir, String[] labels, int startScore,
                   int sampleEvery, boolean recordClaims, boolean keepDecisions,
                   boolean teacherLabel, boolean aux) {
+        this(gameIndex, seed, dir, labels, startScore, sampleEvery, recordClaims, keepDecisions,
+                teacherLabel, aux, false);
+    }
+
+    TraceRecorder(int gameIndex, long seed, Path dir, String[] labels, int startScore,
+                  int sampleEvery, boolean recordClaims, boolean keepDecisions,
+                  boolean teacherLabel, boolean aux, boolean priv) {
         this.gameIndex = gameIndex;
         this.seed = seed;
         this.dir = dir;
@@ -129,6 +168,7 @@ final class TraceRecorder {
         this.keepDecisions = keepDecisions;
         this.teacherLabel = teacherLabel;
         this.aux = aux;
+        this.priv = priv;
         for (int i = 0; i < 4; i++) {
             runningScores[i] = startScore;
         }
@@ -200,6 +240,45 @@ final class TraceRecorder {
         if (aux) {
             auxRows.add(auxRow(d, a));
         }
+        if (priv) {
+            privRows.add(privRow(d, row));
+        }
+    }
+
+    /**
+     * 一条**特权**记录：只取服务端内存里的隐藏量（对手暗牌 / 牌山剩余 / 里宝）。
+     *
+     * <p>⚠ 行键（`game/hand_no/step/seat`）直接从刚写出的决策行里抄 —— 不另起编号，
+     * 否则 sidecar 与 compact 对不齐（判据就是"逐位对齐"）。
+     */
+    private PrivRow privRow(Decision d, Map<String, Object> row) {
+        PrivRow r = new PrivRow();
+        r.game = gameIndex;
+        r.handNo = handNo;
+        r.step = Json.i(row, "step", -1);
+        r.seat = Json.i(row, "seat", -1);
+        java.util.Arrays.fill(r.wallNext, 255);
+        java.util.Arrays.fill(r.ura, 255);
+        Round rr = d.round;
+        if (rr == null) {
+            return r;
+        }
+        for (int j = 0; j < 3; j++) {
+            final int s = (r.seat + 1 + j) % 4;
+            final int[] c = rr.concealCounts(s);
+            for (int k = 0; k < 34; k++) {
+                r.oppHand[j * 34 + k] = c[k];
+            }
+        }
+        final int[] rem = rr.wallRemaining();
+        for (int i = 0; i < PRIV_WALL_K && i < rem.length; i++) {
+            r.wallNext[i] = Tiles.kind(rem[i]);
+        }
+        final List<Integer> ura = rr.uraIndicators();
+        for (int i = 0; i < 5 && i < ura.size(); i++) {
+            r.ura[i] = ura.get(i);
+        }
+        return r;
     }
 
     /**
@@ -355,6 +434,9 @@ final class TraceRecorder {
         if (aux) {
             writeAux();
         }
+        if (priv) {
+            writePriv();
+        }
         List<String> lines = new ArrayList<>(decisions.size() + hands.size() + 1);
         for (Map<String, Object> row : decisions) {
             lines.add(Json.write(row));
@@ -487,6 +569,72 @@ final class TraceRecorder {
 
     /** 标签侧文件格式版本（字段增删要 +1；Python 侧 `mahjong_ml.aux.AUX_VERSION` 同步）。 */
     static final int AUX_VERSION = 1;
+
+    /** 特权 sidecar 格式版本（字段增删要 +1；`v4/privside.py` 的 `PRIV_VERSION` 同步）。 */
+    static final int PRIV_VERSION = 1;
+
+    /** 特权 sidecar 每决策存"未来摸牌顺序"的前几张（摘要；⛔ 不存整条牌山）。 */
+    static final int PRIV_WALL_K = 14;
+
+    /**
+     * 写**特权** sidecar `g<n>.priv.npz`（MV-2 阶段 2；**训练专用**）。
+     *
+     * <p>形状与决策行**同序同长**，且自带行键（`game/hand_no/step/seat`）——
+     * 这样 compact 的行序一旦变了（分片/重排），读侧还能按键核对、而不是靠"文件恰好同样长"。
+     * ⚠ 与 `g*.aux.npz` 分开两个文件：aux 是"标签/信念真值"、priv 是"policy 绝不能看到的输入"，
+     * 混在一个文件里迟早有人把 priv 列当成观测喂进主网。
+     */
+    private void writePriv() {
+        final int n = privRows.size();
+        final int[] game = new int[n];
+        final int[] step = new int[n];
+        final byte[] handNo = new byte[n];
+        final byte[] seat = new byte[n];
+        final byte[] oppHand = new byte[n * 3 * 34];
+        final byte[] wallNext = new byte[n * PRIV_WALL_K];
+        final byte[] ura = new byte[n * 5];
+        for (int i = 0; i < n; i++) {
+            final PrivRow r = privRows.get(i);
+            game[i] = r.game;
+            step[i] = r.step;
+            handNo[i] = (byte) r.handNo;
+            seat[i] = (byte) r.seat;
+            for (int k = 0; k < 3 * 34; k++) {
+                oppHand[i * 3 * 34 + k] = (byte) r.oppHand[k];
+            }
+            for (int k = 0; k < PRIV_WALL_K; k++) {
+                wallNext[i * PRIV_WALL_K + k] = (byte) r.wallNext[k];
+            }
+            for (int k = 0; k < 5; k++) {
+                ura[i * 5 + k] = (byte) r.ura[k];
+            }
+        }
+        NpzWriter npz = new NpzWriter();
+        // 行键四件套（顺序固定；读侧按它对齐 compact）
+        npz.putI32("game", game, n);
+        npz.putI8("hand_no", handNo, n);
+        npz.putI32("step", step, n);
+        npz.putI8("seat", seat, n);
+        npz.putU8("opp_hand", oppHand, n, 3, 34);
+        npz.putU8("wall_next", wallNext, n, PRIV_WALL_K);
+        npz.putU8("ura", ura, n, 5);
+        npz.putJson("meta", Json.write(Json.obj(
+                "priv_version", PRIV_VERSION,
+                "obs_version", mahjong.ai.Observation.VERSION,
+                "game", gameIndex,
+                "seed", seed,
+                "n", n,
+                "wall_k", PRIV_WALL_K,
+                "row_key", "game,hand_no,step,seat",
+                "policies", List.of(labels),
+                "note", "PRIVILEGED: opp hands / wall order / ura. "
+                        + "training-only; never obs, net.bin or inference")));
+        try {
+            Files.write(dir.resolve("g" + gameIndex + ".priv.npz"), npz.toBytes());
+        } catch (IOException e) {
+            Log.warn("特权 sidecar 写入失败 " + dir + "：" + e);
+        }
+    }
 
     /** 小局键（与 {@link #roundKey(Map)} 必须同格式，否则连庄会被当成换局）。 */
     private static String roundKey(Round r) {

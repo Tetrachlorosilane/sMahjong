@@ -1228,6 +1228,7 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 | `--sample <k>` / `--no-claims` | 每 k 次决策记 1 条 / 不记录鸣牌决策 |
 | `--hands <n>` | 每场最多 n 个小局（0 = 完整半庄；冒烟测试用） |
 | `--aux` | **额外**落标签侧文件 `g<序号>.aux.npz`（`FEATURES-V4.md` §5.2：对手手牌/听牌、放铳、和了、顺位）。⚠ **不改轨迹**：同一颗种子开不开它，`g*.jsonl` 逐字节相同（自检钉着）。**两个生产者都支持**（C++ 侧 2026-09 补齐：`trainer/src/npzwriter.hpp`；连 npz 容器一起**逐字节相同**，对拍 = `node tools/trainer-aux-parity.mjs … --selfcheck`） |
+| `--priv` | **额外**落**特权** sidecar `g<序号>.priv.npz`（MV-2 阶段 2，**训练期 privileged critic 专用**）：逐决策 `opp_hand[3,34]`（对手暗牌计数）· `wall_next[n,14]`（可摸牌山**剩余顺序**）· `ura[n,5]`（里宝指示牌）+ 行键 `game/hand_no/step/seat`。⛔ **不进 obs / 不进 `net.bin` / 推理永不读**（`grep priv server/src/main/java/mahjong/ai trainer/src` = 0）。⚠ **不改轨迹**：同种子开不开它，`g*.jsonl` 与 `g*.aux.npz` **逐字节相同**（实测 sha256 相等） |
 | `--preset <name>` | 规则预设：`mleague` / `tenhou` / `majsoul` / `custom` |
 | `--no-v4-cache` | 关掉 v4 网络的**增量事件缓存**（默认开）。⚠ 输出**逐位相同**、只影响耗时：判据见 `docs/TRAINING-V4.md` §5.3（`SelfTest.v4CacheTests` + `tools/v4-cache-check.mjs`）；对拍/排障时用它拿"全量重算"基准 |
 

@@ -230,6 +230,19 @@ public final class Wall {
     }
 
     /**
+     * 供**训练侧特权 sidecar**：可摸牌山**剩余顺序**的拷贝（从下一张要摸的开始）。
+     *
+     * <p>这是**隐藏信息**（未来的摸牌顺序）—— 只许写进训练期的 privileged 侧文件，
+     * ⛔ 绝不进 obs / `net.bin` / 推理（`AGENTS.md` §6.5 的硬闸门；本方法不改任何账）。
+     *
+     * @return 长度 = {@link #tilesLeft()}（不足时返回当前剩余，不补 0）
+     */
+    public int[] liveRemaining() {
+        final int from = Math.min(livePos, liveEnd);
+        return java.util.Arrays.copyOfRange(tiles, from, liveEnd);
+    }
+
+    /**
      * 供自检：交换牌山里两张的位置（**只动"摸牌顺序"这条隐藏信息**）。
      *
      * <p>用途是"隐藏量红证"：把还没摸到的牌换一换，**公开状态一个字节都没变**，

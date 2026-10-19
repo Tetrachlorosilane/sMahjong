@@ -35,4 +35,6 @@
 
 - 阶段 0（已完成）：`lab/mv1/A--RULE-COVERAGE.md`（A− 规则/情景覆盖 37 条 + 判据 8 重建 `C8-v2`）。
 - 阶段 1（本批）：`lab/mv1/ARCH-REDESIGN.md` §14「阶段 1 已实现」+ `NOTES.md` §6.5 第一百一十六轮。
+- 阶段 2（已完成）：`lab/mv1/PRIVILEGED-CRITIC.md`（可行性审计 / `--priv` 特权 sidecar / 2a critic / 2b 蒸馏 / 判据 ①②③读数）
+  + `NOTES.md` §6.5 第一百一十七轮。⚠ 只追加指针，⛔ 未改本文件 A–J 的任何口径。
 - 阶段 2+：照 A–J；⛔ 本文件不写"下一步清单"（那是 `docs/HANDOVER.md` §1 的保留字）。
