@@ -4,13 +4,16 @@
  *
  * 两件事，都是"设计里写了、但没有任何东西会因为漏改一端而变红"的欠账：
  *
- * 1. **`cand` 派生 ⑨⑩⑪ 恒 0**（`docs/FEATURES-V4.md` §4.3 / `python/.../v4/blocks.py` 的
- *    `cand_matrix` / `server/.../ai/V4Features.candMatrix`）：派生段**声明 11 维**，而三端都只
- *    写**已实现的 8 维**（`DERIVED_CANDIDATE` / `PER_CANDIDATE` / `kPerCandidate`），
- *    末尾 3 维（`score_expected` / `danger_after_all` / `danger_after_riichi`）**恒 0**。
- *    ⇒ 判据 = ① 三段宽度 88 / 11 / 29 / 128 三端同值；② "已实现维数"= 8 三端同值；
- *    ③ 比例尺向量 8 个值逐位相同；④ 文档 §4.3 写的是同一组数（88/11/29/128）+ 同一句"恒 0"。
- *    ⚠ 这一条**只证"定义一致"**；"这一端真的留了 0"由 `SelfTest.candDerivedTests` 在前向张量上量。
+ * 1. **`cand` 派生段的 11 维 = per_cand 8 维 + E3 的 3 列**（`docs/FEATURES-V4.md` §4.3 /
+ *    `python/.../v4/blocks.py` 的 `cand_matrix` / `server/.../ai/V4Features.candMatrix`）：派生段**声明 11 维**，
+ *    前 8 维（①–⑧）来自 per-cand 向量（`DERIVED_CANDIDATE` / `PER_CANDIDATE` / `kPerCandidate`），
+ *    末尾 3 维（`score_expected` / `danger_after_all` / `danger_after_riichi`）自**第一百一十三轮（E3）起
+ *    已三端接线**（落点 `blocks._cand_v4_dims` / `ObsFeatures.perCandidateV4` / `v4policy.cpp:kCandDeadDimsFirst`
+ *    那一组）⇒ **不再是恒 0**（旧口径"⑨⑩⑪ 恒 0"已作废，文档 §4.3 现写"不再恒 0"）。
+ *    ⇒ 判据 = ① 三段宽度 88 / 11 / 29 / 128 三端同值；② per-cand 已实现维数 = 8 三端同值
+ *    （剩 3 维 = E3 那 3 列，仍是"11 − 8 = 3"这条口径）；③ 比例尺向量 8 个值逐位相同；
+ *    ④ 文档 §4.3 写的是同一组数（88/11/29/128）+ 同一句"⑨⑩⑪ …恒 0"锚点（E3 起该句是"不再恒 0"）。
+ *    ⚠ 这一条**只证"定义一致"**；"这一端真的写进去了"由 `SelfTest.candDerivedTests` 与 240 用例 golden 夹具量。
  *
  * 2. **`seq_delta` 恒缺省**（`PROTOCOL §8.2`「本实现不发 / 缺省 = 1」）：三端读它时必须都是
  *    「**缺省 1**、夹到 **8**、再 **÷8**」，EVT 槽宽 1、下标 95。任一端换了缺省值或夹取上限，
@@ -157,7 +160,7 @@ if (CAND_BASE[0][1] !== null && CAND_DERIVED[0][1] !== null && C_CAND[0][1] !== 
     }
 }
 
-// 「已实现维数」= 8（三端同名）：⑨⑩⑪ 就是这么来的 3 列
+// per-cand「已实现维数」= 8（三端同名）：派生段 11 = 8（per_cand）+ 3（E3 的 ⑨⑩⑪）
 const IMPLEMENTED = [
     ['Python features.py', intConst('python/mahjong_ml/features.py', 'DERIVED_CANDIDATE')],
     ['Java ObsFeatures', intConst('server/src/main/java/mahjong/ai/ObsFeatures.java',
@@ -169,10 +172,10 @@ const nImpl = IMPLEMENTED[0][1];
 const nDecl = CAND_DERIVED[0][1];
 if (nImpl !== null && nDecl !== null) {
     if (nDecl - nImpl !== 3) {
-        problems.push(`cand 派生段里"尚未接线的维数" = ${nDecl} - ${nImpl} = ${nDecl - nImpl}`
-                      + ' != 3（⑨⑩⑪）—— 声明/实现漂了，文档与三端要一起改');
+        problems.push(`cand 派生段里"per_cand 之外的维数" = ${nDecl} - ${nImpl} = ${nDecl - nImpl}`
+                      + ' != 3（⑨⑩⑪ = E3 的三列）—— 声明/实现漂了，文档与三端要一起改');
     } else {
-        info.push(`cand 派生段 = 已实现 ${nImpl} + 未接线 3（⑨⑩⑪）✓`);
+        info.push(`cand 派生段 = per_cand ${nImpl} + E3 三列 ${nDecl - nImpl}（⑨⑩⑪，已接线）✓`);
     }
 }
 
@@ -191,19 +194,20 @@ if (scale !== null && nImpl !== null && scale.length !== nImpl) {
     info.push(`比例尺长度 == 已实现维数（${scale.length}）✓`);
 }
 
-// `blocks.py` 的 `cand_matrix` 必须**只**消费已实现的那 8 维（这就是"⑨⑩⑪ 恒 0"的机制）
+// `blocks.py` 的 `cand_matrix` 必须**先**按已实现的 8 维截断 `per_cand`，再由 E3 单独填 ⑨⑩⑪
+// （这两步合起来才是"cand[88:96] 有值、cand[96:99] 由 E3 写"的机制）
 const blocks = read('python/mahjong_ml/v4/blocks.py');
 if (blocks !== null) {
     if (!/\[:f3\.DERIVED_CANDIDATE\]/.test(blocks)) {
         problems.push('blocks.py 的 cand_matrix 没有按 `f3.DERIVED_CANDIDATE` 截断'
-                      + '（⑨⑩⑪ 恒 0 的机制被改掉了？）');
+                      + '（per_cand → cand[88:96] 的截断被改掉了？）');
     } else {
         info.push('blocks.py：`cand_matrix` 按 `DERIVED_CANDIDATE` 截断 ✓');
     }
     if (!/v4 新增 3 维/.test(blocks)) {
-        problems.push('blocks.py 里找不到"v4 新增 3 维…先留 0"的锚点注释（口径笔记被删了？）');
+        problems.push('blocks.py 里找不到"v4 新增 3 维…"的锚点注释（E3 落点口径笔记被删了？）');
     } else {
-        info.push('blocks.py：⑨⑩⑪「先留 0」锚点注释在 ✓');
+        info.push('blocks.py：⑨⑩⑪ 的 E3 落点注释（`_cand_v4_dims`）在 ✓');
     }
 }
 
@@ -224,10 +228,11 @@ if (features !== null) {
             }
         }
         if (!/⑨⑩⑪[^\n]*恒 0/.test(sec)) {
-            problems.push('docs/FEATURES-V4.md §4.3 里没有「⑨⑩⑪ … 恒 0」那句'
-                          + '（三端同改的锚点之一）');
+            problems.push('docs/FEATURES-V4.md §4.3 里没有「⑨⑩⑪ … 恒 0」这句锚点'
+                          + '（三端同改的锚点之一；E3 起该句写作「不再恒 0」）');
         } else {
-            info.push('docs/FEATURES-V4.md §4.3：88/11/29/128 + 「⑨⑩⑪ 恒 0」在 ✓');
+            info.push('docs/FEATURES-V4.md §4.3：88/11/29/128 + 「⑨⑩⑪ …恒 0」锚点在'
+                      + '（E3 起读作「不再恒 0」）✓');
         }
     }
 }
@@ -305,5 +310,5 @@ if (problems.length > 0) {
     process.exit(1);
 }
 console.log(`[v4-derived-check] PASS：cand 派生段 ${CAND_BASE[0][1]}+${CAND_DERIVED[0][1]}+`
-            + `${CAND_RESERVED[0][1]}=${C_CAND[0][1]}（已实现 ${nImpl} 维，⑨⑩⑪ 恒 0）`
+            + `${CAND_RESERVED[0][1]}=${C_CAND[0][1]}（per_cand ${nImpl} 维 + E3 三列 ⑨⑩⑪，已接线）`
             + '与 seq_delta 缺省口径（min(1,8)/8、末槽宽 1）在三端源码 + 两份文档同名同值');
