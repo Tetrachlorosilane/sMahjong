@@ -7,7 +7,7 @@
 | `v4/model.py` | `EventTower.forward_steps`（:481）· `AEventTower.forward_steps`（:698）· `V4Model.event_steps`（:1158）—— 把既有逐事件递推**原样复制**一遍取每步 carry，`forward` 一字未动 | +43 |
 | `v4/pretrain.py` | `NextEventHead`（:121，两头分开 `Linear(d→64)+GELU+Linear(64→C)`，d=128/H=64/19,242 参数）· `next_event_batch`（:169，右对齐标签 + 打乱置换）· `compute_loss(aux_next=)`（:1255/:1538）· `evaluate(next_head=)`（:1595，报 CE/top1/边缘熵）· `train()` 建头/优化器/主循环（:2400-2450/:3266）· ckpt 单独键（:1930/:3527）· 三条 CLI（:3995） | +294/−8 |
 | `selfcheck.py` | **5 条**（:2322 起）：形状/参数账 · 标签对齐（末事件丢 + tile 掩码）· 打乱只动辅头输入 · 关闭时损失一行都不走（成对正向）· 梯度只到 `event` 塔、不进 `heads`/`loss_weights()`/`state_dict()` | +62 |
-- **缺省逐位不变（实测）**：同命令 600 步 pre/post `model` 段 sha 同为 **`6723caa0…`**，ckpt 键集合相同、无 `next_event_head`；`selfcheck 1029→1034/0`。
+- **缺省逐位不变（实测）**：同命令 600 步 pre/post `model` 段 sha 同为 **`6723caa0…`**，ckpt 键集合相同、无 `next_event_head`；**1,200 步基线 `base.bin` = `7EB4954B…`**（s40 的 PPO 配方逐字节复现 ⇒ 与改动前第一百二十一轮的锚**同一个 sha**，含 RNG/数据顺序/优化器轨迹）；`selfcheck 1029→1034/0`。辅头训练后导出的 `armT.bin` 仍是 **3,973,715 B / 992,166 参数**（19,242 参数不在包里）。
 - 开关：`--next-event-aux {off|type|tile|both}`（缺省 off）· `--next-event-weight 0.1` · `--next-event-shuffle {off|on}`；`both` = 两头 CE 的**均值**（分项照报）。`aux` 开而 weight ≤0 / shuffle 开而 aux 关 ⇒ `SystemExit`（fail-closed）。
 ## 2 两臂（同数据/同 `--init`/同 seed/同 1,200 步/同 lr 3e-3 constant；只差一个开关）
 数据 `.tmp/mv1-s38/corpus-compact`（train 2,604 / val 479，**按场**留出 `g2`，`h0[128]`）；`--init` = **A0.bin**（阶段 2 蒸馏网，事件敏感性最高者）；`--arch a- --batch 64 --epochs 30 --stage-a 0 --stage-b 0`；辅头 `both` w=0.1。

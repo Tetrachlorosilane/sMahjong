@@ -6878,7 +6878,7 @@ loss/KL/`|g|`/top1）**逐字相同**；两种切法都过 —— **epoch 边界
 **第一百二十四轮：训练期专用的"下一事件预测"辅头 + 真序/打乱序两臂（2026-10-20，⛔ 零采集/未跑闸门/未发布）**
 > 详情 = `lab/mv1/NEXT-EVENT-AUX.md`（≤50 行）；判据**跑前冻写** = `.tmp/mv1-s44/FROZEN.md`；证据 = gitignored `.tmp/mv1-s44/`。
 - **实现**（⛔ 只在训练期，缺省 `off`）：`EventTower/AEventTower.forward_steps` + `V4Model.event_steps`（+43 行，`forward` 一字未动）· 外部 `NextEventHead`（两头分开 `Linear(d→64)+GELU+Linear(64→C)`，H=64、**19,242** 参数；⛔ 不进 `HEAD_SPECS`/`loss_weights()`/`net.bin`/三端/推理路径）· `--next-event-{aux,weight,shuffle}`（缺省 `off/0.1/off`，`both` = 两头 CE 均值）· ckpt 单独键 `next_event_head`。
-- **缺省逐位不变（实测）**：同命令 **600 步** pre/post `model` 段 sha **同为 `6723caa0…`**、ckpt 键集合相同、无 `next_event_head`；`selfcheck` **1029→1034/0**（新增 5 条：形状/标签对齐/打乱只动辅头输入/关闭时损失不走/梯度只到 `event` 塔）。
+- **缺省逐位不变（实测）**：同命令 **600 步** pre/post `model` 段 sha **同为 `6723caa0…`**、ckpt 键集合相同、无 `next_event_head`；**1,200 步 `base.bin` = `7EB4954B…`**（s40 PPO 配方逐字节复现 = 改动前第一百二十一轮的锚，含 RNG/数据顺序）；`selfcheck` **1029→1034/0**（新增 5 条：形状/标签对齐/打乱只动辅头输入/关闭时损失不走/梯度只到 `event` 塔）。
 - **两臂**（`.tmp/mv1-s38/corpus-compact` 2,604/479 按场留出 · `--init` **A0**（⛔ 不用 A8）· `arch a-` · seed 20260927 · `batch 64 × 30 ep = 1,200 步` · `lr 3e-3 constant` · `--stage-a 0 --stage-b 0` · 辅头 `both` w=0.1）：T 真序 / S 窗口内打乱（标签随序列一起换；⛔ 策略侧输入逐位相同）。
 - ⭐ **读数（held-out，n type 12,135 / tile 11,941）**：`both` CE **T 7.2871（末轮）/ 1.7739（最好，ep1）** vs **S 1.7891 / 1.7730（ep3）**；分项 type T 0.3840/0.1426 vs S 0.1408/0.1367、tile T 14.1903/3.3940 vs S 3.4374/3.4059；**边缘基线**（各自）type 0.1491/0.1446、tile 3.3642/3.3535、both 1.7566/1.7490。
 - **判据（冻写 ≥0.02 nats）不通过**：`Δ=CE_S−CE_T` 末轮 **−5.498**、最好轮 **−0.0009**、唯一 T 占优的 ep1 **+0.0018**。**阴性对照成立**：打乱臂停在**自身边缘基线**（0.1408 vs 0.1446；3.437 vs 3.354）⇒ 头能学边际、信号确实被销毁 ⇒ **判据没放水**；两臂一样差 ⇒ 按 FROZEN §0.3 判 **"顺序不可学/样本不足"**。
