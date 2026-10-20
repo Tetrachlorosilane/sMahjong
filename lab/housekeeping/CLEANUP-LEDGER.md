@@ -82,3 +82,50 @@
 
 **对账**：删除清单合计 **7.03 GB**；C: 实测多出 **9.38 GB** —— 差额 2.35 GB 是**同一轮里被中止的 1,200 步试跑**留下的
 `refcache-*` 与 `ckpt/`（重启扫描时按"每点从干净现场起跑"删掉），它们不属于上表清单，特此写明。
+
+## 5 第二批清理（同日续）：MSLT `compact` 归档 + `tmp\` 其余 14 目录（2026-10-20）
+
+> ⚠ **新路径（醒目）**：**MSLT compact 现位于 `S:\mahjong-training\archive\mv1-mslt-compact`（仓库内已删除）**。
+> ⇒ 本台账 §1 行 12 与 §3 行 68 里 `tmp\mahjong-mslt\compact` 的旧引用**已失效**，实际位置以本行为准。
+
+### 5.1 事实（逐字照记；⚠ 已实测完成，本批未重做）
+
+1. **搬迁**：`tmp\mahjong-mslt\compact`（**49 文件 / 15,138.4 MB**）已搬到 `S:\mahjong-training\archive\mv1-mslt-compact`；校验 = 文件数相同、总字节相同、三个最大文件 sha256 全同（`mslt-s00\train.evt.npy` 7,285.9 MB · `train.cand.npy` 4,371.5 MB · `train.tile.npy` 2,064.3 MB）⇒ **校验通过后删源**。
+2. **`tmp\` 其余 14 个目录已删**（引用命中 0 之后）：`stylemetric` 232.5 MB · `rotate-perm-{a,b,c}` 126.4 / 124.6 / 121.9 MB · `bl13` 37.9 MB · `rerun` 27.0 MB · `byte-*` ×6 ≈ 128 MB · `oldtree` 0.8 MB · `oldbuild` 1.3 MB ⇒ **合计 799.8 MB**。
+3. **磁盘**：C: **98.10 → 113.40 GB（+15.30）** · S: **148.60 → 133.80 GB（−14.80，即归档那份）** · E: **501.70 GB 不变**。
+4. **保留**：`tmp\mahjong-mslt\ckpt` **991 MB** · 根目录 `net-*.bin` **42 份 / 224.1 MB**（**唯一副本**，sha256 对 `tools/build/*/net.bin` **0 命中**）· `gate-root` 7.3 MB · `logs` 1.2 MB。
+5. **项目方裁决**：`.uv-cache`（4.15 GB）与 `release\rust`（2.55 GB）**暂时保留**。
+
+### 5.2 旧路径引用检查（全仓 grep `mahjong-mslt` / `mahjong-mslt\compact` / `mahjong-mslt/compact`）
+
+**结论**：命中 **13 处，全在 `.md` 文档、全属历史记录/台账 ⇒ 原样保留**（⛔ 不改写旧记录）；**可执行脚本/工具命中 0 处**（`tools/`·`python/`·`server/`·`client/` 下 `.py/.mjs/.js/.java/.ps1` 全扫，0 命中）。⚠ **该路径已不存在**，实际位置见 §5 顶部新路径行。
+
+| 文件:行 | 分类 | 性质 | 处置 |
+| --- | --- | --- | --- |
+| `NOTES.md:6317` | 历史 | 第七十八轮小节：工作区内副本 `tmp\mahjong-mslt\` | 保留 |
+| `NOTES.md:6333` | 历史 | 边界 diff 脚本输出 `tmp\mahjong-mslt\logs\r79-boundary-diff3.log` | 保留 |
+| `NOTES.md:6809` | 历史 | 上一批清理盘点摘要（`tmp/mahjong-mslt` 16.36 GB 待定夺） | 保留 |
+| `lab/housekeeping/CLEANUP-LEDGER.md:12` | 历史 | 本台账 §1 盘点行 | 保留 |
+| `lab/housekeeping/CLEANUP-LEDGER.md:30` | 历史 | 本台账 §1 可释放总量 | 保留 |
+| `lab/housekeeping/CLEANUP-LEDGER.md:68` | 历史 | 本台账 §3 待定夺行（"建议先搬到 S:"已由 §5 执行） | 保留 |
+| `lab/housekeeping/CHAIN-CAP-PLAN.md:9` | 历史 | 第八十轮预注册配方，命令行含 `--data tmp\mahjong-mslt\compact\mslt-s00` | 保留（历史命令，⛔ 不改写预注册） |
+| `lab/mslt/MSLT-RESULT.md:103` | 历史 | 结果报告：compact 落在工作区内 | 保留 |
+| `lab/mslt/MSLT-RESULT.md:115` | 历史 | 结果报告：原始日志 `tmp\mahjong-mslt\logs\` | 保留 |
+| `lab/mslt/MSLT-RESULT.md:116` | 历史 | 结果报告：全部工作在工作区内 | 保留 |
+| `lab/mslt/MSLT-PLAN-AMENDMENT.md:15` | 历史 | 计划修订：紧凑集路径 | 保留 |
+| `lab/mslt/MSLT-PLAN-AMENDMENT.md:47` | 历史 | 计划修订：数据根 = `...\tmp\mahjong-mslt` | 保留 |
+| `lab/mv1/ARCH-AUDIT.md:3` | 历史 | 架构审计：val 数据来自 compact（只读 mmap） | 保留 |
+
+### 5.3 未跟踪的一次性实验脚本（`tmp\` 内；不属仓库工具链）
+
+`git ls-files tmp` = **0**。`tmp\mahjong-mslt\` 下 **22 个未跟踪脚本**（`.ps1` ×19 / `.py` ×3）仍写 `$dr = "$root\tmp\mahjong-mslt"`，其中 **18 个**直接拼 `$dr\compact\mslt-s00`（如 `mslt-train.ps1:10`、`r80-*.ps1`、`bl04r79-*.ps1`、`r80-epoch-kl-diag.py:9` 的绝对路径）。⚠ 它们是**一次性实验脚本、非仓库工具**，且随 `tmp\` 后续清理退场 ⇒ 本批（**只读+文档**）**未改**；若日后复跑，把 `$dr`/`$data` 改指 `S:\mahjong-training\archive\mv1-mslt-compact\mslt-s00`（或参数化成 `-Data`）即可。
+
+### 5.4 核验（本批实测，`Test-Path` 原文）
+
+```
+Test-Path C:\Users\HP\source\games\mahjong\tmp\mahjong-mslt\compact   => False
+Test-Path S:\mahjong-training\archive\mv1-mslt-compact                => True
+新路径文件数 = 49；总字节 = 15,873,793,589（= 15,138.4 MB）；tmp\ 下仅剩 mahjong-mslt 一个目录
+```
+
+⚠ 本批**只读 + 文档**：未训练 / 未采集 / 未跑闸门 / 未发布，**未删任何东西**。
