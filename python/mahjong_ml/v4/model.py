@@ -478,6 +478,23 @@ class EventTower(nn.Module):
             h = self.cell(e[:, t], h)
         return h
 
+    def forward_steps(self, evt: torch.Tensor, h: torch.Tensor | None = None
+                      ) -> tuple[torch.Tensor, torch.Tensor]:
+        """**逐步** carry `[B,K,d]`（+ 末态）—— 训练期下一事件辅头专用（v4 塔的同款）。
+
+        ⚠ 与 `forward` 的递推**逐行相同**（同一个 `enc`/`cell`/`torch.where`），只是把每步的 `h`
+        存下来；`forward` 本身**一个字节都没动**（缺省路径不调用它 ⇒ 逐位不变）。
+        """
+        e = self.enc(evt)
+        if h is None:
+            h = torch.zeros(e.shape[0], e.shape[2], dtype=e.dtype, device=e.device)
+        real = evt.abs().sum(dim=-1) > 0
+        hs = []
+        for t in range(e.shape[1]):
+            h = torch.where(real[:, t].unsqueeze(-1), self.cell(e[:, t], h), h)
+            hs.append(h)
+        return torch.stack(hs, dim=1), h
+
 
 class Mlp(nn.Module):
     """`Linear → ReLU → Linear`（+ 可选末端 ReLU）。
@@ -677,6 +694,27 @@ class AEventTower(nn.Module):
         for t in range(e.shape[1]):
             h = self.cell(e[:, t], h)
         return h
+
+    def forward_steps(self, evt: torch.Tensor, h: torch.Tensor | None = None
+                      ) -> tuple[torch.Tensor, torch.Tensor]:
+        """**逐步** carry `[B,K,128]`（+ 末态）—— 只给**训练期**的下一事件辅头读。
+
+        ⚠ 为什么不改 `forward` 的返回：`forward` 是**上线/导出/逐位对照**都要跑的那条路径，
+        多一个返回值就多一处"顺手用上它"的机会。这里把递推**原样复制**一遍（同一个
+        `_encode`/`cell`/`torch.where`），只在训练开关打开时被调 ⇒ **缺省路径逐位不变**
+        （判据：不传 `--next-event-aux` 时没有任何调用点，`forward` 一个字节没动）。
+        ⚠ 语义与 `forward` 的 `h`（出去）**同一时刻**：`hs[:, t]` = 看完第 `t` 个事件后的 carry；
+        padding 位（`real=False`）**不推进**（carry 原样保留，与 `forward` 的 `where` 一致）。
+        """
+        e = self._encode(evt)                                        # [B,K,128]
+        if h is None:
+            h = torch.zeros(e.shape[0], e.shape[2], dtype=e.dtype, device=e.device)
+        real = evt.abs().sum(dim=-1) > 0
+        hs = []
+        for t in range(e.shape[1]):
+            h = torch.where(real[:, t].unsqueeze(-1), self.cell(e[:, t], h), h)
+            hs.append(h)
+        return torch.stack(hs, dim=1), h
 
 
 def _sincos_pe(n: int, d: int) -> torch.Tensor:
@@ -1116,6 +1154,11 @@ class V4Model(nn.Module):
     def step_event(self, new_evt: torch.Tensor, h: torch.Tensor | None) -> torch.Tensor:
         """循环推理的增量入口（`EventStream.step` 用它）。"""
         return self.event.step(new_evt, h)
+
+    def event_steps(self, evt: torch.Tensor, h: torch.Tensor | None = None
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """窗口内**逐事件步**的 carry `[B,K,d]`（训练期辅头专用；⛔ 不进推理/导出/net.bin）。"""
+        return self.event.forward_steps(evt, h)
 
     # ---------------------------------------------------------------- 元信息
     def param_count(self) -> int:

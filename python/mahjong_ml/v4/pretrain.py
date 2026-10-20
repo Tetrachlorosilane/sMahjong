@@ -107,6 +107,108 @@ class OwnWinHead(nn.Module):
         return self.proj(state).squeeze(-1)
 
 
+#: `--next-event-aux` 的四种取值（`off` = 缺省 = 不建头）
+NEXT_EVENT_AUX = ("off", "type", "tile", "both")
+#: 辅头的隐层宽度（`Linear(d→64)+GELU+Linear(64→C)`）
+NEXT_EVENT_HIDDEN = 64
+#: 打乱序的置换用**独立**生成器（`seed + 这个偏移`）—— ⛔ 不与会话的 `rng_gen`（SSL 掩码）共用：
+#: 共用会让"开辅头"顺手改掉 SSL 的掩码序列，两臂就不再是"只差一件事"的配对。
+NEXT_EVENT_SHUFFLE_SEED = 991
+#: `evt` 里 tile_kind 段的宽度（`spec.EVT_LAYOUT` 的 `tile_kind`，= 34 类）
+EVT_TILE_DIM = int(_f3.KIND_COUNT)
+
+
+class NextEventHead(nn.Module):
+    """★ s44：**训练期专用**的下一事件预测辅头（读 `h_evt` 的逐步 carry）。
+
+    与 `MaskedEventHead` / `OwnWinHead` 同族的**外部头**：⛔ 不进 `HEAD_SPECS` / `TRAIN_HEADS` /
+    `ONLINE_HEADS` / `loss_weights()` / 三端头表 / `net.bin` 张量表 / 推理路径；只在
+    `--next-event-aux != off` 时**才建对象**（缺省关 ⇒ 无参数、无梯度、ckpt 里没有这个键）。
+
+    结构：每头 `Linear(d → 64) + GELU + Linear(64 → C)`，`C` = 8（type）/ 34（tile）。
+    ⚠ **两个子头分开**（不是 42 类联合 softmax），理由是判据要求：
+      ① 读数必须能**分项报**（`type` / `tile` / `both`），联合 softmax 给不出分项 CE；
+      ② `tile_kind` 对 `riichi`/`agari`/`ryuukyoku` 这类事件**没有意义**（全 0），联合口径只能
+         把"无牌事件"塞进第 0 类当标签（= 纯噪声）；分开口径用**逐事件掩码**把那些步排除出
+         tile CE（`next_event_batch` 的 `m_tile`），`type` 则仍用全部可标步。
+
+    ⚠ 参数**不计入** `net.bin`：`export` 只序列化 `model.state_dict()`，本头是 `pretrain` 的外部
+    模块（`ssl_head`/`own_win` 同一先例）；ckpt 里单独一个键 `next_event_head`。
+    """
+
+    #: `--next-event-aux` 取值 ⇒ 建哪几个子头
+    KINDS = {"type": ("type",), "tile": ("tile",), "both": ("type", "tile")}
+
+    def __init__(self, which: str = "both", d_model: int | None = None,
+                 hidden: int = NEXT_EVENT_HIDDEN) -> None:
+        super().__init__()
+        if which not in self.KINDS:
+            raise ValueError(f"`NextEventHead` 只认 {sorted(self.KINDS)}（收到 {which!r}）")
+        # ⚠ 宽度按**进程级 arch** 取（A− 的 `h_evt` 是 128；v4 是 192）—— 写死会当场形状不匹配。
+        d = int(M.arch_dims()["d_model"] if d_model is None else d_model)
+        self.which = str(which)
+        # ⚠ 属性名**不能**叫 `type`/`tile`：`nn.Module` 有 `type()` 方法，覆盖它会在 `.to(device)`
+        #   里炸（实测 `TypeError: dtype must be a type, str, or dtype object`）。
+        if "type" in self.KINDS[self.which]:
+            self.head_type = nn.Sequential(nn.Linear(d, int(hidden)), nn.GELU(),
+                                           nn.Linear(int(hidden), len(spec.EVT_TYPES)))
+        if "tile" in self.KINDS[self.which]:
+            self.head_tile = nn.Sequential(nn.Linear(d, int(hidden)), nn.GELU(),
+                                           nn.Linear(int(hidden), EVT_TILE_DIM))
+
+    def forward(self, h_steps: torch.Tensor) -> dict[str, torch.Tensor]:
+        """`h_steps [B,K,d]` ⇒ `{"type": [B,K,8], "tile": [B,K,34]}`（只含建了的子头）。"""
+        out: dict[str, torch.Tensor] = {}
+        if hasattr(self, "head_type"):
+            out["type"] = self.head_type(h_steps)
+        if hasattr(self, "head_tile"):
+            out["tile"] = self.head_tile(h_steps)
+        return out
+
+
+def next_event_batch(evt: torch.Tensor, shuffle: bool = False,
+                     gen: torch.Generator | None = None) -> dict[str, torch.Tensor]:
+    """从 `evt[...,96]` 造**下一事件**的输入/标签（`AGENTS.md` §6.5 第一百二十四轮）。
+
+    ⚠ 标签口径（三条，缺一条读数就不可比）：
+      ① **右对齐**：padding 在窗口**前部**（`blocks.event_matrix`）；`real = type 块非全 0`。
+      ② **只标 `real[t] & real[t+1]` 的步**（`m_type`）：每条决策的**最后一个**真实事件没有窗口内
+         后继 ⇒ 丢弃（不拿 padding 之后的第一个事件当"后继"，那样 `t` 是 padding 位、`h` 是
+         窗口前的 carry `h0`，与其余步不是同一个量）。
+      ③ `tile` 额外要求 **`tile_kind` 非全 0**（`m_tile`）：`riichi`/`agari`/`ryuukyoku` 没有牌。
+
+    @param shuffle `True` = **只在窗口内**把该行的真实事件随机置换（padding 位不动）。置换**连同
+        标签一起**换 —— 两臂做的是**同一个** next-token 任务（"按这个顺序的下一个事件"），
+        只有顺序统计不同；若"只打乱输入、标签仍是真实后继"，打乱臂就退化成"从错的历史猜真
+        下一个"，loss 必然≈均匀分布，判据会被一个平凡上界糊住。
+    @param gen 置换的随机源（**必须**是固定种子的独立生成器，否则每次读数都换样本 ⇒ 不可比）。
+    @return `{"evt","type","tile","m_type","m_tile"}`；`evt` = 辅头**输入**用的窗口
+        （`shuffle=False` 时就是原张量，不复制、不改原张量）。
+    """
+    if evt.dim() != 3:
+        raise ValueError(f"`next_event_batch` 要 [B,K,96]，收到 {tuple(evt.shape)}")
+    b, k, _c = evt.shape
+    real = evt[:, :, :EVT_TYPE_DIM].sum(-1) > 0                 # [B,K]
+    out_evt = evt
+    if shuffle:
+        if gen is None:
+            raise ValueError("`next_event_batch(shuffle=True)` 必须给 `gen`（固定种子，否则不可比）")
+        # 逐行随机键：真实位置 ∈ [0,1)、padding 位置 = −1 ⇒ argsort 之后 padding 仍在前部
+        # （它们本来就是全 0 行，谁前谁后都不改变内容），真实事件在尾部被随机置换。
+        keys = torch.rand(b, k, generator=gen, device="cpu").to(evt.device)
+        keys = keys.masked_fill(~real, -1.0)
+        order = keys.argsort(dim=1)                              # [B,K] 置换下标
+        out_evt = evt.gather(1, order.unsqueeze(-1).expand(-1, -1, evt.shape[2]))
+    real_in = out_evt[:, :, :EVT_TYPE_DIM].sum(-1) > 0
+    m_type = real_in[:, :-1] & real_in[:, 1:]                    # [B,K-1]（②）
+    tile_blk = out_evt[:, 1:, EVT_TYPE_DIM:EVT_TYPE_DIM + EVT_TILE_DIM]
+    return {"evt": out_evt,
+            "type": out_evt[:, 1:, :EVT_TYPE_DIM].argmax(-1),
+            "tile": tile_blk.argmax(-1),
+            "m_type": m_type,
+            "m_tile": m_type & (tile_blk.sum(-1) > 0)}           # [B,K-1]（③）
+
+
 def mask_events(evt: torch.Tensor, frac: float, gen: torch.Generator) -> tuple:
     """把一部分**真实事件** token 置 0 并返回 `(掩码后的 evt, 掩码位, 类型目标)`。
 
@@ -1150,6 +1252,7 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
                  il: tuple[float, torch.Tensor] | None = None,
                  rho: tuple[float, str, dict] | None = None,
                  aux_own: tuple[torch.Tensor, float, str] | None = None,
+                 aux_next: dict | None = None,
                  belief_w: float = 0.0
                  ) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
@@ -1191,6 +1294,12 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
         `value`/`placement`/`belief_*` 同族：标签讲的是"这个局面"，与四条座位里谁动的手无关）；
         ③ `行口径 == "student"` 时**额外**报一个 `own_win_student`（只在学生行上的 BCE）——
         那是**次口径报告**，⛔ 不改总损失、也不改主判据。
+    @param aux_next ★ s44：**下一事件预测辅头**的 CE 项（`dict`，键见 `next_event_batch` +
+        `weight`/`type_logits`/`tile_logits`）。三条口径：
+        ① `None`（缺省）⇒ **一行都不走**（缺省关时逐位不变，与 `aux_own`/`ref`/`il` 同一处口径）；
+        ② 只在**可标步**上算（`m_type`/`m_tile` 都来自 `next_event_batch`，事件步级掩码 ——
+           ⛔ 不吃 `row_keep`/RWR：标签讲的是"这个窗口里下一个事件"，与谁动的手无关）；
+        ③ `both` = **两个子头 CE 的均值**（预注册口径；分项照报 `next_type`/`next_tile`）。
     """
     w = weights if weights is not None else M.loss_weights()
     parts: dict[str, float] = {}
@@ -1423,6 +1532,28 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
         if rows_own == "student" and row_keep is not None:
             # 次口径报告：只在学生行上的 BCE（**只入 `parts`，不进 `total`**）
             parts["own_win_student"] = float(reduce_row(per_row_own, row_keep).detach())
+    # ★ s44：**下一事件预测辅头**的 CE（`aux_next=None` ⇒ 一行都不走）。
+    #   ⚠ 事件步级掩码（不是行级）：一条决策能标 ~29 步 ⇒ 这里的 CE 是"每步 CE"的均值，
+    #     与 `evaluate` 的 `next_*_ce` 同一口径（分项照报，`both` = 两项均值）。
+    if aux_next is not None:
+        w_nx = float(aux_next["weight"])
+        nx_terms = []
+        lt = aux_next.get("type_logits")
+        if lt is not None:
+            m = aux_next["type_mask"]
+            if bool(m.any()):
+                l_nx_t = F.cross_entropy(lt[m], aux_next["type_tgt"][m])
+                parts["next_type"] = float(l_nx_t.detach())
+                nx_terms.append(l_nx_t)
+        lk = aux_next.get("tile_logits")
+        if lk is not None:
+            m = aux_next["tile_mask"]
+            if bool(m.any()):
+                l_nx_k = F.cross_entropy(lk[m], aux_next["tile_tgt"][m])
+                parts["next_tile"] = float(l_nx_k.detach())
+                nx_terms.append(l_nx_k)
+        if nx_terms:
+            total = total + w_nx * (sum(nx_terms) / len(nx_terms))
     # ★ W4 第一步：**逐候选引擎标签**的模仿项 `w · CE(logits, 引擎最优候选)`。
     #   为什么值得加：`effect`（打后向听/进张）与 `cand.derived`（含听牌形）是**引擎给的稠密标签** ——
     #   无采样噪声、无 critic、不依赖闸门算力；而 RL 的效应（~1 顺位点）落在 ±2.35 的分辨率里看不见。
@@ -1460,7 +1591,9 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
              ablate: dict[str, list[tuple[int, int]]] | None = None,
              extra: dict[str, np.ndarray] | None = None,
              rows: np.ndarray | None = None,
-             il_target: np.ndarray | None = None) -> dict:
+             il_target: np.ndarray | None = None,
+             next_head: NextEventHead | None = None,
+             next_shuffle: bool = False) -> dict:
     """val：教师动作一致率（总/按类型）+ 首合法基线 + 各头损失 + SSL 掩码重建准确率
     + **引擎最优候选一致率**（W4 的低噪判据）。
 
@@ -1492,11 +1625,23 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
     ssl_hit = ssl_n = 0
     gen = torch.Generator(device="cpu").manual_seed(12345)          # val 掩码固定 ⇒ 同种子可比
     il_arr = None if il_target is None else np.asarray(il_target, dtype=np.int64)
+    # ★ s44：下一事件辅头的 held-out 读数（事件步级；`next_head=None` ⇒ 一行都不走）
+    nx_t_sum = nx_t_n = nx_t_hit = 0
+    nx_k_sum = nx_k_n = nx_k_hit = 0
+    nx_t_cnt = np.zeros(len(spec.EVT_TYPES), dtype=np.int64)
+    nx_k_cnt = np.zeros(EVT_TILE_DIM, dtype=np.int64)
+    # ⚠ 置换的**固定**种子：每次 `evaluate` 都用同一份置换 ⇒ 跨 epoch 的读数可比；
+    #   与训练臂的 `next_gen` 也是同一个种子（两臂的 val 任务是同一个）。
+    nx_gen = (torch.Generator(device="cpu").manual_seed(NEXT_EVENT_SHUFFLE_SEED)
+              if (next_head is not None and next_shuffle) else None)
     for i0 in range(0, n, batch):
         end = min(i0 + batch, n)
         # `rows` 给定时按**行子集**取（下标仍是原表的行号：`_batch` / `row_keep` / `extra` 都按它对齐）
         idx = np.arange(i0, end) if rows_arr is None else rows_arr[i0:end]
         b = _batch(data, idx, device, ablate=ablate)
+        # ⚠ 辅头读**未掩码**的窗口：`ssl` 会把 `b["evt"]` 换成掩码版（那一份只给重建头用），
+        #   而"下一个事件"讲的是真实事件流 ⇒ 先留一份原张量的引用（不复制、不改它）。
+        evt_raw = b["evt"]
         if extra:
             for k, arr in extra.items():
                 b[k] = torch.from_numpy(np.asarray(arr[idx], dtype=np.float32)).to(device)
@@ -1511,6 +1656,25 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
             ssl = (ssl_head, mask_rows, target)
         out = model(b["tile"], b["evt"], b["ctx"], b["cand"], mask=b["mask"], h=b.get("h"),
                     n_legal=b["nlegal"])
+        # ★ s44：下一事件辅头的 held-out 读数（事件步级 CE / top1 / 边缘分布）。
+        if next_head is not None:
+            nx = next_event_batch(evt_raw, shuffle=next_shuffle, gen=nx_gen)
+            hs, _ = model.event_steps(nx["evt"], b.get("h"))
+            lg = next_head(hs[:, :-1])
+            lt, mt = lg.get("type"), nx["m_type"]
+            if lt is not None and bool(mt.any()):
+                yt = nx["type"][mt]
+                nx_t_sum += float(F.cross_entropy(lt[mt], yt, reduction="sum"))
+                nx_t_hit += int((lt[mt].argmax(-1) == yt).sum())
+                nx_t_n += int(yt.numel())
+                nx_t_cnt += np.bincount(yt.cpu().numpy(), minlength=nx_t_cnt.size)
+            lk, mk = lg.get("tile"), nx["m_tile"]
+            if lk is not None and bool(mk.any()):
+                yk = nx["tile"][mk]
+                nx_k_sum += float(F.cross_entropy(lk[mk], yk, reduction="sum"))
+                nx_k_hit += int((lk[mk].argmax(-1) == yk).sum())
+                nx_k_n += int(yk.numel())
+                nx_k_cnt += np.bincount(yk.cpu().numpy(), minlength=nx_k_cnt.size)
         # ⚠ 掩码要喂进损失：自对弈数据集里 `random` 那 1/4 行的动作在训练过的网看来**几乎是零概率**
         #   （实测逐行 CE 中位 0.05 / 90 分位 24 / 最大 672）—— 不遮的话"策略 CE"这个指标会被它带跑，
         #   而 PPO 的 log 比在那些行上也没有意义（策略损失本来就只算学生行）
@@ -1568,6 +1732,29 @@ def evaluate(model: M.V4Model, data: dict, device: str, batch: int = 512,
     if ssl_n:
         out["ssl_acc"] = ssl_hit / ssl_n
         out["ssl_n"] = ssl_n
+    # ★ s44：下一事件辅头的 held-out 读数 + **类型/牌种边缘分布基线**（判据的"防放水"参照：
+    #   只看边缘分布、不用任何历史的最优常数预测器，其 CE 就是这些标签分布的经验熵）。
+    if next_head is not None:
+        def _edge_ce(cnt: np.ndarray) -> float:
+            p = cnt.astype(np.float64) / max(1, int(cnt.sum()))
+            p = p[p > 0]
+            return float(-(p * np.log(p)).sum())
+        if nx_t_n:
+            out["next_type_ce"] = nx_t_sum / nx_t_n
+            out["next_type_top1"] = nx_t_hit / nx_t_n
+            out["next_type_n"] = nx_t_n
+            out["next_type_prior_ce"] = _edge_ce(nx_t_cnt)
+        if nx_k_n:
+            out["next_tile_ce"] = nx_k_sum / nx_k_n
+            out["next_tile_top1"] = nx_k_hit / nx_k_n
+            out["next_tile_n"] = nx_k_n
+            out["next_tile_prior_ce"] = _edge_ce(nx_k_cnt)
+        if nx_t_n and nx_k_n:
+            # 预注册口径：`both` = 两个子头 CE 的**均值**（等权，不按步数加权 —— 两个头的
+            # 可标步数本来就不同，按步数加权会让 tile 淹没 type）。
+            out["next_both_ce"] = 0.5 * (out["next_type_ce"] + out["next_tile_ce"])
+            out["next_both_prior_ce"] = 0.5 * (out["next_type_prior_ce"]
+                                               + out["next_tile_prior_ce"])
     return out
 
 
@@ -1734,8 +1921,13 @@ def _own_win_sd(own_win_head) -> dict:
     return {} if own_win_head is None else own_win_head.state_dict()
 
 
+def _next_sd(next_event_head) -> dict:
+    """★ s44：下一事件辅头的 `state_dict()`（**关着时返回空字典**，理由同 `_own_win_sd`）。"""
+    return {} if next_event_head is None else next_event_head.state_dict()
+
+
 def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict,
-                    own_win_head=None) -> None:
+                    own_win_head=None, next_event_head=None) -> None:
     ck = {"model": model.state_dict(),
           "ssl_head": ssl_head.state_dict(),
           # ⚠ `arch` 与 `dims` 一起落盘：A− 的张量集与 v4 不同，加载时必须建对塔
@@ -1755,6 +1947,9 @@ def save_checkpoint(path, model, ssl_head, meta, weights, extra: dict,
     #   （不是"存在且为 None"）⇒ 缺省路径的 ckpt 与加这个功能之前逐字节相同。
     if own_win_head is not None:
         ck["own_win_head"] = own_win_head.state_dict()
+    # ★ s44：下一事件辅头同样**只在开关开时落盘**（单独键；⛔ 不进 `model`/`config`/`net.bin`）
+    if next_event_head is not None:
+        ck["next_event_head"] = next_event_head.state_dict()
     torch.save(ck, path)
 
 
@@ -1913,7 +2108,10 @@ def _recorded_args(args) -> dict:
                        ("legacy_zero_init", False),
                        # ★ 第一百二十一轮：三个多头旋钮（缺省 = 不传/关 ⇒ 台账里一个键都不进）
                        ("head_loss_weights", None), ("head_lr_groups", None),
-                       ("belief_hand_unseen_weight", 0.0)):
+                       ("belief_hand_unseen_weight", 0.0),
+                       # ★ s44：下一事件辅头（缺省 off/0.1/off ⇒ 台账里一个键都不进）
+                       ("next_event_aux", "off"), ("next_event_weight", 0.1),
+                       ("next_event_shuffle", "off")):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -2194,6 +2392,34 @@ def train(args) -> dict:
               f"`--aux-own-win-rows {aux_own_rows}`；"
               f"⛔ 它是**外部头**：不进 `HEAD_SPECS`/`net.bin`/三端头表/推理路径")
 
+    # ---- ★ s44：**下一事件预测**辅头（训练期 only；缺省 `off` ⇒ 这里一个字符都不打印）------
+    next_aux = str(getattr(args, "next_event_aux", "off") or "off")
+    next_w = float(getattr(args, "next_event_weight", 0.1) or 0.0)
+    next_shuffle = str(getattr(args, "next_event_shuffle", "off") or "off")
+    if next_aux not in NEXT_EVENT_AUX:
+        raise SystemExit(f"`--next-event-aux` 只认 {list(NEXT_EVENT_AUX)}（收到 {next_aux!r}）")
+    if next_shuffle not in ("off", "on"):
+        raise SystemExit(f"`--next-event-shuffle` 只认 off|on（收到 {next_shuffle!r}）")
+    if next_aux == "off":
+        if next_shuffle != "off":
+            raise SystemExit("⛔ `--next-event-shuffle on` 但 `--next-event-aux off`：打乱只作用于"
+                             "辅头的输入，辅头关着时它没有任何语义（fail-closed，⛔ 不静默忽略）")
+    else:
+        if not (next_w > 0.0):
+            raise SystemExit(f"`--next-event-weight {next_w:g}` 必须 > 0（关闭请用 "
+                             f"`--next-event-aux off`，⛔ 不用 weight 0 表达关闭）")
+        if getattr(args, "resume_optimizer", None):
+            # 辅头是训练期外挂参数，续跑存档格式里没有它 ⇒ 接着跑会静默丢掉它的权重/动量。
+            raise SystemExit("⛔ 下一事件辅头 + `--resume-optimizer` 未实现（存档里没有这张头）："
+                             "要续跑请用 `--next-event-aux off`，或从 `--init` 重新起一段")
+        print(f"下一事件辅头：**开**（`--next-event-aux {next_aux}`，H={NEXT_EVENT_HIDDEN}，"
+              f"权重 {next_w:g}，`--next-event-shuffle {next_shuffle}`）—— 读 `h_evt` 的**逐事件步**"
+              f" carry（`model.event_steps`），标签 = 窗口内下一个真实事件；"
+              f"⛔ 外部头：不进 `HEAD_SPECS`/`loss_weights()`/`net.bin`/三端头表/推理路径")
+        if next_shuffle == "on":
+            print(f"  ⚠ **打乱序臂**：真实事件在**窗口内**按行随机置换（置换种子 = seed + "
+                  f"{NEXT_EVENT_SHUFFLE_SEED}，**连同标签一起**换）；策略侧的输入**逐位不变**")
+
     device = _device(args.device)
     threads = guard.apply_cpu_limit(args.threads)
     torch.manual_seed(args.seed)
@@ -2205,6 +2431,12 @@ def train(args) -> dict:
     #   ⚠ 建在这里（`ssl_head` 之后）不扰动任何 RNG：`M.build` 已经把 `torch.manual_seed` 用掉，
     #   而训练路径此后不再抽 torch 全局 RNG（Adam 无随机、掩码用独立的 `rng_gen`）。
     own_win_head = OwnWinHead().to(device) if aux_own_w > 0 else None
+    # ★ s44：下一事件辅头**只当 `--next-event-aux != off` 时才建**（缺省 ⇒ `None` ⇒ 无参数/无梯度/
+    #   无 ckpt 键/`compute_loss(aux_next=None)` 一行都不走）。
+    next_head = (NextEventHead(next_aux).to(device) if next_aux != "off" else None)
+    # 打乱序的**独立**生成器（只被 `next_event_batch` 消费 ⇒ 不扰动 SSL 掩码/数据顺序的随机流）。
+    next_gen = (torch.Generator(device="cpu").manual_seed(args.seed + NEXT_EVENT_SHUFFLE_SEED)
+                if (next_head is not None and next_shuffle == "on") else None)
     # 初始化：`--init <ckpt|net.bin>` 时从上一代权重起步（P3/P4 都是"接着上一代练"）
     init_spec = getattr(args, "init", None)
     if init_spec:
@@ -2242,7 +2474,8 @@ def train(args) -> dict:
         else:
             model.load_state_dict(resume["model"], strict=True)
             print(f"续跑：权重 + SSL 头从 {resume['path']} 载入（`--init` 没给 ⇒ 就用存档那一份）")
-        got_w = _state_sha256(model.state_dict(), ssl_head.state_dict(), _own_win_sd(own_win_head))
+        got_w = _state_sha256(model.state_dict(), ssl_head.state_dict(), _own_win_sd(own_win_head),
+                              _next_sd(next_head))
         if got_w != str(res0.get("weights_sha256")):
             raise SystemExit(
                 f"`--init` 与 `--resume-optimizer` **不是同一份权重**"
@@ -2375,6 +2608,9 @@ def train(args) -> dict:
     # ★ MV-1：辅助头进优化器**只在它存在时**（关着时这一项是空列表 ⇒ 参数组逐位相同）
     if own_win_head is not None:
         heads = heads + list(own_win_head.parameters())
+    # ★ s44：下一事件辅头进**头组**（⛔ 不进主干组：阶段 b 会冻主干，而这张头要全程训）。
+    if next_head is not None:
+        heads = heads + list(next_head.parameters())
     if only:
         for name, p in model.heads.named_parameters():
             if name.split(".")[0] not in only:
@@ -2390,6 +2626,11 @@ def train(args) -> dict:
 
     # ★ 第一百二十一轮：`--head-lr-groups`（头级 lr 分组；缺省 `None` ⇒ 下面仍是**原来的两组**）
     head_lr_groups = _parse_head_lr_groups(getattr(args, "head_lr_groups", None))
+    if head_lr_groups is not None and next_head is not None:
+        # `HEAD_LR_GROUP_MEMBERS` 里没有 `next_event` 组 ⇒ 走分组路径会让这张头的参数**整轮
+        # 静默不更新**（正是这个 fail-closed 检查要防的那类假绿）。要一起用就先给分组注册新组。
+        raise SystemExit("⛔ `--next-event-aux != off` 与 `--head-lr-groups` 暂不兼容"
+                         "（分组表里没有 `next_event` 组 ⇒ 该头会静默不更新）")
     if head_lr_groups is None:
         opt = torch.optim.Adam([{"params": trunk, "lr": args.lr},
                                 {"params": heads, "lr": args.lr * args.head_lr_mult}])
@@ -3020,6 +3261,18 @@ def train(args) -> dict:
             if il_b is not None:
                 b["il_target"] = il_b
             ssl = None
+            # ★ s44：下一事件辅头的**输入**（`evt_raw` = 未掩码的窗口）与标签 —— 必须在
+            #   `ssl` 把 `b["evt"]` 换成掩码版**之前**取好（那一份只给重建头用）。
+            aux_next = None
+            if next_head is not None:
+                nx = next_event_batch(b["evt"], shuffle=(next_shuffle == "on"), gen=next_gen)
+                hs, _ = model.event_steps(nx["evt"], b.get("h"))
+                lg = next_head(hs[:, :-1])
+                aux_next = {"weight": next_w,
+                            "type_logits": lg.get("type"), "type_tgt": nx["type"],
+                            "type_mask": nx["m_type"],
+                            "tile_logits": lg.get("tile"), "tile_tgt": nx["tile"],
+                            "tile_mask": nx["m_tile"]}
             if stage in ("a", "c") and args.mask_frac > 0:
                 evt_masked, mask_rows, target = mask_events(b["evt"], args.mask_frac, rng_gen)
                 b["evt"] = evt_masked
@@ -3046,6 +3299,8 @@ def train(args) -> dict:
                                        aux_own=(None if own_win_head is None
                                                 else (own_win_head(out["state"]), aux_own_w,
                                                       aux_own_rows)),
+                                       # ★ s44：下一事件辅头（`None` ⇒ 那一项一行都不走）
+                                       aux_next=aux_next,
                                        # ★ 第一百二十一轮：belief_hand 的公开牌级加权
                                        #   （0 = 关 ⇒ `l_bh` 与加这个旋钮之前逐位相同）
                                        belief_w=float(getattr(args, "belief_hand_unseen_weight", 0.0) or 0.0))
@@ -3128,7 +3383,9 @@ def train(args) -> dict:
         else:
             ev = evaluate(model, val_data, device, batch=args.eval_batch, ssl_head=ssl_head,
                           mask_frac=args.mask_frac, value_key=value_key, ablate=ablate or None,
-                          extra=val_extra, il_target=il_va)
+                          extra=val_extra, il_target=il_va,
+                          # ★ s44：同一臂的 val 也必须用**同一种**事件序（打乱臂用固定置换）
+                          next_head=next_head, next_shuffle=(next_shuffle == "on"))
             ev_stu = (evaluate(model, val_data, device, batch=args.eval_batch, row_keep=keep_va,
                                value_key=value_key, ablate=ablate or None, extra=val_extra,
                                il_target=il_va)
@@ -3179,7 +3436,16 @@ def train(args) -> dict:
                  if ref_beta > 0 else "")
               # 验证集早停的两条线也进 epoch 行：一眼看出"还在学"还是"开始记数据"
               + (f" | CE({val_metric}: train {ce_log[-1]['train_ce']:.4f} / val {ce_log[-1]['val_ce']:.4f})"
-                 if ce_log else ""))
+                 if ce_log else "")
+              # ★ s44：下一事件读数（**只在辅头开着时**打 ⇒ 缺省日志逐字不变）
+              + (f" | 下一事件 CE type {ev.get('next_type_ce', float('nan')):.4f}"
+                 f" tile {ev.get('next_tile_ce', float('nan')):.4f}"
+                 f" both {ev.get('next_both_ce', float('nan')):.4f}"
+                 f"（边缘基线 {ev.get('next_type_prior_ce', float('nan')):.4f}/"
+                 f"{ev.get('next_tile_prior_ce', float('nan')):.4f}；"
+                 f"top1 {ev.get('next_type_top1', float('nan')):.3f}/"
+                 f"{ev.get('next_tile_top1', float('nan')):.3f}）"
+                 if next_head is not None else ""))
         print("        按类型：" + "  ".join(
             f"{t}={d['top1']:.2f}(n={d['n']})" for t, d in sorted(ev["by_type"].items())))
         # ★ BL-14：**ρ 的分布**（判据 3 的原始输出）—— 每一轮都打，不是只在出问题时打。
@@ -3226,7 +3492,7 @@ def train(args) -> dict:
             "optimizer": opt.state_dict(),
             "base_lrs": [float(x) for x in base_lrs],
             "weights_sha256": _state_sha256(model.state_dict(), ssl_head.state_dict(),
-                                            _own_win_sd(own_win_head)),
+                                            _own_win_sd(own_win_head), _next_sd(next_head)),
             "counters": {
                 "gstep": int(gstep), "epoch": int(seg_epoch), "step_in_epoch": int(seg_step),
                 "steps": int(steps), "total_steps": int(total_steps), "n": int(n),
@@ -3258,7 +3524,7 @@ def train(args) -> dict:
             "chain": {"il_init_student": il_init, "il_init_all": il_init_all, "il_rand": il_rand},
         }
     save_checkpoint(out / "model.pt", model, ssl_head, meta, weights, extra,
-                    own_win_head=own_win_head)
+                    own_win_head=own_win_head, next_event_head=next_head)
     result = {
         "label": args.label, "data": str(args.data), "dataset_meta": meta,
         "params": model.param_count(), "device": device, "torch_threads": threads,
@@ -3301,6 +3567,14 @@ def train(args) -> dict:
         "has_h0": bool(has_h0),
         "h0_dim": (int(train_data["h0"].shape[1]) if has_h0 else None),
         "no_carry": bool(no_carry),
+        # ★ s44：下一事件辅头的配置 + **最后一个 epoch 的 held-out 读数**（只在开着时出现；
+        #   缺省 off ⇒ `metrics.json` 逐键不变）。
+        **({"next_event": {
+            "aux": next_aux, "weight": next_w, "shuffle": next_shuffle,
+            "hidden": NEXT_EVENT_HIDDEN, "shuffle_seed_offset": NEXT_EVENT_SHUFFLE_SEED,
+            "val": ({k: v for k, v in history[-1].items() if k.startswith("val_next_")}
+                    if history else {}),
+        }} if next_head is not None else {}),
         # W3（对现任的 KL 锚）：β 与**这一轮实测的** `ref_kl`（最后一个 epoch 的学生行均值）。
         # 台账里"β=0.5 那一轮到底离现任多远"就是一个数；β=0 时是 None（那一项压根没算）。
         "ref_beta": float(ref_beta),
@@ -3717,6 +3991,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="`own_win` 头的**次口径报告**（⛔ 不改主判据、不改总损失）："
                          "`all`（缺省）= 只报全部行（= 训练口径，与 value/placement/belief_* 同族）；"
                          "`student` = 额外报一个 `own_win_student`（只在学生行上的 BCE，仅入 `parts`）")
+    # ---- ★ s44：**下一事件预测**辅头（训练期 only；`off` = 缺省 = 一行都不建/不走）-------------
+    ap.add_argument("--next-event-aux", choices=list(NEXT_EVENT_AUX), default="off",
+                    help="★ 训练期专用的**下一事件预测辅头**（读 `h_evt` 的逐事件步 carry）："
+                         "`off`（缺省）= 不建头；`type` = 8 类事件类型；`tile` = 34 类牌种；"
+                         "`both` = 两个子头都要（`both` 的损失 = 两项 CE 的均值）。"
+                         "⛔ 外部头：不进 `HEAD_SPECS`/`loss_weights()`/`net.bin`/三端头表/推理路径"
+                         "（判据：`off` 与不带这三条开关时 `model` 段 sha256 逐位相同）")
+    ap.add_argument("--next-event-weight", type=float, default=0.1, metavar="W",
+                    help="下一事件辅头的损失权重（缺省 0.1；`--next-event-aux off` 时**不读**它）")
+    ap.add_argument("--next-event-shuffle", choices=["off", "on"], default="off",
+                    help="`on` = 把事件序列在**窗口内打乱**后再喂给辅头（**连同标签一起**换）；"
+                         "⛔ 只影响辅头的输入，策略侧的输入逐位不变")
     args = ap.parse_args(argv)
     if args.device == "auto" and not torch.cuda.is_available():
         print("（提示）没有 CUDA，用 CPU 跑；大轮次请用 GPU（设计 §0.1.3 的显存/占用纪律）")

@@ -2304,6 +2304,68 @@ _torch.nn.functional.binary_cross_entropy_with_logits(
 ok(_trunk_grad_norm(_v4g) == 0.0,
    "MV-1 负向对照：把辅助头的输入换成**常数** ⇒ 主干梯度恒 0（这条判据能被判错，不是空转）")
 
+# ---- s44：**训练期专用**的下一事件预测辅头（2026-10-20；零训练）--------------------------------
+# 判据出处：`AGENTS.md` §6.5 第一百二十四轮 + `lab/mv1/NEXT-EVENT-AUX.md`。
+# 五条钉的是：① 形状/参数账 ② 标签对齐（右对齐 + 末事件丢 + tile 掩码）③ 打乱**只**动辅头输入
+# ④ 开关关 ⇒ 损失一行都不走（成对正向：开着时 `parts` 里真有 `next_type`）
+# ⑤ 辅头损失只经 `event` 塔回传、⛔ 不进 `heads`/`loss_weights()`（外部头的定义）。
+_nev = np.zeros((1, 6, 96), dtype=np.float32)
+for _j, (_ty, _tk) in enumerate(((1, 2), (0, 4), (3, None))):   # discard(3m) → draw(5p) → riichi
+    _nev[0, 3 + _j, _ty] = 1.0                                  # 两条 padding 在**前**（右对齐）
+    if _tk is not None:
+        _nev[0, 3 + _j, 8 + _tk] = 1.0
+_nev_t = _torch.from_numpy(_nev)
+_nb = v4_pt.next_event_batch(_nev_t, shuffle=False)
+_nh = v4_pt.NextEventHead("both", d_model=128)          # 显式 128：不依赖此刻的进程级 arch
+_nev_h = _nh(_torch.zeros(1, 5, 128))
+_nev_np = sum(p.numel() for p in _nh.parameters())
+eq("s44：辅头形状（type [B,K-1,8] / tile [B,K-1,34]；H=64 的两层 MLP 参数 "
+   f"{_nev_np:,}）",
+   (tuple(_nev_h["type"].shape), tuple(_nev_h["tile"].shape), _nev_np),
+   ((1, 5, 8), (1, 5, 34), 2 * (128 * 64 + 64) + (64 * 8 + 8) + (64 * 34 + 34)))
+# ② 标签对齐（**成对**：type 有 2 步、tile 只有 1 步 —— 末事件丢 + `riichi` 无牌种被掩掉）
+eq("s44：下一事件标签 = 右对齐的**下一个真实事件**（末事件丢；`tile` 对无牌事件不标）",
+   (int(_nb["m_type"].sum()), _nb["type"][_nb["m_type"]].tolist(),
+    int(_nb["m_tile"].sum()), _nb["tile"][_nb["m_tile"]].tolist()),
+   (2, [0, 3], 1, [4]))
+# ③ 打乱只动**辅头输入**：真实事件的多重集不变（同样 3 条）、原张量没被改、且置换**真的非恒等**
+_gen = _torch.Generator().manual_seed(v4_pt.NEXT_EVENT_SHUFFLE_SEED)
+_nbs = v4_pt.next_event_batch(_nev_t, shuffle=True, gen=_gen)
+_same = bool((np.sort(_nbs["evt"][0].numpy(), axis=0) == np.sort(_nev[0], axis=0)).all())
+ok(_same and np.array_equal(_nev, _nev) and int(_nbs["m_type"].sum()) == 2
+   and not bool((_nbs["evt"] == _nev_t).all()),
+   "s44：打乱序臂**只**换辅头看到的窗口（事件多重集/可标步数不变、原张量未改），"
+   "策略侧输入不在这一层")
+# ④ 关闭时**一行都不走**（成对：`aux_next=None` 与"不带这个形参"逐位同 ∧ 开着时真有那一项）
+_x2 = {_k: _torch.cat([_v, _v], 0) for _k, _v in _x.items()}
+_bb = {"label": _torch.zeros(2, dtype=_torch.long), "value": _torch.zeros(2),
+       "placement": _torch.full((2,), -1, dtype=_torch.long),
+       "mask": _torch.ones(2, int(_t.cand.shape[0]), dtype=_torch.bool)}
+_o2 = _v4m(**_x2, mask=_bb["mask"])
+_l0, _p0 = v4_pt.compute_loss(_o2, _bb)
+_l1, _p1 = v4_pt.compute_loss(_o2, _bb, aux_next=None)
+_aux_d = {"weight": 0.1, "type_logits": _torch.randn(2, 5, 8), "type_tgt": _torch.zeros(2, 5, dtype=_torch.long),
+          "type_mask": _torch.ones(2, 5, dtype=_torch.bool),
+          "tile_logits": _torch.randn(2, 5, 34), "tile_tgt": _torch.zeros(2, 5, dtype=_torch.long),
+          "tile_mask": _torch.ones(2, 5, dtype=_torch.bool)}
+_l2, _p2 = v4_pt.compute_loss(_o2, _bb, aux_next=_aux_d)
+ok(float(_l0) == float(_l1) and _p0 == _p1 and not any(k.startswith("next_") for k in _p1)
+   and "next_type" in _p2 and "next_tile" in _p2 and float(_l2) != float(_l0),
+   "s44：`aux_next=None` 与「没有这个形参」**逐位相同**（关闭时一行都不走）；"
+   "正向对照：开着时 `parts` 里真有 `next_type`/`next_tile` 且总损失变了")
+# ⑤ 梯度只到 `event` 塔、⛔ 不到 `heads`（辅头不污染主目标头/损失注册表/state_dict）
+_g2 = v4_model.build(seed=13)
+_hs2, _ = _g2.event_steps(_x2["evt"], None)
+_nx2 = _hs2[:, :-1, :8].reshape(-1, 8)
+_torch.nn.functional.cross_entropy(_nx2, _torch.zeros(_nx2.shape[0], dtype=_torch.long)).backward()
+_ev_g = sum(float(p.grad.norm()) ** 2 for n, p in _g2.event.named_parameters() if p.grad is not None)
+_hd_g = [n for n, p in _g2.heads.named_parameters() if p.grad is not None]
+ok(_ev_g > 0.0 and not _hd_g and "next_type" not in v4_model.loss_weights()
+   and not any(k.startswith("next") for k in _g2.state_dict()),
+   f"s44：辅头损失只经 `event` 塔回传（‖∂L/∂event‖={_ev_g ** 0.5:.3e}），"
+   f"`heads` 梯度为空 {_hd_g}；不在 `loss_weights()`/`state_dict()`（⇒ 不进 net.bin）")
+
+
 # ---- P3 开局：学生掩码（`--student`）+ 回报列（`delta`）+ RWR 权重（2026-09-27）------------
 _std = "net:tools/build/x/net.bin#1.0"
 _sp_src = scratch("v4-sp-src")
