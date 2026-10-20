@@ -184,6 +184,115 @@ def privileged_features(priv: dict, i: int, opp_tenpai: np.ndarray | None = None
     return np.concatenate(parts).astype(np.float32)
 
 
+# ---------------------------------------------------------------- 牌先验（第一百二十轮）
+#
+# 项目方原话：「critic 可以放置更多额外计算信息，包括某张牌的几个比值，包括手牌中与总数比例，
+# 非上帝视角某牌剩余数与上帝视角剩余数比例，某牌被扣牌比例」⇒ 34 种 × **5 个比值 = 170 维**。
+#
+# ⚠ 五个比值**全部由既有字段推导**（obs 的 `hand`/`visible` + `priv.opp_hand`）⇒
+#   **不需要新采集**、⛔ 不进 obs / 主网 / `net.bin` / 推理，只在 critic 的输入张量里。
+#
+# 单位约定：公式在**张数**（0..4 的整数）下写，输出再按值域归一。分母 0 一律用 **ε = 0.25 张**
+# （= 唯一可分辨的最小量的一半）兜底，并按预注册区间截断 —— 见 `lab/mv1/CRITIC-TILE-PRIORS.md`。
+
+#: 分母兜底（张）。`4−own−vis`、`4−own−vis−opp` 都可能为 0。
+RATIO_EPS = 0.25
+#: `remaining_ratio` 的数学上界 = 4/ε（`4−own−vis` 最大 4、分母被抬到 ε）。
+RATIO_MAX_REMAINING = 4.0 / RATIO_EPS
+#: `withheld_ratio` 的上界：`opp ≤ 4−own−vis` ⇒ ≤ 1。
+RATIO_MAX_WITHHELD = 1.0
+#: 170 = 34 种 × 5；块顺序即下面 `RATIO_BLOCKS` 的顺序。
+RATIO_BLOCKS = ("hand_ratio", "public_remaining", "god_remaining",
+                "remaining_ratio", "withheld_ratio")
+RATIO_DIMS = 34 * len(RATIO_BLOCKS)
+
+
+def _check_counts_2d(v: np.ndarray, name: str) -> np.ndarray:
+    a = np.asarray(v, np.float64)
+    if a.ndim != 2 or a.shape[1] != 34:
+        raise ValueError(f"{name}: 期望 m×34，实际 {a.shape}")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{name}: 有非有限值")
+    if a.min() < -1e-3 or a.max() > 4.0 + 1e-3:
+        raise ValueError(f"{name}: 值域越界 [{a.min()}, {a.max()}]（应 0..4）")
+    if np.abs(a - np.rint(a)).max() > 1e-3:
+        raise ValueError(f"{name}: 不是整数张数（max|Δ|={np.abs(a - np.rint(a)).max()}）"
+                         "—— `/4` 的归一列解回来才有意义")
+    return np.rint(a)
+
+
+def _ratio_matrix(own: np.ndarray, vis: np.ndarray, opp: np.ndarray) -> np.ndarray:
+    """`m×34` 张数 → `m×170` 比值（**唯一实现**；1 行的 `tile_ratio_features` 也走这里）。"""
+    own = _check_counts_2d(own, "hand")
+    vis = _check_counts_2d(vis, "visible")
+    opp = _check_counts_2d(opp, "opp_sum")
+    if (own + vis > 4.0 + 1e-6).any():
+        raise ValueError("own+vis 超过 4 张（visible 可能把自家手牌算进去了）")
+    public = 4.0 - own - vis                      # 我看不到的张数 = 他家手牌 + 牌山
+    god = public - opp                            # 上帝视角剩余 = 牌山
+    if god.min() < -1e-6:
+        raise ValueError(f"god_remaining 为负（{god.min()}）—— 可见牌/对手手牌有重复计数")
+    rem = np.clip(public / np.maximum(god, RATIO_EPS), 0.0, RATIO_MAX_REMAINING)
+    wh = np.clip(opp / np.maximum(public, RATIO_EPS), 0.0, RATIO_MAX_WITHHELD)
+    return np.concatenate([own / 4.0, public / 4.0, god / 4.0, rem, wh], 1).astype(np.float32)
+
+
+def tile_ratio_features(hand, visible, opp_sum) -> np.ndarray:
+    """34×5 = 170 维「每张牌的比值先验」（**纯函数**，只吃张数向量）。
+
+    | 列 | 公式（张数） | 值域 |
+    | --- | --- | --- |
+    | `hand_ratio` | `own/4` | [0,1] |
+    | `public_remaining` | `(4−own−vis)/4`（我看不到的张数） | [0,1] |
+    | `god_remaining` | `(4−own−vis−opp)/4`（牌山剩余） | [0,1]，断言 ≥0 |
+    | `remaining_ratio` | `(4−own−vis)/max(4−own−vis−opp, ε)` | [0,16] |
+    | `withheld_ratio` | `opp/max(4−own−vis, ε)` | [0,1] |
+
+    `own` = 自家手牌、`vis` = 公开可见（四家牌河+副露+宝牌指示，obs `visible`，**不含**自家手牌）、
+    `opp` = 三家暗牌之和。`ε = 0.25` 张；`remaining_ratio` 截断 [0,16]，`withheld_ratio` 截断 [0,1]。
+    """
+    out = _ratio_matrix(np.asarray(hand, np.float64).reshape(1, -1),
+                        np.asarray(visible, np.float64).reshape(1, -1),
+                        np.asarray(opp_sum, np.float64).reshape(1, -1))
+    return out[0]
+
+
+def ratios_from_data(pub: np.ndarray, priv: np.ndarray, chunk: int = 50_000) -> np.ndarray:
+    """从**既有** `data.npz` 的 `pub/priv` 列反推 170 维（⛔ 零采集、零 raw 依赖）。
+
+    `pub[:, 0:34]` = `hand/4`、`pub[:, 34:68]` = `visible/4`（`public_features` 的构造顺序）；
+    `priv[:, 0:102]` = 三席 `opp_hand/4`（按席 34 连续展平）。
+    """
+    n = pub.shape[0]
+    out = np.empty((n, RATIO_DIMS), np.float32)
+    for st in range(0, n, chunk):
+        sl = slice(st, min(st + chunk, n))
+        own = np.rint(np.asarray(pub[sl, 0:34], np.float64) * 4.0)
+        vis = np.rint(np.asarray(pub[sl, 34:68], np.float64) * 4.0)
+        opp = np.rint(np.asarray(priv[sl, 0:102], np.float64) * 4.0).reshape(-1, 3, 34).sum(1)
+        out[sl] = _ratio_matrix(own, vis, opp)
+    return out
+
+
+def build_ratios(data_npz: Path, out: Path) -> dict:
+    z = np.load(data_npz)
+    pub, priv = z["pub"], z["priv"]
+    if pub.shape[1] < 68 or priv.shape[1] < 102:
+        raise SystemExit(f"data.npz 列数不够：pub={pub.shape} priv={priv.shape}")
+    r = ratios_from_data(pub, priv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out, ratios=r)
+    meta = {"n": int(r.shape[0]), "dims": int(r.shape[1]), "blocks": list(RATIO_BLOCKS),
+            "eps": RATIO_EPS, "clip": {"remaining_ratio": [0.0, RATIO_MAX_REMAINING],
+                                       "withheld_ratio": [0.0, RATIO_MAX_WITHHELD]},
+            "source": str(data_npz),
+            "note": "全由既有 data.npz 的 pub/priv 派生（hand/visible/opp_hand）⇒ 零采集"}
+    out.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
+    print(json.dumps(meta, ensure_ascii=False, indent=1))
+    return meta
+
+
 # ---------------------------------------------------------------- 数据集
 
 def build_data(raw: str | Path, out: Path, limit_files: int | None = None) -> dict:
@@ -337,6 +446,67 @@ PRIV_SLICES: dict[str, tuple[slice, ...] | None] = {
 def priv_block(x: np.ndarray, block: str) -> np.ndarray:
     sl = PRIV_SLICES[block]
     return x if sl is None else np.concatenate([x[:, s] for s in sl], 1)
+
+
+#: 第一百二十轮的五个臂（**同一份数据 / 同一配方 / 同一 seed / 同一早停**）。
+#: `use_priv` = 旧 309 维特权块；`ratios` = 新 170 维牌先验；`ratio_cols` = 取哪几列。
+ARMS: dict[str, dict] = {
+    "P": {"use_priv": False, "ratios": False, "ratio_cols": None,
+          "desc": "纯公开基线（阶段 2 的 public_baseline）"},
+    "A": {"use_priv": True, "ratios": False, "ratio_cols": None,
+          "desc": "阶段 2 对照：公开 + 旧特权 309"},
+    "B": {"use_priv": True, "ratios": True, "ratio_cols": None,
+          "desc": "主臂：公开 + 旧特权 309 + 新 170"},
+    "C": {"use_priv": False, "ratios": True, "ratio_cols": None,
+          "desc": "消融：公开 + 仅新 170"},
+    "D": {"use_priv": True, "ratios": True, "ratio_cols": "no_remaining_ratio",
+          "desc": "B 去掉 remaining_ratio 34 列（边际）"},
+}
+
+#: `remaining_ratio` 在 170 维里的列区间（块 3）。
+RATIO_SLICE_REMAINING = slice(3 * 34, 4 * 34)
+
+
+def ratio_columns(spec) -> np.ndarray:
+    """`ratio_cols` 说明 → 列下标数组（`None` = 全 170）。"""
+    if spec is None:
+        return np.arange(RATIO_DIMS)
+    if spec == "no_remaining_ratio":
+        keep = np.ones(RATIO_DIMS, bool)
+        keep[RATIO_SLICE_REMAINING] = False
+        return np.where(keep)[0]
+    return np.asarray(spec, np.int64)
+
+
+def critic_features(ck: dict, pub: np.ndarray, priv: np.ndarray,
+                    ratios: np.ndarray | None = None) -> np.ndarray:
+    """按 ckpt 里记的**配方**拼 critic 输入；旧 ckpt（没有新键）⇒ 与阶段 2 **逐位相同**。
+
+    ⚠ fail-closed：ckpt 要比值却没给 `ratios` ⇒ 抛错（⛔ 不拿全 0 顶替）。
+    """
+    use_priv = bool(ck.get("use_priv", True))
+    want_ratios = bool(ck.get("ratios", False))
+    parts: list[np.ndarray] = [pub]
+    if use_priv:
+        parts.append(priv_block(priv, ck.get("priv_block", "full")))
+    if want_ratios:
+        if ratios is None:
+            raise ValueError("该 ckpt 的输入含 170 维牌先验，但没给 ratios")
+        cols = ratio_columns(ck.get("ratio_cols"))
+        parts.append(ratios[:, cols])
+    return parts[0].astype(np.float32) if len(parts) == 1 else np.concatenate(parts, 1)
+
+
+def _arm_x(name: str, pub, priv, ratios) -> np.ndarray:
+    return critic_features(ARMS[name], pub, priv, ratios)
+
+
+def row_crps(prob: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """逐行 CRPS（与 `prob_metrics` 的 `crps` **同一个式子**，只是不取均值）。"""
+    prob = np.asarray(prob, np.float64)
+    y = np.asarray(y, np.float64)
+    return ((prob * np.abs(CENTERS[None, :] - y[:, None])).sum(1)
+            - 0.5 * np.einsum("ij,jk,ik->i", prob, _DIST, prob))
 
 
 def train_net(x_tr, y_tr, x_va, y_va, hidden, seed: int, epochs: int = 25,
@@ -500,9 +670,16 @@ def cmd_distill(args) -> int:
     net_c = _mlp(ck["d_in"], tuple(ck["hidden"]), VALUE_BINS, drop=float(ck.get("drop", 0.3)))
     net_c.load_state_dict(ck["state"])
     net_c.eval()
-    xn_all = ((np.concatenate([x_pub, priv_block(x_prv, ck.get("priv_block", "full"))], 1)
-               - ck["mu"]) / ck["sd"]).astype(np.float32)
+    ratios = None
+    if ck.get("ratios"):
+        if not args.ratios:
+            raise SystemExit("该 critic 的输入含 170 维牌先验 ⇒ 必须给 --ratios")
+        ratios = np.load(args.ratios)["ratios"]
+    xc_all = critic_features(ck, x_pub, x_prv, ratios)
+    xn_all = ((xc_all - ck["mu"]) / ck["sd"]).astype(np.float32)
+    del xc_all
     p_critic = _probs(net_c, xn_all)
+    del xn_all
     ck_b = torch.load(args.baseline, map_location="cpu", weights_only=False)
     net_b = _mlp(ck_b["d_in"], tuple(ck_b["hidden"]), VALUE_BINS, drop=float(ck_b.get("drop", 0.3)))
     net_b.load_state_dict(ck_b["state"])
@@ -699,6 +876,154 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_ratios(args) -> int:
+    build_ratios(Path(args.data), Path(args.out))
+    return 0
+
+
+def _boot_pair(a: dict, b: dict, y: np.ndarray, games: np.ndarray,
+               n: int = 2000, seed: int = 0) -> dict:
+    """**按场**配对 bootstrap：ΔEV / ΔCRPS / ΔMAE = 臂 a − 臂 b 的 95% 区间。
+
+    与阶段 2 的 `_boot` 同一把尺子（整场重采样、两臂**同一次**重采样的行），
+    只是把指标从 EV 扩到 CRPS / MAE（任务书要"Δ 与 CI"）。
+    """
+    uniq = np.unique(games)
+    by = {int(g): np.where(games == g)[0] for g in uniq}
+    rng = np.random.default_rng(seed)
+    dev, dcr, dmae = [], [], []
+    for _ in range(n):
+        pick = rng.choice(uniq, size=len(uniq), replace=True)
+        ii = np.concatenate([by[int(g)] for g in pick])
+        dev.append(explained_variance(a["pred"][ii], y[ii])
+                   - explained_variance(b["pred"][ii], y[ii]))
+        dcr.append(float(a["crps"][ii].mean()) - float(b["crps"][ii].mean()))
+        dmae.append(float(a["ae"][ii].mean()) - float(b["ae"][ii].mean()))
+
+    def q(v):
+        return [float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))]
+
+    return {"n_boot": n, "n_games": int(len(uniq)),
+            "d_ev": float(np.mean(dev)), "d_ev_ci": q(dev),
+            "d_crps": float(np.mean(dcr)), "d_crps_ci": q(dcr),
+            "d_mae": float(np.mean(dmae)), "d_mae_ci": q(dmae),
+            "p_d_ev_gt0": float(np.mean(np.asarray(dev) > 0))}
+
+
+def cmd_arms(args) -> int:
+    """五个臂（P/A/B/C/D）在**同一份数据、同一配方、同一 seed、同一早停**下各训一遍。
+
+    读数 = val / test 的 EV · CRPS · MAE · ρ（Spearman），并给 B−A / B−C / B−D 的
+    **按场配对 bootstrap**（ΔEV / ΔCRPS / ΔMAE 的 95% CI）。
+    """
+    import torch                                                # noqa: PLC0415
+
+    torch.set_num_threads(args.threads)
+    z = np.load(args.data)
+    x_pub, x_prv, keys = z["pub"], z["priv"], z["keys"]
+    Y = z["y"] if args.label == "final" else z["y_delta"]
+    games = keys[:, 0]
+    tr, va, te = _split3(games)
+    names = [s.strip() for s in args.arms.split(",") if s.strip()]
+    for nm in names:
+        if nm not in ARMS:
+            raise SystemExit(f"未知臂 {nm}（有 {sorted(ARMS)}）")
+    ratios = None
+    if any(ARMS[nm]["ratios"] for nm in names):
+        if not args.ratios:
+            raise SystemExit("这些臂要 170 维牌先验 ⇒ 必须给 --ratios")
+        ratios = np.load(args.ratios)["ratios"]
+        if ratios.shape != (len(Y), RATIO_DIMS):
+            raise SystemExit(f"ratios 形状 {ratios.shape} != ({len(Y)}, {RATIO_DIMS})")
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    hidden = tuple(int(h) for h in args.hidden.split(","))
+    print(f"label={args.label} rows tr/va/te={int(tr.sum())}/{int(va.sum())}/{int(te.sum())} "
+          f"d_pub={x_pub.shape[1]} d_priv={x_prv.shape[1]} "
+          f"d_ratios={0 if ratios is None else ratios.shape[1]} arms={names}")
+    res: dict = {"label": args.label, "arms": names, "recipe": {
+                     "hidden": list(hidden), "lr": args.lr, "wd": args.wd, "drop": args.drop,
+                     "epochs": args.epochs, "batch": 512, "sigma": 1.5, "seed": args.seed,
+                     "optimizer": "Adam", "select": "min val CE（同阶段 2）"},
+                 "split": {"train": int(tr.sum()), "val": int(va.sum()), "test": int(te.sum()),
+                           "val_games": int(len(np.unique(games[va]))),
+                           "test_games": int(len(np.unique(games[te]))),
+                           "note": "按场切：%10==5 早停、%10==0 报告（与阶段 2 同一 mask）"},
+                 "dims": {"pub": int(x_pub.shape[1]), "priv": int(x_prv.shape[1]),
+                          "ratios": int(RATIO_DIMS), "eps": RATIO_EPS}}
+    store: dict[str, dict] = {}
+    for nm in names:
+        x = _arm_x(nm, x_pub, x_prv, ratios)
+        mu = x[tr].mean(0)
+        sd = x[tr].std(0)
+        sd[sd < 1e-6] = 1.0
+        xn = x.astype(np.float32, copy=True)          # 就地标准化（省一份 1.5 GB 临时）
+        del x
+        xn -= mu
+        xn /= sd
+        net, info = train_net(xn[tr], Y[tr], xn[va], Y[va], hidden, args.seed,
+                              epochs=args.epochs, lr=args.lr, wd=args.wd, drop=args.drop)
+        p_te = _probs(net, xn[te])
+        p_va = _probs(net, xn[va])
+        m_te = prob_metrics(p_te, Y[te])
+        m_va = prob_metrics(p_va, Y[va])
+        for m, tag in ((m_te, "test"), (m_va, "val")):
+            m.update(params=info["params"], val_ce=info["val_ce"], best_epoch=info["epoch"],
+                     d_in=int(xn.shape[1]), split=tag)
+        res[nm] = {"desc": ARMS[nm]["desc"], "use_priv": ARMS[nm]["use_priv"],
+                   "ratios": ARMS[nm]["ratios"], "ratio_cols": ARMS[nm]["ratio_cols"],
+                   "d_in": int(xn.shape[1]), "test": m_te, "val": m_va}
+        torch.save({"state": net.state_dict(), "hidden": hidden, "mu": mu, "sd": sd,
+                    "d_in": int(xn.shape[1]), "priv_block": "full",
+                    "use_priv": ARMS[nm]["use_priv"], "ratios": ARMS[nm]["ratios"],
+                    "ratio_cols": ARMS[nm]["ratio_cols"], "drop": args.drop,
+                    "label": args.label, "arm": nm, "metrics": m_te}, out / f"arm{nm}.pt")
+        store[nm] = {"pred": p_te @ CENTERS, "crps": row_crps(p_te, Y[te]),
+                     "ae": np.abs(p_te @ CENTERS - Y[te]),
+                     "pred_val": p_va @ CENTERS, "prob_te": p_te}
+        print(f"{nm} test EV={m_te['ev']:+.4f} CRPS={m_te['crps']:.3f} MAE={m_te['mae']:.3f} "
+              f"rho={m_te['spearman']:+.4f} | val EV={m_va['ev']:+.4f} "
+              f"CRPS={m_va['crps']:.3f} MAE={m_va['mae']:.3f} rho={m_va['spearman']:+.4f} "
+              f"| params={info['params']} ep={info['epoch']} d_in={xn.shape[1]}")
+        del xn, p_va
+        store[nm]["prob_te"] = store[nm]["prob_te"]        # 保留即可（15 MB/臂）
+
+    # ---- 配对 bootstrap（按场）
+    pairs = [("B", "A"), ("B", "C"), ("B", "D"), ("A", "P")]
+    boot = {}
+    for a, b in pairs:
+        if a in store and b in store:
+            boot[f"{a}-{b}"] = _boot_pair(store[a], store[b], Y[te], games[te],
+                                          n=args.boot, seed=args.seed)
+            d = boot[f"{a}-{b}"]
+            print(f"boot {a}-{b}: dEV={d['d_ev']:+.4f} CI{d['d_ev_ci']} "
+                  f"dCRPS={d['d_crps']:+.4f} CI{d['d_crps_ci']} "
+                  f"dMAE={d['d_mae']:+.4f} CI{d['d_mae_ci']} P(dEV>0)={d['p_d_ev_gt0']:.3f}")
+    res["bootstrap"] = boot
+
+    # ---- 主判据（**冻写在 `.tmp/mv1-s39/FROZEN.md`**）：B>A 且 CI 下界 >0
+    if "B-A" in boot:
+        d = boot["B-A"]
+        res["criterion_main"] = {
+            "rule": "EV_B(test) > EV_A(test) ∧ ΔEV(B−A) 的 95% CI 下界 > 0",
+            "ev_b": res["B"]["test"]["ev"], "ev_a": res["A"]["test"]["ev"],
+            "d_ev": d["d_ev"], "ci": d["d_ev_ci"],
+            "pass": bool(res["B"]["test"]["ev"] > res["A"]["test"]["ev"]
+                         and d["d_ev_ci"][0] > 0.0)}
+        print("criterion_main", json.dumps(res["criterion_main"], ensure_ascii=False))
+    np.savez(out / "arms.test.npz", y=Y[te], game=games[te],
+             **{f"{k}_pred": v["pred"] for k, v in store.items()},
+             **{f"{k}_crps": v["crps"] for k, v in store.items()},
+             **{f"{k}_ae": v["ae"] for k, v in store.items()})
+    y_va = Y[va]
+    np.savez(out / "arms.val.npz", y=y_va, game=games[va],
+             **{f"{k}_pred": v["pred_val"] for k, v in store.items()})
+    (out / "metrics.json").write_text(json.dumps(res, ensure_ascii=False, indent=1),
+                                      encoding="utf-8")
+    print("wrote", out / "metrics.json")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="privcritic")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -728,11 +1053,32 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--compact", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--label", choices=["delta", "final"], default="delta")
+    s.add_argument("--ratios", default=None,
+                   help="170 维牌先验（critic 的输入含它时必给）")
     s.add_argument("--steps", type=int, default=600)
     s.add_argument("--batch", type=int, default=1024)
     s.add_argument("--lr", type=float, default=1e-2)
     s.add_argument("--seed", type=int, default=20261020)
     s.set_defaults(func=cmd_distill)
+    rt = sub.add_parser("ratios")
+    rt.add_argument("--data", required=True, help="阶段 2 的 data.npz（pub/priv 列）")
+    rt.add_argument("--out", required=True)
+    rt.set_defaults(func=cmd_ratios)
+    ar = sub.add_parser("arms")
+    ar.add_argument("--data", required=True)
+    ar.add_argument("--ratios", default=None)
+    ar.add_argument("--out", required=True)
+    ar.add_argument("--arms", default="P,A,B,C,D")
+    ar.add_argument("--label", choices=["delta", "final"], default="final")
+    ar.add_argument("--hidden", default="64")
+    ar.add_argument("--epochs", type=int, default=15)
+    ar.add_argument("--lr", type=float, default=3e-4)
+    ar.add_argument("--wd", type=float, default=1e-3)
+    ar.add_argument("--drop", type=float, default=0.3)
+    ar.add_argument("--boot", type=int, default=2000)
+    ar.add_argument("--threads", type=int, default=8)
+    ar.add_argument("--seed", type=int, default=20261020)
+    ar.set_defaults(func=cmd_arms)
     args = ap.parse_args(argv)
     return int(args.func(args) or 0)
 
