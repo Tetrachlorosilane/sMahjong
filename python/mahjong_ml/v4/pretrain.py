@@ -2290,8 +2290,15 @@ def train(args) -> dict:
     if lr_sched != "cosine" and getattr(args, "resume_optimizer", None):
         raise SystemExit("⛔ 换了 `--lr-schedule` 不许续跑：续跑指纹（`_resume_recipe`）里没有这一项，"
                          "接着跑出来的不是同一条轨迹；要换调度请从 `--init` 重新起一段")
+    lr_warm = int(getattr(args, "lr_warmup_steps", 0) or 0)
+    if lr_warm < 0:
+        raise SystemExit(f"`--lr-warmup-steps {lr_warm}` 越界：必须 ≥0（0 = 关）")
+    if lr_warm > 0 and getattr(args, "resume_optimizer", None):
+        raise SystemExit("⛔ 换了 `--lr-warmup-steps` 不许续跑：续跑指纹里没有这一项；"
+                         "要换 warmup 请从 `--init` 重新起一段")
     print(f"lr 调度：{lr_sched}"
           + (f"（floor = {lr_floor:g}·base）" if lr_sched == "floored-cosine" else "")
+          + (f"；warmup {lr_warm} 步（shape ← min(shape, (step+1)/{lr_warm})）" if lr_warm > 0 else "")
           + "；c 段之外的阶段照旧保持常数 lr")
     # ⚠ **KL 早停必须够得着**（第二十五轮实测的坑）：`--max-steps 100` 配 `--kl-min-steps 100`
     #   ⇒ 判据只在 step ≥100 时才看，而一轮最多 100 步 ⇒ 早停永不触发（三代 `stop_reason` 全 None）。
@@ -2832,6 +2839,12 @@ def train(args) -> dict:
                         shape = lr_floor + (1.0 - lr_floor) * 0.5 * (1 + math.cos(math.pi * prog))
                         for pg, base in zip(opt.param_groups, base_lrs):
                             pg["lr"] = base * args.stage_c_lr_mult * shape
+                # ★ 第一百一十九轮：warmup 只**压低**前 N 步的形状（`min(shape, (gstep+1)/N)`），
+                # 之后完全交回上面的调度；`lr_warm == 0` 时这一支不执行 ⇒ 旧路径逐位不变。
+                if lr_warm > 0 and gstep < lr_warm:
+                    warm_shape = (gstep + 1) / lr_warm
+                    for pg, base in zip(opt.param_groups, base_lrs):
+                        pg["lr"] = min(pg["lr"], base * args.stage_c_lr_mult * warm_shape)
             idx = np.sort(perm[step * args.batch:(step + 1) * args.batch])
             if idx.size == 0:
                 break
@@ -3341,6 +3354,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr-floor-frac", type=float, default=0.1, metavar="F",
                     help="`--lr-schedule floored-cosine` 的 lr 下限（占 --lr 的比例，缺省 0.1）；"
                          "⚠ `--lr-schedule cosine` 下必须留缺省（0.1），否则报错")
+    # ★ 第一百一十九轮（lr 配方小规模优化）：**warmup 段**。缺省 0 = 一个浮点都不改（旧路径逐位不变）。
+    # 为什么单独一个旋钮：warmup 只改"前 N 步的 lr 形状"，不碰 --lr 数值、不碰网络结构；
+    # 语义 = `shape ← min(shape, (step+1)/N)`，N 步之后完全交回 `--lr-schedule` 的形状。
+    ap.add_argument("--lr-warmup-steps", type=int, default=0, metavar="N",
+                    help="c 段开头用 N 步从 ~0 线性升到目标 lr（缺省 0 = 关）；"
+                         "⚠ 只改 lr 形状，不改 --lr / 不改结构")
     # ★ A−（T1，段 1）：拓扑开关。缺省 v4 = 现有图（逐位不变）；`a-` = 新图（`ARCH-REDESIGN` §2.2）。
     ap.add_argument("--arch", choices=[M.ARCH_V4, M.ARCH_A], default=M.ARCH_V4,
                     help="网络图：v4（缺省，现有图，逐位不变）/ a-（T1：34 轴卷积+轴向注意力、"

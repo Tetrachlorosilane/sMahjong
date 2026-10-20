@@ -25,14 +25,33 @@ const NOTES = join(ROOT, 'NOTES.md');
 const CHECK = process.argv.includes('--check');
 
 const CN = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const UNITS = { 十: 10, 百: 100, 千: 1000 };
 
-/** 中文数字 → 整数（够用到 九十九：「六十七」= 67）。 */
+/** 中文数字 → 整数（0–9999：「九十九」= 99、「一百一十八」= 118、「一百零三」= 103）。 */
 function cn2int(s) {
     if (/^\d+$/.test(s)) return Number(s);
-    if (s === '十') return 10;
-    const m = s.match(/^(.)?十(.)?$/);
-    if (m) return (m[1] ? CN[m[1]] : 1) * 10 + (m[2] ? CN[m[2]] : 0);
-    return CN[s] ?? NaN;
+    const CN0 = { 零: 0, 〇: 0 };
+    let total = 0;
+    let cur = 0;          // 当前"段"的数字（如 一百一十八 里的 一十八）
+    let section = 0;      // 已累计到"万"之前的段
+    let lastUnit = 0;     // 上一个单位（用来识别"一百零三"里的零）
+    let seen = false;
+    for (const ch of s) {
+        if (ch in CN || ch in CN0) {
+            cur = (CN[ch] ?? CN0[ch]);
+            seen = true;
+        } else if (ch in UNITS) {
+            const u = UNITS[ch];
+            section += (cur || (seen ? 0 : 1)) * u;
+            cur = 0;
+            lastUnit = u;
+            seen = true;
+        } else {
+            return NaN;
+        }
+    }
+    total = section + cur;
+    return seen ? total : NaN;
 }
 
 const lines = readFileSync(NOTES, 'utf8').split('\n');
@@ -62,6 +81,9 @@ const table = ['| 轮次 | 日期 | 主题（点进去搜这串就行） |', '| 
 
 const missing = [];
 const max = rounds.reduce((a, r) => Math.max(a, r.n), 0);
+// ⚠ 起始号只能从**数组**取：`Math.min(...present)` 展开的是 Set（不可迭代成参数）⇒ 恒 NaN，
+// 打印出来就是「编号 NaN–NaN」（第一百一十九轮修）。只改显示，判据不动。
+const min = rounds.reduce((a, r) => Math.min(a, r.n), Infinity);
 const present = new Set(rounds.map((r) => r.n));
 for (let i = 1; i <= max; i++) if (!present.has(i)) missing.push(i);
 
@@ -102,4 +124,4 @@ if (problems.length > 0) {
     process.exit(1);
 }
 console.log(`[round-index] PASS：索引表覆盖正文全部 ${rounds.length} 个轮次小节`
-            + `（编号 ${Math.min(...present)}–${max}${missing.length ? `，缺号 ${missing.join(',')}` : ''}）`);
+            + `（编号 ${min}–${max}${missing.length ? `，缺号 ${missing.join(',')}` : ''}）`);
