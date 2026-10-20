@@ -15,6 +15,7 @@
 | 查**关键纠错**（训练域专属 `T-nn`） | `AGENTS-TRAIN-LEDGER.md` §B |
 | 查轮次全量索引（75 小节 / 编号 5–88） | `NOTES.md` §6.5 轮次索引表 |
 | 查现行**下一步**（唯一清单） | `docs/HANDOVER.md` §1 / §3（⛔ 本文件不复述） |
+| 查**文献调研 / 可迁移性评估** | 可用文献索引 → `lab/research/LIT-INDEX-2026-10.md` · `lab/research/LIT-SYNTHESIS-2026-10.md`（入口 `lab/research/README.md`） |
 | 采集 / 训练 / 校验命令 | 主 `AGENTS.md` §4 L3 + `docs/HANDOVER.md` §4 |
 | 我要动**别的域** | 回 `AGENTS.md` 顶部路由表 |
 
