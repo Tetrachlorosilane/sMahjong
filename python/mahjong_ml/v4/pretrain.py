@@ -1149,7 +1149,8 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
                  ref: tuple[float, torch.Tensor] | None = None,
                  il: tuple[float, torch.Tensor] | None = None,
                  rho: tuple[float, str, dict] | None = None,
-                 aux_own: tuple[torch.Tensor, float, str] | None = None
+                 aux_own: tuple[torch.Tensor, float, str] | None = None,
+                 belief_w: float = 0.0
                  ) -> tuple[torch.Tensor, dict[str, float]]:
     """多头加权损失。返回 `(总损失, 逐头损失字典)`。
 
@@ -1365,7 +1366,19 @@ def compute_loss(out: dict[str, torch.Tensor], b: dict[str, torch.Tensor],      
         # 对手手牌：按"有没有该牌种"的二值化目标做**逐牌种 BCE**（34 类"哪一张"不适用：
         #   手牌是一个 13 张的**集合**，不是"选一个牌种"）
         tgt = (b["opp_hand"] > 0).float()
-        l_bh = F.binary_cross_entropy_with_logits(out["belief_hand"], tgt)
+        if belief_w > 0.0 and "tile" in b:
+            # 牌级加权（第一百二十一轮）：用**公开** `tile` 的第 34 通道 `unseen`（= 4−visible，
+            # 已 /4 归一化）给每格 BCE 加权：`w = 1 + α·unseen/4`，再按整批均值归一。
+            #   ⛔ 只用 obs 里已有的公开量（四家牌河/副露/宝牌指示 ⇒ `Visible.counts`），⛔ 不碰 `priv`。
+            #   为什么加权：`unseen==0` 的格子标签必为 0（该牌种已全可见）⇒ 原口径把大量
+            #   平凡负例算进损失、梯度被稀释；归一化是为了让 α 只改**分配**、不偷偷改头的总尺度。
+            u = b["tile"][:, :, 34] * 4.0                          # [B,34] 0..4（公开）
+            wc = (1.0 + float(belief_w) * (u / 4.0)).unsqueeze(1).expand(-1, 3, -1)
+            wc = wc / wc.mean().clamp_min(1e-9)
+            per = F.binary_cross_entropy_with_logits(out["belief_hand"], tgt, reduction="none")
+            l_bh = (per * wc).mean()
+        else:
+            l_bh = F.binary_cross_entropy_with_logits(out["belief_hand"], tgt)
         parts["belief_hand"] = float(l_bh.detach())
         total = total + w["belief_hand"] * l_bh
     if "opp_tenpai" in b:
@@ -1633,6 +1646,84 @@ def _stage_of(step: int, total: int, frac_a: float, frac_b: float) -> str:
     return "c"
 
 
+#: 头级 lr 分组的成员（第一百二十一轮）。⛔ 只用于**优化器参数组**，不改前向/头表/`net.bin`。
+#: - `policy`：策略头 + `policy_gate`（后者把 `belief_tenpai` 门控进 policy ⇒ 属策略路径）；
+#: - `value`：值 + 顺位（同一族"局面价值"）；
+#: - `belief`：手牌 + 听牌信念（同一族"隐藏信息推断"）；
+#: - `aux`：危险 + 牌效 + SSL 解码器 + `own_win`（其余辅助头）。
+#: ⚠ 分组必须**覆盖 `heads` 下的每一个参数**（含 `policy_gate`）：漏掉一个 ⇒ 该参数在整个 B 组
+#:   **静默不更新**（第一百二十一轮实测：漏 `policy_gate` 时它 1 步都没动，`max|Δ|` 恰好 = 一步 lr）。
+#:   `train()` 里用"并集 == 全集"的断言兜底（fail-closed），⛔ 不许靠肉眼列全。
+HEAD_LR_GROUP_MEMBERS: dict[str, tuple[str, ...]] = {
+    "policy": ("policy", "policy_gate"),
+    "value": ("value", "placement"),
+    "belief": ("belief_hand", "belief_tenpai"),
+    "aux": ("danger", "effect", "ssl", "own_win"),
+}
+
+
+def _parse_head_loss_weights(spec, valid) -> dict[str, float]:
+    """`--head-loss-weights k=v,...` → `{头: 权重}`。缺省/空串 ⇒ `{}`（调用方一行都不改）。
+
+    ⚠ 未知头 / 非数 / 负值 / 重复键一律 `SystemExit`（⛔ 不许静默忽略旋钮）。
+    """
+    s = str(spec or "").strip()
+    if not s:
+        return {}
+    out: dict[str, float] = {}
+    for item in s.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise SystemExit(f"`--head-loss-weights` 的每一项必须是 `头=权重`（收到 {item!r}）")
+        name, val = (x.strip() for x in item.split("=", 1))
+        if name not in valid:
+            raise SystemExit(f"`--head-loss-weights` 里有未知的头 {name!r}；可选 {sorted(valid)}")
+        if name in out:
+            raise SystemExit(f"`--head-loss-weights` 重复点名 {name!r}（⛔ 后者静默覆盖前者）")
+        try:
+            w = float(val)
+        except ValueError:
+            raise SystemExit(f"`--head-loss-weights {name}=` 的值不是数：{val!r}") from None
+        if not math.isfinite(w) or w < 0.0:
+            raise SystemExit(f"`--head-loss-weights {name}={w:g}` 越界：必须 ≥0 且有限")
+        out[name] = w
+    return out
+
+
+def _parse_head_lr_groups(spec) -> dict[str, float] | None:
+    """`--head-lr-groups policy=,value=,belief=,aux=` → `{组: 倍率}`；缺省 ⇒ `None`。
+
+    未点名的组**继承 `--head-lr-mult`**（在 `train()` 里填）；⛔ 未知组/负数/重复键硬拒。
+    """
+    s = str(spec or "").strip()
+    if not s:
+        return None
+    out: dict[str, float] = {}
+    for item in s.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise SystemExit(f"`--head-lr-groups` 的每一项必须是 `组=倍率`（收到 {item!r}）")
+        name, val = (x.strip() for x in item.split("=", 1))
+        if name not in HEAD_LR_GROUP_MEMBERS:
+            raise SystemExit(f"`--head-lr-groups` 里有未知的组 {name!r}；可选 "
+                             f"{sorted(HEAD_LR_GROUP_MEMBERS)}")
+        if name in out:
+            raise SystemExit(f"`--head-lr-groups` 重复点名 {name!r}（⛔ 后者静默覆盖前者）")
+        try:
+            mult = float(val)
+        except ValueError:
+            raise SystemExit(f"`--head-lr-groups {name}=` 的值不是数：{val!r}") from None
+        if not math.isfinite(mult) or mult < 0.0:
+            raise SystemExit(f"`--head-lr-groups {name}={mult:g}` 越界：必须 ≥0 且有限")
+        out[name] = mult
+    return out
+
+
+
 def _own_win_sd(own_win_head) -> dict:
     """★ MV-1：辅助头 `own_win` 的 `state_dict()`（**关着时返回空字典**）。
 
@@ -1759,7 +1850,7 @@ def _behaviour_record(spec_str: str, meta: dict) -> dict:
 def _resume_recipe(args, *, resolved_data: str, n: int, steps: int, total_steps: int) -> dict:
     """**口径/日程指纹**：续跑时逐项核对 —— 只要有一项不同，接着跑出来的就不是同一条轨迹。"""
     g = getattr
-    return {
+    rec = {
         "data": resolved_data, "n": int(n), "steps": int(steps), "total_steps": int(total_steps),
         "epochs": int(g(args, "epochs", 0)), "batch": int(g(args, "batch", 0)),
         "seed": int(g(args, "seed", 0)),
@@ -1776,6 +1867,10 @@ def _resume_recipe(args, *, resolved_data: str, n: int, steps: int, total_steps:
         "advantage": str(g(args, "advantage", "auto") or "auto"),
         "only_heads": str(g(args, "only_heads", "") or ""),
         "drop_heads": str(g(args, "drop_heads", "") or ""),
+        # ★ 第一百二十一轮：三条多头旋钮都改轨迹 ⇒ 必须进续跑指纹（缺省值 = 旧值，旧存档照旧匹配）
+        "head_loss_weights": str(g(args, "head_loss_weights", "") or ""),
+        "head_lr_groups": str(g(args, "head_lr_groups", "") or ""),
+        "belief_hand_unseen_weight": float(g(args, "belief_hand_unseen_weight", 0.0) or 0.0),
         "freeze_trunk": bool(g(args, "freeze_trunk", False)),
         "ablate_blocks": str(g(args, "ablate_blocks", "") or ""),
         "ref_beta": float(g(args, "ref_beta", 0.0)), "il_weight": float(g(args, "il_weight", 0.0)),
@@ -1787,6 +1882,13 @@ def _resume_recipe(args, *, resolved_data: str, n: int, steps: int, total_steps:
         "baseline_fit": str(g(args, "baseline_fit", "scale") or "scale"),
         "feature_version": int(spec.FEATURE_VERSION_V4), "blocks_fingerprint": spec.fingerprint(),
     }
+    # ★ 第一百二十一轮：三个多头旋钮**只在非缺省时**进指纹 —— 否则旧存档（没有这三个键）
+    #   会被判成"口径不一致"而拒续跑（缺省值 = 旧行为 ⇒ 不该改变兼容性）。
+    for _k, _d in (("head_loss_weights", ""), ("head_lr_groups", ""),
+                   ("belief_hand_unseen_weight", 0.0)):
+        if rec.get(_k) == _d:
+            rec.pop(_k, None)
+    return rec
 
 
 def _recorded_args(args) -> dict:
@@ -1808,7 +1910,10 @@ def _recorded_args(args) -> dict:
                        # ★ C1（第一百零一轮）：`fusion.out` 末端 ReLU（缺省 = 去掉 ⇒ 台账里一个键都不进）
                        ("legacy_out_relu", False),
                        # ★ C3（第一百零二轮）：门控初始化（缺省 = 小非零 ⇒ 台账里一个键都不进）
-                       ("legacy_zero_init", False)):
+                       ("legacy_zero_init", False),
+                       # ★ 第一百二十一轮：三个多头旋钮（缺省 = 不传/关 ⇒ 台账里一个键都不进）
+                       ("head_loss_weights", None), ("head_lr_groups", None),
+                       ("belief_hand_unseen_weight", 0.0)):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -2232,6 +2337,13 @@ def train(args) -> dict:
               f"与加这个功能之前逐位相同）；要启用就同时给 `--ref-beta <β>`")
     weights = dict(M.loss_weights())
     weights["ssl"] = args.ssl_weight
+    # ★ 第一百二十一轮：`--head-loss-weights`（逐头权重覆盖；缺省 `{}` ⇒ 下面一行都不改）
+    head_loss_over = _parse_head_loss_weights(getattr(args, "head_loss_weights", None), M.loss_weights())
+    for _hk, _hv in head_loss_over.items():
+        weights[_hk] = _hv
+    if head_loss_over:
+        print("逐头 loss 权重覆盖："
+              + "，".join(f"{k}={v:g}" for k, v in sorted(head_loss_over.items())))
     # `--only-heads`：只训点名的头（其余头的损失权重清零 + 参数冻住）。"修 critic"那一轮用它
     # （`--only-heads value --freeze-trunk`，见 `NOTES.md` §6.5 第十三轮）。
     # ⚠ 点名之后**必须绕过 `STAGE_WEIGHTS`**：阶段 a 的注册权重里 `value` 就是 0（那会让这一轮
@@ -2267,8 +2379,59 @@ def train(args) -> dict:
         for name, p in model.heads.named_parameters():
             if name.split(".")[0] not in only:
                 p.requires_grad = False
-    opt = torch.optim.Adam([{"params": trunk, "lr": args.lr},
-                            {"params": heads, "lr": args.lr * args.head_lr_mult}])
+
+    def _step_weights(stage: str) -> dict[str, float]:
+        """本步的逐头权重：阶段权重（或注册表）之上叠 `--head-loss-weights`。
+
+        缺省 `head_loss_over={}` ⇒ **返回的就是原来那个对象**（一行都不改）。
+        """
+        base = weights if only else (STAGE_WEIGHTS.get(stage) or weights)
+        return base if not head_loss_over else {**base, **head_loss_over}
+
+    # ★ 第一百二十一轮：`--head-lr-groups`（头级 lr 分组；缺省 `None` ⇒ 下面仍是**原来的两组**）
+    head_lr_groups = _parse_head_lr_groups(getattr(args, "head_lr_groups", None))
+    if head_lr_groups is None:
+        opt = torch.optim.Adam([{"params": trunk, "lr": args.lr},
+                                {"params": heads, "lr": args.lr * args.head_lr_mult}])
+    else:
+        # 每一组 → 一个参数组；**未点名的组继承 `--head-lr-mult`**（显式打印出来，不静默）。
+        def _group_params(gname: str) -> list:
+            members = HEAD_LR_GROUP_MEMBERS[gname]
+            ps = [p for n, p in model.heads.named_parameters()
+                  if n.split(".")[0] in members]
+            if "ssl" in members:
+                ps += list(ssl_head.parameters())
+            if "own_win" in members and own_win_head is not None:
+                ps += list(own_win_head.parameters())
+            return ps
+
+        pg = [{"params": trunk, "lr": args.lr}]
+        shown = []
+        covered: list = []
+        for gname in HEAD_LR_GROUP_MEMBERS:
+            mult = float(head_lr_groups.get(gname, args.head_lr_mult))
+            ps = _group_params(gname)
+            if ps:
+                pg.append({"params": ps, "lr": args.lr * mult})
+            covered += ps
+            shown.append(f"{gname}×{mult:g}")
+        # ⚠ fail-closed：分组必须覆盖**全部头参数**（`heads` + ssl + own_win）。漏一个 =
+        #   该参数整轮静默不更新（第一百二十一轮实测过：漏 `policy_gate` ⇒ 它 1 步都不动）。
+        owned_ids = [id(p) for p in heads]                  # `heads` 已含 ssl/own_win（见上）
+        covered_ids = {id(p) for p in covered}
+        missing = [n for n, p in
+                   (list(model.heads.named_parameters())
+                    + [("ssl." + n, p) for n, p in ssl_head.named_parameters()]
+                    + ([] if own_win_head is None
+                       else [("own." + n, p) for n, p in own_win_head.named_parameters()]))
+                   if id(p) in set(owned_ids) and id(p) not in covered_ids]
+        if missing:
+            raise SystemExit(f"⛔ `--head-lr-groups` 没有覆盖这些头参数：{missing}"
+                             f"（漏掉 = 整轮不更新）—— 修 `HEAD_LR_GROUP_MEMBERS`，"
+                             f"⛔ 不许静默跳过")
+        opt = torch.optim.Adam(pg)
+        print("头级 lr 分组：" + "，".join(shown)
+              + f"（主干 = --lr；未点名的组继承 `--head-lr-mult {args.head_lr_mult:g}`）")
     mon = guard.GpuMonitor() if device == "cuda" else None
     dc = guard.DutyCycle(mon) if mon else None
 
@@ -2872,7 +3035,7 @@ def train(args) -> dict:
             ref_b = None if ref_np is None else torch.from_numpy(ref_np[idx]).to(device)
             # ⚠ 优势**只归一化一次**：`adv_tr`（手级路径）已在 `_hand_advantage` 里按学生行全局
             #   z-score 过 ⇒ 这里 `norm="none"`；遗留路径（V 每步重算的 final/rtg 口径）才是批内。
-            loss, parts = compute_loss(out, b, weights if only else (STAGE_WEIGHTS.get(stage) or weights),
+            loss, parts = compute_loss(out, b, _step_weights(stage),
                                        ssl, row_keep=kb, row_w=wb, ppo=ppo, value_key=value_key,
                                        policy_temp=p_temp, adv_fixed=adv_b,
                                        adv_norm=("none" if adv_tr is not None else "batch"),
@@ -2882,7 +3045,10 @@ def train(args) -> dict:
                                        # ★ MV-1：辅助头 `own_win`（`None` ⇒ 那一项一行都不走）
                                        aux_own=(None if own_win_head is None
                                                 else (own_win_head(out["state"]), aux_own_w,
-                                                      aux_own_rows)))
+                                                      aux_own_rows)),
+                                       # ★ 第一百二十一轮：belief_hand 的公开牌级加权
+                                       #   （0 = 关 ⇒ `l_bh` 与加这个旋钮之前逐位相同）
+                                       belief_w=float(getattr(args, "belief_hand_unseen_weight", 0.0) or 0.0))
             # ⚠ **发散就停**（2026-09-28 加）：NaN 的 loss 会让整网变成 NaN 参数，而训练"照跑完"
             #   并落盘一份废 checkpoint（`#0.5` 那次就是）。宁可当场报错，也不要产出一个
             #   看着跑完、实际是首合法基线的模型。
@@ -3334,6 +3500,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stage-a", type=float, default=0.25, help="阶段 a（策略+牌效）占总步数比例")
     ap.add_argument("--stage-b", type=float, default=0.35, help="阶段 b（冻主干只训头）占比")
     ap.add_argument("--head-lr-mult", type=float, default=3.0, help="头的学习率倍数（主干 = --lr）")
+    # ★ 第一百二十一轮：逐头 loss 权重 + 头级 lr 分组 + belief_hand 公开牌级加权
+    #   三条都**缺省不传 ⇒ 与加它们之前逐位相同**（`_recorded_args` 里缺省值也不进台账）。
+    ap.add_argument("--head-loss-weights", default=None, metavar="K=V,...",
+                    help="逐头损失权重覆盖（如 policy=2,value=0.25；缺省不传 = 注册表原值）")
+    ap.add_argument("--head-lr-groups", default=None, metavar="G=M,...",
+                    help="头级 lr 分组倍率：policy/value/belief/aux（未点名的组 = --head-lr-mult）")
+    ap.add_argument("--belief-hand-unseen-weight", type=float, default=0.0, metavar="α",
+                    help="belief_hand 逐牌种 BCE 用**公开** `tile.unseen` 加权（0=关；w=1+α·unseen/4）")
     # 只训若干头 / 全程冻主干（"修 critic"那一轮：`--only-heads value --freeze-trunk`）
     ap.add_argument("--freeze-trunk", action="store_true",
                     help="整轮冻结主干（等价于把阶段 b 的语义推广到全程；只更新头参数）")
