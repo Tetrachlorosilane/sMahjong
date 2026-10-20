@@ -62,6 +62,10 @@
 **5 = 测量有效性硬前置不满足**（座次覆盖 / 臂隔离 / 对手池 / 共轭嫌疑）——拒绝出判决（fail-closed）。
 ⛔ 本工具**不训练**：`--collect` 只跑自对弈采集（`style-vector.py` → `trainer.exe selfplay`），
 并自带"零训练进程"自证（起跑/收尾各扫一次全部进程的**命令行**，命中任何训练特征 ⇒ ERROR）。
+
+⭐ `--cuped-report`（**可选，缺省关**）：只在 `verdict.json` 额外写 `estimator.cuped_report`
+（`β/SE/CI/VR/SE↓/等效 n/配对覆盖`），**判决仍用 O0**、⛔ 不改 PASS/FAIL/退出码；缺省路径一个键都不加。
+协变量 = 基线臂同山同席结果；缺失/常数 ⇒ 该字段 `null` + 警告（失败只作用于该字段）。
 """
 from __future__ import annotations
 
@@ -1074,6 +1078,88 @@ def eval_from_series_per_family(families: list, metric: str, guards: list, args)
                 f"（tol/MDE={row['tol_over_mde']:.2f}）⇒ **标为不得作为否决依据**（天生必破 = 假警报）")
         out["guards"].append(row)
     return out
+
+
+def cuped_report(families: list, metric: str, folds: int = 10) -> tuple[dict | None, list]:
+    """**仅报告**的 CUPED 读数（`--cuped-report`，缺省关）：⛔ 不进判决、不改 PASS/FAIL/退出码。
+
+    协变量 `X` = **基线臂在同一副牌山、同一学生席上的结果**（判决前可得、不受候选臂影响）。
+    `β = Cov(d,X)/Var(X)`（K 折交叉拟合，折 = 族内位置 % K）；`SE`/`CI` 只用**折外**残差；
+    `VR = ρ(d,X)²`、`SE↓ = 1 − SE_cuped/SE_O0`、`equiv_n = (SE_O0/SE_cuped)²`。
+    缺失/常数 ⇒ 返回 `(None, [警告…])`（fail-closed 只针对该字段，⛔ 判决仍是 O0）。
+    """
+    d, x, fold = [], [], []
+    missing = 0
+    for fi, f in enumerate(families):
+        a = ((f.get("by_metric") or {}).get(metric) or {}).get("a") or {}
+        b = ((f.get("by_metric") or {}).get(metric) or {}).get("b") or {}
+        seeds = sorted(set(a) & set(b))
+        for pos, s in enumerate(seeds):
+            try:
+                ya, xb = float(a[s]), float(b[s])
+            except (TypeError, ValueError):
+                missing += 1
+                continue
+            if not (math.isfinite(ya) and math.isfinite(xb)):
+                missing += 1
+                continue
+            d.append(ya - xb)
+            x.append(xb)
+            fold.append(pos % folds)
+    n = len(d)
+    cooc = {"n_pairs": n, "n_families": len(families), "n_missing": missing,
+            "covariate": "baseline_arm_same_wall_same_seat_result", "folds": folds}
+    if missing:
+        return None, [f"CUPED 报告：协变量缺失 {missing} 对（同山同席配不上）⇒ 记 null（fail-closed）"]
+    if n < max(4, folds * 2):
+        return None, [f"CUPED 报告：可配对场只有 {n}（<{max(4, folds * 2)}）⇒ 记 null"]
+    dv, xv = np.asarray(d, float), np.asarray(x, float)
+    sd = float(dv.std(ddof=1))
+    se0 = sd / math.sqrt(n)
+    if not (math.isfinite(se0) and se0 > 0):
+        return None, ["CUPED 报告：O0 的 SE 为 0/非有限（两臂读数逐位相同？）⇒ 记 null"]
+    if float(xv.std(ddof=1)) <= 0:
+        return None, ["CUPED 报告：协变量（基线臂同山同席结果）是常数 ⇒ 记 null"]
+    fold = np.asarray(fold, int)
+    r = np.empty(n)
+    betas, adj, zero_var_folds = [], 0.0, 0
+    for k in range(folds):
+        te, tr = fold == k, fold != k
+        if not tr.any() or not te.any():
+            continue
+        zt = xv[tr] - xv[tr].mean()
+        den = float(np.dot(zt, zt))
+        if den <= 1e-12:
+            b = 0.0
+            zero_var_folds += 1
+        else:
+            b = float(np.dot(dv[tr] - dv[tr].mean(), zt) / den)
+        betas.append(b)
+        zc = xv[te] - xv[tr].mean()
+        r[te] = (dv[te] - dv.mean()) - b * zc
+        adj += float(np.sum(b * zc))
+    r = r - r.mean()
+    se_c = float(r.std(ddof=1) / math.sqrt(n))
+    if not (math.isfinite(se_c) and se_c > 0):
+        return None, ["CUPED 报告：交叉拟合后的 SE 为 0/非有限 ⇒ 记 null"]
+    delta_c = float(dv.mean()) - adj / n
+    z95 = 1.959963985
+    rep = {
+        "beta": float(np.mean(betas)) if betas else float("nan"),
+        "se": se_c,
+        "ci": [delta_c - z95 * se_c, delta_c + z95 * se_c],
+        "delta": delta_c,
+        "vr": 1.0 - (se_c / se0) ** 2,
+        "se_reduce": 1.0 - se_c / se0,
+        "equiv_n": (se0 / se_c) ** 2,
+        "cooc": cooc,
+        "o0": {"delta": float(dv.mean()), "se": se0, "n": n},
+        "note": "仅报告、不进判决（判决仍用 O0）；协变量 = 基线臂同山同席结果",
+    }
+    warns = []
+    if zero_var_folds:
+        warns.append(f"CUPED 报告：{zero_var_folds}/{folds} 折的协变量为常数（该折 β=0）")
+    return rep, warns
 
 
 def placebo_null_contrast(families: list, mode: str, metric: str) -> dict:
@@ -2214,6 +2300,9 @@ def main(argv=None) -> int:
     ap.add_argument("--incumbent", default="", help="--gate-dir：基准臂标签子串（缺省抄旧 verdict.json）")
     ap.add_argument("--candidate", default="", help="--gate-dir：候选臂标签子串（缺省抄旧 verdict.json）")
     ap.add_argument("--metric", default=DEFAULT_METRIC, choices=ml_eval.METRICS)
+    ap.add_argument("--cuped-report", action="store_true",
+                    help="可选（缺省关）：只在 verdict.json 额外写 estimator.cuped_report；"
+                         "判决仍用 O0，⛔ 不改 PASS/FAIL/退出码")
     ap.add_argument("--guard-metric", default=DEFAULT_GUARDS,
                     help=f"护栏 `名[:容忍带]`（逗号分隔）；缺省 = gate.QUALITY_TOL：{DEFAULT_GUARDS}")
     ap.add_argument("--out", default="", help="verdict.json 落点（缺省 <数据根>/w-ladder/ceiling-gate/）")
@@ -2461,6 +2550,13 @@ def main(argv=None) -> int:
         "verdict": verdict,
         "exit_code": code,
     }
+    #: ⛔ 可选、仅报告：缺省**一个键都不加**（判决/judge/退出码在上一行已经定死，后面不再改）。
+    if bool(getattr(args, "cuped_report", False)):
+        cr, cr_warn = cuped_report(families, args.metric)
+        payload["estimator"] = {"cuped_report": cr, "warnings": cr_warn}
+        probes.add("cuped_report", cr is not None,
+                   ("CUPED 报告已写入（仅报告、判决仍 O0）" if cr is not None
+                    else "；".join(cr_warn) or "CUPED 报告取不到 ⇒ null"))
     if not args.legacy_placebo:
         #: ⛔ 只在**新口径**下写这两处：`--legacy-placebo` 的产物必须与旧版逐字节一致。
         payload["caliber"]["安慰剂口径"] = (
