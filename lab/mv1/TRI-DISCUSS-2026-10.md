@@ -3,6 +3,7 @@
 > 输入：`lab/research/DISCUSS-{gemini,luna}/{ASSESS-1,CRITIQUE-2,FINAL-3}.md` 六份（二手材料，未入库）· 参照 `lab/mv1/{S46-RECIPE-4ROUNDS,STAGE3-FINAL,P1-AREFACTOR-GATE,CRITIC-TILE-PRIORS,PRIVILEGED-CRITIC,EVAL-VARIANCE,MEASUREMENT-VALIDITY}.md` · `NOTES.md §6.5` 第119–125轮 · 证据 `.tmp/mv1-{s38,s46}/`、`tools/build/mv1-s35-evidence/`。
 > ⛔ 本文件只做综合与校核：未训练/未采集/未跑闸门/未发布。判决**条件于各自牌山族**（P1/阶段 3 = `53610001/2/3`；S46 = `53620001/2/3`），跨族只当先验、不相加。
 > 校核口径 = 原文—我的复算—一致？八条逐一见第 2/5 节与 `NOTES.md §6.5` 第126轮；本文一律采用复算值。
+> **二次讨论（2026-10-22）见 `lab/research/DISCUSS2-{gemini,luna}/ASSESS.md`**（未入库；Q1–Q8 与 M1–M3 已并入 `lab/mv1/MISTAKES-2026-10.md` / `lab/mv1/NEXT-STEPS-2026-10B.md`，⛔ 本文数字不改）。
 
 ## 1 一句话结论
 
