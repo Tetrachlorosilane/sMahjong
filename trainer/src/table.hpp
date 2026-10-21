@@ -48,6 +48,15 @@ struct RoundEndEvent {
     std::string reason;                // 已是码（`YakuCodes.reasonOf(res.abortReason)`）
     bool renchan = false;
     const RoundResult *result = nullptr;   // = `Table.lastResult`
+    /**
+     * 本小局四家**副露数**（`Round.melds[s].size()`）与其中**明面**（`Meld::open()`）的副露数。
+     *
+     * 为什么要单独带出来：`summary.json` v2 的 `meld` / `open_meld` 按**小局×席位**计数，
+     * 而 `Round` 在 `playGame` 里是局部对象 —— 记录器拿不到它。⛔ 不写进 `g*.jsonl`
+     * （轨迹格式不动）；只是记录器与 `selfplay` 汇总之间的内存字段。
+     */
+    std::array<int, 4> meldCounts{};
+    std::array<int, 4> openMeldCounts{};
 };
 
 class Table {
@@ -243,6 +252,17 @@ public:
                 ev.reason = reasonCodeOf(res.abortReason);  // ⚠ 认不出的（含 ""）→ 空串
                 ev.renchan = res.dealerRenchan;
                 ev.result = &lastResult;
+                for (int i = 0; i < 4; i++) {
+                    ev.meldCounts[static_cast<size_t>(i)]
+                            = static_cast<int>(r.melds[static_cast<size_t>(i)].size());
+                    int open = 0;
+                    for (const Meld &m : r.melds[static_cast<size_t>(i)]) {
+                        if (m.open()) {
+                            open++;
+                        }
+                    }
+                    ev.openMeldCounts[static_cast<size_t>(i)] = open;
+                }
                 debugEventTap(ev);
             }
             // 局间：Java 会 `sleepMs(roundDelayMs)` + `awaitRoundConfirm()`；两者都不产生

@@ -601,6 +601,12 @@ C++ 只吃局面那半、重算选项文本，逐字符比（`node tools/trainer
 `features` 侧跟 Java 的 `×3/4` 口径。`summary.json` 的 `workers` 字段写的是**钳制后的线程数**
 （与 Java 同口径；它不在逐字节比较范围内）。
 
+**`summary.json` v2（2026-10-21）**：顶层 `"v": 2`；`by_policy` 增 `wins` / `tsumo` / `meld` / `open_meld`，
+`per_game` 增 `tsumo` / `meld` / `open_meld` 三个四元数组（下标 = 座位）。`tsumo` = 自摸和了的
+**小局×席位**数；`meld` = 至少一副副露（**含暗杠**）的小局×席位数；`meld_rate` 的分母是
+`by_policy.seat_hands`（不是 `Σ per_game.hands`）。⚠ **旧 v1 summary 不迁移**：读侧
+`self_win_rate` / `meld_rate` 仍 `null` + 原警告；`tools/selfplay-check.mjs` 对 v1 只 warn、照样 PASS。
+
 **为什么并行不改产出（三条，缺一不可）**：
 
 1. **每场的种子只与 `(seedBase, g)` 有关**（`SelfPlay.seedFor`），每场每席的策略实例是

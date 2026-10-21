@@ -12,6 +12,7 @@ import mahjong.ai.Action;
 import mahjong.ai.Decision;
 import mahjong.ai.ObsFeatures;
 import mahjong.bot.Bot;
+import mahjong.core.Meld;
 import mahjong.core.Tiles;
 import mahjong.game.Round;
 import mahjong.game.Table;
@@ -135,6 +136,18 @@ final class TraceRecorder {
     /** 当前小局的决策行在 {@link #decisions} 里的起始下标（回填用）。 */
     private int handRowFrom;
 
+    /**
+     * v2 汇总用的**逐小局四家副露数**（`Round.melds[s].size()` 与其中 `open()` 的数目）。
+     *
+     * <p>⛔ **不进 `g*.jsonl`**：轨迹格式一个字节不动。`handRows()` 与这两条并列列表
+     * 逐下标对齐，只有 {@link SelfPlay} 汇总读它们。取 `max` 是因为每一手都能看到
+     * 当前的公开副露；用 `Round` 而非 `obs` 是为了与 C++ `RoundEndEvent` 同源。
+     */
+    private final int[] handMeldMax = new int[4];
+    private final int[] handOpenMeldMax = new int[4];
+    private final List<int[]> handMeldRows = new ArrayList<>();
+    private final List<int[]> handOpenMeldRows = new ArrayList<>();
+
     TraceRecorder(int gameIndex, long seed, Path dir, String[] labels, int startScore,
                   int sampleEvery, boolean recordClaims, boolean keepDecisions) {
         this(gameIndex, seed, dir, labels, startScore, sampleEvery, recordClaims, keepDecisions,
@@ -184,6 +197,16 @@ final class TraceRecorder {
         return hands;
     }
 
+    /** 与 {@link #handRows()} 逐下标对齐的**副露数**（每席 0..4；v2 汇总专用）。 */
+    List<int[]> handMeldCounts() {
+        return handMeldRows;
+    }
+
+    /** 同上的**明面副露**数（暗杠不计；v2 汇总专用）。 */
+    List<int[]> handOpenMeldCounts() {
+        return handOpenMeldRows;
+    }
+
     /** 本场实际发生的决策次数（**不受采样影响**；统计吞吐要用它）。 */
     int decisionCount() {
         return observed;
@@ -195,6 +218,23 @@ final class TraceRecorder {
         observed++;
         // 小局编号必须每次都推进（统计行也要用它），所以先 roll 再判是否记录
         rollHand(roundKey(d.round));
+        // v2：副露计数在**任何 early-return 之前**推进（`keepDecisions=false` 也要有汇总）。
+        if (d.round != null) {
+            for (int s = 0; s < 4; s++) {
+                final List<Meld> ms = d.round.melds[s];
+                if (ms == null) {
+                    continue;
+                }
+                handMeldMax[s] = Math.max(handMeldMax[s], ms.size());
+                int open = 0;
+                for (Meld m : ms) {
+                    if (m.open()) {
+                        open++;
+                    }
+                }
+                handOpenMeldMax[s] = Math.max(handOpenMeldMax[s], open);
+            }
+        }
         if (!keepDecisions) {
             return;
         }
@@ -337,6 +377,9 @@ final class TraceRecorder {
             return;
         }
         rollHand(roundKey(ev));
+        // v2：与 `handRows` 逐下标对齐（新小局若一次决策都没有，`rollHand` 已清零 ⇒ 记 0）
+        handMeldRows.add(handMeldMax.clone());
+        handOpenMeldRows.add(handOpenMeldMax.clone());
         List<Object> after = Json.list(ev, "scores");
         int[] now = new int[4];
         for (int i = 0; i < 4 && after != null && i < after.size(); i++) {
@@ -659,6 +702,11 @@ final class TraceRecorder {
             handKey = key;
             handNo++;
             handRowFrom = decisions.size();
+            // v2：新小局从 0 起（副露是公开量，逐手取 max 即可；暗杠也计入 `meld`，`open_meld` 不计）
+            for (int s = 0; s < 4; s++) {
+                handMeldMax[s] = 0;
+                handOpenMeldMax[s] = 0;
+            }
         }
     }
 

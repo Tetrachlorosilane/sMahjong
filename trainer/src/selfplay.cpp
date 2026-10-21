@@ -28,6 +28,10 @@ struct PolicyStat {
     long long placeSum = 0;
     int wins = 0;
     int dealIns = 0;
+    /** 本策略的**小局×席位**计数（v2）：自摸和了 / 有副露 / 有明面副露。 */
+    int tsumo = 0;
+    int meld = 0;
+    int openMeld = 0;
     long long deltaSum = 0;
     long long winScoreSum = 0;
     double rankPointSum = 0;
@@ -104,6 +108,10 @@ struct GameRow {
     std::array<int, 4> winPoints{};
     std::array<int, 4> deals{};
     std::array<int, 4> dealPoints{};
+    /** v2 风格轴（下标 = 座位号）：自摸和了 / 有副露 / 有明面副露（均为**小局×席位**计数）。 */
+    std::array<int, 4> tsumo{};
+    std::array<int, 4> meld{};
+    std::array<int, 4> openMeld{};
     std::array<std::string, 4> labels{};
     std::vector<HandRow> hands;
 };
@@ -222,6 +230,16 @@ GameRow oneGame(const Config &c, const std::vector<PolicyFactory> &factories, in
             if (h.loser == i) {
                 row.deals[static_cast<size_t>(i)]++;
                 row.dealPoints[static_cast<size_t>(i)] += -h.delta[static_cast<size_t>(i)];
+            }
+            // v2：自摸和了 / 有副露 / 有明面副露（同一行 `HandRow`，与表里的累计**同一把尺子**）
+            if (h.winner == i && h.tsumo) {
+                row.tsumo[static_cast<size_t>(i)]++;
+            }
+            if (h.meldCounts[static_cast<size_t>(i)] > 0) {
+                row.meld[static_cast<size_t>(i)]++;
+            }
+            if (h.openMeldCounts[static_cast<size_t>(i)] > 0) {
+                row.openMeld[static_cast<size_t>(i)]++;
             }
         }
     }
@@ -469,6 +487,13 @@ Summary run(const Config &c, std::string &fatal) {
             jsonIntArray(o, row.deals.data(), 4);
             o += ",\"deal_points\":";
             jsonIntArray(o, row.dealPoints.data(), 4);
+            // v2：三个新的**小局×席位**计数（与 Java 同序；顺序 = tsumo/meld/open_meld）
+            o += ",\"tsumo\":";
+            jsonIntArray(o, row.tsumo.data(), 4);
+            o += ",\"meld\":";
+            jsonIntArray(o, row.meld.data(), 4);
+            o += ",\"open_meld\":";
+            jsonIntArray(o, row.openMeld.data(), 4);
             o += ",\"hands\":";
             o += std::to_string(row.hands.size());
             o += ",\"ryukyoku\":";
@@ -501,9 +526,18 @@ Summary run(const Config &c, std::string &fatal) {
                     if (h.winner == i) {
                         st.wins++;
                         st.winScoreSum += d;
+                        if (h.tsumo) {
+                            st.tsumo++;
+                        }
                     }
                     if (h.loser == i) {
                         st.dealIns++;
+                    }
+                    if (h.meldCounts[static_cast<size_t>(i)] > 0) {
+                        st.meld++;
+                    }
+                    if (h.openMeldCounts[static_cast<size_t>(i)] > 0) {
+                        st.openMeld++;
                     }
                     break;
                 }
@@ -515,7 +549,7 @@ Summary run(const Config &c, std::string &fatal) {
 
 /** 汇总 → JSON（`SelfPlay.toJson` 的等价物，键序一致）。 */
 std::string summaryJson(const Summary &s) {
-    std::string o = "{\"games\":";
+    std::string o = "{\"v\":2,\"games\":";
     o += std::to_string(s.games);
     o += ",\"hands\":";
     o += std::to_string(s.hands);
@@ -546,6 +580,14 @@ std::string summaryJson(const Summary &s) {
         o += std::to_string(st.games);
         o += ",\"seat_hands\":";
         o += std::to_string(st.seatHands);
+        o += ",\"wins\":";
+        o += std::to_string(st.wins);
+        o += ",\"tsumo\":";
+        o += std::to_string(st.tsumo);
+        o += ",\"meld\":";
+        o += std::to_string(st.meld);
+        o += ",\"open_meld\":";
+        o += std::to_string(st.openMeld);
         o += ",\"avg_place\":";
         jsonDouble(o, st.avgPlace());
         o += ",\"avg_rank_points\":";

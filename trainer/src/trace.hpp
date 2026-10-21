@@ -43,6 +43,9 @@ struct HandRow {
     bool nagashi = false;
     std::array<bool, 4> tenpai{};
     bool hasResult = true;                 // `res == null` → `tenpai` 写空数组
+    /** 本小局四家的副露数 / 明面副露数（`round_end` 的 `Round.melds`；**只进汇总，不进轨迹**）。 */
+    std::array<int, 4> meldCounts{};
+    std::array<int, 4> openMeldCounts{};
     /**
      * 和了者的役/番/符/役满/打点档（Java `Round.Result.winScore`）。
      *

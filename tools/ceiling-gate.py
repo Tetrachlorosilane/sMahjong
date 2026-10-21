@@ -830,7 +830,12 @@ def _mean(xs: list) -> float | None:
 
 
 def _arm_guard_values(run, label: str) -> dict:
-    """一条采集里某臂的护栏原料。`summary.json` 没有的字段**明确记 null**。"""
+    """一条采集里某臂的护栏原料。`summary.json` 没有的字段**明确记 null**。
+
+    v2 口径（2026-10-21）：`by_policy` 若带 `tsumo` / `meld` / `wins`，则
+    `self_win_rate = tsumo / wins`、`meld_rate = meld / hands`（`hands` = `seat_hands`）。
+    ⛔ 旧 summary（v1，没有这三个字段）**逐位保持原行为**：两列仍 null + 原警告。
+    """
     bp = (run.by_policy or {}).get(label) or {}
     hands = sum(int(g.get("hands") or 0) for g in run.per_game or [])
     wins = deals = win_points = 0.0
@@ -848,9 +853,42 @@ def _arm_guard_values(run, label: str) -> dict:
     avg_val = bp.get("avg_win_score")
     if avg_val is None and wins:
         avg_val = win_points / wins
-    return {"self_win_rate": bp.get("self_win_rate"),          # summary 无 tsumo 计数
+
+    # ---- v2：自摸率 / 副露率（缺字段 ⇒ None，绝不拿 win_rate 冒充）
+    tsumo = bp.get("tsumo")
+    meld = bp.get("meld")
+    # per_game 兜底：只有当**每一场**都带该数组时才求和（缺一场就记 None，不猜）
+    def _sum_per_game(key: str) -> float | None:
+        gs = run.per_game or []
+        if not gs:
+            return None
+        total = 0.0
+        for g in gs:
+            arr = g.get(key)
+            if not isinstance(arr, list) or len(arr) != 4:
+                return None
+            idxs = [i for i, lab in enumerate(g.get("policies") or []) if str(lab) == label]
+            if not idxs:
+                return None
+            total += sum(float(arr[i]) for i in idxs)
+        return total
+
+    if tsumo is None:
+        tsumo = _sum_per_game("tsumo")
+    if meld is None:
+        meld = _sum_per_game("meld")
+    wins_bp = bp.get("wins")
+    if wins_bp is None:
+        wins_bp = wins if wins > 0 else None
+    # ⚠ `meld_rate` 的分母必须是**该策略的** `seat_hands`，不是 `sum(per_game.hands)`
+    #   （后者是"四席合计"的表级小局数；多标签同桌时会把分母放大 4 倍）。
+    seat_hands = int(bp.get("seat_hands") or 0)
+    meld_den = seat_hands if seat_hands > 0 else hands
+    self_win = (float(tsumo) / float(wins_bp)) if (tsumo is not None and wins_bp) else None
+    meld_rate = (float(meld) / float(meld_den)) if (meld is not None and meld_den) else None
+    return {"self_win_rate": self_win,
             "deal_in_rate": float(deal_in) if deal_in is not None else None,
-            "meld_rate": bp.get("meld_rate"),                  # summary 无副露计数
+            "meld_rate": meld_rate,
             "avg_hand_value": float(avg_val) if avg_val is not None else None}
 
 
@@ -878,16 +916,27 @@ def measurement_guards(families: list) -> dict:
                         "deal_in_rate": agg("deal_in_rate", "baseline"),
                         "meld_rate": agg("meld_rate", "baseline"),
                         "avg_hand_value": agg("avg_hand_value", "baseline")},
-           "available": {"self_win_rate": False, "deal_in_rate": True,
-                         "meld_rate": False, "avg_hand_value": True},
+           "available": {"self_win_rate": False, "deal_in_rate": False,
+                         "meld_rate": False, "avg_hand_value": False},
            "notes": []}
+    # `available` = **本轮候选臂真的取到了**（旧 summary 全 null ⇒ 全 false，与改动前一致）
+    for _k in out["available"]:
+        out["available"][_k] = out["candidate"].get(_k) is not None
+    # ⚠ `available` 只报**本轮读数是否拿得到**（旧 summary 仍然 false ⇒ 与改动前逐位相同）
     if out["candidate"]["self_win_rate"] is None:
         notes = out["notes"]
         notes.append("self_win_rate 取不到：trainer summary.json 只记 wins（荣和+自摸合计数），"
                      "无 tsumo 计数 ⇒ 记 null（⛔ 不拿 wins/hands 冒充自摸率）")
+    else:
+        out["notes"].append("self_win_rate = by_policy.tsumo / by_policy.wins"
+                            "（同一策略在所有小局×席位上的自摸和了数 / 和了数）")
     if out["candidate"]["meld_rate"] is None:
         out["notes"].append("meld_rate 取不到：summary.json 无副露计数 ⇒ 记 null（不重采；"
                             "要该轴须在新采集摘要里加字段）")
+    else:
+        out["notes"].append("meld_rate = by_policy.meld / by_policy.seat_hands"
+                            "（至少有一副副露的小局×席位数 / 打过的小局×席位数；"
+                            "meld 含暗杠，open_meld 单列在 summary.by_policy）")
     if out["candidate"]["deal_in_rate"] is not None:
         out["notes"].append("deal_in_rate / avg_hand_value 取自 by_policy 的 deal_in_rate / "
                             "avg_win_score（与 per_game 逐项对账）；avg_hand_value 含本场棒/供託")

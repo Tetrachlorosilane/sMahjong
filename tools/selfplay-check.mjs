@@ -92,6 +92,8 @@ for (const c of FU_OPTIONAL_LIMITS) {
 const problems = [];
 const warnings = [];
 const stats = { games: 0, hands: 0, decisions: 0, turn: 0, claim: 0, byKind: {} };
+/** v2 独立复算：game -> {tsumo:[4], meld:[4]}（只从决策 obs.melds 与小局行重算）。 */
+const calcByGame = new Map();
 const add = (file, line, msg) => problems.push(`${path.basename(file)}:${line} ${msg}`);
 // ⚠ 提示**不算失败**：区分"训练数据本身不可用"（problems，退出码 1）与"评测元数据是旧版"
 //   （warnings，照样 PASS）—— 例如旧 `summary.json` 没有 `rank_points`：轨迹训练不受影响，
@@ -428,6 +430,30 @@ for (const f of files) {
     }
     prev = row;
   }
+  // ---- v2 独立复算：副露只看**公开** obs.melds（任一决策行看到该席有副露就算），
+  //      自摸只看 hand 行的 `tsumo` + `winner` —— ⛔ 不读生产者新加的汇总字段。
+  const meldSeen = new Map();          // hand_no -> [4] bool
+  for (const { row } of decisions) {
+    const o = row.obs;
+    if (!o || !Array.isArray(o.melds)) continue;
+    let rec = meldSeen.get(row.hand_no);
+    if (!rec) { rec = [false, false, false, false]; meldSeen.set(row.hand_no, rec); }
+    o.melds.forEach((ms, s) => {
+      if (s < 4 && Array.isArray(ms) && ms.length > 0) rec[s] = true;
+    });
+  }
+  const calcTsumo = [0, 0, 0, 0];
+  const calcMeld = [0, 0, 0, 0];
+  for (const { row } of hands) {
+    const rec = meldSeen.get(row.hand_no) || [false, false, false, false];
+    const tsumo = row.tsumo === true;
+    for (let s = 0; s < 4; s++) {
+      if (tsumo && row.winner === s) calcTsumo[s]++;
+      if (rec[s]) calcMeld[s]++;
+    }
+  }
+  if (game) calcByGame.set(game.row.game, { tsumo: calcTsumo, meld: calcMeld });
+
   if (game) {
     stats.games++;
     if (game.row.decisions !== decisions.length) {
@@ -598,6 +624,85 @@ if (fs.existsSync(summaryPath)) {
     }
     if (Math.abs(got - want) > 0.05) {
       problems.push(`summary.by_policy.${label}.avg_rank_points=${got}，按 per_game 重算应为 ${want.toFixed(3)}`);
+    }
+  }
+  // ---- v2：tsumo / meld / open_meld（2026-10-21；PROTOCOL §8.4）
+  // ⚠ 旧 summary（没有 `v`）**照样 PASS**：只提示"护栏两列会是 null"，不升格为问题。
+  if (sum.v === undefined) {
+    warn('summary.json 是旧版（v1，无 `v` 字段）：没有 tsumo/meld/open_meld ⇒ '
+      + 'self_win_rate / meld_rate 记 null（向后兼容，不重采）');
+  } else if (sum.v !== 2) {
+    problems.push(`summary.v=${JSON.stringify(sum.v)} 不认识（本校验器只认 2；旧版必须没有 v）`);
+  } else {
+    const needKeys = ['tsumo', 'meld', 'open_meld'];
+    const isIntArr4 = (a) => Array.isArray(a) && a.length === 4
+      && a.every((v) => Number.isInteger(v) && v >= 0);
+    for (const g of sum.per_game || []) {
+      const at = `summary.per_game[${g.game}]`;
+      for (const k of needKeys) {
+        if (!isIntArr4(g[k])) {
+          problems.push(`${at}.${k} 必须是 4 个非负整数（v2 契约）`);
+        }
+      }
+      if (isIntArr4(g.tsumo) && isIntArr4(g.wins)) {
+        for (let i = 0; i < 4; i++) {
+          if (g.tsumo[i] > g.wins[i]) problems.push(`${at} 座位${i} tsumo(${g.tsumo[i]}) > wins(${g.wins[i]})`);
+        }
+      }
+      if (isIntArr4(g.open_meld) && isIntArr4(g.meld)) {
+        for (let i = 0; i < 4; i++) {
+          if (g.open_meld[i] > g.meld[i]) problems.push(`${at} 座位${i} open_meld(${g.open_meld[i]}) > meld(${g.meld[i]})`);
+        }
+      }
+      // 独立复算：自摸来自 hand 行、副露来自决策 obs.melds（⛔ 不照抄生产者的新字段）
+      const c = calcByGame.get(g.game);
+      if (!c) problems.push(`${at} 找不到对应轨迹，无法独立复算`);
+      else {
+        if (JSON.stringify(c.tsumo) !== JSON.stringify(g.tsumo)) {
+          problems.push(`${at}.tsumo=${JSON.stringify(g.tsumo)}，按 hand 行独立复算应为 ${JSON.stringify(c.tsumo)}`);
+        }
+        if (JSON.stringify(c.meld) !== JSON.stringify(g.meld)) {
+          problems.push(`${at}.meld=${JSON.stringify(g.meld)}，按 obs.melds 独立复算应为 ${JSON.stringify(c.meld)}`);
+        }
+      }
+    }
+    // by_policy：整数、范围、与 per_game 逐项对账
+    const acc = new Map();
+    for (const g of sum.per_game || []) {
+      (g.policies || []).forEach((label, i) => {
+        const cur = acc.get(label) || { wins: 0, tsumo: 0, meld: 0, open_meld: 0 };
+        for (const k of ['wins', ...needKeys]) {
+          if (isIntArr4(g[k])) cur[k] += g[k][i];
+        }
+        acc.set(label, cur);
+      });
+    }
+    for (const [label, st] of Object.entries(sum.by_policy || {})) {
+      const at = `summary.by_policy.${label}`;
+      const sh = st.seat_hands;
+      for (const k of ['wins', ...needKeys]) {
+        if (!Number.isInteger(st[k]) || st[k] < 0) problems.push(`${at}.${k} 必须是非负整数（v2 契约）`);
+      }
+      if (Number.isInteger(st.wins) && Number.isInteger(sh) && st.wins > sh) {
+        problems.push(`${at} wins(${st.wins}) > seat_hands(${sh})`);
+      }
+      if (Number.isInteger(st.tsumo) && Number.isInteger(st.wins) && st.tsumo > st.wins) {
+        problems.push(`${at} tsumo(${st.tsumo}) > wins(${st.wins})`);
+      }
+      if (Number.isInteger(st.meld) && Number.isInteger(sh) && st.meld > sh) {
+        problems.push(`${at} meld(${st.meld}) > seat_hands(${sh})`);
+      }
+      if (Number.isInteger(st.open_meld) && Number.isInteger(st.meld) && st.open_meld > st.meld) {
+        problems.push(`${at} open_meld(${st.open_meld}) > meld(${st.meld})`);
+      }
+      const a = acc.get(label);
+      if (a) {
+        for (const k of ['wins', ...needKeys]) {
+          if (Number.isInteger(st[k]) && a[k] !== st[k]) {
+            problems.push(`${at}.${k}=${st[k]}，按 per_game 求和应为 ${a[k]}`);
+          }
+        }
+      }
     }
   }
 } else if (!quiet) {

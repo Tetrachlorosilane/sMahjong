@@ -174,6 +174,8 @@ void TraceRecorder::onRoundEnd(const RoundEndEvent &ev) {
     row.abortive = ev.abortive;
     row.reason = ev.reason;
     row.renchan = ev.renchan;
+    row.meldCounts = ev.meldCounts;
+    row.openMeldCounts = ev.openMeldCounts;
     if (ev.result != nullptr) {
         row.winner = ev.result->winner;
         row.loser = ev.result->loser;

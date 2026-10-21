@@ -91,6 +91,10 @@ public final class SelfPlay {
         public long placeSum;
         public int wins;
         public int dealIns;
+        /** v2：自摸和了 / 有副露 / 有明面副露（均为**小局×席位**计数，分母 = `seatHands`）。 */
+        public int tsumo;
+        public int meld;
+        public int openMeld;
         public long deltaSum;
         public long winScoreSum;
         /** **顺位点**（精算点数）之和 —— 顺位意识的唯一可测口径，见 {@link #avgRankPoints()}。 */
@@ -189,8 +193,15 @@ public final class SelfPlay {
         int[] winPoints;
         int[] deals;
         int[] dealPoints;
+        /** v2 风格轴（下标 = 座位号）：自摸和了 / 有副露 / 有明面副露（小局×席位计数）。 */
+        int[] tsumo;
+        int[] meld;
+        int[] openMeld;
         String[] labels;
         List<Map<String, Object>> hands;
+        /** 与 {@link #hands} 逐下标对齐的副露计数（`TraceRecorder.handMeldCounts()`）。 */
+        List<int[]> handMelds;
+        List<int[]> handOpenMelds;
     }
 
     /** 单场种子：只与 (seedBase, 场号) 有关，**与并行顺序无关**。 */
@@ -284,6 +295,10 @@ public final class SelfPlay {
                     "win_points", Json.intList(row.winPoints),
                     "deals", Json.intList(row.deals),
                     "deal_points", Json.intList(row.dealPoints),
+                    // v2：三个新的**小局×席位**计数（与 C++ 同序：tsumo/meld/open_meld）
+                    "tsumo", Json.intList(row.tsumo),
+                    "meld", Json.intList(row.meld),
+                    "open_meld", Json.intList(row.openMeld),
                     "hands", row.hands.size(),
                     "ryukyoku", row.ryukyoku));
             // 顺位按策略标签累计
@@ -294,10 +309,14 @@ public final class SelfPlay {
                 st.rankPointSum += row.rankPoints[i];      // 顺位点按**座位**索引（见 Settlement 的注释）
             }
             // 逐手把"和了 / 放铳 / 收支"记到对应策略上
-            for (Map<String, Object> h : row.hands) {
+            for (int hi = 0; hi < row.hands.size(); hi++) {
+                Map<String, Object> h = row.hands.get(hi);
                 int winner = Json.i(h, "winner", -1);
                 int loser = Json.i(h, "loser", -1);
+                boolean tsumoWin = Json.bool(h, "tsumo", false);
                 List<Object> delta = Json.list(h, "delta");
+                int[] melds = hi < row.handMelds.size() ? row.handMelds.get(hi) : new int[4];
+                int[] openMelds = hi < row.handOpenMelds.size() ? row.handOpenMelds.get(hi) : new int[4];
                 for (int i = 0; i < 4; i++) {
                     PolicyStat st = s.byPolicy.get(row.labels[i]);
                     st.seatHands++;
@@ -306,9 +325,18 @@ public final class SelfPlay {
                     if (winner == i) {
                         st.wins++;
                         st.winScoreSum += d;
+                        if (tsumoWin) {
+                            st.tsumo++;
+                        }
                     }
                     if (loser == i) {
                         st.dealIns++;
+                    }
+                    if (melds[i] > 0) {
+                        st.meld++;
+                    }
+                    if (openMelds[i] > 0) {
+                        st.openMeld++;
                     }
                 }
             }
@@ -378,19 +406,37 @@ public final class SelfPlay {
         row.winPoints = new int[4];
         row.deals = new int[4];
         row.dealPoints = new int[4];
-        for (Map<String, Object> h : row.hands) {
+        row.tsumo = new int[4];
+        row.meld = new int[4];
+        row.openMeld = new int[4];
+        row.handMelds = rec.handMeldCounts();
+        row.handOpenMelds = rec.handOpenMeldCounts();
+        for (int hi = 0; hi < row.hands.size(); hi++) {
+            Map<String, Object> h = row.hands.get(hi);
             int winner = Json.i(h, "winner", -1);
             int loser = Json.i(h, "loser", -1);
+            boolean tsumoWin = Json.bool(h, "tsumo", false);
             List<Object> delta = Json.list(h, "delta");
+            int[] melds = hi < row.handMelds.size() ? row.handMelds.get(hi) : new int[4];
+            int[] openMelds = hi < row.handOpenMelds.size() ? row.handOpenMelds.get(hi) : new int[4];
             for (int i = 0; i < 4; i++) {
                 int d = delta == null || i >= delta.size() ? 0 : ((Number) delta.get(i)).intValue();
                 if (winner == i) {
                     row.wins[i]++;
                     row.winPoints[i] += d;
+                    if (tsumoWin) {
+                        row.tsumo[i]++;
+                    }
                 }
                 if (loser == i) {
                     row.deals[i]++;
                     row.dealPoints[i] += -d;
+                }
+                if (melds[i] > 0) {
+                    row.meld[i]++;
+                }
+                if (openMelds[i] > 0) {
+                    row.openMeld[i]++;
                 }
             }
         }
@@ -434,6 +480,7 @@ public final class SelfPlay {
     /** 汇总 → JSON（写 {@code summary.json}）。 */
     public static Map<String, Object> toJson(Summary s) {
         Map<String, Object> out = Json.obj(
+                "v", 2,
                 "games", s.games,
                 "hands", s.hands,
                 "decisions", s.decisions,
@@ -450,6 +497,10 @@ public final class SelfPlay {
             byPolicy.put(e.getKey(), Json.obj(
                     "games", st.games,
                     "seat_hands", st.seatHands,
+                    "wins", st.wins,
+                    "tsumo", st.tsumo,
+                    "meld", st.meld,
+                    "open_meld", st.openMeld,
                     "avg_place", st.avgPlace(),
                     "avg_rank_points", st.avgRankPoints(),
                     "win_rate", st.winRate(),

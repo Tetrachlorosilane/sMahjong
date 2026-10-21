@@ -1292,6 +1292,12 @@ java -jar mahjong-server.jar --selfplay 2000 --workers 8 --rotate \
 - `summary.json` 含 `by_policy`（`avg_place` / **`avg_rank_points`** / `win_rate` / `deal_in_rate` /
   `avg_delta` / `avg_win_score`）与 `per_game`（每场种子 + 四家顺位 + **四家顺位点 `rank_points`**）
   —— 后者是配对显著性检验的输入。
+- **`summary.json` v2（2026-10-21）**：顶层加 `"v": 2`；`by_policy` 增 `wins` / `tsumo` / `meld` /
+  `open_meld`，`per_game` 增 `tsumo` / `meld` / `open_meld` 三个四元数组（下标 = 座位）。口径：
+  `tsumo` = 自摸和了的**小局×席位**数；`wins` = 和了数；`meld` = 至少一副副露（**含暗杠**）的小局×席位数；
+  `open_meld` = 其中至少一副**明面**副露（`chi`/`pon`/`daiminkan`/`kakan`，不含暗杠）。
+  ⇒ 护栏公式：`self_win_rate = tsumo / wins`、`meld_rate = meld / seat_hands`。⚠ **旧 summary（无 `v`）不迁移**：
+  读侧仍记 `null` + `available:false` + 原警告，行为与 v1 逐位相同。
 - **顺位点**（精算点数）= `(点数 − 返点)/1000 + 马点 + 头名赏`，**由生产的 `RoundScoring.settle` 算**
   （同点拆分/并列口径一并继承，不另写一份公式），恒有 **`Σ rank_points == 0`**（马点之和为 0、
   头名赏正好抵消返点与配给原点的差）。⚠ `avg_place` **测不出顺位意识**（领先时少赢一把、压住放铳率，
