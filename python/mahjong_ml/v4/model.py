@@ -152,6 +152,38 @@ SEG_TILE, SEG_EVT, SEG_MEM = 0, 1, 2
 DANGER_COEF = 1.0
 DANGER_EPS = 1e-6
 
+#: `danger → policy` 的**形态**（第一百二十九轮）。缺省 `log` = 改动前的无界式（逐位不变）；
+#: `bounded` = `DANGER_COEF·(mean_k σ(danger_k) − mean_i mean_k σ(danger_i,k))` ∈ **[−1, +1]**
+#: （**逐行居中**：减掉的逐行常数对 softmax/argmax 是数学空操作），出生 `p≈0.5 ⇒ ≈0`。
+#: 为什么要有界：旧式 `log(p+ε)` 在 `p→0` 时到 `log ε ≈ −13.8`，一个候选的 4 家概率全低就能把
+#: logit 拉穿（与其余候选的尺度无关）；有界式把这条通路限制在 `±DANGER_COEF` 内，且**居中**到
+#: 出生点 0（旧式出生 ≈ −0.693 的逐行常数，虽不改 argmax，但会与 `policy` 的 bias 抢尺度）。
+#: ⚠ **尚未三端同步**（Java/C++ 仍是旧式）：`bounded` 只给训练/离线实验用，⛔ 该形态训出的网
+#: **不得按"可直接上线"解读**；缺省 `log` ⇒ 前向逐位不变。
+DANGER_FORM = "log"
+DANGER_FORMS = ("log", "bounded")
+
+
+def set_danger_form(name: str) -> None:
+    """**进程级** `danger` 形态开关（`pretrain --danger-form` 设一次；缺省 `log`）。"""
+    global DANGER_FORM
+    if name not in DANGER_FORMS:
+        raise ValueError(f"未知 danger 形态 {name!r}（可选：{' / '.join(DANGER_FORMS)}）")
+    DANGER_FORM = name
+
+
+#: `belief_tenpai` 的门控**是否 stop-gradient**（第一百二十九轮；`pretrain --belief-gate-detach`）。
+#: 缺省 **False** ⇒ 梯度图与改动前逐位相同（600 步 sha 不变）。
+#: 开 = `policy_gate(sigmoid(bt).detach())`：只断"经 gate 回流到 belief 头/主干"的这一路，
+#: `belief_tenpai` 自己的 BCE **照常**反传（两件事在计算图上本来就是两条边）。
+BELIEF_GATE_DETACH = False
+
+
+def set_belief_gate_detach(flag: bool) -> None:
+    """**进程级**门控 stop-gradient 开关（`pretrain` 在 `train()` 开头设一次）。"""
+    global BELIEF_GATE_DETACH
+    BELIEF_GATE_DETACH = bool(flag)
+
 #: `u` 的死维 / 恒等维**不进首层**（`ARCH-REDESIGN` §2.1：ctx 删 9、cand 删 29）——
 #: 做法 = 在首层前乘一个**非持久 buffer 掩码**（`persistent=False` ⇒ 不进 `state_dict` ⇒
 #: 不进 `net.bin`，参数账一个数都不变），被掩列**永远拿不到梯度**（不是"初始化成 0 等它学回来"）。
@@ -396,15 +428,33 @@ TRAIN_HEADS: tuple[str, ...] = tuple(h.name for h in HEAD_SPECS if h.contract)
 
 #: **推理必需**的头 —— ⛔ 定义是"**前向路径实际读取**"，不是"训练过"（用户裁决 2026-10-07）。
 #:
-#: **当前值（实测）**：`policy` + `belief_tenpai`。后者的在线**原因**是逐候选门控
-#: `gate = 1 + tanh(policy_gate(sigmoid(bt)))` 乘在候选表示上 ⇒ 真的改 argmax（第五十五轮）。
+#: ⚠ **按 arch 分开**（第一百二十九轮修正）：v4 的前向只经 `policy_gate` 读 `belief_tenpai`；
+#: **a− 的 `AHeads.forward` 还读 `danger`**（0 参数固定通道 `logit += DANGER_COEF·risk`）——
+#: 旧声明 `("policy", "belief_tenpai")` 在 a− 上**漏了 `danger`**，消融集合因此是错的
+#: （`lab/research/HEAD-REVIEW-gemini.md` §4 的代码事实）。
 #:
-#: ⚠ 它是"**每个 checkpoint 的性质**"，不是"代码拓扑常量"：`heads.policy_gate.*` 属**可缺张量**
+#: ⚠ `belief_tenpai` 仍是"**每个 checkpoint 的性质**"：`heads.policy_gate.*` 属**可缺张量**
 #: （`normalize_state` 缺则补 0）⇒ **老网**没有它时门控恒等、`belief_tenpai` **不进推理**，
-#: 此时本集合退化成 `("policy",)`。所以换 checkpoint 要**重跑判据**（`v4 check` ⑦/⑦′）。
-#: 判据 = `online_heads()`（见下）；唯一规格与升级规则见 `docs/TRAINER-CPP.md` §6.25；
-#: 三端同值由 `node tools/head-tables-check.mjs` 机械比对。
-ONLINE_HEADS: tuple[str, ...] = ("policy", "belief_tenpai")
+#: 此时该 arch 的集合退化成 `("policy",)`（a− 再加上 `danger`）。所以换 checkpoint 要**重跑判据**
+#: （`v4 check` ⑦/⑦′）。判据 = `online_heads()`（见下）；唯一规格与升级规则见
+#: `docs/TRAINER-CPP.md` §6.25；三端同值由 `node tools/head-tables-check.mjs` 机械比对。
+#:
+#: ⚠ 三端字面量 `ONLINE_HEADS` 取**两个 arch 的并集**（Java/C++ 的常量是 arch 无关的声明）；
+#: 逐 arch 的准确集合用 `online_heads_declared(arch)`，⛔ 别拿并集当"这张网读了这些头"。
+ONLINE_HEADS_BY_ARCH: dict[str, tuple[str, ...]] = {
+    ARCH_V4: ("policy", "belief_tenpai"),
+    ARCH_A: ("policy", "belief_tenpai", "danger"),
+}
+ONLINE_HEADS: tuple[str, ...] = ("policy", "belief_tenpai", "danger")
+
+
+def online_heads_declared(arch: str | None = None) -> tuple[str, ...]:
+    """**该 arch 的声明集合**（代码拓扑层；逐 ckpt 的实测仍看 `online_heads()`）。
+
+    `danger` 在 a− 上**恒定被读**（0 参数通道，与 `policy_gate` 是否退化无关）；在 v4 上**不被读**。
+    """
+    a = ARCH if arch is None else str(arch)
+    return ONLINE_HEADS_BY_ARCH[a]
 
 
 class TileTower(nn.Module):
@@ -870,12 +920,23 @@ class AHeads(nn.Module):
 
     def forward(self, u: torch.Tensor, state: torch.Tensor, mask: torch.Tensor | None) -> dict:
         bt = self.belief_tenpai(state)
-        gate = 1.0 + torch.tanh(self.policy_gate(torch.sigmoid(bt)))
+        # ★ 第一百二十九轮：可选 stop-gradient（见 `BELIEF_GATE_DETACH`；缺省关 ⇒ 逐位不变）。
+        p_bt = torch.sigmoid(bt)
+        if BELIEF_GATE_DETACH:
+            p_bt = p_bt.detach()
+        gate = 1.0 + torch.tanh(self.policy_gate(p_bt))
         ug = u * gate.unsqueeze(1)
         danger = self.danger(u)                                       # [B,L,4]
         logits = self.policy(ug).squeeze(-1)
         # A 档：danger 作为**逐候选**特征进 policy（固定系数、0 参数；出生≈逐行常数）
-        risk = torch.log(torch.sigmoid(danger).mean(dim=-1) + DANGER_EPS)
+        p_dan = torch.sigmoid(danger).mean(dim=-1)
+        if DANGER_FORM == "bounded":
+            # ★ 第一百二十九轮：有界式 `p − mean_i p_i ∈ [−1, +1]`（逐行居中）。
+            #   减掉的逐行常数对 softmax/argmax 是**数学空操作** ⇒ 只留"这张牌相对其它候选
+            #   的危险度"；出生 `p≈0.5` 时逐行差 ≪1e-2 ⇒ 对 argmax ≈0。
+            risk = p_dan - p_dan.mean(dim=-1, keepdim=True)
+        else:
+            risk = torch.log(p_dan + DANGER_EPS)                       # 旧式（无界；逐位复现）
         logits = logits + DANGER_COEF * risk
         if mask is not None:
             logits = logits.masked_fill(~mask, float("-inf"))
@@ -992,7 +1053,12 @@ class Heads(nn.Module):
         bt = self.belief_tenpai(state)                          # [B,3]（logits）
         # 门控只作用在 **policy** 的候选表示上（`danger`/`effect` 用未门控的 `u`）：
         # 假设就是"对手听牌信念该影响**打哪张**"，其它头各有各的语义，别一起动。
-        gate = 1.0 + torch.tanh(self.policy_gate(torch.sigmoid(bt)))    # [B,dm]
+        # ★ 第一百二十九轮：可选 stop-gradient —— 只断"gate → belief 头/主干"这一路；
+        #   `belief_tenpai` 自己的 BCE 是另一条边，照常反传（缺省关 ⇒ 梯度图逐位不变）。
+        p_bt = torch.sigmoid(bt)
+        if BELIEF_GATE_DETACH:
+            p_bt = p_bt.detach()
+        gate = 1.0 + torch.tanh(self.policy_gate(p_bt))                  # [B,dm]
         ug = u * gate.unsqueeze(1)                                      # [B,L,dm] 逐候选
         logits = self.policy(ug).squeeze(-1)                            # [B,L]
         if mask is not None:
@@ -1231,6 +1297,72 @@ def online_heads(m: "V4Model", forward_fn: Callable[[], dict[str, torch.Tensor]]
 
 def loss_weights() -> dict[str, float]:
     return {h.name: h.weight for h in HEAD_SPECS}
+
+
+# ---------------------------------------------------------------- Platt 校准（烘进头）
+#
+# ★ 第一百二十九轮：`belief_tenpai` 的 `bt` 均值 ~26（`sigmoid≈1`、门控输入饱和），A1→A3 的
+#   判据是"**带截距**的校准能把 BCE 从 13.2 拉回 0.31 且 AUC 不变"（温度单独不行：缺截距）。
+#   这里把 `sigmoid(a·bt + b)` 的 `(a, b)` **合并进该头最后一个 Linear**：
+#
+#       z_j = W_j·state + c_j                          （原头，j = 0/1/2 席）
+#       sigmoid(a_j·z_j + b_j) = sigmoid((a_j·W_j)·state + (a_j·c_j + b_j))
+#   ⇒ `W_j ← a_j·W_j`、`c_j ← a_j·c_j + b_j`。**张量形状/参数个数/`net.bin` 布局全不变**
+#   （只改数值 ⇒ 大小不变），三端前向零改动（它们仍算 `sigmoid(Linear(state))`）。
+#   ⚠ 逐席 `(a_j, b_j)`：`bt` 的三列是三个对手，不能共用一个标量。
+
+def platt_logits(logits: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """`a·logits + b`（`a`/`b` 是长度 = 列数的向量；广播到 `[N,C]`）。"""
+    return logits * a.to(logits.dtype) + b.to(logits.dtype)
+
+
+def fit_platt(logits: torch.Tensor, targets: torch.Tensor, *,
+              max_iter: int = 300, lr: float = 0.2) -> tuple[torch.Tensor, torch.Tensor]:
+    """逐列拟合 `(a, b)` 最小化 `BCE(sigmoid(a·x+b), y)`（LBFGS；输入 detach）。
+
+    ⚠ **必须带截距**：只拟合温度 `x/T` 时 `T→∞` 只能把 `p→0.5`（BCE→0.693），回不到基率
+    ~0.15（A1b §3 的实测：T 顶到网格上限 2000 仍 `BCE 0.697`）。
+    """
+    x = logits.detach().to(torch.float32)
+    t = targets.detach().to(torch.float32)
+    c = int(x.shape[1])
+    a = torch.ones(c, dtype=torch.float32, requires_grad=True)
+    b = torch.zeros(c, dtype=torch.float32, requires_grad=True)
+    opt = torch.optim.LBFGS([a, b], lr=lr, max_iter=max_iter, line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(a * x + b, t)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return a.detach(), b.detach()
+
+
+@torch.no_grad()
+def bake_platt_(head: "nn.Linear", a: torch.Tensor, b: torch.Tensor) -> dict[str, float]:
+    """把 Platt `(a,b)` **原地**烘进 `head`（`W ← a⊙W`、`c ← a⊙c+b`）；返回数值校验。
+
+    校验口径：`max|Δ|` 是"烘入后 `head(x)`"与"烘入前 `a·head(x)+b`"在同一批 `x` 上的差 ——
+    调用方传入 `probe_x` 可复算；这里只报权重侧的 `max|ΔW|`/`max|Δc|`。
+    """
+    a = a.detach().to(device=head.weight.device, dtype=head.weight.dtype).reshape(-1)
+    b = b.detach().to(device=head.weight.device, dtype=head.weight.dtype).reshape(-1)
+    if int(a.numel()) != int(head.out_features) or int(b.numel()) != int(head.out_features):
+        raise ValueError(f"Platt 维度 {a.numel()}/{b.numel()} ≠ 头输出 {head.out_features}")
+    if not bool(torch.isfinite(a).all()) or not bool(torch.isfinite(b).all()):
+        raise ValueError("Platt (a,b) 含 NaN/Inf —— ⛔ 不烘入一个坏校准")
+    w0 = head.weight.detach().clone()
+    c0 = head.bias.detach().clone()
+    head.weight.mul_(a.unsqueeze(1))
+    head.bias.mul_(a).add_(b)
+    return {
+        "max_abs_dW": float((head.weight - w0 * a.unsqueeze(1)).abs().max()),
+        "max_abs_dc": float((head.bias - (c0 * a + b)).abs().max()),
+        "a_min": float(a.min()), "a_max": float(a.max()),
+        "b_min": float(b.min()), "b_max": float(b.max()),
+    }
 
 
 def hl_gauss_targets(values: torch.Tensor, bins: int | None = None,

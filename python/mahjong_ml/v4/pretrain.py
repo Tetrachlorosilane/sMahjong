@@ -2111,7 +2111,10 @@ def _recorded_args(args) -> dict:
                        ("belief_hand_unseen_weight", 0.0),
                        # ★ s44：下一事件辅头（缺省 off/0.1/off ⇒ 台账里一个键都不进）
                        ("next_event_aux", "off"), ("next_event_weight", 0.1),
-                       ("next_event_shuffle", "off")):
+                       ("next_event_shuffle", "off"),
+                       # ★ 第一百二十九轮：判定头四处修正（缺省 = off/off/log ⇒ 台账一个键都不进）
+                       ("calibrate_belief", "off"), ("belief_gate_detach", False),
+                       ("danger_form", "log")):
         if d.get(k) == default:
             d.pop(k, None)
     # ⚠ 程序化调用（自检/脚本的 `Namespace(**{...})`）可能给 `Path`，而 CLI 永远给 str：
@@ -2271,6 +2274,22 @@ def train(args) -> dict:
     # ⚠ 三端（Java/C++）**未同步** ⇒ a- 的网**不得**上线/上闸门。
     _arch = str(getattr(args, "arch", M.ARCH_V4) or M.ARCH_V4)
     M.set_arch(_arch)
+    # ---- ★ 第一百二十九轮：判定头四处修正（三处行为开关 + 一处声明修正）----------------------
+    # 缺省 `off/off/log` ⇒ 前向/梯度图逐位不变（600 步 sha 判据），声明修正不进前向。
+    _danger_form = str(getattr(args, "danger_form", "log") or "log")
+    M.set_danger_form(_danger_form)
+    _detach = bool(getattr(args, "belief_gate_detach", False))
+    M.set_belief_gate_detach(_detach)
+    _calib = str(getattr(args, "calibrate_belief", "off") or "off")
+    if _calib not in ("off", "platt"):
+        raise SystemExit(f"--calibrate-belief={_calib!r} 不认识（只认 off / platt）")
+    if _calib != "off" and (bool(getattr(args, "save_optimizer", False))
+                            or getattr(args, "resume_optimizer", None)):
+        raise SystemExit("--calibrate-belief=platt 与 --save-optimizer/--resume-optimizer 不能同用："
+                         "烘入会改 `belief_tenpai` 的权重值 ⇒ 续跑存档的 weights_sha256 会对不上")
+    print("判定头修正：" + f"danger 形态 = **{_danger_form}**；"
+          f"belief 门控 detach = **{'on' if _detach else 'off'}**；"
+          f"Platt 烘入 = **{_calib}**")
     # ---- ★ S1 / P4（第一百一十六轮）：a− 的**两条新结构**（逐候选事件读出 + evt 首层 LN）----
     # 口径（三条，写死在这里免得每个调用点各猜一次）：
     #   ① `--legacy-evt-readout` / `--legacy-evt-ln` ⇒ **关**（逐位复现改动前的图）；
@@ -3468,6 +3487,55 @@ def train(args) -> dict:
         mon.close()
     wall = time.perf_counter() - t0
 
+    # ---- ★ 第一百二十九轮：`--calibrate-belief platt` = 在 **val** 上拟合 `(a,b)` 并烘进头 ----
+    # 位置：训练结束、存档之前（导出读 `model.pt` ⇒ 烘入后的值随包走）。
+    # ⚠ 只改 `heads.belief_tenpai` 的**数值**（形状/参数个数/net.bin 布局全不变）；缺省 off ⇒ 不跑。
+    calibration = None
+    if _calib == "platt":
+        from .heads_audit import auc as _auc
+        from .model import bake_platt_, fit_platt, platt_logits
+        model.eval()
+        n_val = int(val_data["label"].shape[0])
+        ev_bs = int(getattr(args, "eval_batch", 256) or 256)
+        xs: list[torch.Tensor] = []
+        with torch.no_grad():
+            for i0 in range(0, n_val, ev_bs):
+                idx = np.arange(i0, min(i0 + ev_bs, n_val))
+                b = _batch(val_data, idx, device)
+                out = model(b["tile"], b["evt"], b["ctx"], b["cand"],
+                            mask=b["mask"], h=b.get("h"))
+                xs.append(out["belief_tenpai"].detach().float().cpu())
+        x_bt = torch.cat(xs, 0)
+        y_bt = torch.from_numpy(np.asarray(val_data["aux_opp_tenpai"], dtype=np.float32))
+        a_pl, b_pl = fit_platt(x_bt, y_bt)
+        with torch.no_grad():
+            z_before = x_bt
+            z_after = platt_logits(x_bt, a_pl, b_pl)
+            bce_before = float(torch.nn.functional.binary_cross_entropy_with_logits(
+                z_before, y_bt))
+            bce_after = float(torch.nn.functional.binary_cross_entropy_with_logits(
+                z_after, y_bt))
+            auc_before = [float(_auc(z_before[:, j].numpy(), y_bt[:, j].numpy()))
+                          for j in range(3)]
+            auc_after = [float(_auc(z_after[:, j].numpy(), y_bt[:, j].numpy()))
+                         for j in range(3)]
+            probe = x_bt[: min(2048, int(x_bt.shape[0]))]
+            ref = platt_logits(probe, a_pl, b_pl)
+            stats = bake_platt_(model.heads.belief_tenpai, a_pl, b_pl)
+            got = model.heads.belief_tenpai(probe)
+            bake_max_abs = float((got - ref).abs().max())
+        calibration = {
+            "kind": "platt", "rows": int(x_bt.shape[0]),
+            "a": [float(v) for v in a_pl], "b": [float(v) for v in b_pl],
+            "bce_before": bce_before, "bce_after": bce_after,
+            "auc_before": auc_before, "auc_after": auc_after,
+            "bake_check": {"max_abs_head_vs_platt": bake_max_abs, **stats},
+        }
+        print(f"Platt 烘入（val n={int(x_bt.shape[0])}）：BCE {bce_before:.3f} → {bce_after:.3f}；"
+              f"AUC {['%.3f' % v for v in auc_before]} → {['%.3f' % v for v in auc_after]}；"
+              f"a={[round(float(v), 4) for v in a_pl]} b={[round(float(v), 3) for v in b_pl]}；"
+              f"烘入校验 max|Δ|={bake_max_abs:.2e}")
+
     # ---- ★ BL-04：这一段的**续跑点**（`--stop-after-steps` 半截 ⇒ 累加器原样带走）------------
     if cut_epoch is not None:
         seg_epoch, seg_step = int(cut_epoch[0]), int(cut_epoch[1])
@@ -3479,6 +3547,9 @@ def train(args) -> dict:
 
     out = paths.allocate("ckpt", args.label, need_bytes=16 * 1024**2)
     extra: dict = {"args": _recorded_args(args), "stage_steps": stage_steps}
+    if calibration is not None:
+        # 只在真烘入时多这个键（缺省 off ⇒ `model.pt` / `metrics.json` 逐字节不变）。
+        extra["calibration"] = calibration
     if save_optimizer:
         # **行为策略标识**：续跑闸门的三把尺子里有两把（链条起点 kl0 / 连续性探针 kl_probe）要用
         # 存档那一刻的量 ⇒ 探针**在这里**现算（模型已是这一段的最终权重，与续跑时的重算严格同源）。
@@ -3567,6 +3638,8 @@ def train(args) -> dict:
         "has_h0": bool(has_h0),
         "h0_dim": (int(train_data["h0"].shape[1]) if has_h0 else None),
         "no_carry": bool(no_carry),
+        # ★ 第一百二十九轮：只在 `--calibrate-belief platt` 时多这个键（缺省 ⇒ 逐字节不变）
+        **({"calibration": calibration} if calibration is not None else {}),
         # ★ s44：下一事件辅头的配置 + **最后一个 epoch 的 held-out 读数**（只在开着时出现；
         #   缺省 off ⇒ `metrics.json` 逐键不变）。
         **({"next_event": {
@@ -3813,6 +3886,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="网络图：v4（缺省，现有图，逐位不变）/ a-（T1：34 轴卷积+轴向注意力、"
                          "95-token joint attention、value 81 bin、heads d=128）。"
                          "⚠ a- 与 v4 不能互相 warm-start；三端未同步 ⇒ 不得上线/上闸门")
+    # ★ 第一百二十九轮：判定头四处修正。三个行为开关**缺省关/旧式** ⇒ 逐位不变（600 步 sha 判据）。
+    ap.add_argument("--calibrate-belief", choices=["off", "platt"], default="off",
+                    help="训练结束时在 val 上拟合 Platt `sigmoid(a·bt+b)` 并**烘进** "
+                         "`heads.belief_tenpai` 的权重/偏置（只改数值 ⇒ 形状/参数/net.bin 布局不变）。"
+                         "off（缺省）= 不跑，逐位不变")
+    ap.add_argument("--belief-gate-detach", action="store_true",
+                    help="门控输入 `sigmoid(bt)` 先 detach（只断 gate→belief 头/主干这一路；"
+                         "belief 自己的 BCE 照常反传）。缺省开=旧梯度图（逐位不变）")
+    ap.add_argument("--danger-form", choices=list(M.DANGER_FORMS), default="log",
+                    help="a− 的 `danger → policy` 形态：log（缺省，旧式无界，逐位不变）/ "
+                         "bounded（`2·mean σ(d) − 1 ∈ [−1,1]`，出生 ≈0）。"
+                         "⚠ bounded 尚未三端同步 ⇒ 仅训练/离线实验")
     # ★ C2（第一百轮）：state 级头池化口径。缺省 = **新**（mask-aware，只对 n_legal 个合法槽求均值，
     #   与 Java/C++ 同分母）；开这个开关才回到旧的 `u.mean(1)`（分母 Lmax）—— 只用于逐位复现旧行为。
     ap.add_argument("--legacy-pool", action="store_true",

@@ -5627,6 +5627,63 @@ eq("BL-14：`max(ρ,1/ρ)` 是上限判据真正比的那个量",
    round(_rs["rho_worst_two_sided"], 6), 1e6)
 eq("BL-14：分位数在 **ρ** 上算（p50 = 1）", round(_rs["rho_p50"], 6), 1.0)
 
+# ---- 第一百二十九轮：判定头四处修正（声明 / Platt 烘入 / detach / danger 有界式）------------
+# ⚠ 这些是**静态 + 合成数据正向对照**；"缺省 600 步逐位不变"是训练相读数（见
+#   `lab/mv1/HEAD-DESIGN-FIXES.md`），⛔ 不在自检里跑训练。
+eq("129：`online_heads_declared('a-')` 含 `danger`（旧声明在 a− 上漏了这个 0 参数通道）",
+   v4_model.online_heads_declared("a-"), ("policy", "belief_tenpai", "danger"))
+eq("129：`online_heads_declared('v4')` 不含 `danger`（v4 前向不读它）",
+   v4_model.online_heads_declared("v4"), ("policy", "belief_tenpai"))
+eq("129：三端字面量 `ONLINE_HEADS` = 两个 arch 的并集",
+   v4_model.ONLINE_HEADS, ("policy", "belief_tenpai", "danger"))
+# Platt：`sigmoid(a·z+b)` 合并进 Linear 后与"先算 z 再校准"逐位同值（fp32 容差）
+_pl_head = v4_model.nn.Linear(5, 3)
+_pl_x = _torch.randn(17, 5)
+_pl_a = _torch.tensor([0.25, 0.5, 1.25])
+_pl_b = _torch.tensor([-1.0, 0.5, 2.0])
+with _torch.no_grad():
+    _pl_ref = _pl_head(_pl_x) * _pl_a + _pl_b
+    _pl_st = v4_model.bake_platt_(_pl_head, _pl_a, _pl_b)
+    _pl_got = _pl_head(_pl_x)
+ok(float((_pl_got - _pl_ref).abs().max()) <= 1e-6 and int(_pl_head.weight.numel()) == 15,
+   "129：Platt `(a,b)` 烘进最后一个 Linear = `W←a⊙W, c←a⊙c+b`（形状/参数个数不变，max|Δ|≤1e-6）",
+   f"max|Δ|={float((_pl_got - _pl_ref).abs().max()):.2e} dW={_pl_st['max_abs_dW']:.1e}")
+# danger 有界式：零参数 ⇒ 项**恰好 0**（旧 log 式会加 −0.693 的逐行常数）；且 `|risk| ≤ 1`
+_dg = v4_model.build(seed=3, arch="a-")
+with _torch.no_grad():
+    for _p in (_dg.heads.danger.weight, _dg.heads.danger.bias):
+        _p.zero_()
+    _dg_x = {k: v for k, v in _x.items() if k in ("tile", "evt", "ctx", "cand")}
+    v4_model.set_danger_form("bounded")
+    _dg_b = _dg(**_dg_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))
+    _coef0 = v4_model.DANGER_COEF
+    v4_model.DANGER_COEF = 0.0
+    try:
+        _dg_0 = _dg(**_dg_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))
+    finally:
+        v4_model.DANGER_COEF = _coef0
+    v4_model.set_danger_form("log")
+ok(_torch.equal(_dg_b["policy"], _dg_0["policy"]),
+   "129：有界 danger 在「危险概率全相等」时对 logits **恰好 0**（旧 log 式是 −0.693 逐行常数）",
+   f"max|Δ|={float((_dg_b['policy'] - _dg_0['policy']).abs().max()):.2e}")
+# detach：门控输入 `requires_grad` 在开关开/关两档下必须不同（缺省关 ⇒ 旧梯度图）
+_dt = v4_model.build(seed=4, arch="v4")
+def _gate_input_requires_grad(_flag: bool) -> bool:
+    v4_model.set_belief_gate_detach(_flag)
+    _cap = {}
+    _h = _dt.heads.policy_gate.register_forward_pre_hook(
+        lambda _m, _inp: _cap.__setitem__("v", _inp[0]))
+    try:
+        _dt(**_dg_x, mask=_torch.ones(1, _t.cand.shape[0], dtype=_torch.bool))
+    finally:
+        _h.remove()
+        v4_model.set_belief_gate_detach(False)
+    return bool(_cap["v"].requires_grad)
+_off, _on = _gate_input_requires_grad(False), _gate_input_requires_grad(True)
+ok(_off and not _on,
+   "129：`--belief-gate-detach` 开 ⇒ `policy_gate(sigmoid(bt).detach())` 的输入 `requires_grad=False`"
+   "（关 ⇒ True，缺省逐位不变）", f"off={_off} on={_on}")
+
 print(f"\n自检：检查项 {count}，失败 {len(fails)}")
 for f in fails:
     print(f"  FAIL: {f}")

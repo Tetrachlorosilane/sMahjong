@@ -78,8 +78,12 @@ inline constexpr int kFlagReserved = 0xF0;
  * （第五十五轮）**乘在逐候选表示上** ⇒ 真的改 argmax。而 `heads.policy_gate.*` 是**可缺张量**
  * （缺 = 恒等门控，旧网走 `normalize_state` 补 0）⇒ 老网的在线集合退化成 `{policy}`：
  * 这是"**每个 checkpoint 的性质**"，不是代码常量（换 checkpoint 要重跑判据）。
+ *
+ * <p>⚠ 本常量 = **两个 arch 的并集**：v4 只经 gate 读 `belief_tenpai`；**a− 的 `AHeads.forward`
+ * 还读 `danger`**（0 参数固定通道）⇒ 逐 arch 的准确集合 = Python `online_heads_declared(arch)`
+ * （第一百二十九轮修正；旧声明在 a− 上漏了 `danger`）。
  */
-inline const std::vector<std::string> ONLINE_HEADS = {"policy", "belief_tenpai"};
+inline const std::vector<std::string> ONLINE_HEADS = {"policy", "belief_tenpai", "danger"};
 
 /**
  * **训练与契约必需**的头：必须训练 + 过 parity + 进消融与加载器契约（⛔ 与"上线"**无关**）。

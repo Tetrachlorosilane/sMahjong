@@ -94,9 +94,13 @@ public final class V4Policy implements LogitPolicy {
      * （第五十五轮）乘在候选表示上 ⇒ 真的改 argmax。而 `heads.policy_gate.*` 是**可缺张量**
      * （缺 = 恒等门控）⇒ **老网**的在线集合退化成 `{policy}`：这是"**每个 checkpoint 的性质**"，
      * 不是代码常量。实测探针见 `tools.V4Probe --golden` 那行里的 `dValue/dBelief/dGate`。
+     *
+     * <p>⚠ 这里是**两个 arch 的并集**（Java/C++ 的常量与 arch 无关）：v4 只经 gate 读
+     * `belief_tenpai`；**a− 的 `AHeads.forward` 还读 `danger`**（0 参数固定通道）
+     * ⇒ 逐 arch 的准确集合 = Python `online_heads_declared(arch)`（第一百二十九轮修正）。
      */
     public static final java.util.List<String> ONLINE_HEADS =
-            java.util.List.of("policy", "belief_tenpai");
+            java.util.List.of("policy", "belief_tenpai", "danger");
 
     /** **训练与契约必需**的头：必须训练 + 过 parity + 进消融/加载器契约（⛔ 与"上线"无关）。 */
     public static final java.util.List<String> TRAIN_HEADS =

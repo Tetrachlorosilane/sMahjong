@@ -1198,7 +1198,7 @@ matvec 在改动前是**纯标量**（汇编里只有 `vaddss`/`vmulss`：一个
 
 | 表 | 内容 | 用途 | 由谁定 |
 | --- | --- | --- | --- |
-| **`ONLINE_HEADS`（推理必需）** | **前向路径实际读取**的头。当前实测 = **`('policy', 'belief_tenpai')`** | 决定"能不能影响一手牌" | **机械判据**（见下），⛔ 不靠文档声明 |
+| **`ONLINE_HEADS`（推理必需）** | **前向路径实际读取**的头。三端常量取**并集** = **`('policy', 'belief_tenpai', 'danger')`**；逐 arch 的准确集合 = **v4 `('policy', 'belief_tenpai')` / a− `('policy', 'belief_tenpai', 'danger')`**（Python `online_heads_declared(arch)`；a− 的 0 参数 `danger` 通道第一百二十九轮补声明） | 决定"能不能影响一手牌" | **机械判据**（见下），⛔ 不靠文档声明 |
 | **`TRAIN_HEADS`（训练与契约必需）** | **`('policy', 'value', 'belief_tenpai', 'danger')`** | 训练损失 / parity / 加载器契约 / 消融 | `model.HEAD_SPECS` 的 `contract` 字段 |
 
 **⚠ 实测推翻了"只消费策略头"这句话**：`Heads.forward` 里

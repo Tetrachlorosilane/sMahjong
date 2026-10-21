@@ -327,6 +327,10 @@ for (const t of targets) {
         dm: net.dims.d_model,
         gateW: g.maxW, gateB: g.maxB, gateShape: g.shape,
         gateLive: g.live, gateWhy: g.why, gatePresent: g.present,
+        // ★ 第一百二十九轮：a− 的 `AHeads.forward` **恒定读 `danger`**（0 参数固定通道
+        //   `logit += DANGER_COEF·risk`）⇒ 它属于"前向实际读取"的头，与 gate 是否退化无关。
+        //   v4 的前向不读 `danger`（`—`）。旧 `ONLINE_HEADS` 在 a− 上漏了它（审查 §4 的代码事实）。
+        dangerLive: isA,
         memW: m === null ? null : m.maxW,
         memB: m === null ? null : m.maxB,
         memPresent: m === null ? null : m.present,
@@ -345,23 +349,24 @@ console.log('      是第 95 个 token（0 参数，§2.3）⇒ 该列记 "—"�
             + '（AGENTS §6.5「头是否上线 = 前向是否读取」）');
 console.log('');
 if (strictCurrent) {
-    console.log('| 包 | 包状态 | 格式 | 拓扑 | dm | policy_gate.weight max|w| | bias max|b| | 形状 | fusion.mem.w max|w| | 判定 |');
-    console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+    console.log('| 包 | 包状态 | 格式 | 拓扑 | dm | policy_gate.weight max|w| | bias max|b| | 形状 | fusion.mem.w max|w| | danger 通道 | 判定 |');
+    console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
 } else {
-    console.log('| 包 | 格式 | 拓扑 | dm | policy_gate.weight max|w| | bias max|b| | 形状 | fusion.mem.w max|w| | 判定 |');
+    console.log('| 包 | 格式 | 拓扑 | dm | policy_gate.weight max|w| | bias max|b| | 形状 | fusion.mem.w max|w| | danger 通道 | 判定 |');
     console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
 }
 for (const r of rows) {
     const statusCell = strictCurrent ? ` ${r.pkgStatus ?? '**未登记**'} |` : '';
     if (r.note) {
-        console.log(`| ${r.label} |${statusCell} ${r.fmt} | - | - | - | - | - | - | ${r.note} |`);
+        console.log(`| ${r.label} |${statusCell} ${r.fmt} | - | - | - | - | - | - | - | - | ${r.note} |`);
         continue;
     }
     const memCell = r.memW === null ? '—（a- 无 mem 门）'
         : `${fmtNum(r.memW)}${r.memPresent ? '' : ' (缺)'}`;
+    const dangerCell = r.dangerLive ? '✅ 在线（0 参数通道）' : '—（v4 前向不读）';
     const topoCell = r.retired ? `${r.topo}（格式 2 已退役）` : r.topo;
     console.log(`| ${r.label} |${statusCell} ${r.fmt} | ${topoCell} | ${r.dm} | ${fmtNum(r.gateW)}${r.gatePresent ? '' : ' (缺)'}`
-                + ` | ${fmtNum(r.gateB)} | ${r.gateShape} | ${memCell}`
+                + ` | ${fmtNum(r.gateB)} | ${r.gateShape} | ${memCell} | ${dangerCell}`
                 + ` | ${r.gateLive ? '✅ 在线' : '🟡 退化'} |`);
 }
 console.log('');
