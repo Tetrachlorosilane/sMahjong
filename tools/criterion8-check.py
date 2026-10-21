@@ -284,8 +284,15 @@ def check(run: Run, *, probes: list[dict], net: NetInfo | None, raw_net: bytes |
     legs: list[Leg] = []
 
     # ---- M1 主判据
+    # ⚠ 末窗只是"最后一个 epoch 的均值"（steps_per_epoch == WINDOW 时）⇒ 必须同屏给出
+    #    last / mean / p50 / min / 逐轮 ≥ε 的轮数，否则分类会随"用哪个统计量"翻转
+    #    （实测 r4：last 0.0218 过、p50 0.0198 不过、仅 6/12 轮过 —— 见 lab/mv1/MISTAKES-2026-10.md 第 2 条）。
+    _n = len(run.kls)
+    _mean = sum(run.kls) / _n if _n else 0.0
+    _n_ge = sum(1 for v in run.kls if v >= eps)
     legs.append(Leg("M1", f"KL/100step(末窗 W={w}) ≥ ε={eps:g}",
-                    kl_last >= eps, f"{kl_last:.4f}", f"p50={p50:.4f} · min={min(run.kls):.4f}"))
+                    kl_last >= eps, f"{kl_last:.4f}",
+                    f"last={kl_last:.4f} · mean={_mean:.4f} · p50={p50:.4f} · min={min(run.kls):.4f} · 逐轮≥ε {_n_ge}/{_n}"))
 
     # ---- M2 跑满声明步数
     declared = run.epochs_declared * run.spe
