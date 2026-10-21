@@ -3498,6 +3498,7 @@ def train(args) -> dict:
         n_val = int(val_data["label"].shape[0])
         ev_bs = int(getattr(args, "eval_batch", 256) or 256)
         xs: list[torch.Tensor] = []
+        ss: list[torch.Tensor] = []
         with torch.no_grad():
             for i0 in range(0, n_val, ev_bs):
                 idx = np.arange(i0, min(i0 + ev_bs, n_val))
@@ -3505,7 +3506,9 @@ def train(args) -> dict:
                 out = model(b["tile"], b["evt"], b["ctx"], b["cand"],
                             mask=b["mask"], h=b.get("h"))
                 xs.append(out["belief_tenpai"].detach().float().cpu())
+                ss.append(out["state"].detach().float().cpu())
         x_bt = torch.cat(xs, 0)
+        x_state = torch.cat(ss, 0)
         y_bt = torch.from_numpy(np.asarray(val_data["aux_opp_tenpai"], dtype=np.float32))
         a_pl, b_pl = fit_platt(x_bt, y_bt)
         with torch.no_grad():
@@ -3519,10 +3522,11 @@ def train(args) -> dict:
                           for j in range(3)]
             auc_after = [float(_auc(z_after[:, j].numpy(), y_bt[:, j].numpy()))
                          for j in range(3)]
-            probe = x_bt[: min(2048, int(x_bt.shape[0]))]
-            ref = platt_logits(probe, a_pl, b_pl)
+            ref = platt_logits(x_bt[: min(2048, int(x_bt.shape[0]))].to(device),
+                               a_pl, b_pl)
             stats = bake_platt_(model.heads.belief_tenpai, a_pl, b_pl)
-            got = model.heads.belief_tenpai(probe)
+            got = model.heads.belief_tenpai(
+                x_state[: min(2048, int(x_state.shape[0]))].to(device))
             bake_max_abs = float((got - ref).abs().max())
         calibration = {
             "kind": "platt", "rows": int(x_bt.shape[0]),

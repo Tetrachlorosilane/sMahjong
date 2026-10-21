@@ -1313,7 +1313,8 @@ def loss_weights() -> dict[str, float]:
 
 def platt_logits(logits: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """`a·logits + b`（`a`/`b` 是长度 = 列数的向量；广播到 `[N,C]`）。"""
-    return logits * a.to(logits.dtype) + b.to(logits.dtype)
+    return logits * a.to(device=logits.device, dtype=logits.dtype) \
+        + b.to(device=logits.device, dtype=logits.dtype)
 
 
 def fit_platt(logits: torch.Tensor, targets: torch.Tensor, *,
