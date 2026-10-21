@@ -115,6 +115,14 @@
 - **不要按进程名批量杀 `node`。** DSH 的 Web GUI（`127.0.0.1:3080`）就跑在 node 上。
   要清理自己起的测试进程，**按端口查 PID** 再精确结束。
 - 只改工作区 `C:\Users\HP\source\games\mahjong` 内的文件。
+- ⛔ **不许对 `<repo>\mahjong-training` 做递归删除 / `git clean` / `robocopy /MIR`。** 它是**目录符号链接**
+  （→ `S:\mahjong-training`，2026-10-22 项目方建；junction 实测同语义）：
+  - **只删链接、不伤数据**：`Remove-Item -LiteralPath <link>`（**不带** `-Recurse`/`\*`）、`cmd rmdir <link>`、
+    `git clean -fdx`（链接已在 `.gitignore`）。
+  - ⚠ **会穿透删掉 S: 里的内容**（沙箱实测 target 2 文件 → 0）：`Remove-Item -Path <link>\* -Recurse`、
+    `del /s <link>\*`、`robocopy <空目录> <link> /MIR`。
+  - **判据**：删链接只许 `-LiteralPath` 单条且**不带递归**；任何递归/镜像/通配符清理先 `Resolve-Path`，
+    解析出 `S:\` 就停手。`Remove-Item <repo> -Recurse` 实测只删链接（PS 5.1/7），但**仍禁止**（写成 `<link>\*` 就穿透）。
 
 ---
 

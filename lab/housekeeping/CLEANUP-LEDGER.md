@@ -4,6 +4,9 @@
 > 范围 = 仓库 `C:\Users\HP\source\games\mahjong` 内的**可证明无用 / 可重生成**物；`raw/**`·`compact/**`·`ckpt/**`·`replays/**`·
 > `player*/**`·`bot-ai/**`·`style-reward/**`·`tools/build/**` 的**权重端点一律不删**（见 §3）。
 > ⛔ 本批未采集、未训练长训、未跑闸门、未发布。
+> ⛔ **`mahjong-training` 是仓库内的目录符号链接（→ `S:\mahjong-training`，2026-10-22）**：它**不属于**可清理物；
+> 对它做 `-Recurse -Force` / `<link>\*` / `robocopy /MIR` 会**穿透删掉 S: 上的真实数据**（沙箱实测 target 2 文件 → 0），
+> 只许 `Remove-Item -LiteralPath <link>`（不带递归）。判据见 `AGENTS.md` §2.4。
 
 ## 1 盘点（按可释放体量排序；前 15 行）
 

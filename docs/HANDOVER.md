@@ -271,6 +271,9 @@ node tools\trainer-v4-parity.mjs --golden --fixture-semantics a-       # 夹具�
 .venv\Scripts\python.exe -m mahjong_ml.v4.pretrain --arch a- …         # A− 新图（缺省 --arch v4 = 旧图，逐位复旧）
 
 - **数据根**：`S:\mahjong-training`（配额 200 GB，回收机制在 `paths.py`，`MIN_FREE_GB=10`）。
+- **仓库内链接（2026-10-22）**：`<repo>\mahjong-training` = **目录符号链接** → `S:\mahjong-training`
+  （双向可见、抽 3 文件 FileId 全同；67,275 文件 / 100.02 GB）。读可用；⚠ **Python/trainer 经它写仍被沙箱拒**
+  （实测 `[Errno 13]`，junction 同样）⇒ **`MAHJONG_DATA_ROOT` 绕法仍需要**，⛔ 别把它当写权限解法。
 - `probe/` 有 **3 个 ACL 残留目录**（`cmp-par4` / `cmp-par5` / `mj-diag-pru96cdj`，0 B）——**删不掉，别再当"清理没做完"**。
 - `client/dist` 只在 `-Deploy` 时更新；**发布前先看 `client/` 有没有改过**。
 

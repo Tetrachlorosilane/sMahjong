@@ -68,3 +68,4 @@
 - ② **磁盘配额拒分配 ckpt**（`NOTES.md` §6.5 第 118 轮）⇒ **判据** = 起跑前查目标盘 free ≥ 预期峰值 ×1.5。
 - ③ **torch/JVM `0xC0000005` 偶发**（仓库根 `hs_err_pid5752.log`；第 118 轮 torch 段错误重试成功）⇒ **判据** = 崩溃先留 `hs_err`/栈，同命令重跑一次再判"环境"。
 - ④ **`S:` 沙箱不可写**（第 132 轮 `S:\mahjong-training\.write-probe` 被拒）⇒ **判据** = 一律 `MAHJONG_DATA_ROOT=.tmp/...`；写前 `Test-Path` + 试写探针，失败即换根。
+  **2026-10-22 补**：项目方在仓库内建了 `mahjong-training` 符号链接（→ `S:\mahjong-training`）。实测**只读可用、写入仍被拒**（经链接写 `.write-probe` 同样 `[Errno 13]`；junction 也一样）⇒ 本条判据**不变**，链接不是沙箱绕法。

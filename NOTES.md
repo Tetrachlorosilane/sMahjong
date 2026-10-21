@@ -251,6 +251,11 @@
 
 ⚠ **系统 PATH 里没有 g++** —— `client/build.ps1` / `server/build.ps1` 自己把它拼进 PATH。
 
+> **仓库内数据路径（2026-10-22）**：`<repo>\mahjong-training` 是**目录符号链接** → `S:\mahjong-training`
+> （`fsutil` tag `0xA000000C`；抽 3 个文件 size/mtime/FileId 与 S: 全同；67,275 文件 / 100.02 GB）。
+> ⚠ 它只是**路径别名**：**读**可用；**写仍被沙箱拒**（见 §4 的 `MAHJONG_DATA_ROOT` 绕法），
+> ⛔ 不要把它写成 `DATA_ROOT` 的缺省值。
+
 ---
 
 ## 3.4 `build\` 与 `dist\` 的关系（注解：为什么两者**不应该**整目录相同）
@@ -292,6 +297,9 @@ pwsh -File client\build.ps1 -Deploy          # 先同步，再比；期望三项
 > `python\.venv\Scripts\python.exe`（`.uv-python\...` 基础解释器是 cp312，供 uv 用，别直接调）；
 > ② **数据根**：缺省 `S:\mahjong-training` 会被沙箱拒（子进程写**工作区外**路径 ⇒ `[Errno 13]` / `[WinError 5]`，
 > 连 `%TEMP%` 也不行）⇒ 用 `MAHJONG_DATA_ROOT` 指到**仓库内**临时目录（该目录已 gitignore）；
+> ⚠ **仓库内链接不解除这条**（2026-10-22 实测）：经 `<repo>\mahjong-training\.write-probe` 写仍
+> `PermissionError [Errno 13]`（junction 同样）—— 沙箱按**可执行文件位置**判、并解析到 `S:`（§6.5 第四十六轮）
+> ⇒ `MAHJONG_DATA_ROOT` 绕法**仍然需要**，链接只省"读"的路径写法；
 > ③ ⚠ **必须写绝对路径**：写相对路径（如 `python\.tmp\selfcheck-root`）会在后面的
 > `shutil.disk_usage()` 上炸 `FileNotFoundError`（相对 CWD 解析后目录不存在）。
 > 可复现的一条（本机实测 **659/0 SELFCHECK PASS**）：

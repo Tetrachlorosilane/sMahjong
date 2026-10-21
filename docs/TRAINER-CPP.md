@@ -1459,6 +1459,8 @@ trainer\build\trainer.exe v4cache <net.bin> <轨迹目录|g*.jsonl…> [--limit 
 ⚠ 口径：本机 i9-14900HX / 8 workers / 权重 `probe\w1-mem\net.bin`（四席同网）/ 无 `--rotate` / 轨迹落在 `trainer\build\ab`
 （⚠ 本会话里 exe **写不了 `S:\`**：`--out` 给 S: 时 `create_directories` + `fopen` 静默失败、只有 `summary.json` 里的
 统计照打 —— 这是**沙箱/进程权限**现象，不是 trainer 的 bug；同一会话里 PowerShell 能写 S:）。
+（2026-10-22 补：仓库内已建 `mahjong-training` 符号链接 → `S:\mahjong-training`；⚠ 它**不改变**这条 ——
+经链接写仍失败，沙箱按可执行文件位置 + 解析后目标判；别把链接当写权限解法，判据见 `AGENTS.md` §2.4。）
 
 **⑦ 的红证（原样读数，12,880 行 / 8 workers）**：
 
